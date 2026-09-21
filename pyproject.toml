@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-agent-memory"
+version = "0.0.1"
+description = "Self-hosted evidence-grounded memory for AI agents"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "beautifulsoup4>=4.13",
+    "fastapi>=0.119",
+    "httpx>=0.28",
+    "pillow>=11.3",
+    "psycopg[binary,pool]>=3.2",
+    "pydantic>=2.11",
+    "pypdf>=6.1",
+    "pypdfium2>=4.30",
+    "python-multipart>=0.0.20",
+    "pyyaml>=6.0",
+    "tiktoken>=0.11",
+    "uvicorn[standard]>=0.37",
+]
+
+[project.scripts]
+oam = "oam.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "pytest-cov>=7.0",
+    "ruff>=0.14",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["oam*"]
+
+[tool.setuptools.package-data]
+oam = ["web/*.html", "web/*.css", "web/*.js"]
+
+[tool.setuptools.data-files]
+"share/open-agent-memory" = ["configs/oam.yaml"]
+"share/open-agent-memory/migrations" = ["migrations/*.sql"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires an explicitly isolated PostgreSQL test database",
+    "e2e: exercises the complete local product path",
+    "live: requires separately authorized real model endpoints",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.coverage.run]
+branch = true
+source = ["oam"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

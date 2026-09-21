@@ -1,0 +1,18 @@
+{
+  "source_id": "conversation-lin-2026-09-21",
+  "messages": [
+    {
+      "message_id": "m1",
+      "role": "user",
+      "content": "Please use concise Python examples.",
+      "event_time": "2026-09-21T09:00:00Z",
+      "learning_eligible": true
+    },
+    {
+      "message_id": "m2",
+      "role": "assistant",
+      "content": "The separate report lists a synthetic glucose result.",
+      "event_time": "2026-09-21T09:00:01Z"
+    }
+  ]
+}

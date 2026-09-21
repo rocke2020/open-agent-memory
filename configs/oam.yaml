@@ -1,0 +1,150 @@
+contract_version: "0.0.1"
+
+resource:
+  max_bytes: 20971520
+  max_pdf_pages: 20
+  max_images: 20
+  max_pixels_per_image: 40000000
+  max_total_pixels: 100000000
+
+api:
+  max_concurrent_requests: 10
+
+chunk:
+  target_estimated_tokens: 2048
+  max_estimated_tokens: 4096
+  extractable_overlap_estimated_tokens: 0
+  previous_context_estimated_tokens: 128
+
+extraction:
+  max_input_tokens: 8192
+  max_output_tokens: 4096
+  max_facts_per_group: 64
+
+search:
+  max_query_tokens: 512
+  max_queries: 4
+  query_concurrency: 2
+  rrf_k: 60
+  channel_weights: equal
+  graph_seed_min_similarity: 0.3
+  graph_seed_max: 20
+  relation_hops: 1
+  relation_candidates: 32
+  entity_candidates_per_entity: 200
+  entity_score_scale: 0.5
+  ann_iterative_scan: strict_order
+  ann_scan_max_tuples: 20000
+  fast:
+    channel_candidates: 32
+    fused_candidates: 64
+    max_results: 16
+  deep:
+    channel_candidates: 64
+    fused_candidates: 128
+    rerank_candidates: 64
+    max_results: 32
+
+index:
+  semantic_link_min_similarity: 0.7
+  semantic_link_max_neighbors: 20
+
+recall:
+  turn_deadline_seconds: 10
+  fast_deadline_seconds: 3
+  deep_deadline_seconds: 10
+
+context:
+  default_tokens: 2048
+  max_tokens: 8192
+  tokenizer: o200k_base
+
+chunks:
+  default_tokens: 8192
+  max_tokens: 8192
+
+profile:
+  main_tokens: 256
+  preferences_tokens: 512
+  experiences_tokens: 512
+  max_fields_per_section: 32
+  max_value_bytes: 2048
+
+planner:
+  max_calls: 1
+  max_context_tokens: 2048
+
+request:
+  batch_deadline_seconds: 10
+  delegated_deadline_seconds: 10
+
+model:
+  attempt_timeout_seconds: 60
+
+retry:
+  max_attempts: 3
+
+worker:
+  max_tasks: 4
+  max_model_calls: 2
+
+lease:
+  seconds: 90
+  heartbeat_seconds: 20
+  shutdown_seconds: 90
+
+database:
+  migration_dsn_env: OAM_MIGRATION_DSN
+  api_dsn_env: OAM_API_DSN
+  worker_queue_dsn_env: OAM_WORKER_QUEUE_DSN
+  worker_content_dsn_env: OAM_WORKER_CONTENT_DSN
+  api_pool_max: 10
+  worker_pool_max: 6
+
+auth:
+  cache_ttl_seconds: 30
+  cache_max_entries: 4096
+  credential_page_size: 50
+
+ingest:
+  max_bytes: 131072
+  max_messages: 128
+
+queue:
+  max_pending_per_scope: 1000
+
+provider:
+  global_concurrency: 4
+
+scope:
+  max_reports: 100
+  max_chats: 1000
+  concurrency: 2
+
+trace:
+  content_retention_days: 7
+  metadata_retention_days: 30
+
+evidence:
+  default_retention_days: 365
+
+audit:
+  retention_days: 90
+
+export:
+  retention_hours: 24
+
+backup:
+  retention_days: 30
+
+models:
+  roles:
+    extraction: null
+    insights: null
+    embedding: null
+    document_vision: null
+    abstract: null
+    profile: null
+    reranker: null
+    planner: null
+  bindings: {}

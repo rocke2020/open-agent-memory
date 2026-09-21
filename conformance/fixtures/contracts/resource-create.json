@@ -1,0 +1,8 @@
+{
+  "resource_id": "synthetic-medical-report",
+  "resource_type": "evidence",
+  "media_type": "text/html",
+  "filename": "synthetic-medical-report.html",
+  "byte_length": 2048,
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

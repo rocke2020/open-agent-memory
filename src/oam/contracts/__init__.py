@@ -1,0 +1,1 @@
+"""Public HTTP contract models."""

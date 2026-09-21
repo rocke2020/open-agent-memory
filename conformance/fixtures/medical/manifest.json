@@ -1,0 +1,12 @@
+{
+  "fixture_id": "synthetic-lab-report-v1",
+  "synthetic": true,
+  "contains_real_person_data": false,
+  "subject_code": "SYN-001",
+  "collected_on": "2026-08-14",
+  "measurements": [
+    {"name": "Sodium", "value": 140, "unit": "mmol/L"},
+    {"name": "Glucose", "value": 92, "unit": "mg/dL"}
+  ],
+  "encoded_binary_files": ["synthetic-lab-report.pdf.b64", "synthetic-lab-report.png.b64"]
+}

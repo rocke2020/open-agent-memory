@@ -1,0 +1,76 @@
+:root {
+  color-scheme: light dark;
+  --background: #f7f8fa;
+  --surface: #ffffff;
+  --text: #18202a;
+  --muted: #556272;
+  --border: #c7ced8;
+  --accent: #2457d6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #11151a;
+    --surface: #1b222b;
+    --text: #edf2f7;
+    --muted: #aab5c2;
+    --border: #465261;
+    --accent: #8aabff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font: 1rem/1.5 system-ui, sans-serif;
+}
+
+main {
+  width: min(42rem, calc(100% - 2rem));
+  margin: 4rem auto;
+  padding: 2rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+form {
+  display: grid;
+  gap: 1rem;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 650;
+}
+
+input,
+button {
+  min-height: 2.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+}
+
+button {
+  background: var(--accent);
+  color: var(--surface);
+  cursor: pointer;
+}
+
+input:focus-visible,
+button:focus-visible {
+  outline: 0.2rem solid var(--accent);
+  outline-offset: 0.15rem;
+}
+
+p {
+  color: var(--muted);
+}
