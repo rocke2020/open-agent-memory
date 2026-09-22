@@ -230,10 +230,17 @@ class ModelCapability(StrEnum):
 
 class ModelBinding(FrozenModel):
     protocol: Literal["openai_compatible"]
-    model: str = Field(min_length=1)
+    model: str | None = Field(default=None, min_length=1)
+    model_env: str | None = Field(default=None, min_length=1)
     endpoint_env: str = Field(min_length=1)
     api_key_env: str | None = Field(default=None, min_length=1)
     capabilities: frozenset[ModelCapability]
+
+    @model_validator(mode="after")
+    def validate_model_source(self) -> ModelBinding:
+        if (self.model is None) == (self.model_env is None):
+            raise ValueError("exactly one of model or model_env is required")
+        return self
 
     @field_serializer("capabilities")
     def serialize_capabilities(self, capabilities: frozenset[ModelCapability]) -> list[str]:

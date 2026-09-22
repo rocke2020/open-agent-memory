@@ -6,9 +6,9 @@ OAM uses one canonical behavior file and explicit operator commands. No required
 
 ## 1. Configuration
 
-`configs/oam.yaml` owns limits, role aliases, retrieval/profile policy, worker concurrency, leases, and retention. An alternate operator YAML may override selected fields; omitted fields come from the canonical YAML, never a second set of Python numeric defaults. Environment variables supply the PostgreSQL DSNs, model endpoint/key values referenced by the selected binding, operator secret-handoff destinations, and an optional alternate config path. An environment variable never overrides a behavioral default invisibly.
+`configs/oam.yaml` owns limits, role aliases, retrieval/profile policy, worker concurrency, leases, and retention. An alternate operator YAML may override selected fields; omitted fields come from the canonical YAML, never a second set of Python numeric defaults. At CLI startup, inherited process variables take precedence and `./.env` fills only missing variables. Environment variables supply the PostgreSQL DSNs, model identifiers selected through `model_env`, model endpoint/key values referenced by the selected binding, operator secret-handoff destinations, and an optional alternate config path. An environment variable never overrides a behavioral default invisibly.
 
-Required v0.0.1 roles are extraction, Insights, embedding, document vision, Resource abstract, and Profile generation. Reranker and planner are optional. Each binding declares `protocol: openai_compatible`, model, endpoint environment variable, optional key environment variable, and capabilities; preflight verifies the role-specific behavior rather than trusting a provider name.
+Required v0.0.1 roles are extraction, Insights, embedding, document vision, Resource abstract, and Profile generation. Reranker and planner are optional. Each binding declares `protocol: openai_compatible`, exactly one of `model` or `model_env`, an endpoint environment variable, an optional key environment variable, and capabilities; preflight verifies the role-specific behavior rather than trusting a provider name.
 
 ## 2. Commands
 

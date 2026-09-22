@@ -46,6 +46,15 @@ def resolve_model_binding(
     if alias is None:
         return None
     binding = models.bindings[alias]
+    model = binding.model
+    if binding.model_env is not None:
+        model = environment.get(binding.model_env, "").strip()
+        if not model:
+            raise ModelBindingResolutionError(
+                f"model role {role!r} requires environment variable {binding.model_env}"
+            )
+    if model is None:
+        raise ModelBindingResolutionError(f"model role {role!r} has no model source")
     endpoint = environment.get(binding.endpoint_env, "").strip().rstrip("/")
     if not endpoint:
         raise ModelBindingResolutionError(
@@ -78,7 +87,7 @@ def resolve_model_binding(
         role=role,
         alias=alias,
         protocol=binding.protocol,
-        model=binding.model,
+        model=model,
         endpoint=endpoint,
         capabilities=binding.capabilities,
         credential_configured=api_key is not None,

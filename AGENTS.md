@@ -16,7 +16,7 @@ The release must preserve L0 source evidence, derive source-backed L1 memory, ge
 - `src/oam/evidence/`, `indexing/`, `insights/`, `profiles/`, `resources/`, and `retrieval/` own the Evidence-to-Projections-to-Context data path.
 - `src/oam/auth/`, `governance/`, and `workers/` own tenant/scope authority, source lifecycle, durable operations, leases, fences, and publication.
 - `migrations/` owns versioned PostgreSQL schema and RLS. Runtime code must not invent schema outside migrations.
-- `configs/oam.yaml` is the sole public behavior owner. Environment variables provide secrets, endpoints, DSNs, and an alternate config path only.
+- `configs/oam.yaml` is the sole public behavior owner. Environment variables provide secrets, endpoints, model identifiers selected through `model_env`, DSNs, and an alternate config path only. The CLI loads `./.env` without overriding inherited process variables.
 - `conformance/` and `tests/` own public fixtures and fail-capable unit, integration, contract, browser, and end-to-end proof.
 - `src/oam/web/` contains the bundled same-origin Memory Inspector. It is an API client, never a second policy engine.
 - `deploy/` and the root `Dockerfile` own the supported container topologies and are added only in the final release phase.

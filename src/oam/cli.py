@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 
 from oam import __version__
 from oam.config import load_config
@@ -126,5 +127,11 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def entrypoint(argv: list[str] | None = None, *, dotenv_path: str | Path | None = None) -> int:
+    selected_dotenv_path = Path.cwd() / ".env" if dotenv_path is None else Path(dotenv_path)
+    load_dotenv(dotenv_path=selected_dotenv_path, override=False)
+    return main(argv)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entrypoint())

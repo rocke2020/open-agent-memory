@@ -39,6 +39,41 @@ def test_resolver_freezes_endpoint_and_redacts_secret_from_all_public_views() ->
     assert "api_key" not in resolved.redacted()
 
 
+def test_resolver_reads_model_from_environment_without_later_mutation() -> None:
+    models = ModelsConfig(
+        roles=ModelRoles(extraction="primary"),
+        bindings={
+            "primary": ModelBinding(
+                protocol="openai_compatible",
+                model_env="OAM_CHAT_MODEL",
+                endpoint_env="OAM_CHAT_URL",
+                capabilities=frozenset({ModelCapability.CHAT}),
+            )
+        },
+    )
+    environment = {
+        "OAM_CHAT_MODEL": "environment-chat",
+        "OAM_CHAT_URL": "https://models.example.test/v1",
+    }
+
+    resolved = resolve_model_binding(models, "extraction", environment)
+    environment["OAM_CHAT_MODEL"] = "changed-chat"
+
+    assert resolved is not None
+    assert resolved.model == "environment-chat"
+
+
+@pytest.mark.parametrize("model_fields", [{}, {"model": "literal", "model_env": "MODEL"}])
+def test_model_binding_requires_exactly_one_model_source(model_fields) -> None:
+    with pytest.raises(ValueError):
+        ModelBinding(
+            protocol="openai_compatible",
+            endpoint_env="OAM_CHAT_URL",
+            capabilities=frozenset({ModelCapability.CHAT}),
+            **model_fields,
+        )
+
+
 def test_resolver_fails_closed_when_endpoint_or_declared_key_is_missing() -> None:
     with pytest.raises(ModelBindingResolutionError, match="OAM_CHAT_URL"):
         resolve_model_binding(_models(), "extraction", {})
@@ -49,6 +84,23 @@ def test_resolver_fails_closed_when_endpoint_or_declared_key_is_missing() -> Non
             "extraction",
             {"OAM_CHAT_URL": "https://models.example.test/v1"},
         )
+
+
+def test_resolver_fails_closed_when_environment_model_is_missing() -> None:
+    models = ModelsConfig(
+        roles=ModelRoles(extraction="primary"),
+        bindings={
+            "primary": ModelBinding(
+                protocol="openai_compatible",
+                model_env="OAM_CHAT_MODEL",
+                endpoint_env="OAM_CHAT_URL",
+                capabilities=frozenset({ModelCapability.CHAT}),
+            )
+        },
+    )
+
+    with pytest.raises(ModelBindingResolutionError, match="OAM_CHAT_MODEL"):
+        resolve_model_binding(models, "extraction", {"OAM_CHAT_URL": "http://model.test"})
 
 
 def test_resolver_reports_an_unbound_optional_role_without_inference() -> None:
