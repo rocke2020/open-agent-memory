@@ -58,7 +58,7 @@ uv run oam api --config configs/oam.yaml --host 127.0.0.1 --port 8080
 uv run oam worker --config configs/oam.yaml
 ```
 
-`GET /health/live`, `GET /health/ready`, `GET /v1/capabilities`, `/openapi.json`, and `/ui/` are available. Full-release readiness remains `503 core_only`. Configure distinct API, queue and worker-content DSNs plus extraction, Insight, embedding and abstract model roles before using the core. Initial `oam migrate` requires a new operator-only file through `OAM_BOOTSTRAP_OUTPUT` for the administrator secret; see [operations](docs/operations.md). The revised user-qualified public flow still needs its named end-to-end verification; do not treat examples or OpenAPI presence as that proof. Profiles, batch/planner, source lifecycle and full Inspector integration remain unavailable. See the [indexing and recall design](docs/indexing-retrieval.md) for algorithms and verification boundaries.
+`GET /health/live`, `GET /health/ready`, `GET /v1/capabilities`, `/openapi.json`, and `/ui/` are available. Full-release readiness remains `503 core_only`. Configure distinct API, queue and worker-content DSNs plus extraction, Insight, embedding and abstract model roles before using the core. Initial `oam migrate` requires a new operator-only file through `OAM_BOOTSTRAP_OUTPUT` for the administrator secret; see [operations](docs/operations.md). The revised user-qualified public flow still needs its named end-to-end verification; do not treat examples or OpenAPI presence as that proof. Profiles, batch/planner, source lifecycle and full Inspector integration remain unavailable. See [architecture](docs/architecture.md) for the current pipeline and [acceptance](docs/acceptance.md) for its remaining gates.
 
 ## Release Boundary
 
