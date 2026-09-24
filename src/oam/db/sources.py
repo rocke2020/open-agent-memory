@@ -8,8 +8,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Protocol
 
-from oam.auth.credentials import AuthorizedScope
-from oam.db.context import bind_scope
+from oam.auth.credentials import AuthorizedUser
+from oam.db.context import bind_user
 
 
 class IdempotencyConflict(RuntimeError):
@@ -90,16 +90,16 @@ FIND_IDEMPOTENT_OPERATION_SQL = """
 SELECT operation_id, request_hash, accepted_seq
 FROM operations
 WHERE tenant_id = %s
-  AND scope_id = %s
+  AND user_id = %s
   AND principal_id = %s
   AND kind = %s
   AND dedup_key = %s
 """.strip()
 
-LOCK_SCOPE_SQL = """
+LOCK_USER_SQL = """
 SELECT accepted_seq
-FROM scopes
-WHERE tenant_id = %s AND scope_id = %s AND state = 'active'
+FROM users
+WHERE tenant_id = %s AND user_id = %s AND state = 'active'
 FOR UPDATE
 """.strip()
 
@@ -107,7 +107,7 @@ READ_ORIGINAL_SQL = """
 SELECT original_bytes, media_type, content_sha256, byte_length, status, received_at
 FROM source_versions
 WHERE tenant_id = %s
-  AND scope_id = %s
+  AND user_id = %s
   AND source_id = %s
   AND source_version = %s
 """.strip()
@@ -117,23 +117,23 @@ class SourceRepository:
     def accept(
         self,
         connection: Connection,
-        authority: AuthorizedScope,
+        authority: AuthorizedUser,
         command: AcceptSource,
     ) -> AcceptanceReceipt:
         if not authority.allows("memory:append"):
-            raise PermissionError("scope does not grant memory:append")
+            raise PermissionError("user does not grant memory:append")
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
-            bind_scope(cursor, authority)
-            cursor.execute(LOCK_SCOPE_SQL, (authority.tenant_id, authority.scope_id))
-            scope_row = cursor.fetchone()
-            if scope_row is None:
-                raise PermissionError("scope is unavailable")
+            bind_user(cursor, authority)
+            cursor.execute(LOCK_USER_SQL, (authority.tenant_id, authority.user_id))
+            user_row = cursor.fetchone()
+            if user_row is None:
+                raise PermissionError("user is unavailable")
             cursor.execute(
                 FIND_IDEMPOTENT_OPERATION_SQL,
                 (
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     authority.principal_id,
                     command.operation_kind,
                     command.idempotency_key,
@@ -154,18 +154,18 @@ class SourceRepository:
             if command.source_version is None:
                 command = self._assign_revision(cursor, authority, command)
 
-            accepted_seq = int(scope_row[0]) + 1
+            accepted_seq = int(user_row[0]) + 1
             cursor.execute(
-                "UPDATE scopes SET accepted_seq = %s WHERE tenant_id = %s AND scope_id = %s",
-                (accepted_seq, authority.tenant_id, authority.scope_id),
+                "UPDATE users SET accepted_seq = %s WHERE tenant_id = %s AND user_id = %s",
+                (accepted_seq, authority.tenant_id, authority.user_id),
             )
             cursor.execute(
                 "INSERT INTO sources "
-                "(tenant_id, scope_id, source_id, input_role, resource_type, status) "
+                "(tenant_id, user_id, source_id, input_role, resource_type, status) "
                 "VALUES (%s, %s, %s, %s, %s, 'active') ON CONFLICT DO NOTHING",
                 (
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     command.source_id,
                     command.input_role,
                     command.resource_type,
@@ -173,7 +173,7 @@ class SourceRepository:
             )
             cursor.execute(
                 "UPDATE sources SET active_version = %s "
-                "WHERE tenant_id = %s AND scope_id = %s AND source_id = %s "
+                "WHERE tenant_id = %s AND user_id = %s AND source_id = %s "
                 "AND input_role = %s AND resource_type IS NOT DISTINCT FROM %s "
                 "AND status = 'active' "
                 "AND active_version IS NOT DISTINCT FROM %s "
@@ -182,7 +182,7 @@ class SourceRepository:
                 (
                     command.source_version,
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     command.source_id,
                     command.input_role,
                     command.resource_type,
@@ -194,19 +194,19 @@ class SourceRepository:
                 raise SourceVersionConflict(command.source_id)
             cursor.execute(
                 "UPDATE source_versions SET status = 'superseded' "
-                "WHERE tenant_id = %s AND scope_id = %s AND source_id = %s "
+                "WHERE tenant_id = %s AND user_id = %s AND source_id = %s "
                 "AND status = 'active'",
-                (authority.tenant_id, authority.scope_id, command.source_id),
+                (authority.tenant_id, authority.user_id, command.source_id),
             )
             content_sha256 = hashlib.sha256(command.original_bytes).digest()
             cursor.execute(
                 "INSERT INTO source_versions "
-                "(tenant_id, scope_id, source_id, source_version, media_type, original_bytes, "
+                "(tenant_id, user_id, source_id, source_version, media_type, original_bytes, "
                 "content_sha256, byte_length, status) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')",
                 (
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     command.source_id,
                     command.source_version,
                     command.media_type,
@@ -217,12 +217,12 @@ class SourceRepository:
             )
             cursor.execute(
                 "INSERT INTO evidence "
-                "(tenant_id, scope_id, evidence_id, source_id, source_version, accepted_seq, "
+                "(tenant_id, user_id, evidence_id, source_id, source_version, accepted_seq, "
                 "content_text, learning_eligible, status) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')",
                 (
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     command.evidence_id,
                     command.source_id,
                     command.source_version,
@@ -233,12 +233,12 @@ class SourceRepository:
             )
             cursor.execute(
                 "INSERT INTO operations "
-                "(tenant_id, scope_id, operation_id, principal_id, source_id, source_version, "
+                "(tenant_id, user_id, operation_id, principal_id, source_id, source_version, "
                 "accepted_seq, kind, schema_version, status, dedup_key, request_hash, plan_sealed) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'accepted', %s, %s, true)",
                 (
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     command.operation_id,
                     authority.principal_id,
                     command.source_id,
@@ -252,12 +252,12 @@ class SourceRepository:
             )
             cursor.execute(
                 "INSERT INTO work_units "
-                "(tenant_id, scope_id, work_unit_id, operation_id, stage, input_digest, "
+                "(tenant_id, user_id, work_unit_id, operation_id, stage, input_digest, "
                 "generation_id, status, attempts_remaining) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, 'queued', %s)",
                 (
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     command.work_unit_id,
                     command.operation_id,
                     command.stage,
@@ -273,15 +273,15 @@ class SourceRepository:
             )
 
     @staticmethod
-    def _assign_revision(cursor: Cursor, authority: AuthorizedScope, command: AcceptSource):
+    def _assign_revision(cursor: Cursor, authority: AuthorizedUser, command: AcceptSource):
         """Allocate under the existing user lock, after checking the logical retry key."""
         cursor.execute(
             "SELECT s.active_version,v.media_type,v.original_bytes FROM sources s "
             "LEFT JOIN source_versions v ON "
-            "(v.tenant_id,v.scope_id,v.source_id,v.source_version)="
-            "(s.tenant_id,s.scope_id,s.source_id,s.active_version) "
-            "WHERE s.tenant_id=%s AND s.scope_id=%s AND s.source_id=%s",
-            (authority.tenant_id, authority.scope_id, command.source_id),
+            "(v.tenant_id,v.user_id,v.source_id,v.source_version)="
+            "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
+            "WHERE s.tenant_id=%s AND s.user_id=%s AND s.source_id=%s",
+            (authority.tenant_id, authority.user_id, command.source_id),
         )
         active = cursor.fetchone()
         previous = int(active[0]) if active and active[0] is not None else None
@@ -313,19 +313,19 @@ class SourceRepository:
     def read_original(
         self,
         connection: Connection,
-        authority: AuthorizedScope,
+        authority: AuthorizedUser,
         *,
         source_id: str,
         source_version: int,
     ) -> StoredOriginal | None:
         if not authority.allows("memory:read"):
-            raise PermissionError("scope does not grant memory:read")
+            raise PermissionError("user does not grant memory:read")
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
-            bind_scope(cursor, authority)
+            bind_user(cursor, authority)
             cursor.execute(
                 READ_ORIGINAL_SQL,
-                (authority.tenant_id, authority.scope_id, source_id, source_version),
+                (authority.tenant_id, authority.user_id, source_id, source_version),
             )
             row = cursor.fetchone()
             if row is None:

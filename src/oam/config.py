@@ -194,14 +194,14 @@ class IngestConfig(FrozenModel):
 
 
 class QueueConfig(FrozenModel):
-    max_pending_per_scope: PositiveInt
+    max_pending_per_user: PositiveInt
 
 
 class ProviderConfig(FrozenModel):
     global_concurrency: PositiveInt
 
 
-class ScopeConfig(FrozenModel):
+class UserConfig(FrozenModel):
     max_reports: PositiveInt
     max_chats: PositiveInt
     concurrency: PositiveInt
@@ -337,7 +337,7 @@ class OAMConfig(FrozenModel):
     ingest: IngestConfig
     queue: QueueConfig
     provider: ProviderConfig
-    scope: ScopeConfig
+    user: UserConfig
     trace: TraceConfig
     evidence: EvidenceConfig
     audit: AuditConfig

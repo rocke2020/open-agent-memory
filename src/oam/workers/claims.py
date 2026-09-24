@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Protocol
 
 CLAIM_ONE_SQL = (
-    "SELECT tenant_id, scope_id, work_unit_id, operation_id, stage, attempt_id, "
+    "SELECT tenant_id, user_id, work_unit_id, operation_id, stage, attempt_id, "
     "fence, lease_expires_at FROM oam_claim_work(%s, %s, %s)"
 )
 
@@ -16,7 +16,7 @@ UPDATE work_units
 SET lease_expires_at = clock_timestamp() + (%s * interval '1 second'),
     updated_at = clock_timestamp()
 WHERE tenant_id = %s
-  AND scope_id = %s
+  AND user_id = %s
   AND work_unit_id = %s
   AND owner_id = %s
   AND fence = %s
@@ -35,7 +35,7 @@ class ClaimCursor(Protocol):
 @dataclass(frozen=True, slots=True)
 class ClaimedWork:
     tenant_id: str
-    scope_id: str
+    user_id: str
     work_unit_id: str
     operation_id: str
     stage: str
@@ -63,7 +63,7 @@ def claim_one(
         return None
     return ClaimedWork(
         tenant_id=str(row[0]),
-        scope_id=str(row[1]),
+        user_id=str(row[1]),
         work_unit_id=str(row[2]),
         operation_id=str(row[3]),
         stage=str(row[4]),

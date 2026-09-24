@@ -20,7 +20,7 @@ pytestmark = pytest.mark.integration
 def annotate(connection, authority, node, instant):
     connection.execute(
         "INSERT INTO unit_times VALUES (%s,%s,%s,%s,'event',%s,'{}')",
-        (authority.tenant_id, authority.scope_id, node, node, Range(instant, instant, "[]")),
+        (authority.tenant_id, authority.user_id, node, node, Range(instant, instant, "[]")),
     )
 
 
@@ -37,7 +37,7 @@ def test_fast_last_week_six_hops_keeps_direct_outside_but_rejects_outside_bridge
             previous = f"node{index - 1}"
             connection.execute(
                 "INSERT INTO temporal_links VALUES (%s,%s,'event',%s,%s,%s,%s,0,1)",
-                (authority.tenant_id, authority.scope_id, previous, node, previous, node),
+                (authority.tenant_id, authority.user_id, previous, node, previous, node),
             )
     add_fact(connection, authority, "outside", "last week what I did", direction=0.9)
     annotate(connection, authority, "outside", datetime(2025, 1, 8, tzinfo=UTC))
@@ -106,9 +106,9 @@ def test_time_matched_raw_and_fully_supported_insight_receive_temporal_rank(reca
         annotate(connection, authority, node, instant)
     add_insight(connection, authority, "plan", ("a", "b"))
     connection.execute(
-        "INSERT INTO search_units(tenant_id,scope_id,unit_id,kind,origin,source_id,source_version,"
+        "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,source_version,"
         "evidence_id,passage_id,generation_id,content_text,locator,embedding,lexical_text) "
-        "SELECT tenant_id,scope_id,'raw','passage','memory',source_id,source_version,evidence_id,"
+        "SELECT tenant_id,user_id,'raw','passage','memory',source_id,source_version,evidence_id,"
         "'a',generation_id,content_text,locator,embedding,lexical_text FROM search_units "
         "WHERE tenant_id=%s AND unit_id='a'",
         (authority.tenant_id,),

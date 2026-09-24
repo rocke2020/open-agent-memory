@@ -23,7 +23,7 @@ def insight_connection():
     try:
         connection.execute("INSERT INTO tenants(tenant_id,state) VALUES (%s,'active')", (tenant,))
         connection.execute(
-            "INSERT INTO scopes(tenant_id,scope_id,subject,namespace,lifetime) "
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
             "VALUES (%s,'scope','subject','default','persistent')",
             (tenant,),
         )
@@ -35,7 +35,7 @@ def insight_connection():
 
 def insert_insight(connection, tenant, *, subtype=None, include_subtype=True):
     columns = (
-        "tenant_id,scope_id,insight_id,revision,synthesis_text,input_digest,"
+        "tenant_id,user_id,insight_id,revision,synthesis_text,input_digest,"
         "recipe_id,generation_id,visible_from"
     )
     placeholders = "%s,'scope',%s,1,'Supported synthesis',%s,'recipe','generation',1"

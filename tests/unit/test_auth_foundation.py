@@ -165,14 +165,14 @@ def test_authorized_scope_retains_credential_derived_tenant_identity() -> None:
         expires_at=None,
     )
 
-    scope = credentials.AuthorizedScope.from_database_grant(
+    scope = credentials.AuthorizedUser.from_database_grant(
         principal,
-        scope_id="scope-1",
+        user_id="scope-1",
         capabilities={"memory:read", "memory:append"},
     )
 
     assert scope.tenant_id == "tenant-1"
     assert scope.principal_id == "writer-1"
-    assert scope.scope_id == "scope-1"
+    assert scope.user_id == "scope-1"
     assert scope.allows("memory:append") is True
     assert scope.allows("source:delete") is False

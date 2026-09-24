@@ -32,11 +32,11 @@ class AuthenticatedPrincipal:
 
 
 @dataclass(frozen=True, slots=True)
-class AuthorizedScope:
+class AuthorizedUser:
     credential_id: str
     tenant_id: str
     principal_id: str
-    scope_id: str
+    user_id: str
     capabilities: frozenset[str]
 
     @classmethod
@@ -44,12 +44,12 @@ class AuthorizedScope:
         cls,
         principal: AuthenticatedPrincipal,
         *,
-        scope_id: str,
+        user_id: str,
         capabilities: Collection[str],
-    ) -> AuthorizedScope:
+    ) -> AuthorizedUser:
         """Create authority only from a credential-derived principal and checked grant."""
-        if not scope_id.strip():
-            raise ValueError("scope_id cannot be empty")
+        if not user_id.strip():
+            raise ValueError("user_id cannot be empty")
         frozen_capabilities = frozenset(capabilities)
         if not frozen_capabilities or any(
             not capability.strip() for capability in frozen_capabilities
@@ -59,7 +59,7 @@ class AuthorizedScope:
             credential_id=principal.credential_id,
             tenant_id=principal.tenant_id,
             principal_id=principal.principal_id,
-            scope_id=scope_id,
+            user_id=user_id,
             capabilities=frozen_capabilities,
         )
 

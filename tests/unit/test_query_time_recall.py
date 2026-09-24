@@ -25,7 +25,7 @@ class DatedRepository:
             "new": {"year": 2025, "text": "Apple harvest was good."},
         }
 
-    def scope_state(self):
+    def user_state(self):
         return {"index_generation_id": "generation", "readiness": "ready"}
 
     def temporal_matches(self, unit_ids):

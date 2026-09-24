@@ -74,13 +74,13 @@ def run_worker_from_environment(config_path: str | Path, *, once: bool = False) 
             if once:
                 return process_claims()
             # Each source uses at most one connection or model call at a time.
-            # Capping all sources by the scope limit also bounds any one scope.
+            # The per-user limit also bounds the shared worker pool.
             concurrency = min(
                 config.worker.max_tasks,
                 config.worker.max_model_calls,
                 config.provider.global_concurrency,
                 config.database.worker_pool_max,
-                config.scope.concurrency,
+                config.user.concurrency,
             )
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
                 try:

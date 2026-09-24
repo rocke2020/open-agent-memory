@@ -49,3 +49,23 @@ def test_initial_migration_creates_forced_rls_and_non_bypass_roles() -> None:
         "oam_content": (False, False),
         "oam_queue": (False, False),
     }
+
+
+def test_current_content_schema_uses_tenant_and_user_identity() -> None:
+    dsn = _isolated_dsn()
+    apply_migrations(dsn, Path(__file__).parents[2] / "migrations")
+    with psycopg.connect(dsn) as connection:
+        columns = connection.execute(
+            "SELECT table_name,column_name FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name IN "
+            "('users','grants','sources','source_versions','search_units','work_units') "
+            "AND column_name IN ('user_id','user_id') ORDER BY table_name,column_name"
+        ).fetchall()
+    assert columns == [
+        ("grants", "user_id"),
+        ("search_units", "user_id"),
+        ("source_versions", "user_id"),
+        ("sources", "user_id"),
+        ("users", "user_id"),
+        ("work_units", "user_id"),
+    ]

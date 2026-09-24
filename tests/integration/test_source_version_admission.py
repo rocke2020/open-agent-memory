@@ -6,8 +6,8 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from oam.auth.credentials import AuthorizedScope
-from oam.db.context import bind_scope
+from oam.auth.credentials import AuthorizedUser
+from oam.db.context import bind_user
 from oam.db.sources import AcceptSource, SourceRepository, SourceVersionConflict
 
 pytestmark = pytest.mark.integration
@@ -30,15 +30,15 @@ def source_database():
             (tenant,),
         )
         connection.execute(
-            "INSERT INTO scopes(tenant_id,scope_id,subject,namespace,lifetime) "
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
             "VALUES (%s,'scope','synthetic','test','persistent')",
             (tenant,),
         )
         connection.execute("SET LOCAL ROLE oam_api")
-        authority = AuthorizedScope(
+        authority = AuthorizedUser(
             "key", tenant, "writer", "scope", frozenset({"memory:append", "memory:read"})
         )
-        bind_scope(connection.cursor(), authority)
+        bind_user(connection.cursor(), authority)
         yield connection, authority
 
 
@@ -111,7 +111,7 @@ def test_source_replacement_requires_cas_and_preserves_original_bytes(source_dat
         )
     assert (
         connection.execute(
-            "SELECT accepted_seq FROM scopes WHERE tenant_id=%s", (authority.tenant_id,)
+            "SELECT accepted_seq FROM users WHERE tenant_id=%s", (authority.tenant_id,)
         ).fetchone()[0]
         == 2
     )

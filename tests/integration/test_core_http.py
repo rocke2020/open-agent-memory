@@ -112,18 +112,18 @@ def test_index_schema_initializes_dimension_and_rejects_cross_scope_graph_endpoi
         )
         for scope in ("a", "b"):
             connection.execute(
-                "INSERT INTO scopes(tenant_id,scope_id,subject,namespace,lifetime) "
+                "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
                 "VALUES (%s,%s,'synthetic','test','persistent')",
                 (tenant, scope),
             )
             connection.execute(
-                "INSERT INTO memories(tenant_id,scope_id,memory_id,canonical_claim,"
+                "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,"
                 "assertion_kind,generation_id,visible_from) "
                 "VALUES (%s,%s,%s,'synthetic','stated','g',1)",
                 (tenant, scope, scope),
             )
             connection.execute(
-                "INSERT INTO search_units(tenant_id,scope_id,unit_id,memory_id,kind,origin,"
+                "INSERT INTO search_units(tenant_id,user_id,unit_id,memory_id,kind,origin,"
                 "content_text,"
                 "generation_id,embedding,lexical_text,locator) "
                 "VALUES (%s,%s,%s,%s,'fact','memory','synthetic','g',%s::vector,'synthetic','{}')",
@@ -131,7 +131,7 @@ def test_index_schema_initializes_dimension_and_rejects_cross_scope_graph_endpoi
             )
         with pytest.raises(psycopg.errors.ForeignKeyViolation), connection.transaction():
             connection.execute(
-                "INSERT INTO unit_links(tenant_id,scope_id,source_id,target_id,kind,weight) "
+                "INSERT INTO unit_links(tenant_id,user_id,source_id,target_id,kind,weight) "
                 "VALUES (%s,'a','a','b','semantic',0.9)",
                 (tenant,),
             )

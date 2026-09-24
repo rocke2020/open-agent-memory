@@ -10,7 +10,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
-from oam.auth.credentials import AuthorizedScope
+from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.indexing.links import build_links
 
@@ -34,12 +34,12 @@ def database():
         connection.execute("INSERT INTO tenants(tenant_id,state) VALUES (%s,'active')", (tenant,))
         for scope in ("batch", "incremental", "foreign"):
             connection.execute(
-                "INSERT INTO scopes(tenant_id,scope_id,subject,namespace,lifetime,"
+                "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime,"
                 "index_generation_id) "
                 "VALUES (%s,%s,'synthetic','test','persistent','generation')",
                 (tenant, scope),
             )
-        authority = AuthorizedScope(
+        authority = AuthorizedUser(
             "key", tenant, "worker", "batch", frozenset({"memory:append", "memory:read"})
         )
         config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
@@ -59,7 +59,7 @@ def database():
 
 
 def other_scope(authority, scope):
-    return AuthorizedScope(
+    return AuthorizedUser(
         authority.credential_id,
         authority.tenant_id,
         authority.principal_id,
@@ -79,35 +79,35 @@ def add_fact(
     generation="generation",
     vector=(1.0, 0.0),
 ):
-    tenant, scope = authority.tenant_id, authority.scope_id
+    tenant, scope = authority.tenant_id, authority.user_id
     connection.execute(
-        "INSERT INTO sources(tenant_id,scope_id,source_id,input_role,active_version,status) "
+        "INSERT INTO sources(tenant_id,user_id,source_id,input_role,active_version,status) "
         "VALUES (%s,%s,%s,'interaction',1,'active')",
         (tenant, scope, node_id),
     )
     connection.execute(
-        "INSERT INTO source_versions(tenant_id,scope_id,source_id,source_version,media_type,"
+        "INSERT INTO source_versions(tenant_id,user_id,source_id,source_version,media_type,"
         "original_bytes,content_sha256,byte_length,status) "
         "VALUES (%s,%s,%s,1,'text/plain',%s,%s,1,%s)",
         (tenant, scope, node_id, b"x", b"x" * 32, "superseded" if stale else "active"),
     )
     connection.execute(
-        "INSERT INTO evidence(tenant_id,scope_id,evidence_id,source_id,source_version,accepted_seq,"
+        "INSERT INTO evidence(tenant_id,user_id,evidence_id,source_id,source_version,accepted_seq,"
         "content_text,learning_eligible,status) VALUES (%s,%s,%s,%s,1,1,'x',%s,'active')",
         (tenant, scope, node_id, node_id, eligible),
     )
     connection.execute(
-        "INSERT INTO passages(tenant_id,scope_id,passage_id,evidence_id,parse_revision,locator,"
+        "INSERT INTO passages(tenant_id,user_id,passage_id,evidence_id,parse_revision,locator,"
         "normalized_text,generation_id,visible_from) VALUES (%s,%s,%s,%s,1,'{}','x',%s,1)",
         (tenant, scope, node_id, node_id, generation),
     )
     connection.execute(
-        "INSERT INTO memories(tenant_id,scope_id,memory_id,canonical_claim,assertion_kind,"
+        "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,assertion_kind,"
         "generation_id,visible_from) VALUES (%s,%s,%s,'x','stated',%s,1)",
         (tenant, scope, node_id, generation),
     )
     connection.execute(
-        "INSERT INTO support(tenant_id,scope_id,memory_id,evidence_id,passage_id,"
+        "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
         "support_kind,span) "
         "VALUES (%s,%s,%s,%s,%s,'quote',%s)",
         (tenant, scope, node_id, node_id, node_id, Jsonb({"start": 0, "end": 1})),
@@ -116,7 +116,7 @@ def add_fact(
     embedding = str(list(vector) + [0.0] * (dimensions - len(vector)))
     timestamp = START + timedelta(days=day) if day is not None else None
     connection.execute(
-        "INSERT INTO search_units(tenant_id,scope_id,unit_id,kind,origin,source_id,source_version,"
+        "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,source_version,"
         "evidence_id,memory_id,generation_id,content_text,locator,embedding,lexical_text,"
         "mentioned_at,source_created_at,source_updated_at) "
         "VALUES (%s,%s,%s,'fact','memory',%s,1,%s,%s,%s,'x','{}',%s::vector,'x',%s,%s,%s)",
@@ -139,11 +139,11 @@ def add_fact(
 def annotate(connection, authority, unit_id, annotation_id, role, day):
     timestamp = START + timedelta(days=day)
     connection.execute(
-        "INSERT INTO unit_times(tenant_id,scope_id,annotation_id,unit_id,role,time_span,detail) "
+        "INSERT INTO unit_times(tenant_id,user_id,annotation_id,unit_id,role,time_span,detail) "
         "VALUES (%s,%s,%s,%s,%s,tstzrange(%s,%s,'[]'),%s)",
         (
             authority.tenant_id,
-            authority.scope_id,
+            authority.user_id,
             annotation_id,
             unit_id,
             role,
@@ -157,9 +157,9 @@ def annotate(connection, authority, unit_id, annotation_id, role, day):
 def temporal_rows(connection, authority):
     return connection.execute(
         "SELECT time_basis,left_id,right_id,left_annotation_id,right_annotation_id,"
-        "gap_seconds,weight FROM temporal_links WHERE tenant_id=%s AND scope_id=%s "
+        "gap_seconds,weight FROM temporal_links WHERE tenant_id=%s AND user_id=%s "
         "ORDER BY time_basis,left_id,right_id",
-        (authority.tenant_id, authority.scope_id),
+        (authority.tenant_id, authority.user_id),
     ).fetchall()
 
 
@@ -266,12 +266,12 @@ def test_temporal_period_gap_treats_touching_and_overlapping_ranges_as_zero(data
     for node_id, start_day, end_day in (("seed", 0, 5), ("overlap", 3, 4), ("touching", 5, 6)):
         add_fact(connection, authority, node_id)
         connection.execute(
-            "INSERT INTO unit_times(tenant_id,scope_id,annotation_id,unit_id,role,"
+            "INSERT INTO unit_times(tenant_id,user_id,annotation_id,unit_id,role,"
             "time_span,detail) "
             "VALUES (%s,%s,%s,%s,'event',tstzrange(%s,%s,'[)'),%s)",
             (
                 authority.tenant_id,
-                authority.scope_id,
+                authority.user_id,
                 node_id,
                 node_id,
                 START + timedelta(days=start_day),

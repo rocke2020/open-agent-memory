@@ -13,7 +13,7 @@ LIMITS = (
     ("worker", "max_model_calls"),
     ("provider", "global_concurrency"),
     ("database", "worker_pool_max"),
-    ("scope", "concurrency"),
+    ("user", "concurrency"),
 )
 
 

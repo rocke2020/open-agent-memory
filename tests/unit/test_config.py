@@ -20,8 +20,8 @@ def test_canonical_config_freezes_v001_trial_limits_without_provider_defaults() 
     assert resolved.config.resource.max_images == 20
     assert resolved.config.resource.max_pixels_per_image == 40_000_000
     assert resolved.config.resource.max_total_pixels == 100_000_000
-    assert resolved.config.scope.max_reports == 100
-    assert resolved.config.scope.max_chats == 1_000
+    assert resolved.config.user.max_reports == 100
+    assert resolved.config.user.max_chats == 1_000
     assert resolved.config.api.max_concurrent_requests == 10
     assert resolved.config.models.bindings == {}
     assert resolved.config.models.required_unbound_roles() == {
@@ -88,9 +88,9 @@ def test_canonical_config_has_one_owner_for_database_auth_and_work_limits() -> N
     assert config.auth.cache_max_entries == 4096
     assert config.ingest.max_bytes == 128 * 1024
     assert config.ingest.max_messages == 128
-    assert config.queue.max_pending_per_scope == 1000
+    assert config.queue.max_pending_per_user == 1000
     assert config.provider.global_concurrency == 4
-    assert config.scope.concurrency == 2
+    assert config.user.concurrency == 2
 
 
 def test_canonical_config_freezes_every_shared_runtime_limit() -> None:

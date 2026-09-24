@@ -77,7 +77,7 @@ Optional paired `time_basis`/`time_window` override query-date parsing. The half
 
 Every response carries a request ID and contract version. Accepted asynchronous work distinguishes `accepted`, `source_searchable`, `memory_ready`, `insights_ready`, and Profile freshness; success at one stage never implies later stages completed.
 
-Recall returns typed `items`, exact rendered `context`, `context_tokens`, `tokenizer`, and diagnostics for query-time interpretation, executed/omitted stages, partial coverage, usage and timings. Each Insight item includes its assigned subtype and exact supporting facts; empty results do not invent evidence. The context-token count covers the exact returned context, including citations and time qualifiers.
+Recall returns typed `items`, exact rendered `context`, `context_tokens`, `tokenizer`, and diagnostics for query-time interpretation, executed/omitted stages, executed fusion arms, partial coverage, usage and timings. Each Insight item includes its assigned subtype and exact supporting facts; empty results do not invent evidence. The context-token count covers the exact returned context, including citations and time qualifiers.
 
 Errors use safe details; validation and authorization complete before external calls. Invalid credentials return `401`; retain wire-body overflow returns `413`; conflicting reuse of an idempotency key returns `409`; invalid explicit input returns `422`; unavailable capability/mandatory recall stages return `503`; exhausted deadlines return `504`. Unavailable authority uses a non-enumerating `404` where required.
 

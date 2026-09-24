@@ -11,9 +11,9 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from oam.auth.credentials import AuthorizedScope
+from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
-from oam.db.context import bind_scope
+from oam.db.context import bind_user
 from oam.workers.claims import RENEW_LEASE_SQL, ClaimedWork
 
 MEMORY_REVISION = 1
@@ -37,70 +37,70 @@ class IndexStore:
     generation_id: str
 
     def __post_init__(self):
-        self.authority = AuthorizedScope(
+        self.authority = AuthorizedUser(
             "worker",
             self.claim.tenant_id,
             "worker",
-            self.claim.scope_id,
+            self.claim.user_id,
             frozenset({"memory:read", "memory:append"}),
         )
-        self.key = (self.claim.tenant_id, self.claim.scope_id)
+        self.key = (self.claim.tenant_id, self.claim.user_id)
         with self.transaction() as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     "SELECT o.source_id,o.source_version,o.accepted_seq,w.input_digest,"
                     "w.generation_id,s.input_role,sv.original_bytes,sv.media_type,q.policy_epoch "
-                    "FROM work_units w JOIN operations o USING(tenant_id,scope_id,operation_id) "
-                    "JOIN scopes q USING(tenant_id,scope_id) "
-                    "JOIN sources s ON (s.tenant_id,s.scope_id,s.source_id)="
-                    "(o.tenant_id,o.scope_id,o.source_id) "
+                    "FROM work_units w JOIN operations o USING(tenant_id,user_id,operation_id) "
+                    "JOIN users q USING(tenant_id,user_id) "
+                    "JOIN sources s ON (s.tenant_id,s.user_id,s.source_id)="
+                    "(o.tenant_id,o.user_id,o.source_id) "
                     "JOIN source_versions sv ON "
-                    "(sv.tenant_id,sv.scope_id,sv.source_id,sv.source_version)="
-                    "(o.tenant_id,o.scope_id,o.source_id,o.source_version) "
-                    "WHERE w.tenant_id=%s AND w.scope_id=%s AND w.work_unit_id=%s",
+                    "(sv.tenant_id,sv.user_id,sv.source_id,sv.source_version)="
+                    "(o.tenant_id,o.user_id,o.source_id,o.source_version) "
+                    "WHERE w.tenant_id=%s AND w.user_id=%s AND w.work_unit_id=%s",
                     (*self.key, self.claim.work_unit_id),
                 )
                 self.source = cursor.fetchone()
             if self.source is None or self.source["generation_id"] != self.generation_id:
                 raise StaleIndexWork("index generation changed")
             connection.execute(
-                "UPDATE scopes SET index_generation_id=%s WHERE tenant_id=%s AND scope_id=%s "
+                "UPDATE users SET index_generation_id=%s WHERE tenant_id=%s AND user_id=%s "
                 "AND index_generation_id IS NULL",
                 (self.generation_id, *self.key),
             )
             self.guard(connection)
             connection.execute(
                 "UPDATE operations SET status='running',updated_at=clock_timestamp() "
-                "WHERE tenant_id=%s AND scope_id=%s AND operation_id=%s",
+                "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
                 (*self.key, self.claim.operation_id),
             )
 
     @contextmanager
     def transaction(self):
         with psycopg.connect(self.dsn) as connection:
-            bind_scope(connection.cursor(), self.authority)
+            bind_user(connection.cursor(), self.authority)
             yield connection
 
     def guard(self, connection):
-        scope = connection.execute(
-            "SELECT state,policy_epoch,index_generation_id FROM scopes "
-            "WHERE tenant_id=%s AND scope_id=%s FOR UPDATE",
+        user = connection.execute(
+            "SELECT state,policy_epoch,index_generation_id FROM users "
+            "WHERE tenant_id=%s AND user_id=%s FOR UPDATE",
             self.key,
         ).fetchone()
         row = connection.execute(
             "SELECT w.owner_id,w.fence,w.status,w.lease_expires_at>clock_timestamp(),"
             "o.cancellation_revision,o.status,s.status,s.active_version,sv.status "
-            "FROM work_units w JOIN operations o USING(tenant_id,scope_id,operation_id) "
-            "JOIN sources s ON (s.tenant_id,s.scope_id,s.source_id)="
-            "(o.tenant_id,o.scope_id,o.source_id) "
-            "JOIN source_versions sv ON (sv.tenant_id,sv.scope_id,sv.source_id,sv.source_version)="
-            "(o.tenant_id,o.scope_id,o.source_id,o.source_version) "
-            "WHERE w.tenant_id=%s AND w.scope_id=%s AND w.work_unit_id=%s FOR UPDATE OF w,o",
+            "FROM work_units w JOIN operations o USING(tenant_id,user_id,operation_id) "
+            "JOIN sources s ON (s.tenant_id,s.user_id,s.source_id)="
+            "(o.tenant_id,o.user_id,o.source_id) "
+            "JOIN source_versions sv ON (sv.tenant_id,sv.user_id,sv.source_id,sv.source_version)="
+            "(o.tenant_id,o.user_id,o.source_id,o.source_version) "
+            "WHERE w.tenant_id=%s AND w.user_id=%s AND w.work_unit_id=%s FOR UPDATE OF w,o",
             (*self.key, self.claim.work_unit_id),
         ).fetchone()
         if (
-            scope is None
-            or scope != ("active", self.source["policy_epoch"], self.generation_id)
+            user is None
+            or user != ("active", self.source["policy_epoch"], self.generation_id)
             or row is None
             or row[:5] != (self.worker_id, self.claim.fence, "running", True, 0)
             or row[5] not in {"accepted", "running"}
@@ -121,7 +121,7 @@ class IndexStore:
         with self.transaction() as connection:
             self.guard(connection)
             existing = connection.execute(
-                "SELECT output FROM index_stage_results WHERE tenant_id=%s AND scope_id=%s "
+                "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
                 "AND source_id=%s AND source_version=%s AND generation_id=%s "
                 "AND stage_key=%s AND input_digest=%s",
                 identity,
@@ -140,7 +140,7 @@ class IndexStore:
             )
             connection.execute(
                 "UPDATE attempts SET disposition='unknown_external_outcome',request_ref=%s "
-                "WHERE tenant_id=%s AND scope_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
                 (stage, *self.key, self.claim.work_unit_id, self.claim.attempt_id),
             )
         output = produce()
@@ -150,7 +150,7 @@ class IndexStore:
         with self.transaction() as connection:
             self.guard(connection)
             connection.execute(
-                "INSERT INTO index_stage_results(tenant_id,scope_id,source_id,source_version,"
+                "INSERT INTO index_stage_results(tenant_id,user_id,source_id,source_version,"
                 "generation_id,stage_key,input_digest,output,usage,work_unit_id,attempt_id) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                 (
@@ -163,7 +163,7 @@ class IndexStore:
             )
             connection.execute(
                 "UPDATE attempts SET disposition='claimed',response_ref=%s "
-                "WHERE tenant_id=%s AND scope_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
                 (stage, *self.key, self.claim.work_unit_id, self.claim.attempt_id),
             )
         return output
@@ -171,7 +171,7 @@ class IndexStore:
     def readiness(self, connection, **stages):
         connection.execute(
             "UPDATE operations SET stage_state=stage_state||%s::jsonb,updated_at=clock_timestamp() "
-            "WHERE tenant_id=%s AND scope_id=%s AND operation_id=%s",
+            "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
             (Jsonb(stages), *self.key, self.claim.operation_id),
         )
 
@@ -182,11 +182,11 @@ class IndexStore:
         with self.transaction() as connection:
             self.guard(connection)
             rows = connection.execute(
-                "SELECT e.content_text FROM evidence e WHERE e.tenant_id=%s AND e.scope_id=%s "
+                "SELECT e.content_text FROM evidence e WHERE e.tenant_id=%s AND e.user_id=%s "
                 "AND e.source_id=%s AND e.source_version=%s AND e.status='active' "
                 "AND e.content_text IS NOT NULL AND NOT EXISTS(SELECT 1 FROM passages p "
-                "WHERE (p.tenant_id,p.scope_id,p.evidence_id)="
-                "(e.tenant_id,e.scope_id,e.evidence_id))",
+                "WHERE (p.tenant_id,p.user_id,p.evidence_id)="
+                "(e.tenant_id,e.user_id,e.evidence_id))",
                 (*self.key, self.source["source_id"], self.source["source_version"]),
             ).fetchall()
         if len(rows) != 1:
@@ -206,7 +206,7 @@ class IndexStore:
             else stable_id("time", unit_id, ordinal)
         )
         connection.execute(
-            "INSERT INTO unit_times(tenant_id,scope_id,annotation_id,unit_id,role,"
+            "INSERT INTO unit_times(tenant_id,user_id,annotation_id,unit_id,role,"
             "time_span,detail) "
             "VALUES (%s,%s,%s,%s,%s,tstzrange(%s,%s,%s),%s) ON CONFLICT DO NOTHING",
             (
@@ -227,23 +227,23 @@ class IndexStore:
             self.summarize_usage(connection)
             connection.execute(
                 "UPDATE work_units SET status='succeeded',updated_at=clock_timestamp() "
-                "WHERE tenant_id=%s AND scope_id=%s AND work_unit_id=%s",
+                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
                 (*self.key, self.claim.work_unit_id),
             )
             connection.execute(
                 "UPDATE attempts SET disposition='succeeded',finished_at=clock_timestamp() "
-                "WHERE tenant_id=%s AND scope_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
                 (*self.key, self.claim.work_unit_id, self.claim.attempt_id),
             )
             connection.execute(
                 "UPDATE operations SET status='succeeded',updated_at=clock_timestamp(), "
                 "stage_state=stage_state-'error'-'error_detail' "
-                "WHERE tenant_id=%s AND scope_id=%s AND operation_id=%s",
+                "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
                 (*self.key, self.claim.operation_id),
             )
             connection.execute(
-                "UPDATE scopes SET published_seq=greatest(published_seq,%s) "
-                "WHERE tenant_id=%s AND scope_id=%s",
+                "UPDATE users SET published_seq=greatest(published_seq,%s) "
+                "WHERE tenant_id=%s AND user_id=%s",
                 (self.source["accepted_seq"], *self.key),
             )
 
@@ -264,7 +264,7 @@ class IndexStore:
             owned = connection.execute(
                 "UPDATE work_units SET status=CASE WHEN %s AND attempts_remaining>0 "
                 "THEN 'queued' ELSE 'failed_terminal' END,updated_at=clock_timestamp() "
-                "WHERE tenant_id=%s AND scope_id=%s AND work_unit_id=%s AND owner_id=%s "
+                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND owner_id=%s "
                 "AND fence=%s AND status='running' AND lease_expires_at>clock_timestamp() "
                 "RETURNING status",
                 (retryable, *self.key, self.claim.work_unit_id, self.worker_id, self.claim.fence),
@@ -274,7 +274,7 @@ class IndexStore:
                     connection.execute(
                         "UPDATE attempts SET disposition='failed',usage=%s,"
                         "response_ref=request_ref,finished_at=clock_timestamp() "
-                        "WHERE tenant_id=%s AND scope_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                        "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
                         (
                             Jsonb(known_usage.model_dump(mode="json")),
                             *self.key,
@@ -289,7 +289,7 @@ class IndexStore:
                 connection.execute(
                     "UPDATE operations SET status=%s,"
                     "stage_state=stage_state||%s::jsonb "
-                    "WHERE tenant_id=%s AND scope_id=%s AND operation_id=%s AND status='running'",
+                    "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s AND status='running'",
                     (
                         "running" if retrying else "partial_failed",
                         Jsonb(diagnostic),
@@ -300,7 +300,7 @@ class IndexStore:
 
     def summarize_usage(self, connection):
         rows = connection.execute(
-            "SELECT stage_key,usage FROM index_stage_results WHERE tenant_id=%s AND scope_id=%s "
+            "SELECT stage_key,usage FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
             "AND source_id=%s AND source_version=%s AND generation_id=%s",
             (
                 *self.key,
@@ -311,9 +311,9 @@ class IndexStore:
         ).fetchall()
         attempts = connection.execute(
             "SELECT a.disposition,a.request_ref,a.usage FROM attempts a "
-            "JOIN work_units w USING(tenant_id,scope_id,work_unit_id) "
-            "JOIN operations o USING(tenant_id,scope_id,operation_id) "
-            "WHERE o.tenant_id=%s AND o.scope_id=%s AND o.source_id=%s AND o.source_version=%s "
+            "JOIN work_units w USING(tenant_id,user_id,work_unit_id) "
+            "JOIN operations o USING(tenant_id,user_id,operation_id) "
+            "WHERE o.tenant_id=%s AND o.user_id=%s AND o.source_id=%s AND o.source_version=%s "
             "AND w.generation_id=%s",
             (
                 *self.key,
@@ -378,7 +378,7 @@ class IndexStore:
         from oam.retrieval.repository import lexicalize
 
         connection.execute(
-            "INSERT INTO search_units(tenant_id,scope_id,unit_id,kind,origin,source_id,"
+            "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
             "source_version,evidence_id,passage_id,memory_id,insight_id,insight_revision,"
             "generation_id,content_text,locator,embedding,lexical_text,mentioned_at,"
             "source_created_at,source_updated_at,ordinal) "

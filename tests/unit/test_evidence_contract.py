@@ -39,7 +39,7 @@ def test_public_body_cannot_select_tenant_or_scope() -> None:
         EvidenceAppendRequest(
             source_id="conversation-1",
             tenant_id="tenant-1",
-            scope_id="scope-1",
+            user_id="scope-1",
             messages=[
                 {
                     "message_id": "m1",

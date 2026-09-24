@@ -8,13 +8,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
-from oam.auth.credentials import AuthorizedScope
-from oam.db.context import bind_scope
+from oam.auth.credentials import AuthorizedUser
+from oam.db.context import bind_user
 from oam.operations.state import OperationStatus
 
 
 class OperationNotFound(LookupError):
-    """No operation is visible in the authorized scope."""
+    """No operation is visible for the authorized user."""
 
 
 class OperationNotCancellable(RuntimeError):
@@ -75,17 +75,17 @@ class OperationRepository:
     def get(
         self,
         connection: Connection,
-        authority: AuthorizedScope,
+        authority: AuthorizedUser,
         operation_id: str,
     ) -> OperationRecord | None:
         self._require(authority, "memory:read")
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
-            bind_scope(cursor, authority)
+            bind_user(cursor, authority)
             cursor.execute(
                 f"SELECT {_FIELDS} FROM operations "  # noqa: S608 - fixed internal fields
-                "WHERE tenant_id = %s AND scope_id = %s AND operation_id = %s",
-                (authority.tenant_id, authority.scope_id, operation_id),
+                "WHERE tenant_id = %s AND user_id = %s AND operation_id = %s",
+                (authority.tenant_id, authority.user_id, operation_id),
             )
             row = cursor.fetchone()
             return None if row is None else self._record(row)
@@ -93,21 +93,21 @@ class OperationRepository:
     def cancel(
         self,
         connection: Connection,
-        authority: AuthorizedScope,
+        authority: AuthorizedUser,
         operation_id: str,
     ) -> OperationRecord:
         self._require(authority, "memory:append")
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
-            bind_scope(cursor, authority)
+            bind_user(cursor, authority)
             cursor.execute(
                 f"UPDATE operations SET status = 'cancelled', "  # noqa: S608
                 "cancellation_revision = cancellation_revision + 1, "
                 "updated_at = clock_timestamp() "
-                "WHERE tenant_id = %s AND scope_id = %s AND operation_id = %s "
+                "WHERE tenant_id = %s AND user_id = %s AND operation_id = %s "
                 "AND status IN ('accepted', 'running') "
                 f"RETURNING {_FIELDS}",
-                (authority.tenant_id, authority.scope_id, operation_id),
+                (authority.tenant_id, authority.user_id, operation_id),
             )
             row = cursor.fetchone()
             if row is None:
@@ -115,16 +115,16 @@ class OperationRepository:
             cursor.execute(
                 "UPDATE work_units SET status = 'cancelled', fence = fence + 1, "
                 "owner_id = NULL, lease_expires_at = NULL, updated_at = clock_timestamp() "
-                "WHERE tenant_id = %s AND scope_id = %s AND operation_id = %s "
+                "WHERE tenant_id = %s AND user_id = %s AND operation_id = %s "
                 "AND status IN ('queued', 'running', 'retry_wait')",
-                (authority.tenant_id, authority.scope_id, operation_id),
+                (authority.tenant_id, authority.user_id, operation_id),
             )
             return self._record(row)
 
     def retry(
         self,
         connection: Connection,
-        authority: AuthorizedScope,
+        authority: AuthorizedUser,
         *,
         original_operation_id: str,
         new_operation_id: str,
@@ -139,11 +139,11 @@ class OperationRepository:
             raise ValueError("attempts_remaining must be positive")
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
-            bind_scope(cursor, authority)
+            bind_user(cursor, authority)
             cursor.execute(
                 f"SELECT {_FIELDS} FROM operations "  # noqa: S608
-                "WHERE tenant_id = %s AND scope_id = %s AND operation_id = %s FOR UPDATE",
-                (authority.tenant_id, authority.scope_id, original_operation_id),
+                "WHERE tenant_id = %s AND user_id = %s AND operation_id = %s FOR UPDATE",
+                (authority.tenant_id, authority.user_id, original_operation_id),
             )
             original_row = cursor.fetchone()
             if original_row is None or OperationStatus(original_row[2]) not in {
@@ -154,11 +154,11 @@ class OperationRepository:
                 raise OperationNotRetryable(original_operation_id)
             cursor.execute(
                 f"SELECT {_FIELDS}, request_hash FROM operations "  # noqa: S608
-                "WHERE tenant_id = %s AND scope_id = %s AND principal_id = %s "
+                "WHERE tenant_id = %s AND user_id = %s AND principal_id = %s "
                 "AND retry_of_operation_id = %s AND dedup_key = %s",
                 (
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     authority.principal_id,
                     original_operation_id,
                     idempotency_key,
@@ -170,22 +170,22 @@ class OperationRepository:
                     raise OperationIdempotencyConflict(idempotency_key)
                 return self._record(existing_retry)
             cursor.execute(
-                "SELECT count(*) FROM work_units WHERE tenant_id = %s AND scope_id = %s "
+                "SELECT count(*) FROM work_units WHERE tenant_id = %s AND user_id = %s "
                 "AND operation_id = %s AND status IN ('failed_terminal', 'cancelled') "
                 "AND cardinality(dependency_ids) > 0",
-                (authority.tenant_id, authority.scope_id, original_operation_id),
+                (authority.tenant_id, authority.user_id, original_operation_id),
             )
             dependencies = cursor.fetchone()
             if dependencies is None or int(dependencies[0]) > 0:
                 raise RetryRequiresPlanning(original_operation_id)
             cursor.execute(
                 f"INSERT INTO operations "  # noqa: S608
-                "(tenant_id, scope_id, operation_id, principal_id, source_id, source_version, "
+                "(tenant_id, user_id, operation_id, principal_id, source_id, source_version, "
                 "accepted_seq, kind, schema_version, status, dedup_key, request_hash, "
                 "plan_sealed, retry_of_operation_id) "
-                "SELECT tenant_id, scope_id, %s, %s, source_id, source_version, accepted_seq, "
+                "SELECT tenant_id, user_id, %s, %s, source_id, source_version, accepted_seq, "
                 "kind, schema_version, 'accepted', %s, %s, true, operation_id "
-                "FROM operations WHERE tenant_id = %s AND scope_id = %s AND operation_id = %s "
+                "FROM operations WHERE tenant_id = %s AND user_id = %s AND operation_id = %s "
                 f"RETURNING {_FIELDS}",
                 (
                     new_operation_id,
@@ -193,7 +193,7 @@ class OperationRepository:
                     idempotency_key,
                     request_hash,
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     original_operation_id,
                 ),
             )
@@ -202,18 +202,18 @@ class OperationRepository:
                 raise OperationNotFound(original_operation_id)
             cursor.execute(
                 "INSERT INTO work_units "
-                "(tenant_id, scope_id, work_unit_id, operation_id, stage, chunk_group_id, "
+                "(tenant_id, user_id, work_unit_id, operation_id, stage, chunk_group_id, "
                 "input_digest, generation_id, dependency_ids, status, attempts_remaining) "
-                "SELECT tenant_id, scope_id, %s || ':' || work_unit_id, %s, stage, "
+                "SELECT tenant_id, user_id, %s || ':' || work_unit_id, %s, stage, "
                 "chunk_group_id, input_digest, generation_id, '{}', 'queued', %s "
-                "FROM work_units WHERE tenant_id = %s AND scope_id = %s AND operation_id = %s "
+                "FROM work_units WHERE tenant_id = %s AND user_id = %s AND operation_id = %s "
                 "AND status IN ('failed_terminal', 'cancelled')",
                 (
                     new_operation_id,
                     new_operation_id,
                     attempts_remaining,
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     original_operation_id,
                 ),
             )
@@ -222,7 +222,7 @@ class OperationRepository:
     def reconcile_attempt(
         self,
         connection: Connection,
-        authority: AuthorizedScope,
+        authority: AuthorizedUser,
         *,
         operation_id: str,
         work_unit_id: str,
@@ -239,16 +239,16 @@ class OperationRepository:
         usage_json = json.dumps(usage, separators=(",", ":"), sort_keys=True)
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
-            bind_scope(cursor, authority)
+            bind_user(cursor, authority)
             cursor.execute(
                 "UPDATE attempts AS attempt SET disposition = %s, response_ref = %s, "
                 "usage = %s::jsonb, "
                 "finished_at = clock_timestamp() "
                 "FROM work_units AS work "
-                "WHERE (work.tenant_id, work.scope_id, work.work_unit_id) = "
-                "(attempt.tenant_id, attempt.scope_id, attempt.work_unit_id) "
+                "WHERE (work.tenant_id, work.user_id, work.work_unit_id) = "
+                "(attempt.tenant_id, attempt.user_id, attempt.work_unit_id) "
                 "AND work.operation_id = %s "
-                "AND attempt.tenant_id = %s AND attempt.scope_id = %s "
+                "AND attempt.tenant_id = %s AND attempt.user_id = %s "
                 "AND attempt.work_unit_id = %s AND attempt.attempt_id = %s "
                 "AND attempt.owner_id = %s AND attempt.fence = %s "
                 "AND attempt.disposition = 'unknown_external_outcome' "
@@ -259,7 +259,7 @@ class OperationRepository:
                     usage_json,
                     operation_id,
                     authority.tenant_id,
-                    authority.scope_id,
+                    authority.user_id,
                     work_unit_id,
                     attempt_id,
                     owner_id,
@@ -287,6 +287,6 @@ class OperationRepository:
         )
 
     @staticmethod
-    def _require(authority: AuthorizedScope, capability: str) -> None:
+    def _require(authority: AuthorizedUser, capability: str) -> None:
         if not authority.allows(capability):
-            raise PermissionError(f"scope does not grant {capability}")
+            raise PermissionError(f"user does not grant {capability}")

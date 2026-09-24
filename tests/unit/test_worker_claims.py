@@ -38,13 +38,13 @@ def test_claim_one_calls_the_allowlisted_database_function() -> None:
     )
 
     assert cursor.executed == (
-        "SELECT tenant_id, scope_id, work_unit_id, operation_id, stage, attempt_id, "
+        "SELECT tenant_id, user_id, work_unit_id, operation_id, stage, attempt_id, "
         "fence, lease_expires_at FROM oam_claim_work(%s, %s, %s)",
         ("worker-1", "attempt-2", 90),
     )
     assert claimed == claims.ClaimedWork(
         tenant_id="tenant-1",
-        scope_id="scope-1",
+        user_id="scope-1",
         work_unit_id="unit-1",
         operation_id="op-1",
         stage="extract",

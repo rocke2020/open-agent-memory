@@ -130,12 +130,12 @@ ingest:
   max_messages: 128
 
 queue:
-  max_pending_per_scope: 1000
+  max_pending_per_user: 1000
 
 provider:
   global_concurrency: 4
 
-scope:
+user:
   max_reports: 100
   max_chats: 1000
   concurrency: 2

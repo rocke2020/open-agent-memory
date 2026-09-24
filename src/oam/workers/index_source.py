@@ -83,7 +83,7 @@ def process_one(
                 with store.transaction() as connection:
                     store.guard(connection)
                     connection.execute(
-                        "INSERT INTO evidence(tenant_id,scope_id,evidence_id,source_id,"
+                        "INSERT INTO evidence(tenant_id,user_id,evidence_id,source_id,"
                         "source_version,"
                         "accepted_seq,content_text,event_time,learning_eligible,status) "
                         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,true,'active') ON CONFLICT DO NOTHING",
@@ -98,7 +98,7 @@ def process_one(
                         ),
                     )
                     connection.execute(
-                        "INSERT INTO passages(tenant_id,scope_id,passage_id,evidence_id,"
+                        "INSERT INTO passages(tenant_id,user_id,passage_id,evidence_id,"
                         "parse_revision,"
                         "locator,normalized_text,generation_id,visible_from) "
                         "VALUES (%s,%s,%s,%s,1,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
@@ -258,7 +258,7 @@ def _resource(store, models):
         with store.transaction() as connection:
             store.guard(connection)
             connection.execute(
-                "INSERT INTO evidence(tenant_id,scope_id,evidence_id,source_id,source_version,"
+                "INSERT INTO evidence(tenant_id,user_id,evidence_id,source_id,source_version,"
                 "accepted_seq,content_text,learning_eligible,status) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,false,'active') ON CONFLICT DO NOTHING",
                 (
@@ -271,7 +271,7 @@ def _resource(store, models):
                 ),
             )
             connection.execute(
-                "INSERT INTO passages(tenant_id,scope_id,passage_id,evidence_id,parse_revision,"
+                "INSERT INTO passages(tenant_id,user_id,passage_id,evidence_id,parse_revision,"
                 "locator,normalized_text,generation_id,visible_from) "
                 "VALUES (%s,%s,%s,%s,1,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                 (
@@ -357,7 +357,7 @@ def _publish_facts(
             memory_id = identifiers[fact.output_index]
             support_locator = {**locator, "start": fact.start, "end": fact.end, "quote": fact.quote}
             connection.execute(
-                "INSERT INTO memories(tenant_id,scope_id,memory_id,canonical_claim,assertion_kind,"
+                "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,assertion_kind,"
                 "generation_id,visible_from) VALUES (%s,%s,%s,%s,'stated',%s,%s) "
                 "ON CONFLICT DO NOTHING",
                 (
@@ -369,7 +369,7 @@ def _publish_facts(
                 ),
             )
             connection.execute(
-                "INSERT INTO support(tenant_id,scope_id,memory_id,evidence_id,passage_id,"
+                "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
                 "support_kind,span) VALUES (%s,%s,%s,%s,%s,'source',%s) ON CONFLICT DO NOTHING",
                 (*store.key, memory_id, evidence_id, passage_id, Jsonb(support_locator)),
             )
@@ -455,7 +455,7 @@ def _insights(store, models, new_fact_ids):
             f"WITH eligible AS ({ELIGIBLE_UNITS}) "
             "SELECT unit_id,content_text,source_id,source_version "
             "FROM eligible WHERE kind='fact' ORDER BY (unit_id=ANY(%s)) DESC,"
-            "embedding <=> (SELECT embedding FROM search_units WHERE tenant_id=%s AND scope_id=%s "
+            "embedding <=> (SELECT embedding FROM search_units WHERE tenant_id=%s AND user_id=%s "
             "AND unit_id=%s),unit_id LIMIT %s",
             (
                 new_fact_ids,
@@ -508,7 +508,7 @@ def _insights(store, models, new_fact_ids):
             if {row[0] for row in eligible} != set(result.support_ids):
                 raise ValueError("Insight support became ineligible")
             connection.execute(
-                "INSERT INTO insights(tenant_id,scope_id,insight_id,revision,synthesis_text,"
+                "INSERT INTO insights(tenant_id,user_id,insight_id,revision,synthesis_text,"
                 "subtype,input_digest,recipe_id,generation_id,visible_from) "
                 "VALUES (%s,%s,%s,1,%s,%s,%s,'oam-insight-v2',%s,%s) ON CONFLICT DO NOTHING",
                 (

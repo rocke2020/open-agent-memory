@@ -12,7 +12,7 @@ import httpx
 import psycopg
 import tiktoken
 
-from oam.auth.credentials import AuthorizedScope
+from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.contracts.search import SearchRequest, TimeBasis
 from oam.retrieval.algorithms import (
@@ -49,7 +49,7 @@ class RecallService:
 
     def search(
         self,
-        authority: AuthorizedScope,
+        authority: AuthorizedUser,
         request: SearchRequest,
         *,
         deadline_at: datetime | None = None,
@@ -111,8 +111,8 @@ class RecallService:
             executed.append(name)
             return value
 
-        if read("scope_state")["index_generation_id"] != self.generation_id:
-            raise RecallUnavailable("query generation differs from active scope generation")
+        if read("user_state")["index_generation_id"] != self.generation_id:
+            raise RecallUnavailable("query generation differs from active user generation")
 
         def text_arms():
             return (
@@ -129,8 +129,11 @@ class RecallService:
                 lambda: self.models.embed((request.query,), timeout_seconds=_remaining(deadline)),
             )
             lexical, anchors = text_future.result(timeout=_remaining(deadline))
-        arms["fts"] = tuple(row["unit_id"] for row in lexical)
-        arms["anchors"] = tuple(row["unit_id"] for row in anchors)
+        arms["lexical"] = tuple(
+            dict.fromkeys(
+                (*[row["unit_id"] for row in anchors], *[row["unit_id"] for row in lexical])
+            )
+        )[: tier.channel_candidates]
         vector = embedding.vectors[0] if embedding is not None else None
         dense_pool = []
         if embedding is not None:
@@ -170,7 +173,7 @@ class RecallService:
                         direct_ids = tuple(
                             item.node_id
                             for item in reciprocal_rank_fusion(
-                                (arms["dense"], arms["fts"], arms["anchors"]),
+                                (arms["dense"], arms["lexical"]),
                                 rrf_k=self.config.search.rrf_k,
                             )
                         )
@@ -274,9 +277,9 @@ class RecallService:
                     key=lambda node: (-rerank_scores[node], node),
                 )
             )
-        index_state = read("scope_state")
+        index_state = read("user_state")
         if index_state["index_generation_id"] != self.generation_id:
-            raise RecallUnavailable("scope generation changed during recall")
+            raise RecallUnavailable("user generation changed during recall")
         hydrated = read("hydrate", final_ids)
         budget = request.max_context_tokens or self.config.context.default_tokens
         items, blocks = [], []
@@ -308,6 +311,7 @@ class RecallService:
             "diagnostics": {
                 "recall_level": mode,
                 "generation_id": self.generation_id,
+                "executed_arms": list(arms),
                 "executed_stages": [
                     name
                     for name in (

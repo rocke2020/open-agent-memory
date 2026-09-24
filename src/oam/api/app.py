@@ -93,7 +93,7 @@ PUBLIC_LIMIT_SECTIONS = (
     "ingest",
     "queue",
     "provider",
-    "scope",
+    "user",
     "trace",
     "evidence",
     "audit",
@@ -238,7 +238,7 @@ def _register_reserved_routes(
         "/v1/users/{user_id}/grants/{principal_id}",
         tags=["Administration"],
     )
-    async def replace_scope_grant(
+    async def replace_user_grant(
         user_id: str,
         principal_id: str,
         body: dict[str, Any],

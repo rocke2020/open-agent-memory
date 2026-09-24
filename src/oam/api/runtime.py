@@ -15,8 +15,8 @@ from psycopg.errors import UniqueViolation
 from psycopg_pool import ConnectionPool
 
 from oam.auth.administration import CredentialAdministration
-from oam.auth.credentials import AuthorizedScope, PositiveCredentialCache, digest_secret
-from oam.auth.repository import AuthRepository, ScopeDenied
+from oam.auth.credentials import AuthorizedUser, PositiveCredentialCache, digest_secret
+from oam.auth.repository import AuthRepository, UserDenied
 from oam.config import OAMConfig
 from oam.contracts.credentials import (
     CredentialIssuedResponse,
@@ -29,7 +29,7 @@ from oam.contracts.operations import ReconcileAttemptRequest
 from oam.contracts.resources import EvidenceResourceCreate, ResourceMediaType
 from oam.contracts.retain import RetainFileDocument, RetainInteraction, RetainTextDocument
 from oam.contracts.search import SearchRequest
-from oam.db.context import bind_scope
+from oam.db.context import bind_user
 from oam.db.sources import AcceptSource, SourceRepository
 from oam.indexing.identity import index_generation
 from oam.models.runtime import RuntimeModels
@@ -41,7 +41,7 @@ class AuthenticationFailed(PermissionError):
 
 
 class AuthorizationFailed(PermissionError):
-    """The caller cannot use the requested operation capability in this scope."""
+    """The caller cannot use the requested operation capability for this user."""
 
 
 class APIRuntime(Protocol):
@@ -59,14 +59,14 @@ class APIRuntime(Protocol):
         self, bearer_secret: str, credential_id: str
     ) -> CredentialRevokedResponse: ...
 
-    def get(self, bearer_secret: str, scope_id: str, operation_id: str) -> OperationRecord: ...
+    def get(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord: ...
 
-    def cancel(self, bearer_secret: str, scope_id: str, operation_id: str) -> OperationRecord: ...
+    def cancel(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord: ...
 
     def retry(
         self,
         bearer_secret: str,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
         idempotency_key: str,
     ) -> OperationRecord: ...
@@ -74,7 +74,7 @@ class APIRuntime(Protocol):
     def reconcile(
         self,
         bearer_secret: str,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
         request: ReconcileAttemptRequest,
     ) -> OperationRecord: ...
@@ -82,7 +82,7 @@ class APIRuntime(Protocol):
 
 @dataclass(slots=True)
 class DatabaseRuntime:
-    """Own the API connection pool and compose auth with scoped operation repositories."""
+    """Own the API connection pool and compose auth with user operation repositories."""
 
     config: OAMConfig
     pool: ConnectionPool
@@ -128,11 +128,11 @@ class DatabaseRuntime:
         with self.pool.connection() as connection:
             self._authenticate(connection, bearer_secret)
 
-    def search(self, bearer_secret: str, scope_id: str, request: SearchRequest) -> dict:
+    def search(self, bearer_secret: str, user_id: str, request: SearchRequest) -> dict:
         from oam.retrieval.service import RecallService
 
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, scope_id, "memory:read")
+            authority = self._authorize(connection, bearer_secret, user_id, "memory:read")
         return RecallService(
             self.config,
             self.pool,
@@ -148,20 +148,20 @@ class DatabaseRuntime:
                 raise AuthenticationFailed
             if principal.role != "administrator":
                 raise AuthorizationFailed
-            authority = AuthorizedScope.from_database_grant(
-                principal, scope_id=user_id, capabilities={"memory:read", "memory:append"}
+            authority = AuthorizedUser.from_database_grant(
+                principal, user_id=user_id, capabilities={"memory:read", "memory:append"}
             )
-            bind_scope(connection.cursor(), authority)
+            bind_user(connection.cursor(), authority)
             try:
                 connection.execute(
-                    "INSERT INTO scopes(tenant_id,scope_id,subject,namespace,lifetime) "
+                    "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
                     "VALUES (%s,%s,%s,'personal','persistent')",
                     (principal.tenant_id, user_id, user_id),
                 )
             except UniqueViolation as exc:
                 raise ValueError("user_id already exists") from exc
             connection.execute(
-                "INSERT INTO grants(tenant_id,scope_id,principal_id,capabilities) "
+                "INSERT INTO grants(tenant_id,user_id,principal_id,capabilities) "
                 "VALUES (%s,%s,%s,%s)",
                 (
                     principal.tenant_id,
@@ -281,8 +281,8 @@ class DatabaseRuntime:
             )
             source = connection.execute(
                 "SELECT source_id,source_version FROM operations "
-                "WHERE tenant_id=%s AND scope_id=%s AND operation_id=%s",
-                (authority.tenant_id, authority.scope_id, receipt.operation_id),
+                "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
+                (authority.tenant_id, authority.user_id, receipt.operation_id),
             ).fetchone()
         return {
             "operation_id": receipt.operation_id,
@@ -323,31 +323,31 @@ class DatabaseRuntime:
             + timedelta(seconds=self.config.auth.cache_ttl_seconds),
         )
 
-    def get(self, bearer_secret: str, scope_id: str, operation_id: str) -> OperationRecord:
+    def get(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord:
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, scope_id, "memory:read")
+            authority = self._authorize(connection, bearer_secret, user_id, "memory:read")
             record = self._operations.get(connection, authority, operation_id)
         if record is None:
             raise OperationNotFound(operation_id)
         return record
 
-    def cancel(self, bearer_secret: str, scope_id: str, operation_id: str) -> OperationRecord:
+    def cancel(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord:
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, scope_id, "memory:append")
+            authority = self._authorize(connection, bearer_secret, user_id, "memory:append")
             return self._operations.cancel(connection, authority, operation_id)
 
     def retry(
         self,
         bearer_secret: str,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
         idempotency_key: str,
     ) -> OperationRecord:
         request_hash = hashlib.sha256(
-            f"operation-retry\0{scope_id}\0{operation_id}\0{idempotency_key}".encode()
+            f"operation-retry\0{user_id}\0{operation_id}\0{idempotency_key}".encode()
         ).digest()
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, scope_id, "memory:append")
+            authority = self._authorize(connection, bearer_secret, user_id, "memory:append")
             return self._operations.retry(
                 connection,
                 authority,
@@ -361,7 +361,7 @@ class DatabaseRuntime:
     def reconcile(
         self,
         bearer_secret: str,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
         request: ReconcileAttemptRequest,
     ) -> OperationRecord:
@@ -369,7 +369,7 @@ class DatabaseRuntime:
             authority = self._authorize(
                 connection,
                 bearer_secret,
-                scope_id,
+                user_id,
                 "operation:reconcile",
             )
             self._operations.reconcile_attempt(
@@ -387,7 +387,7 @@ class DatabaseRuntime:
             read_authority = self._authorize(
                 connection,
                 bearer_secret,
-                scope_id,
+                user_id,
                 "memory:read",
             )
             record = self._operations.get(connection, read_authority, operation_id)
@@ -406,14 +406,14 @@ class DatabaseRuntime:
             self._credential_cache.store(lookup, principal)
         return principal
 
-    def _authorize(self, connection, bearer_secret: str, scope_id: str, capability: str):
+    def _authorize(self, connection, bearer_secret: str, user_id: str, capability: str):
         principal = self._authenticate(connection, bearer_secret)
         try:
-            return self._auth.authorize_scope(
+            return self._auth.authorize_user(
                 connection,
                 principal,
-                scope_id=scope_id,
+                user_id=user_id,
                 capability=capability,
             )
-        except ScopeDenied as exc:
+        except UserDenied as exc:
             raise AuthorizationFailed from exc

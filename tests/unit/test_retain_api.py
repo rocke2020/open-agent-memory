@@ -128,5 +128,5 @@ async def test_recall_requires_user_and_does_not_accept_tenant_or_scope_selectio
         ):
             assert (await client.post("/v1/recall", json=body)).status_code == 422
         assert (
-            await client.post("/v1/scopes/lin/search", json={"query": "summary"})
+            await client.post("/v1/users/lin/search", json={"query": "summary"})
         ).status_code == 404

@@ -11,7 +11,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedScope
+from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedUser
 from oam.db.migrations import apply_migrations
 from oam.db.sources import AcceptSource, SourceRepository, SourceVersionConflict
 from oam.workers.claims import claim_one
@@ -39,13 +39,13 @@ def database():
             (tenant,),
         )
         connection.execute(
-            "INSERT INTO scopes (tenant_id, scope_id, subject, namespace, lifetime) "
+            "INSERT INTO users (tenant_id, user_id, subject, namespace, lifetime) "
             "VALUES (%s, 'scope', 'synthetic', 'test', 'persistent')",
             (tenant,),
         )
         principal = AuthenticatedPrincipal("key", tenant, "writer", "writer", None)
-        authority = AuthorizedScope.from_database_grant(
-            principal, scope_id="scope", capabilities={"memory:append", "memory:read"}
+        authority = AuthorizedUser.from_database_grant(
+            principal, user_id="scope", capabilities={"memory:append", "memory:read"}
         )
         yield connection, authority
 
@@ -158,8 +158,8 @@ def test_overlapping_identical_accepts_reuse_one_receipt(database):
     dsn = connection.info.dsn
     tenant = f"race-{uuid4().hex}"
     principal = AuthenticatedPrincipal("key", tenant, "writer", "writer", None)
-    authority = AuthorizedScope.from_database_grant(
-        principal, scope_id="scope", capabilities={"memory:append"}
+    authority = AuthorizedUser.from_database_grant(
+        principal, user_id="scope", capabilities={"memory:append"}
     )
     with psycopg.connect(dsn) as setup:
         setup.execute("INSERT INTO tenants (tenant_id, state) VALUES (%s, 'active')", (tenant,))
@@ -169,7 +169,7 @@ def test_overlapping_identical_accepts_reuse_one_receipt(database):
             (tenant,),
         )
         setup.execute(
-            "INSERT INTO scopes (tenant_id, scope_id, subject, namespace, lifetime) "
+            "INSERT INTO users (tenant_id, user_id, subject, namespace, lifetime) "
             "VALUES (%s, 'scope', 'synthetic', 'test', 'persistent')",
             (tenant,),
         )
@@ -182,7 +182,7 @@ def test_overlapping_identical_accepts_reuse_one_receipt(database):
     try:
         with psycopg.connect(dsn, autocommit=True) as locker, ThreadPoolExecutor(2) as workers:
             with locker.transaction():
-                locker.execute("SELECT 1 FROM scopes WHERE tenant_id = %s FOR UPDATE", (tenant,))
+                locker.execute("SELECT 1 FROM users WHERE tenant_id = %s FOR UPDATE", (tenant,))
                 pending = [workers.submit(accept) for _ in range(2)]
                 deadline = time.monotonic() + 5
                 while True:
@@ -202,7 +202,7 @@ def test_overlapping_identical_accepts_reuse_one_receipt(database):
         with psycopg.connect(dsn) as check:
             assert (
                 check.execute(
-                    "SELECT accepted_seq FROM scopes WHERE tenant_id = %s", (tenant,)
+                    "SELECT accepted_seq FROM users WHERE tenant_id = %s", (tenant,)
                 ).fetchone()[0]
                 == 1
             )

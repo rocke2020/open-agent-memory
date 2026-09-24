@@ -63,15 +63,15 @@ def test_scope_grant_is_checked_with_credential_derived_tenant() -> None:
     )
     connection = Connection((True,))
 
-    authority = repository.AuthRepository().authorize_scope(
+    authority = repository.AuthRepository().authorize_user(
         connection,
         principal,
-        scope_id="scope-1",
+        user_id="scope-1",
         capability="memory:append",
     )
 
     assert authority.tenant_id == "tenant-1"
-    assert authority.scope_id == "scope-1"
+    assert authority.user_id == "scope-1"
     assert authority.capabilities == frozenset({"memory:append"})
     assert connection.cursor_value.calls[0][1] == (
         "tenant-1",
@@ -90,10 +90,10 @@ def test_denied_scope_grant_does_not_construct_authority() -> None:
         expires_at=None,
     )
 
-    with pytest.raises(repository.ScopeDenied):
-        repository.AuthRepository().authorize_scope(
+    with pytest.raises(repository.UserDenied):
+        repository.AuthRepository().authorize_user(
             Connection((False,)),
             principal,
-            scope_id="scope-foreign",
+            user_id="scope-foreign",
             capability="memory:read",
         )

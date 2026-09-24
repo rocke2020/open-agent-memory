@@ -38,17 +38,17 @@ async def test_rotation_commits_before_return_and_invalidates_cached_old_key(mon
             (tenant, digest_secret(secret)),
         )
         connection.execute(
-            "INSERT INTO scopes(tenant_id,scope_id,subject,namespace,lifetime) "
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
             "VALUES (%s,'scope','synthetic','test','persistent')",
             (tenant,),
         )
         connection.execute(
-            "INSERT INTO grants(tenant_id,scope_id,principal_id,capabilities) "
+            "INSERT INTO grants(tenant_id,user_id,principal_id,capabilities) "
             "VALUES (%s,'scope','admin',ARRAY['memory:read'])",
             (tenant,),
         )
         connection.execute(
-            "INSERT INTO operations(tenant_id,scope_id,operation_id,principal_id,kind,"
+            "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,kind,"
             "schema_version,status) VALUES (%s,'scope','operation','admin','test',1,'accepted')",
             (tenant,),
         )

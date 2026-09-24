@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedScope
+from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedUser
 from oam.operations import repository, state
 
 
@@ -38,7 +38,7 @@ class Connection:
         return self.cursor_value
 
 
-def _authority(*capabilities: str) -> AuthorizedScope:
+def _authority(*capabilities: str) -> AuthorizedUser:
     principal = AuthenticatedPrincipal(
         credential_id="key-1",
         tenant_id="tenant-1",
@@ -46,8 +46,8 @@ def _authority(*capabilities: str) -> AuthorizedScope:
         role="writer",
         expires_at=None,
     )
-    return AuthorizedScope.from_database_grant(
-        principal, scope_id="scope-1", capabilities=set(capabilities)
+    return AuthorizedUser.from_database_grant(
+        principal, user_id="scope-1", capabilities=set(capabilities)
     )
 
 
@@ -79,7 +79,7 @@ def test_get_operation_is_bound_to_authorized_tenant_and_scope() -> None:
     assert operation is not None
     assert operation.operation_id == "op-1"
     query, parameters = connection.cursor_value.calls[1]
-    assert "tenant_id = %s" in query and "scope_id = %s" in query
+    assert "tenant_id = %s" in query and "user_id = %s" in query
     assert parameters == ("tenant-1", "scope-1", "op-1")
 
 

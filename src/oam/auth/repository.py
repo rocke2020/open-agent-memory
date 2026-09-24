@@ -1,4 +1,4 @@
-"""Database-backed credential and scope authorization repositories."""
+"""Database-backed credential and user authorization repositories."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import hashlib
 from contextlib import AbstractContextManager
 from typing import Protocol
 
-from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedScope
+from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedUser
 
 
-class ScopeDenied(PermissionError):
-    """The authenticated principal lacks the requested scoped capability."""
+class UserDenied(PermissionError):
+    """The authenticated principal lacks the requested user capability."""
 
 
 class Cursor(Protocol):
@@ -46,26 +46,26 @@ class AuthRepository:
             expires_at=row[4],  # type: ignore[arg-type]
         )
 
-    def authorize_scope(
+    def authorize_user(
         self,
         connection: Connection,
         principal: AuthenticatedPrincipal,
         *,
-        scope_id: str,
+        user_id: str,
         capability: str,
-    ) -> AuthorizedScope:
-        if not scope_id.strip() or not capability.strip():
-            raise ValueError("scope_id and capability cannot be empty")
+    ) -> AuthorizedUser:
+        if not user_id.strip() or not capability.strip():
+            raise ValueError("user_id and capability cannot be empty")
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT oam_authorize_scope(%s, %s, %s, %s)",
-                (principal.tenant_id, principal.principal_id, scope_id, capability),
+                "SELECT oam_authorize_user(%s, %s, %s, %s)",
+                (principal.tenant_id, principal.principal_id, user_id, capability),
             )
             row = cursor.fetchone()
         if row is None or row[0] is not True:
-            raise ScopeDenied(scope_id)
-        return AuthorizedScope.from_database_grant(
+            raise UserDenied(user_id)
+        return AuthorizedUser.from_database_grant(
             principal,
-            scope_id=scope_id,
+            user_id=user_id,
             capabilities={capability},
         )

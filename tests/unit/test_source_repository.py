@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedScope
+from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedUser
 from oam.db import sources
 
 
@@ -38,7 +38,7 @@ class RecordingConnection:
         return self.cursor_value
 
 
-def _authority() -> AuthorizedScope:
+def _authority() -> AuthorizedUser:
     principal = AuthenticatedPrincipal(
         credential_id="key-1",
         tenant_id="tenant-1",
@@ -46,9 +46,9 @@ def _authority() -> AuthorizedScope:
         role="writer",
         expires_at=None,
     )
-    return AuthorizedScope.from_database_grant(
+    return AuthorizedUser.from_database_grant(
         principal,
-        scope_id="scope-1",
+        user_id="scope-1",
         capabilities={"memory:append", "memory:read"},
     )
 
@@ -144,5 +144,5 @@ def test_read_original_is_explicitly_scoped_and_returns_immutable_bytes() -> Non
     )
     query, parameters = connection.cursor_value.calls[1]
     assert "tenant_id = %s" in query
-    assert "scope_id = %s" in query
+    assert "user_id = %s" in query
     assert parameters == ("tenant-1", "scope-1", "source-1", 2)

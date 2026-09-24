@@ -176,7 +176,7 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["limits"]["resource"]["max_bytes"] == 20 * 1024 * 1024
     assert payload["limits"]["chunk"]["max_estimated_tokens"] == 4096
     assert payload["limits"]["model"]["attempt_timeout_seconds"] == 60
-    assert payload["limits"]["scope"]["max_chats"] == 1000
+    assert payload["limits"]["user"]["max_chats"] == 1000
     assert payload["features"]["python_sdk"] is False
     assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "mid", "deep"))
     assert "api_key" not in response.text.lower()
@@ -323,34 +323,32 @@ class RecordingAPIRuntime:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
 
-    def get(self, bearer_secret: str, scope_id: str, operation_id: str) -> OperationRecord:
-        self.calls.append(("get", (bearer_secret, scope_id, operation_id)))
+    def get(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord:
+        self.calls.append(("get", (bearer_secret, user_id, operation_id)))
         return _operation_record(operation_id=operation_id)
 
-    def cancel(self, bearer_secret: str, scope_id: str, operation_id: str) -> OperationRecord:
-        self.calls.append(("cancel", (bearer_secret, scope_id, operation_id)))
+    def cancel(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord:
+        self.calls.append(("cancel", (bearer_secret, user_id, operation_id)))
         return _operation_record(status=OperationStatus.CANCELLED, operation_id=operation_id)
 
     def retry(
         self,
         bearer_secret: str,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
         idempotency_key: str,
     ) -> OperationRecord:
-        self.calls.append(("retry", (bearer_secret, scope_id, operation_id, idempotency_key)))
+        self.calls.append(("retry", (bearer_secret, user_id, operation_id, idempotency_key)))
         return _operation_record(status=OperationStatus.ACCEPTED, operation_id="op-retry")
 
     def reconcile(
         self,
         bearer_secret: str,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
         request,
     ) -> OperationRecord:
-        self.calls.append(
-            ("reconcile", (bearer_secret, scope_id, operation_id, request.attempt_id))
-        )
+        self.calls.append(("reconcile", (bearer_secret, user_id, operation_id, request.attempt_id)))
         return _operation_record(operation_id=operation_id)
 
 

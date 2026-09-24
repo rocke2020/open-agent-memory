@@ -10,7 +10,7 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg.types.range import Range
 
-from oam.auth.credentials import AuthorizedScope
+from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.contracts.search import SearchRequest
 from oam.models.runtime import EmbeddingResult, Usage
@@ -30,45 +30,45 @@ def recall_database():
         tenant = f"recall-{uuid4().hex}"
         connection.execute("INSERT INTO tenants(tenant_id,state) VALUES (%s,'active')", (tenant,))
         connection.execute(
-            "INSERT INTO scopes(tenant_id,scope_id,subject,namespace,lifetime,index_generation_id) "
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime,index_generation_id) "
             "VALUES (%s,'scope','synthetic','test','persistent','generation')",
             (tenant,),
         )
-        authority = AuthorizedScope("key", tenant, "reader", "scope", frozenset({"memory:read"}))
+        authority = AuthorizedUser("key", tenant, "reader", "scope", frozenset({"memory:read"}))
         yield connection, authority
 
 
 def add_fact(connection, authority, node_id, text, *, eligible=True, direction=1.0):
-    tenant, scope = authority.tenant_id, authority.scope_id
+    tenant, scope = authority.tenant_id, authority.user_id
     original = text.encode()
     connection.execute(
-        "INSERT INTO sources(tenant_id,scope_id,source_id,input_role,active_version,status) "
+        "INSERT INTO sources(tenant_id,user_id,source_id,input_role,active_version,status) "
         "VALUES (%s,%s,%s,'interaction',1,'active')",
         (tenant, scope, node_id),
     )
     connection.execute(
-        "INSERT INTO source_versions(tenant_id,scope_id,source_id,source_version,media_type,"
+        "INSERT INTO source_versions(tenant_id,user_id,source_id,source_version,media_type,"
         "original_bytes,content_sha256,byte_length,status) "
         "VALUES (%s,%s,%s,1,'text/plain',%s,%s,%s,'active')",
         (tenant, scope, node_id, original, b"s" * 32, len(original)),
     )
     connection.execute(
-        "INSERT INTO evidence(tenant_id,scope_id,evidence_id,source_id,source_version,accepted_seq,"
+        "INSERT INTO evidence(tenant_id,user_id,evidence_id,source_id,source_version,accepted_seq,"
         "content_text,learning_eligible,status) VALUES (%s,%s,%s,%s,1,1,%s,%s,'active')",
         (tenant, scope, node_id, node_id, text, eligible),
     )
     connection.execute(
-        "INSERT INTO passages(tenant_id,scope_id,passage_id,evidence_id,parse_revision,locator,"
+        "INSERT INTO passages(tenant_id,user_id,passage_id,evidence_id,parse_revision,locator,"
         "normalized_text,generation_id,visible_from) VALUES (%s,%s,%s,%s,1,'{}',%s,'generation',1)",
         (tenant, scope, node_id, node_id, text),
     )
     connection.execute(
-        "INSERT INTO memories(tenant_id,scope_id,memory_id,canonical_claim,assertion_kind,"
+        "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,assertion_kind,"
         "generation_id,visible_from) VALUES (%s,%s,%s,%s,'stated','generation',1)",
         (tenant, scope, node_id, text),
     )
     connection.execute(
-        "INSERT INTO support(tenant_id,scope_id,memory_id,evidence_id,passage_id,"
+        "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
         "support_kind,span) "
         "VALUES (%s,%s,%s,%s,%s,'quote',%s)",
         (tenant, scope, node_id, node_id, node_id, Jsonb({"start": 0, "end": len(text)})),
@@ -76,7 +76,7 @@ def add_fact(connection, authority, node_id, text, *, eligible=True, direction=1
     dimensions = connection.execute("SELECT embedding_dimensions FROM index_settings").fetchone()[0]
     vector = str([direction, math.sqrt(1 - direction * direction)] + [0.0] * (dimensions - 2))
     connection.execute(
-        "INSERT INTO search_units(tenant_id,scope_id,unit_id,kind,origin,source_id,source_version,"
+        "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,source_version,"
         "evidence_id,memory_id,generation_id,content_text,locator,embedding,lexical_text) "
         "VALUES (%s,%s,%s,'fact','memory',%s,1,%s,%s,'generation',%s,%s,%s::vector,%s)",
         (
@@ -105,13 +105,26 @@ def test_direct_retrieval_filters_ineligible_rows_before_its_limit(recall_databa
     connection.execute("SET LOCAL ROLE oam_api")
     repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
 
-    assert repository.scope_generation() == "generation"
+    assert repository.user_generation() == "generation"
     assert [row["unit_id"] for row in repository.lexical("orchard", 1)] == ["b_visible"]
     vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
     assert [row["unit_id"] for row in repository.dense(vector, 1)] == ["b_visible"]
     hydrated = repository.hydrate(("a_hidden", "b_visible"))
     assert [row["unit_id"] for row in hydrated] == ["b_visible"]
     assert hydrated[0]["citations"][0]["source_id"] == "b_visible"
+
+
+def test_literal_identifier_does_not_match_a_longer_identifier(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "exact", "The result is LAB-204.")
+    add_fact(connection, authority, "longer", "The result is LAB-2045.")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert [row["unit_id"] for row in repository.anchors("LAB-204", 10)] == ["exact"]
 
 
 def test_fast_service_returns_cited_context_with_exact_budget(recall_database):
@@ -134,6 +147,7 @@ def test_fast_service_returns_cited_context_with_exact_budget(recall_database):
     assert 0 < result["context_tokens"] <= 256
     assert result["diagnostics"]["executed_stages"] == ["fts", "anchors", "embedding", "dense"]
     assert result["diagnostics"]["generative_calls"] == 0
+    assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
     empty = service.search(authority, SearchRequest(query="apple", max_context_tokens=1))
     assert empty["context"] == ""
     assert empty["items"] == []
@@ -150,16 +164,16 @@ def test_recall_reports_pending_partial_and_ready_from_current_index_operation(r
         (authority.tenant_id,),
     )
     connection.execute(
-        "INSERT INTO operations(tenant_id,scope_id,operation_id,principal_id,source_id,"
+        "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,source_id,"
         "source_version,kind,schema_version,status) "
         "VALUES (%s,%s,'index','reader','apple',1,'retain',1,'running')",
-        (authority.tenant_id, authority.scope_id),
+        (authority.tenant_id, authority.user_id),
     )
     connection.execute(
-        "INSERT INTO work_units(tenant_id,scope_id,work_unit_id,operation_id,stage,input_digest,"
+        "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,input_digest,"
         "generation_id,status,attempts_remaining) VALUES (%s,%s,'work','index','index',%s,"
         "'generation','running',1)",
-        (authority.tenant_id, authority.scope_id, b"x" * 32),
+        (authority.tenant_id, authority.user_id, b"x" * 32),
     )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     service = RecallService(
@@ -216,12 +230,12 @@ def test_event_window_only_qualifies_temporal_candidates(recall_database):
         add_fact(connection, authority, node_id, "apple planting")
         date = datetime(2026, 2 if node_id == "b_boundary" else 1, 1, tzinfo=UTC)
         connection.execute(
-            "INSERT INTO unit_times(tenant_id,scope_id,annotation_id,unit_id,role,"
+            "INSERT INTO unit_times(tenant_id,user_id,annotation_id,unit_id,role,"
             "time_span,detail) "
             "VALUES (%s,%s,%s,%s,%s,%s,'{}')",
             (
                 authority.tenant_id,
-                authority.scope_id,
+                authority.user_id,
                 node_id,
                 node_id,
                 "date_reference" if node_id == "a_reference" else "event",
@@ -258,9 +272,9 @@ def test_event_window_only_qualifies_temporal_candidates(recall_database):
 
 
 def add_insight(connection, authority, unit_id, support_ids):
-    values = (authority.tenant_id, authority.scope_id, unit_id)
+    values = (authority.tenant_id, authority.user_id, unit_id)
     connection.execute(
-        "INSERT INTO insights(tenant_id,scope_id,insight_id,revision,synthesis_text,input_digest,"
+        "INSERT INTO insights(tenant_id,user_id,insight_id,revision,synthesis_text,input_digest,"
         "recipe_id,generation_id,visible_from) "
         "VALUES (%s,%s,%s,1,'Shared plan',%s,'test','generation',1)",
         (*values, b"i" * 32),
@@ -271,7 +285,7 @@ def add_insight(connection, authority, unit_id, support_ids):
         )
     dimensions = connection.execute("SELECT embedding_dimensions FROM index_settings").fetchone()[0]
     connection.execute(
-        "INSERT INTO search_units(tenant_id,scope_id,unit_id,kind,origin,"
+        "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,"
         "insight_id,insight_revision,"
         "generation_id,content_text,locator,embedding,lexical_text) "
         "VALUES (%s,%s,%s,'insight','memory',%s,1,'generation',"
@@ -324,7 +338,7 @@ def test_expanded_modes_follow_causal_direction_and_sibling_hierarchy(recall_dat
     ):
         connection.execute(
             "INSERT INTO unit_links VALUES (%s,%s,%s,%s,'caused_by',1)",
-            (authority.tenant_id, authority.scope_id, source, target),
+            (authority.tenant_id, authority.user_id, source, target),
         )
     add_insight(connection, authority, "plan", ("move", "cheap"))
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
@@ -368,13 +382,13 @@ def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_databa
         )
         connection.execute(
             "INSERT INTO unit_times VALUES (%s,%s,%s,%s,'event',%s,'{}')",
-            (authority.tenant_id, authority.scope_id, node, node, Range(instant, instant, "[]")),
+            (authority.tenant_id, authority.user_id, node, node, Range(instant, instant, "[]")),
         )
         if index:
             previous = f"node{index - 1}"
             connection.execute(
                 "INSERT INTO temporal_links VALUES (%s,%s,'event',%s,%s,%s,%s,0,1)",
-                (authority.tenant_id, authority.scope_id, previous, node, previous, node),
+                (authority.tenant_id, authority.user_id, previous, node, previous, node),
             )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     tier = getattr(config.search, mode).model_copy(update={"channel_candidates": 1})
@@ -592,12 +606,12 @@ def test_graph_sql_filters_hidden_neighbors_before_each_direction_cap(recall_dat
     for node in ("seed", "a_hidden", "z_visible"):
         connection.execute(
             "INSERT INTO unit_entities VALUES (%s,%s,%s,'garden')",
-            (authority.tenant_id, authority.scope_id, node),
+            (authority.tenant_id, authority.user_id, node),
         )
     for source, target, weight in (("a_hidden", "seed", 1.0), ("incoming", "seed", 0.9)):
         connection.execute(
             "INSERT INTO unit_links VALUES (%s,%s,%s,%s,'semantic',%s)",
-            (authority.tenant_id, authority.scope_id, source, target, weight),
+            (authority.tenant_id, authority.user_id, source, target, weight),
         )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     config = config.model_copy(
@@ -628,12 +642,12 @@ def test_temporal_witness_role_is_checked_before_neighbor_cap(recall_database):
         add_fact(connection, authority, node, node)
         connection.execute(
             "INSERT INTO unit_times VALUES (%s,%s,%s,%s,'event',%s,'{}')",
-            (authority.tenant_id, authority.scope_id, node, node, Range(instant, instant, "[]")),
+            (authority.tenant_id, authority.user_id, node, node, Range(instant, instant, "[]")),
         )
     connection.execute(
         "INSERT INTO unit_times VALUES "
         "(%s,%s,'wrong-reference','b_wrong','date_reference',%s,'{}')",
-        (authority.tenant_id, authority.scope_id, Range(instant, instant, "[]")),
+        (authority.tenant_id, authority.user_id, Range(instant, instant, "[]")),
     )
     for target, witness, weight in (
         ("b_wrong", "wrong-reference", 1.0),
@@ -641,7 +655,7 @@ def test_temporal_witness_role_is_checked_before_neighbor_cap(recall_database):
     ):
         connection.execute(
             "INSERT INTO temporal_links VALUES (%s,%s,'event','a_seed',%s,'a_seed',%s,0,%s)",
-            (authority.tenant_id, authority.scope_id, target, witness, weight),
+            (authority.tenant_id, authority.user_id, target, witness, weight),
         )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     request = SearchRequest(
@@ -671,7 +685,7 @@ def test_strict_window_requires_every_insight_support_to_match(recall_database):
         date = datetime(2026, month, 6, tzinfo=UTC)
         connection.execute(
             "INSERT INTO unit_times VALUES (%s,%s,%s,%s,'event',%s,'{}')",
-            (authority.tenant_id, authority.scope_id, node, node, Range(date, date, "[]")),
+            (authority.tenant_id, authority.user_id, node, node, Range(date, date, "[]")),
         )
     add_insight(connection, authority, "plan", ("a", "b"))
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
@@ -731,7 +745,7 @@ def test_point_time_basis_is_visible_in_returned_evidence(recall_database):
 
 
 def test_hnsw_executes_and_matches_exact_scoped_neighbors(recall_database, monkeypatch):
-    from oam.db.context import bind_scope
+    from oam.db.context import bind_user
     from oam.retrieval.repository import RecallRepository
 
     connection, authority = recall_database
@@ -757,7 +771,7 @@ def test_hnsw_executes_and_matches_exact_scoped_neighbors(recall_database, monke
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
     connection.execute("SET LOCAL ROLE oam_api")
-    bind_scope(connection.cursor(), authority)
+    bind_user(connection.cursor(), authority)
     connection.execute("SET LOCAL hnsw.iterative_scan='strict_order'")
     repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 10)
     calls = []

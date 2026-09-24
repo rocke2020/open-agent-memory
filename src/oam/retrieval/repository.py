@@ -1,4 +1,4 @@
-"""Scoped PostgreSQL reads for the shared recall pipeline."""
+"""User-qualified PostgreSQL reads for the shared recall pipeline."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from collections.abc import Sequence
 
 from psycopg.rows import dict_row
 
-from oam.auth.credentials import AuthorizedScope
+from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.contracts.search import SearchRequest
-from oam.db.context import bind_scope
+from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_SUPPORT, ELIGIBLE_UNITS
 from oam.retrieval.algorithms import (
     GraphEdge,
@@ -35,7 +35,7 @@ class RecallRepository:
     def __init__(
         self,
         connection,
-        authority: AuthorizedScope,
+        authority: AuthorizedUser,
         config: OAMConfig,
         *,
         deadline: float,
@@ -49,7 +49,7 @@ class RecallRepository:
         self.deadline = deadline
         self.request = request
         self.time_parameters = {}
-        bind_scope(connection.cursor(), authority)
+        bind_user(connection.cursor(), authority)
 
     def _eligible(self, *, temporal: bool = False) -> str:
         predicate = "true"
@@ -67,8 +67,8 @@ class RecallRepository:
                 if basis in {"event", "referenced"}:
                     return (
                         "EXISTS (SELECT 1 FROM unit_times ut WHERE "
-                        "(ut.tenant_id,ut.scope_id,ut.unit_id)="
-                        f"({alias}.tenant_id,{alias}.scope_id,{alias}.unit_id) "
+                        "(ut.tenant_id,ut.user_id,ut.unit_id)="
+                        f"({alias}.tenant_id,{alias}.user_id,{alias}.unit_id) "
                         "AND ut.role=%(time_role)s AND ut.time_span && "
                         "tstzrange(%(time_start)s,%(time_end)s,'[)'))"
                     )
@@ -82,11 +82,11 @@ class RecallRepository:
             predicate = (
                 f"((u.kind<>'insight' AND {direct('u')}) OR (u.kind='insight' AND NOT EXISTS ("
                 "SELECT 1 FROM insight_support isp WHERE "
-                "(isp.tenant_id,isp.scope_id,isp.insight_id,isp.insight_revision)="
-                "(u.tenant_id,u.scope_id,u.insight_id,u.insight_revision) AND NOT EXISTS ("
+                "(isp.tenant_id,isp.user_id,isp.insight_id,isp.insight_revision)="
+                "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision) AND NOT EXISTS ("
                 "SELECT 1 FROM eligible child WHERE child.kind='fact' AND "
-                "(child.tenant_id,child.scope_id,child.memory_id)="
-                f"(isp.tenant_id,isp.scope_id,isp.memory_id) AND {direct('child')}))))"
+                "(child.tenant_id,child.user_id,child.memory_id)="
+                f"(isp.tenant_id,isp.user_id,isp.memory_id) AND {direct('child')}))))"
             )
         return (
             f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}), "
@@ -106,32 +106,32 @@ class RecallRepository:
         cursor.execute(sql, parameters)
         return cursor.fetchall()
 
-    def scope_generation(self) -> str | None:
-        return self.scope_state()["index_generation_id"]
+    def user_generation(self) -> str | None:
+        return self.user_state()["index_generation_id"]
 
-    def scope_state(self) -> dict:
+    def user_state(self) -> dict:
         rows = self._execute(
             "SELECT sc.index_generation_id,CASE "
             "WHEN bool_or(op.status IN ('partial_failed','failed_terminal','cancelled') "
             "OR op.stage_state->>'extraction_coverage'='partial' OR op.stage_state ? 'error') "
             "THEN 'partial' WHEN bool_or(s.source_id IS NOT NULL AND "
             "(op.status IS NULL OR op.status IN ('accepted','running'))) "
-            "THEN 'pending' ELSE 'ready' END AS readiness FROM scopes sc "
-            "LEFT JOIN sources s ON (s.tenant_id,s.scope_id)=(sc.tenant_id,sc.scope_id) "
+            "THEN 'pending' ELSE 'ready' END AS readiness FROM users sc "
+            "LEFT JOIN sources s ON (s.tenant_id,s.user_id)=(sc.tenant_id,sc.user_id) "
             "AND s.status='active' AND s.input_role IN ('interaction','evidence_resource') "
             "LEFT JOIN LATERAL (SELECT o.status,o.stage_state FROM operations o WHERE "
-            "(o.tenant_id,o.scope_id,o.source_id,o.source_version)="
-            "(s.tenant_id,s.scope_id,s.source_id,s.active_version) AND EXISTS ("
+            "(o.tenant_id,o.user_id,o.source_id,o.source_version)="
+            "(s.tenant_id,s.user_id,s.source_id,s.active_version) AND EXISTS ("
             "SELECT 1 FROM work_units w WHERE "
-            "(w.tenant_id,w.scope_id,w.operation_id,w.generation_id)="
-            "(o.tenant_id,o.scope_id,o.operation_id,sc.index_generation_id)) "
+            "(w.tenant_id,w.user_id,w.operation_id,w.generation_id)="
+            "(o.tenant_id,o.user_id,o.operation_id,sc.index_generation_id)) "
             "ORDER BY o.created_at DESC,o.operation_id DESC LIMIT 1) op ON true "
-            "WHERE sc.tenant_id=%s AND sc.scope_id=%s AND sc.state='active' "
+            "WHERE sc.tenant_id=%s AND sc.user_id=%s AND sc.state='active' "
             "GROUP BY sc.index_generation_id",
-            (self.authority.tenant_id, self.authority.scope_id),
+            (self.authority.tenant_id, self.authority.user_id),
         )
         if not rows:
-            raise PermissionError("active scope is unavailable")
+            raise PermissionError("active user is unavailable")
         return rows[0]
 
     def lexical(self, query: str, limit: int) -> list[dict]:
@@ -144,16 +144,23 @@ class RecallRepository:
         )
 
     def anchors(self, query: str, limit: int) -> list[dict]:
-        anchors = [
-            next(value for value in match if value).casefold() for match in _ANCHOR.findall(query)
+        matches = _ANCHOR.findall(query)
+        phrases = [quoted.casefold() for quoted, _ in matches if quoted]
+        identifiers = [
+            f"(^|[^[:alnum:]_-]){re.escape(identifier)}($|[^[:alnum:]_-])"
+            for _, identifier in matches
+            if identifier
         ]
-        if not anchors:
+        if not phrases and not identifiers:
             return []
         return self._execute(
             self._eligible() + "SELECT unit_id,1.0 AS score FROM filtered u WHERE EXISTS ("
-            "SELECT 1 FROM unnest(%(anchors)s::text[]) a WHERE strpos(lower(u.content_text),a)>0) "
+            "SELECT 1 FROM unnest(%(phrases)s::text[]) p "
+            "WHERE strpos(lower(u.content_text),p)>0) OR EXISTS ("
+            "SELECT 1 FROM unnest(%(identifiers)s::text[]) i "
+            "WHERE u.content_text ~* i) "
             "ORDER BY unit_id LIMIT %(limit)s",
-            {"anchors": anchors, "limit": limit},
+            {"phrases": phrases, "identifiers": identifiers, "limit": limit},
         )
 
     def dense(self, vector: Sequence[float], limit: int) -> list[dict]:
@@ -168,9 +175,9 @@ class RecallRepository:
             self._eligible()
             + "SELECT u.unit_id,u.kind,1-(u.embedding <=> %(vector)s::vector) AS score "
             "FROM search_units u WHERE u.tenant_id=current_setting('oam.tenant_id',true) "
-            "AND u.scope_id=current_setting('oam.scope_id',true) "
+            "AND u.user_id=current_setting('oam.user_id',true) "
             "AND (SELECT true FROM filtered f WHERE "
-            "(f.tenant_id,f.scope_id,f.unit_id)=(u.tenant_id,u.scope_id,u.unit_id)) IS TRUE "
+            "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
             "ORDER BY u.embedding <=> %(vector)s::vector LIMIT %(limit)s",
             {"vector": json.dumps(tuple(vector)), "limit": limit},
         )
@@ -182,25 +189,25 @@ class RecallRepository:
             "SELECT u.unit_id,u.kind,u.origin,u.content_text AS text,u.locator, "
             "u.mentioned_at,u.source_created_at,u.source_updated_at, "
             "(SELECT i.subtype FROM insights i WHERE "
-            "(i.tenant_id,i.scope_id,i.insight_id,i.revision)="
-            "(u.tenant_id,u.scope_id,u.insight_id,u.insight_revision)) AS subtype, "
+            "(i.tenant_id,i.user_id,i.insight_id,i.revision)="
+            "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision)) AS subtype, "
             "COALESCE((SELECT jsonb_agg(jsonb_build_object('memory_id',isp.memory_id,"
             "'support_revision',isp.support_revision) ORDER BY isp.memory_id) "
             "FROM insight_support isp WHERE "
-            "(isp.tenant_id,isp.scope_id,isp.insight_id,isp.insight_revision)="
-            "(u.tenant_id,u.scope_id,u.insight_id,u.insight_revision)), '[]') AS supports, "
+            "(isp.tenant_id,isp.user_id,isp.insight_id,isp.insight_revision)="
+            "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision)), '[]') AS supports, "
             "COALESCE((SELECT jsonb_agg(jsonb_build_object('source_id',sp.source_id,"
             "'source_version',sp.source_version,'evidence_id',sp.evidence_id,"
             "'passage_id',sp.passage_id,'span',sp.span) ORDER BY sp.source_id,sp.passage_id) "
             "FROM valid_support sp WHERE sp.memory_id=u.memory_id OR sp.memory_id IN ("
             "SELECT isp.memory_id FROM insight_support isp WHERE "
-            "(isp.tenant_id,isp.scope_id,isp.insight_id,isp.insight_revision)="
-            "(u.tenant_id,u.scope_id,u.insight_id,u.insight_revision))), "
+            "(isp.tenant_id,isp.user_id,isp.insight_id,isp.insight_revision)="
+            "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision))), "
             "jsonb_build_array(u.locator)) AS citations, "
             "COALESCE((SELECT jsonb_agg(jsonb_build_object("
             "'role',ut.role,'range',ut.time_span::text,"
             "'detail',ut.detail) ORDER BY ut.annotation_id) FROM unit_times ut WHERE "
-            "(ut.tenant_id,ut.scope_id,ut.unit_id)=(u.tenant_id,u.scope_id,u.unit_id)), "
+            "(ut.tenant_id,ut.user_id,ut.unit_id)=(u.tenant_id,u.user_id,u.unit_id)), "
             "'[]') AS time_evidence "
             "FROM filtered u WHERE unit_id=ANY(%(ids)s) ORDER BY array_position(%(ids)s,unit_id)",
             {"ids": list(unit_ids)},
@@ -235,10 +242,10 @@ class RecallRepository:
         entities = self._execute(
             prefix + "SELECT s.unit_id AS seed_id,e.entity_key,c.unit_id FROM seeds s "
             "CROSS JOIN LATERAL (SELECT entity_key FROM unit_entities ue WHERE "
-            "(ue.tenant_id,ue.scope_id,ue.unit_id)=(s.tenant_id,s.scope_id,s.unit_id) "
+            "(ue.tenant_id,ue.user_id,ue.unit_id)=(s.tenant_id,s.user_id,s.unit_id) "
             "ORDER BY entity_key LIMIT %(entities)s) e CROSS JOIN LATERAL ("
             "SELECT u.unit_id FROM filtered u JOIN unit_entities ue "
-            "USING(tenant_id,scope_id,unit_id) "
+            "USING(tenant_id,user_id,unit_id) "
             "WHERE u.kind='fact' AND ue.entity_key=e.entity_key AND u.unit_id<>s.unit_id "
             "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id LIMIT %(per_entity)s) c",
             parameters,
@@ -247,8 +254,8 @@ class RecallRepository:
         for source, target in (("source_id", "target_id"), ("target_id", "source_id")):
             directions.append(
                 "(SELECT l.source_id,l.target_id,l.weight FROM unit_links l JOIN filtered u ON "
-                f"(u.tenant_id,u.scope_id,u.unit_id)=(l.tenant_id,l.scope_id,l.{target}) "
-                f"WHERE (l.tenant_id,l.scope_id,l.{source})=(s.tenant_id,s.scope_id,s.unit_id) "
+                f"(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.{target}) "
+                f"WHERE (l.tenant_id,l.user_id,l.{source})=(s.tenant_id,s.user_id,s.unit_id) "
                 f"AND l.kind='semantic' AND u.kind='fact' ORDER BY l.weight DESC,l.{target} "
                 "LIMIT %(links)s)"
             )
@@ -262,8 +269,8 @@ class RecallRepository:
         causal = self._execute(
             prefix.rstrip() + ", first_edges AS (SELECT s.unit_id AS seed_id,l.* FROM seeds s "
             "CROSS JOIN LATERAL (SELECT l.* FROM unit_links l JOIN filtered u ON "
-            "(u.tenant_id,u.scope_id,u.unit_id)=(l.tenant_id,l.scope_id,l.target_id) "
-            "WHERE (l.tenant_id,l.scope_id,l.source_id)=(s.tenant_id,s.scope_id,s.unit_id) "
+            "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
+            "WHERE (l.tenant_id,l.user_id,l.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
             "AND l.kind='caused_by' AND u.kind='fact' "
             "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) l) "
             "SELECT source_id,target_id,weight,ARRAY[source_id,target_id] AS nodes "
@@ -271,8 +278,8 @@ class RecallRepository:
             "ARRAY[f.seed_id,e.source_id,e.target_id] "
             "FROM first_edges f CROSS JOIN LATERAL (SELECT l.* FROM unit_links l "
             "JOIN filtered u ON "
-            "(u.tenant_id,u.scope_id,u.unit_id)=(l.tenant_id,l.scope_id,l.target_id) "
-            "WHERE (l.tenant_id,l.scope_id,l.source_id)=(f.tenant_id,f.scope_id,f.target_id) "
+            "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
+            "WHERE (l.tenant_id,l.user_id,l.source_id)=(f.tenant_id,f.user_id,f.target_id) "
             "AND l.kind='caused_by' AND u.kind='fact' AND l.target_id<>f.seed_id "
             "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) e",
             parameters,
@@ -323,13 +330,13 @@ class RecallRepository:
             "row_number() OVER(ORDER BY p.embedding <=> %(vector)s::vector,p.unit_id) "
             "AS parent_rank "
             "FROM filtered p JOIN insight_support sp ON "
-            "(sp.tenant_id,sp.scope_id,sp.insight_id,sp.insight_revision)="
-            "(p.tenant_id,p.scope_id,p.insight_id,p.insight_revision) "
+            "(sp.tenant_id,sp.user_id,sp.insight_id,sp.insight_revision)="
+            "(p.tenant_id,p.user_id,p.insight_id,p.insight_revision) "
             "WHERE p.kind='insight' AND sp.memory_id=seed.memory_id "
             "ORDER BY p.embedding <=> %(vector)s::vector,p.unit_id LIMIT %(parents)s) parent "
             "CROSS JOIN LATERAL (SELECT c.unit_id,1-(c.embedding <=> %(vector)s::vector) AS score "
             "FROM filtered c JOIN insight_support sp ON "
-            "(sp.tenant_id,sp.scope_id,sp.memory_id)=(c.tenant_id,c.scope_id,c.memory_id) "
+            "(sp.tenant_id,sp.user_id,sp.memory_id)=(c.tenant_id,c.user_id,c.memory_id) "
             "WHERE c.kind='fact' AND sp.insight_id=parent.insight_id "
             "AND sp.insight_revision=parent.insight_revision AND c.unit_id<>seed.unit_id "
             "ORDER BY c.embedding <=> %(vector)s::vector,c.unit_id LIMIT %(children)s) sibling "
@@ -357,8 +364,8 @@ class RecallRepository:
                 "(least(upper(ut.time_span),%(time_end)s::timestamptz) - "
                 "greatest(lower(ut.time_span),%(time_start)s::timestamptz))/2 "
                 "FROM unit_times ut WHERE "
-                "(ut.tenant_id,ut.scope_id,ut.unit_id)="
-                f"({alias}.tenant_id,{alias}.scope_id,{alias}.unit_id) "
+                "(ut.tenant_id,ut.user_id,ut.unit_id)="
+                f"({alias}.tenant_id,{alias}.user_id,{alias}.unit_id) "
                 "AND ut.role=%(time_role)s AND ut.time_span && "
                 "tstzrange(%(time_start)s,%(time_end)s,'[)') "
                 "ORDER BY greatest(lower(ut.time_span),%(time_start)s::timestamptz),"
@@ -399,7 +406,7 @@ class RecallRepository:
         adjacent = []
         for source, target in (("left_id", "right_id"), ("right_id", "left_id")):
             adjacent.append(
-                f"SELECT t.tenant_id,t.scope_id,t.{source} AS source_id,t.{target} AS target_id,"
+                f"SELECT t.tenant_id,t.user_id,t.{source} AS source_id,t.{target} AS target_id,"
                 "t.weight,'temporal' AS relation,t.left_id,t.right_id,"
                 "t.left_annotation_id,t.right_annotation_id,"
                 "jsonb_build_array('temporal',t.time_basis,t.left_id,t.right_id,"
@@ -408,7 +415,7 @@ class RecallRepository:
                 "AND t.time_basis=%(basis)s"
             )
         adjacent.append(
-            "SELECT l.tenant_id,l.scope_id,l.source_id,l.target_id,l.weight,'caused_by',"
+            "SELECT l.tenant_id,l.user_id,l.source_id,l.target_id,l.weight,'caused_by',"
             "NULL::text,NULL::text,NULL::text,NULL::text,"
             "jsonb_build_array('caused_by',l.source_id,l.target_id)::text FROM unit_links l "
             "WHERE l.kind='caused_by' AND l.source_id=ANY(%(sources)s)"
@@ -419,8 +426,8 @@ class RecallRepository:
             for side in ("left", "right"):
                 conditions.append(
                     "EXISTS(SELECT 1 FROM unit_times witness WHERE "
-                    f"(witness.tenant_id,witness.scope_id,witness.unit_id,witness.annotation_id)="
-                    f"(edge.tenant_id,edge.scope_id,edge.{side}_id,edge.{side}_annotation_id) "
+                    f"(witness.tenant_id,witness.user_id,witness.unit_id,witness.annotation_id)="
+                    f"(edge.tenant_id,edge.user_id,edge.{side}_id,edge.{side}_annotation_id) "
                     "AND witness.role=%(time_role)s AND witness.time_span && "
                     "tstzrange(%(time_start)s,%(time_end)s,'[)'))"
                 )
@@ -432,11 +439,11 @@ class RecallRepository:
             + self._basis_date("target")
             + " AS basis_date,edge.weight,edge.relation,edge.edge_id "
             "FROM adjacent edge JOIN filtered source ON "
-            "(source.tenant_id,source.scope_id,source.unit_id)="
-            "(edge.tenant_id,edge.scope_id,edge.source_id) "
+            "(source.tenant_id,source.user_id,source.unit_id)="
+            "(edge.tenant_id,edge.user_id,edge.source_id) "
             "JOIN filtered target ON "
-            "(target.tenant_id,target.scope_id,target.unit_id)="
-            "(edge.tenant_id,edge.scope_id,edge.target_id) "
+            "(target.tenant_id,target.user_id,target.unit_id)="
+            "(edge.tenant_id,edge.user_id,edge.target_id) "
             "WHERE source.kind='fact' AND target.kind='fact' "
             "AND 1-(target.embedding <=> %(vector)s::vector)>=%(floor)s AND " + witnesses
         )
