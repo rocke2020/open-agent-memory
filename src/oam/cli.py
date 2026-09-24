@@ -37,6 +37,9 @@ def _parser() -> argparse.ArgumentParser:
 
     worker = commands.add_parser("worker", help="run a durable worker")
     worker.add_argument("--config", type=Path, default=selected_config_path)
+    worker.add_argument(
+        "--once", action="store_true", help="process at most one queued source and exit"
+    )
 
     recovery = commands.add_parser(
         "recover-bootstrap", help="issue a replacement bootstrap administrator credential"
@@ -118,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "worker":
         from oam.workers.runner import run_worker_from_environment
 
-        return run_worker_from_environment(args.config)
+        return run_worker_from_environment(args.config, once=args.once)
     if args.command == "recover-bootstrap":
         from oam.auth.bootstrap import recover_bootstrap_from_environment
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import psycopg
 
 from oam.config import ConfigurationError, load_config
-from oam.paths import default_migration_directory
+from oam.paths import default_config_path, default_migration_directory
 
 _MIGRATION_NAME = re.compile(r"^(?P<version>\d{4})_(?P<name>[a-z0-9][a-z0-9_-]*)\.sql$")
 
@@ -52,9 +52,15 @@ def load_migrations(directory: str | Path) -> tuple[Migration, ...]:
     return tuple(sorted(discovered, key=lambda migration: migration.version))
 
 
-def apply_migrations(dsn: str, directory: str | Path) -> int:
+def apply_migrations(
+    dsn: str, directory: str | Path, *, embedding_dimensions: int | None = None
+) -> int:
     """Apply each new migration and reject checksum drift in applied versions."""
     planned = load_migrations(directory)
+    if embedding_dimensions is None:
+        embedding_dimensions = load_config(default_config_path()).config.index.embedding_dimensions
+    if type(embedding_dimensions) is not int or not 1 <= embedding_dimensions <= 2000:
+        raise MigrationError("embedding dimension must be between 1 and 2000")
     applied_count = 0
     with (
         psycopg.connect(dsn, autocommit=True) as connection,
@@ -75,12 +81,20 @@ def apply_migrations(dsn: str, directory: str | Path) -> int:
                 if recorded != migration.sha256:
                     raise MigrationError(f"applied migration {migration.version} checksum changed")
                 continue
-            cursor.execute(migration.path.read_text(encoding="utf-8"))
+            cursor.execute(
+                migration.path.read_text(encoding="utf-8").replace(
+                    "__OAM_EMBEDDING_DIMENSIONS__", str(embedding_dimensions)
+                )
+            )
             cursor.execute(
                 "INSERT INTO schema_migrations (version, name, sha256) VALUES (%s, %s, %s)",
                 (migration.version, migration.name, migration.sha256),
             )
             applied_count += 1
+        if any(migration.name == "indexing_recall" for migration in planned):
+            cursor.execute("SELECT embedding_dimensions FROM index_settings WHERE singleton")
+            if cursor.fetchone()[0] != embedding_dimensions:
+                raise MigrationError("initialized embedding dimension differs from configuration")
     return applied_count
 
 
@@ -100,7 +114,11 @@ def migrate_from_environment(config_path: str | Path) -> int:
         )
         return 2
     try:
-        apply_migrations(dsn, default_migration_directory())
+        apply_migrations(
+            dsn,
+            default_migration_directory(),
+            embedding_dimensions=resolved.config.index.embedding_dimensions,
+        )
     except (MigrationError, OSError, psycopg.Error):
         print("PostgreSQL migration failed", file=sys.stderr)
         return 1

@@ -59,7 +59,7 @@ async def test_rotation_commits_before_return_and_invalidates_cached_old_key(mon
         app.router.lifespan_context(app),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
     ):
-        route = "/v1/scopes/scope/operations/operation"
+        route = "/v1/users/scope/operations/operation"
         assert (await client.get(route, headers=old_headers)).status_code == 200
         issued = await client.post(
             "/v1/credentials", headers=old_headers, json={"principal_id": "admin"}

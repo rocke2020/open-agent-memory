@@ -41,6 +41,7 @@ class ResourceConfig(FrozenModel):
 
 class APIConfig(FrozenModel):
     max_concurrent_requests: PositiveInt
+    max_request_bytes: PositiveInt
 
 
 class ChunkConfig(FrozenModel):
@@ -85,19 +86,30 @@ class SearchConfig(FrozenModel):
     channel_weights: Literal["equal"]
     graph_seed_min_similarity: float = Field(ge=0, le=1)
     graph_seed_max: PositiveInt
-    relation_hops: Literal[1]
+    relation_hops: Literal[2]
     relation_candidates: PositiveInt
     entity_candidates_per_entity: PositiveInt
     entity_score_scale: PositiveFloat
+    entities_per_seed: PositiveInt
+    links_per_seed: PositiveInt
+    hierarchy_parents_per_seed: PositiveInt
+    hierarchy_children_per_parent: PositiveInt
+    temporal_seed_max: PositiveInt
+    temporal_coverage_buckets: PositiveInt
+    temporal_neighbors: PositiveInt
+    temporal_nodes: PositiveInt
+    temporal_semantic_floor: float = Field(ge=0, le=1)
     ann_iterative_scan: Literal["strict_order"]
     ann_scan_max_tuples: PositiveInt
     fast: SearchTier
+    mid: SearchTier
     deep: SearchTier
 
 
 class RecallConfig(FrozenModel):
     turn_deadline_seconds: PositiveFloat
     fast_deadline_seconds: PositiveFloat
+    mid_deadline_seconds: PositiveFloat
     deep_deadline_seconds: PositiveFloat
 
 
@@ -196,8 +208,11 @@ class ScopeConfig(FrozenModel):
 
 
 class IndexConfig(FrozenModel):
+    embedding_dimensions: PositiveInt = Field(le=2000)
     semantic_link_min_similarity: float = Field(ge=0, le=1)
     semantic_link_max_neighbors: PositiveInt
+    temporal_link_max_neighbors: PositiveInt
+    temporal_link_horizon_seconds: PositiveFloat
 
 
 class TraceConfig(FrozenModel):
@@ -235,6 +250,7 @@ class ModelBinding(FrozenModel):
     endpoint_env: str = Field(min_length=1)
     api_key_env: str | None = Field(default=None, min_length=1)
     capabilities: frozenset[ModelCapability]
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
 
     @model_validator(mode="after")
     def validate_model_source(self) -> ModelBinding:

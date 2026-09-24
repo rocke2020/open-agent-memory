@@ -4,22 +4,24 @@
 
 Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for agent developers. It preserves eligible interaction evidence, derives source-backed memory, keeps HTML/PDF/image Resources separate, retrieves both origins together with citations, and builds read-only Profiles only when explicitly requested.
 
-The repository is implementing v0.0.1. The current Step 1–4 foundation includes closed configuration, versioned PostgreSQL schema/RLS, authentication and durable-operation repositories, real model capability preflight, bounded Resource parsing, HTTP/OpenAPI contracts, database-backed operation routes, conformance fixtures, and the browser Inspector shell. It does not yet provide the Step 5 indexing and retrieval path, so it must not be treated as a usable memory server or release candidate.
+The repository is implementing v0.0.1. The user-qualified retain/recall API, server-managed text/document updates, source-backed facts, typed Insights and non-generative fast/mid/deep retrieval have PostgreSQL-backed functional coverage. Separate API/worker processes with configured real models have produced and recalled supported L2 plus HTML Evidence through the current API, including query-date resolution and explicit partial-index diagnostics. No complete LongMemEval stage is available. Profiles, full Resource integration and release-level recovery remain later gates, so this is not a release candidate.
 
 ## Product Model
 
 - **L0 Source evidence:** retained eligible conversations with roles, times, source identities, and learning eligibility.
 - **L1 Learned memory:** source-linked facts, preferences, experiences, events, and constraints extracted from eligible interactions.
-- **L2 Insights:** persisted synthesis over related eligible L1 records with transitive L0 support.
+- **L2 Insights:** persisted synthesis over related eligible L1 records with transitive L0 support and one descriptive subtype: `preference`, `pattern`, `project`, `relationship` or `general`; subtype does not alter ranking.
 - **L3 Profile:** explicitly requested, read-only `main`, `preferences`, and `experiences` projections; unchanged inputs reuse the prior Profile with zero generation calls.
-- **Evidence Resources:** retained HTML/PDF/image originals, detailed passages, locators, and abstracts that remain searchable evidence and never automatically become L1–L3.
+- **Evidence Resources:** retained text/HTML/PDF/image originals, detailed passages, locators, and abstracts that remain searchable evidence and never automatically become L1–L3.
+
+One credential-derived tenant and one authorized `user_id` identify a personal memory collection. An administrator creates it with `POST /v1/users`; the host sends interactions or documents to `POST /v1/retain` and queries `POST /v1/recall`. Interactions need no caller-managed source/message IDs. Documents use a stable `document_id` with explicit `replace` or text-only `append`; OAM allocates revisions. The [HTTP API](docs/api.md) documents JSON and multipart examples, explicit grants, retry keys and operation readiness.
 
 ## Architecture
 
 OAM uses Python, FastAPI, explicit SQL through psycopg, and PostgreSQL with pgvector. API processes are stateless; PostgreSQL owns accepted originals, authorization, source lifecycle, operations, worker claims, leases, fences, and application-replica recovery. Model roles use explicitly configured OpenAI-compatible endpoints with no provider, model, endpoint, or credential defaults.
 
 ```text
-trusted application -> HTTP API -> PostgreSQL receipt + immutable original
+trusted application -> user-authorized retain -> PostgreSQL receipt + immutable original
                                       |
                                       v
                                durable workers
@@ -27,7 +29,7 @@ trusted application -> HTTP API -> PostgreSQL receipt + immutable original
                          Resources -> passages + abstract
                                       |
                                       v
-                         joint fast/deep recall + citations
+                         joint fast/mid/deep recall + citations
 
 explicit Profile refresh -> unchanged: zero calls
                          -> changed: durable operation -> L3
@@ -49,17 +51,18 @@ uv run oam preflight --config configs/oam.yaml --json
 
 The canonical configuration intentionally has no model bindings, so preflight exits `2` and lists every missing required role. When bindings are present, preflight makes one role-appropriate request per enabled role and rejects empty, malformed, reasoning-only, truncated, non-finite, or dimensionally inconsistent results. Supply endpoints and secrets through an explicit operator configuration before expecting readiness. Default tests never read a private `.env` or contact external providers.
 
-The current API shell can be inspected locally:
+Run the API and a separate durable worker with the same operator configuration:
 
 ```bash
 uv run oam api --config configs/oam.yaml --host 127.0.0.1 --port 8080
+uv run oam worker --config configs/oam.yaml
 ```
 
-`GET /health/live`, `GET /health/ready`, `GET /v1/capabilities`, `/openapi.json`, and `/ui/` are available. Readiness remains `503 foundation_only`. Operation read/cancel/retry/reconcile and credential list/issue/revoke routes use the configured API database role when `OAM_API_DSN` is set. Initial `oam migrate` requires a new operator-only file through `OAM_BOOTSTRAP_OUTPUT` for the administrator secret; see [operations](docs/operations.md). Ingestion, Resource, memory, search, Profile, debug, export, and Scope administration remain fail-closed until their later implementation steps.
+`GET /health/live`, `GET /health/ready`, `GET /v1/capabilities`, `/openapi.json`, and `/ui/` are available. Full-release readiness remains `503 core_only`. Configure distinct API, queue and worker-content DSNs plus extraction, Insight, embedding and abstract model roles before using the core. Initial `oam migrate` requires a new operator-only file through `OAM_BOOTSTRAP_OUTPUT` for the administrator secret; see [operations](docs/operations.md). The revised user-qualified public flow still needs its named end-to-end verification; do not treat examples or OpenAPI presence as that proof. Profiles, batch/planner, source lifecycle and full Inspector integration remain unavailable. See the [indexing and recall design](docs/indexing-retrieval.md) for algorithms and verification boundaries.
 
 ## Release Boundary
 
-v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast and deep joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. The Python SDK, targeted fact controls, supplier importers, full Profile Studio, hosted service, database HA, and multi-region operation are later work.
+v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/mid/deep joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and mid are the primary everyday recall modes; deep is an explicit higher-budget option. The Python SDK, targeted fact controls, supplier importers, full Profile Studio, hosted service, database HA, and multi-region operation are later work.
 
 No Dockerfile or public image exists yet. Packaging and publication are the final release phase after the complete source-level acceptance matrix passes.
 

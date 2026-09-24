@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local development research, comparison inputs, and evaluation artifacts.
+/personal/
+
+# Disposable local scripts, logs, and review bundles.
+/tmp/

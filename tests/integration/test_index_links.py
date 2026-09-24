@@ -1,0 +1,285 @@
+"""Link construction on the explicitly isolated local indexing test database."""
+
+import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
+
+import psycopg
+import pytest
+from psycopg.conninfo import conninfo_to_dict
+from psycopg.types.json import Jsonb
+
+from oam.auth.credentials import AuthorizedScope
+from oam.config import load_config
+from oam.indexing.links import build_links
+
+pytestmark = pytest.mark.integration
+START = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+@pytest.fixture
+def database():
+    dsn = os.environ.get("OAM_TEST_POSTGRES_DSN")
+    if not dsn or os.environ.get("OAM_TEST_POSTGRES_ISOLATED") != "1":
+        pytest.skip("requires an explicitly isolated PostgreSQL database")
+    target = conninfo_to_dict(dsn)
+    if target.get("host") not in {"localhost", "127.0.0.1"} or target.get("port") != "15433":
+        pytest.skip("index link fixtures require the approved local port 15433")
+    with (
+        psycopg.connect(dsn, autocommit=True) as connection,
+        connection.transaction(force_rollback=True),
+    ):
+        tenant = f"links-{uuid4().hex}"
+        connection.execute("INSERT INTO tenants(tenant_id,state) VALUES (%s,'active')", (tenant,))
+        for scope in ("batch", "incremental", "foreign"):
+            connection.execute(
+                "INSERT INTO scopes(tenant_id,scope_id,subject,namespace,lifetime,"
+                "index_generation_id) "
+                "VALUES (%s,%s,'synthetic','test','persistent','generation')",
+                (tenant, scope),
+            )
+        authority = AuthorizedScope(
+            "key", tenant, "worker", "batch", frozenset({"memory:append", "memory:read"})
+        )
+        config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+        config = config.model_copy(
+            update={
+                "index": config.index.model_copy(
+                    update={
+                        "semantic_link_min_similarity": 0.5,
+                        "semantic_link_max_neighbors": 1,
+                        "temporal_link_max_neighbors": 1,
+                        "temporal_link_horizon_seconds": 10 * 86400,
+                    }
+                )
+            }
+        )
+        yield connection, authority, config
+
+
+def other_scope(authority, scope):
+    return AuthorizedScope(
+        authority.credential_id,
+        authority.tenant_id,
+        authority.principal_id,
+        scope,
+        authority.capabilities,
+    )
+
+
+def add_fact(
+    connection,
+    authority,
+    node_id,
+    *,
+    day=None,
+    eligible=True,
+    stale=False,
+    generation="generation",
+    vector=(1.0, 0.0),
+):
+    tenant, scope = authority.tenant_id, authority.scope_id
+    connection.execute(
+        "INSERT INTO sources(tenant_id,scope_id,source_id,input_role,active_version,status) "
+        "VALUES (%s,%s,%s,'interaction',1,'active')",
+        (tenant, scope, node_id),
+    )
+    connection.execute(
+        "INSERT INTO source_versions(tenant_id,scope_id,source_id,source_version,media_type,"
+        "original_bytes,content_sha256,byte_length,status) "
+        "VALUES (%s,%s,%s,1,'text/plain',%s,%s,1,%s)",
+        (tenant, scope, node_id, b"x", b"x" * 32, "superseded" if stale else "active"),
+    )
+    connection.execute(
+        "INSERT INTO evidence(tenant_id,scope_id,evidence_id,source_id,source_version,accepted_seq,"
+        "content_text,learning_eligible,status) VALUES (%s,%s,%s,%s,1,1,'x',%s,'active')",
+        (tenant, scope, node_id, node_id, eligible),
+    )
+    connection.execute(
+        "INSERT INTO passages(tenant_id,scope_id,passage_id,evidence_id,parse_revision,locator,"
+        "normalized_text,generation_id,visible_from) VALUES (%s,%s,%s,%s,1,'{}','x',%s,1)",
+        (tenant, scope, node_id, node_id, generation),
+    )
+    connection.execute(
+        "INSERT INTO memories(tenant_id,scope_id,memory_id,canonical_claim,assertion_kind,"
+        "generation_id,visible_from) VALUES (%s,%s,%s,'x','stated',%s,1)",
+        (tenant, scope, node_id, generation),
+    )
+    connection.execute(
+        "INSERT INTO support(tenant_id,scope_id,memory_id,evidence_id,passage_id,"
+        "support_kind,span) "
+        "VALUES (%s,%s,%s,%s,%s,'quote',%s)",
+        (tenant, scope, node_id, node_id, node_id, Jsonb({"start": 0, "end": 1})),
+    )
+    dimensions = connection.execute("SELECT embedding_dimensions FROM index_settings").fetchone()[0]
+    embedding = str(list(vector) + [0.0] * (dimensions - len(vector)))
+    timestamp = START + timedelta(days=day) if day is not None else None
+    connection.execute(
+        "INSERT INTO search_units(tenant_id,scope_id,unit_id,kind,origin,source_id,source_version,"
+        "evidence_id,memory_id,generation_id,content_text,locator,embedding,lexical_text,"
+        "mentioned_at,source_created_at,source_updated_at) "
+        "VALUES (%s,%s,%s,'fact','memory',%s,1,%s,%s,%s,'x','{}',%s::vector,'x',%s,%s,%s)",
+        (
+            tenant,
+            scope,
+            node_id,
+            node_id,
+            node_id,
+            node_id,
+            generation,
+            embedding,
+            timestamp,
+            timestamp,
+            timestamp,
+        ),
+    )
+
+
+def annotate(connection, authority, unit_id, annotation_id, role, day):
+    timestamp = START + timedelta(days=day)
+    connection.execute(
+        "INSERT INTO unit_times(tenant_id,scope_id,annotation_id,unit_id,role,time_span,detail) "
+        "VALUES (%s,%s,%s,%s,%s,tstzrange(%s,%s,'[]'),%s)",
+        (
+            authority.tenant_id,
+            authority.scope_id,
+            annotation_id,
+            unit_id,
+            role,
+            timestamp,
+            timestamp,
+            Jsonb({"meaning": "instant"}),
+        ),
+    )
+
+
+def temporal_rows(connection, authority):
+    return connection.execute(
+        "SELECT time_basis,left_id,right_id,left_annotation_id,right_annotation_id,"
+        "gap_seconds,weight FROM temporal_links WHERE tenant_id=%s AND scope_id=%s "
+        "ORDER BY time_basis,left_id,right_id",
+        (authority.tenant_id, authority.scope_id),
+    ).fetchall()
+
+
+def test_semantic_neighbors_exclude_stale_foreign_and_wrong_generation_before_cap(database):
+    connection, authority, config = database
+    add_fact(connection, authority, "seed")
+    add_fact(connection, authority, "a_hidden", eligible=False)
+    add_fact(connection, authority, "b_stale", stale=True)
+    add_fact(connection, authority, "c_old_generation", generation="old")
+    add_fact(connection, other_scope(authority, "foreign"), "d_foreign")
+    add_fact(connection, authority, "good", vector=(0.8, 0.6))
+    add_fact(connection, authority, "opposite", vector=(-1.0, 0.0))
+    connection.execute("SET LOCAL ROLE oam_content")
+    first = build_links(connection, authority, config, "generation", ["seed", "b_stale"])
+    assert first == {"semantic_links": 1, "temporal_links": 0, "coverage": "complete"}
+    rows = connection.execute("SELECT source_id,target_id,weight FROM unit_links").fetchall()
+    assert [(row[0], row[1]) for row in rows] == [("seed", "good")]
+    assert rows[0][2] == pytest.approx(0.8)
+    repeated = build_links(connection, authority, config, "generation", ["seed"])
+    assert repeated["semantic_links"] == 0
+
+
+def test_temporal_within_batch_and_existing_proposals_have_same_canonical_witnesses(database):
+    connection, authority, config = database
+    incremental = other_scope(authority, "incremental")
+    for selected in (authority, incremental):
+        add_fact(connection, selected, "a", day=0)
+        annotate(connection, selected, "a", "a-event-2", "event", 0)
+        annotate(connection, selected, "a", "a-event-1", "event", 0)
+        annotate(connection, selected, "a", "a-reference", "date_reference", 1)
+    first = build_links(connection, incremental, config, "generation", ["a"])
+    assert first["temporal_links"] == 0
+    for selected in (authority, incremental):
+        add_fact(connection, selected, "b", day=2)
+        annotate(connection, selected, "b", "b-event-2", "event", 2)
+        annotate(connection, selected, "b", "b-event-1", "event", 2)
+        annotate(connection, selected, "b", "b-reference", "date_reference", 2)
+    connection.execute("SET LOCAL ROLE oam_content")
+    within = build_links(connection, authority, config, "generation", ["a", "b"])
+    within_rows = temporal_rows(connection, authority)
+    cross = build_links(connection, incremental, config, "generation", ["b"])
+    assert within["temporal_links"] == cross["temporal_links"] == 5
+    assert temporal_rows(connection, incremental) == within_rows
+    assert [(row[0], row[1], row[2]) for row in within_rows] == [
+        ("created", "a", "b"),
+        ("event", "a", "b"),
+        ("mentioned", "a", "b"),
+        ("referenced", "a", "b"),
+        ("updated", "a", "b"),
+    ]
+    event = next(row for row in within_rows if row[0] == "event")
+    assert event[3:5] == ("a-event-1", "b-event-1")
+    assert event[5:] == (2 * 86400.0, 0.8)
+    reference = next(row for row in within_rows if row[0] == "referenced")
+    assert reference[3:5] == ("a-reference", "b-reference")
+    assert reference[6] == 0.9
+    assert (
+        build_links(connection, incremental, config, "generation", ["a", "b"])["temporal_links"]
+        == 0
+    )
+
+
+def test_temporal_horizon_and_eligibility_are_applied_before_neighbor_cap(database):
+    connection, authority, config = database
+    add_fact(connection, authority, "seed", day=0)
+    add_fact(connection, authority, "a_hidden", day=0.1, eligible=False)
+    add_fact(connection, authority, "b_stale", day=0.2, stale=True)
+    add_fact(connection, other_scope(authority, "foreign"), "c_foreign", day=0.3)
+    add_fact(connection, authority, "good", day=2)
+    add_fact(connection, authority, "boundary", day=10)
+    add_fact(connection, authority, "outside", day=11)
+    connection.execute("SET LOCAL ROLE oam_content")
+    build_links(connection, authority, config, "generation", ["seed"])
+    rows = temporal_rows(connection, authority)
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("created", "good", "seed"),
+        ("mentioned", "good", "seed"),
+        ("updated", "good", "seed"),
+    ]
+    assert all(row[5:] == (2 * 86400.0, 0.8) for row in rows)
+
+
+def test_temporal_horizon_excludes_boundary_without_nearer_candidates(database):
+    connection, authority, config = database
+    add_fact(connection, authority, "seed", day=0)
+    add_fact(connection, authority, "boundary", day=10)
+    add_fact(connection, authority, "outside", day=11)
+    annotate(connection, authority, "seed", "seed-event", "event", 0)
+    annotate(connection, authority, "boundary", "boundary-event", "event", 10)
+    annotate(connection, authority, "outside", "outside-event", "event", 11)
+    connection.execute("SET LOCAL ROLE oam_content")
+    result = build_links(connection, authority, config, "generation", ["seed"])
+    assert result["temporal_links"] == 0
+    assert temporal_rows(connection, authority) == []
+
+
+def test_temporal_period_gap_treats_touching_and_overlapping_ranges_as_zero(database):
+    connection, authority, config = database
+    config = config.model_copy(
+        update={
+            "index": config.index.model_copy(update={"temporal_link_max_neighbors": 2}),
+        }
+    )
+    for node_id, start_day, end_day in (("seed", 0, 5), ("overlap", 3, 4), ("touching", 5, 6)):
+        add_fact(connection, authority, node_id)
+        connection.execute(
+            "INSERT INTO unit_times(tenant_id,scope_id,annotation_id,unit_id,role,"
+            "time_span,detail) "
+            "VALUES (%s,%s,%s,%s,'event',tstzrange(%s,%s,'[)'),%s)",
+            (
+                authority.tenant_id,
+                authority.scope_id,
+                node_id,
+                node_id,
+                START + timedelta(days=start_day),
+                START + timedelta(days=end_day),
+                Jsonb({"meaning": "possible_period"}),
+            ),
+        )
+    connection.execute("SET LOCAL ROLE oam_content")
+    result = build_links(connection, authority, config, "generation", ["seed"])
+    assert result["temporal_links"] == 2
+    assert {row[5:] for row in temporal_rows(connection, authority)} == {(0.0, 1.0)}

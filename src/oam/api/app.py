@@ -5,8 +5,19 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException
 
 from oam.api.runtime import (
     APIRuntime,
@@ -26,7 +37,6 @@ from oam.contracts.credentials import (
     CredentialListResponse,
     CredentialRevokedResponse,
 )
-from oam.contracts.evidence import EvidenceAppendRequest
 from oam.contracts.operations import (
     OperationReadiness,
     OperationResponse,
@@ -34,8 +44,10 @@ from oam.contracts.operations import (
     ReconcileAttemptRequest,
 )
 from oam.contracts.profile import ProfileRefreshRequest
-from oam.contracts.resources import EvidenceResourceCreate
+from oam.contracts.retain import RETAIN_JSON, RecallRequest, RetainFileDocument, UserRequest
 from oam.contracts.search import SearchManyRequest, SearchRequest
+from oam.db.sources import IdempotencyConflict, SourceVersionConflict
+from oam.indexing.identity import index_generation
 from oam.operations.repository import (
     AttemptOwnershipMismatch,
     OperationIdempotencyConflict,
@@ -46,6 +58,7 @@ from oam.operations.repository import (
     RetryRequiresPlanning,
 )
 from oam.operations.state import OperationStatus as StoredOperationStatus
+from oam.retrieval.service import RecallUnavailable
 
 CSP = "; ".join(
     [
@@ -158,7 +171,7 @@ def create_app(
         return {
             "ready": False,
             "missing_required_roles": missing,
-            "reason": "foundation_only",
+            "reason": "core_only",
         }
 
     @app.get("/v1/capabilities", tags=["Capabilities"])
@@ -175,11 +188,13 @@ def create_app(
         return {
             "contract_version": config.contract_version,
             "config_sha256": resolved.sha256,
+            "index_generation_id": index_generation(config, os.environ),
             "limits": limits,
             "features": {
                 "python_sdk": False,
-                "fast_recall": False,
-                "deep_recall": False,
+                "fast_recall": True,
+                "mid_recall": True,
+                "deep_recall": True,
                 "profiles": False,
                 "inspector": True,
             },
@@ -201,6 +216,10 @@ def create_app(
         )
 
     _register_reserved_routes(app, runtime, resolved.config)
+    # The retain endpoint dispatches JSON and multipart itself; register the
+    # JSON union's definitions for OpenAPI clients as well as runtime validation.
+    definitions = RETAIN_JSON.json_schema(ref_template="#/components/schemas/{model}")["$defs"]
+    app.openapi().setdefault("components", {}).setdefault("schemas", {}).update(definitions)
     return app
 
 
@@ -209,16 +228,18 @@ def _register_reserved_routes(
     runtime: APIRuntime | None,
     config: OAMConfig,
 ) -> None:
-    @app.post("/v1/scopes", status_code=201, tags=["Administration"])
-    async def create_scope(body: dict[str, Any]) -> None:
-        _unavailable()
+    @app.post("/v1/users", status_code=201, tags=["Administration"])
+    def create_user(request: Request, body: UserRequest) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).create_user(request.state.bearer_secret, body.user_id)
+        )
 
     @app.put(
-        "/v1/scopes/{scope_id}/grants/{principal_id}",
+        "/v1/users/{user_id}/grants/{principal_id}",
         tags=["Administration"],
     )
     async def replace_scope_grant(
-        scope_id: str,
+        user_id: str,
         principal_id: str,
         body: dict[str, Any],
     ) -> None:
@@ -264,86 +285,183 @@ def _register_reserved_routes(
             )
         )
 
-    @app.post("/v1/scopes/{scope_id}/evidence", status_code=202, tags=["Evidence"])
-    async def append_evidence(scope_id: str, body: EvidenceAppendRequest) -> None:
+    @app.post(
+        "/v1/retain",
+        status_code=202,
+        tags=["Retain"],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            key: value
+                            for key, value in RETAIN_JSON.json_schema(
+                                ref_template="#/components/schemas/{model}"
+                            ).items()
+                            if key != "$defs"
+                        }
+                    },
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["metadata", "original"],
+                            "properties": {
+                                "metadata": {
+                                    "type": "string",
+                                    "description": (
+                                        "JSON: user_id, input_type=document, "
+                                        "document_id, update_mode=replace."
+                                    ),
+                                },
+                                "original": {"type": "string", "format": "binary"},
+                            },
+                        }
+                    },
+                },
+            }
+        },
+    )
+    async def retain(
+        request: Request,
+        idempotency_key: str = Header(min_length=1),
+    ) -> dict:
+        await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).authenticate(request.state.bearer_secret)
+            )
+        )
+        limit = config.api.max_request_bytes
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                length = int(declared)
+                if length < 0:
+                    raise ValueError
+            except ValueError as exc:
+                raise HTTPException(400, detail={"code": "InvalidContentLength"}) from exc
+            if length > limit:
+                raise HTTPException(413, detail={"code": "RequestTooLarge"})
+        consumed = 0
+
+        async def limited_receive():
+            nonlocal consumed
+            message = await request.receive()
+            consumed += len(message.get("body", b""))
+            if consumed > limit:
+                # The multipart parser closes its partial upload files on this
+                # exception; JSON body reads propagate it to the same 413 below.
+                raise MultiPartException("retain request exceeds byte limit")
+            return message
+
+        bounded = Request(request.scope, receive=limited_receive)
+        upload = {}
+        try:
+            if bounded.headers.get("content-type", "").startswith("multipart/form-data"):
+                async with bounded.form(max_files=1, max_fields=1) as form:
+                    body = RetainFileDocument.model_validate_json(form.get("metadata", ""))
+                    original = form.get("original")
+                    if original is None or not hasattr(original, "read"):
+                        raise ValueError("original file is required")
+                    content = await original.read(config.resource.max_bytes + 1)
+                    if not content or len(content) > config.resource.max_bytes:
+                        raise ValueError("original exceeds byte limit or is empty")
+                    upload = {
+                        "content": content,
+                        "media_type": original.content_type,
+                        "filename": original.filename,
+                    }
+            else:
+                body = RETAIN_JSON.validate_json(await bounded.body())
+                _validate_limits(body, config)
+        except (MultiPartException, StarletteHTTPException) as exc:
+            if consumed > limit:
+                raise HTTPException(413, detail={"code": "RequestTooLarge"}) from exc
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, detail={"code": "InvalidRetainRequest"}) from exc
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).retain(
+                    request.state.bearer_secret, body, idempotency_key, **upload
+                )
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/resources", tags=["Resources"])
+    async def list_resources(user_id: str) -> None:
+        _unavailable()
+
+    @app.get("/v1/users/{user_id}/memories", tags=["Memory"])
+    async def list_memories(user_id: str) -> None:
+        _unavailable()
+
+    @app.post("/v1/recall", tags=["Recall"])
+    def search(request: Request, body: RecallRequest) -> dict:
+        _validate_limits(body, config)
+        return _content_call(
+            lambda: _require_runtime(runtime).search(
+                request.state.bearer_secret, body.user_id, body
+            )
+        )
+
+    @app.post("/v1/users/{user_id}/search-many", tags=["Recall"])
+    async def search_many(user_id: str, body: SearchManyRequest) -> None:
         _validate_limits(body, config)
         _unavailable()
 
-    @app.post("/v1/scopes/{scope_id}/resources", status_code=202, tags=["Resources"])
-    async def create_resource(scope_id: str, body: EvidenceResourceCreate) -> None:
+    @app.post("/v1/users/{user_id}/decompose-and-search", tags=["Recall"])
+    async def decompose_and_search(user_id: str, body: SearchRequest) -> None:
         _validate_limits(body, config)
         _unavailable()
 
-    @app.get("/v1/scopes/{scope_id}/resources", tags=["Resources"])
-    async def list_resources(scope_id: str) -> None:
+    @app.get("/v1/users/{user_id}/profile", tags=["Profiles"])
+    async def get_profile(user_id: str) -> None:
         _unavailable()
 
-    @app.get("/v1/scopes/{scope_id}/memories", tags=["Memory"])
-    async def list_memories(scope_id: str) -> None:
-        _unavailable()
-
-    @app.post("/v1/scopes/{scope_id}/search", tags=["Recall"])
-    async def search(scope_id: str, body: SearchRequest) -> None:
-        _validate_limits(body, config)
-        _unavailable()
-
-    @app.post("/v1/scopes/{scope_id}/search-many", tags=["Recall"])
-    async def search_many(scope_id: str, body: SearchManyRequest) -> None:
-        _validate_limits(body, config)
-        _unavailable()
-
-    @app.post("/v1/scopes/{scope_id}/decompose-and-search", tags=["Recall"])
-    async def decompose_and_search(scope_id: str, body: SearchRequest) -> None:
-        _validate_limits(body, config)
-        _unavailable()
-
-    @app.get("/v1/scopes/{scope_id}/profile", tags=["Profiles"])
-    async def get_profile(scope_id: str) -> None:
-        _unavailable()
-
-    @app.post("/v1/scopes/{scope_id}/profile/refresh", tags=["Profiles"])
-    async def refresh_profile(scope_id: str, body: ProfileRefreshRequest) -> None:
+    @app.post("/v1/users/{user_id}/profile/refresh", tags=["Profiles"])
+    async def refresh_profile(user_id: str, body: ProfileRefreshRequest) -> None:
         _unavailable()
 
     @app.get(
-        "/v1/scopes/{scope_id}/operations/{operation_id}",
+        "/v1/users/{user_id}/operations/{operation_id}",
         response_model=OperationResponse,
         tags=["Operations"],
     )
     def get_operation(
         request: Request,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
     ) -> OperationResponse:
         active_runtime = _require_runtime(runtime)
         return _operation_call(
-            lambda: active_runtime.get(request.state.bearer_secret, scope_id, operation_id)
+            lambda: active_runtime.get(request.state.bearer_secret, user_id, operation_id)
         )
 
     @app.post(
-        "/v1/scopes/{scope_id}/operations/{operation_id}/cancel",
+        "/v1/users/{user_id}/operations/{operation_id}/cancel",
         response_model=OperationResponse,
         tags=["Operations"],
     )
     def cancel_operation(
         request: Request,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
     ) -> OperationResponse:
         active_runtime = _require_runtime(runtime)
         return _operation_call(
-            lambda: active_runtime.cancel(request.state.bearer_secret, scope_id, operation_id)
+            lambda: active_runtime.cancel(request.state.bearer_secret, user_id, operation_id)
         )
 
     @app.post(
-        "/v1/scopes/{scope_id}/operations/{operation_id}/retry",
+        "/v1/users/{user_id}/operations/{operation_id}/retry",
         response_model=OperationResponse,
         status_code=status.HTTP_201_CREATED,
         tags=["Operations"],
     )
     def retry_operation(
         request: Request,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
         idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     ) -> OperationResponse:
@@ -351,20 +469,20 @@ def _register_reserved_routes(
         return _operation_call(
             lambda: active_runtime.retry(
                 request.state.bearer_secret,
-                scope_id,
+                user_id,
                 operation_id,
                 idempotency_key,
             )
         )
 
     @app.post(
-        "/v1/scopes/{scope_id}/operations/{operation_id}/reconcile-attempt",
+        "/v1/users/{user_id}/operations/{operation_id}/reconcile-attempt",
         response_model=OperationResponse,
         tags=["Operations"],
     )
     def reconcile_attempt(
         request: Request,
-        scope_id: str,
+        user_id: str,
         operation_id: str,
         body: ReconcileAttemptRequest,
     ) -> OperationResponse:
@@ -372,26 +490,26 @@ def _register_reserved_routes(
         return _operation_call(
             lambda: active_runtime.reconcile(
                 request.state.bearer_secret,
-                scope_id,
+                user_id,
                 operation_id,
                 body,
             )
         )
 
-    @app.get("/v1/scopes/{scope_id}/debug/traces/{trace_id}", tags=["Debug"])
-    async def get_trace(scope_id: str, trace_id: str) -> None:
+    @app.get("/v1/users/{user_id}/debug/traces/{trace_id}", tags=["Debug"])
+    async def get_trace(user_id: str, trace_id: str) -> None:
         _unavailable()
 
-    @app.get("/v1/scopes/{scope_id}/profile/diff", tags=["Debug"])
-    async def profile_diff(scope_id: str, from_revision: str, to_revision: str) -> None:
+    @app.get("/v1/users/{user_id}/profile/diff", tags=["Debug"])
+    async def profile_diff(user_id: str, from_revision: str, to_revision: str) -> None:
         _unavailable()
 
-    @app.post("/v1/scopes/{scope_id}/replays", status_code=202, tags=["Debug"])
-    async def create_replay(scope_id: str, body: dict[str, Any]) -> None:
+    @app.post("/v1/users/{user_id}/replays", status_code=202, tags=["Debug"])
+    async def create_replay(user_id: str, body: dict[str, Any]) -> None:
         _unavailable()
 
-    @app.post("/v1/scopes/{scope_id}/exports", status_code=202, tags=["Exports"])
-    async def create_export(scope_id: str, body: dict[str, Any]) -> None:
+    @app.post("/v1/users/{user_id}/exports", status_code=202, tags=["Exports"])
+    async def create_export(user_id: str, body: dict[str, Any]) -> None:
         _unavailable()
 
 
@@ -403,6 +521,25 @@ def _validate_limits(body, config: OAMConfig) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "InputLimitExceeded", "retryable": False},
         ) from exc
+
+
+def _content_call(call):
+    try:
+        return call()
+    except AuthenticationFailed as exc:
+        raise HTTPException(401, detail={"code": "AuthenticationFailed"}) from exc
+    except PermissionError as exc:
+        raise HTTPException(404, detail={"code": "UserUnavailable"}) from exc
+    except NotImplementedError as exc:
+        raise HTTPException(503, detail={"code": "CapabilityUnavailable"}) from exc
+    except RecallUnavailable as exc:
+        raise HTTPException(503, detail={"code": "RecallUnavailable"}) from exc
+    except TimeoutError as exc:
+        raise HTTPException(504, detail={"code": "RecallDeadlineExceeded"}) from exc
+    except (IdempotencyConflict, SourceVersionConflict) as exc:
+        raise HTTPException(409, detail={"code": type(exc).__name__}) from exc
+    except ValueError as exc:
+        raise HTTPException(422, detail={"code": "InvalidRequest", "message": str(exc)}) from exc
 
 
 def _credential_call(call):
@@ -436,7 +573,7 @@ def _bearer_secret(authorization: str | None) -> str | None:
 
 
 def _requires_bearer(path: str) -> bool:
-    return path == "/v1/scopes" or path.startswith(("/v1/scopes/", "/v1/credentials"))
+    return path.startswith("/v1/") and path != "/v1/capabilities"
 
 
 def _require_runtime(runtime: APIRuntime | None) -> APIRuntime:
@@ -482,7 +619,23 @@ def _operation_response(record: OperationRecord) -> OperationResponse:
     }
     return OperationResponse(
         operation_id=record.operation_id,
+        source_id=record.source_id,
+        revision=record.source_version,
         kind=record.kind,
         status=statuses[record.status],
-        readiness=OperationReadiness(accepted=True),
+        readiness=OperationReadiness(
+            accepted=True,
+            **{
+                name: bool(record.stage_state.get(name, False))
+                for name in (
+                    "source_searchable",
+                    "memory_ready",
+                    "insights_ready",
+                    "profile_current",
+                )
+            },
+        ),
+        stage_state=record.stage_state,
+        usage=record.stage_state.get("usage", {}),
+        embedding_usage=record.stage_state.get("embedding_usage", {}),
     )

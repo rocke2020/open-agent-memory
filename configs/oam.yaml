@@ -9,6 +9,7 @@ resource:
 
 api:
   max_concurrent_requests: 10
+  max_request_bytes: 25165824
 
 chunk:
   target_estimated_tokens: 2048
@@ -29,16 +30,30 @@ search:
   channel_weights: equal
   graph_seed_min_similarity: 0.3
   graph_seed_max: 20
-  relation_hops: 1
+  relation_hops: 2
   relation_candidates: 32
   entity_candidates_per_entity: 200
   entity_score_scale: 0.5
+  entities_per_seed: 8
+  links_per_seed: 16
+  hierarchy_parents_per_seed: 2
+  hierarchy_children_per_parent: 8
+  temporal_seed_max: 10
+  temporal_coverage_buckets: 8
+  temporal_neighbors: 10
+  temporal_nodes: 300
+  temporal_semantic_floor: 0.1
   ann_iterative_scan: strict_order
   ann_scan_max_tuples: 20000
   fast:
     channel_candidates: 32
     fused_candidates: 64
     max_results: 16
+  mid:
+    channel_candidates: 48
+    fused_candidates: 96
+    rerank_candidates: 48
+    max_results: 24
   deep:
     channel_candidates: 64
     fused_candidates: 128
@@ -46,12 +61,16 @@ search:
     max_results: 32
 
 index:
+  embedding_dimensions: 1024
   semantic_link_min_similarity: 0.7
   semantic_link_max_neighbors: 20
+  temporal_link_max_neighbors: 20
+  temporal_link_horizon_seconds: 86400
 
 recall:
   turn_deadline_seconds: 10
   fast_deadline_seconds: 3
+  mid_deadline_seconds: 5
   deep_deadline_seconds: 10
 
 context:

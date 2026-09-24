@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -50,6 +50,7 @@ class OperationRecord:
     source_version: int | None
     created_at: datetime
     updated_at: datetime
+    stage_state: dict = field(default_factory=dict)
 
 
 class Cursor(Protocol):
@@ -66,7 +67,7 @@ class Connection(Protocol):
 
 _FIELDS = (
     "operation_id, kind, status, accepted_seq, plan_sealed, cancellation_revision, "
-    "retry_of_operation_id, source_id, source_version, created_at, updated_at"
+    "retry_of_operation_id, source_id, source_version, created_at, updated_at, stage_state"
 )
 
 
@@ -165,7 +166,7 @@ class OperationRepository:
             )
             existing_retry = cursor.fetchone()
             if existing_retry is not None:
-                if bytes(existing_retry[11]) != request_hash:
+                if bytes(existing_retry[12]) != request_hash:
                     raise OperationIdempotencyConflict(idempotency_key)
                 return self._record(existing_retry)
             cursor.execute(
@@ -282,6 +283,7 @@ class OperationRepository:
             source_version=None if row[8] is None else int(row[8]),
             created_at=row[9],  # type: ignore[arg-type]
             updated_at=row[10],  # type: ignore[arg-type]
+            stage_state=row[11],
         )
 
     @staticmethod

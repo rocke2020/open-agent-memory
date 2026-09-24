@@ -69,3 +69,20 @@ def test_trusted_turn_requires_shared_repository() -> None:
 
     with pytest.raises(TurnDeadlineConfigurationError):
         coordinator.admit(RecallLevel.FAST, trusted_turn_key="turn-1")
+
+
+def test_mid_uses_its_selected_cap_and_later_react_call_has_fresh_budget(tmp_path) -> None:
+    path = tmp_path / "operator.yaml"
+    path.write_text("recall:\n  mid_deadline_seconds: 2\n")
+    config = load_config(path).config.recall
+    started = datetime(2026, 9, 22, tzinfo=UTC)
+    clock = MutableClock(started)
+    coordinator = RecallDeadlineCoordinator(config, None, clock)
+    coordinator.admit(RecallLevel.FAST)
+    clock.now += timedelta(seconds=30)
+
+    admitted = coordinator.admit(RecallLevel.MID)
+
+    assert admitted.deadline_at == started + timedelta(seconds=32)
+    assert admitted.remaining_seconds == 2
+    assert admitted.turn_deadline_at is None

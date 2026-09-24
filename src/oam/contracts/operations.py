@@ -34,10 +34,15 @@ class OperationError(FrozenContract):
 
 class OperationResponse(FrozenContract):
     operation_id: str = Field(min_length=1)
+    source_id: str | None = None
+    revision: PositiveInt | None = None
     kind: str = Field(min_length=1)
     status: OperationStatus
     readiness: OperationReadiness
     error: OperationError | None = None
+    stage_state: dict[str, Any] = Field(default_factory=dict)
+    usage: dict[str, Any] = Field(default_factory=dict)
+    embedding_usage: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReconcileAttemptRequest(FrozenContract):

@@ -7,6 +7,7 @@ import pytest
 from oam.api.app import create_app
 from oam.operations.repository import OperationRecord
 from oam.operations.state import OperationStatus
+from oam.retrieval.service import RecallUnavailable
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
@@ -125,14 +126,43 @@ async def test_binding_names_alone_cannot_make_the_foundation_ready(tmp_path) ->
 async def test_http_admission_uses_selected_config_limits(
     tmp_path, config_text, route, payload, expected_status
 ) -> None:
+    class AuthenticatedRuntime:
+        def authenticate(self, secret):
+            pass
+
     config = tmp_path / "oam.yaml"
     config.write_text(config_text, encoding="utf-8")
-    transport = httpx.ASGITransport(app=create_app(config))
+    transport = httpx.ASGITransport(app=create_app(config, runtime=AuthenticatedRuntime()))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        if route == "evidence":
+            payload = {
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {key: value for key, value in message.items() if key != "message_id"}
+                    | {"learning_eligible": True}
+                    for message in payload["messages"]
+                ],
+            }
+        elif route == "resources":
+            payload = {
+                "user_id": "scope",
+                "input_type": "document",
+                "document_id": "report",
+                "update_mode": "replace",
+                "text": "12345",
+            }
+        elif route == "search":
+            payload = {"user_id": "scope", **payload}
+        path = (
+            "/v1/retain"
+            if route in {"evidence", "resources"}
+            else ("/v1/recall" if route == "search" else f"/v1/users/scope/{route}")
+        )
         response = await client.post(
-            f"/v1/scopes/scope/{route}",
+            path,
             json=payload,
-            headers={"Authorization": "Bearer synthetic-key"},
+            headers={"Authorization": "Bearer synthetic-key", "Idempotency-Key": "limit-test"},
         )
     assert response.status_code == expected_status
 
@@ -148,47 +178,78 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["limits"]["model"]["attempt_timeout_seconds"] == 60
     assert payload["limits"]["scope"]["max_chats"] == 1000
     assert payload["features"]["python_sdk"] is False
-    assert payload["features"]["fast_recall"] is False
+    assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "mid", "deep"))
     assert "api_key" not in response.text.lower()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "code"),
+    [
+        (RecallUnavailable("internal model details"), 503, "RecallUnavailable"),
+        (TimeoutError("internal connection details"), 504, "RecallDeadlineExceeded"),
+        (NotImplementedError("later-stage role"), 503, "CapabilityUnavailable"),
+        (PermissionError("private scope"), 404, "UserUnavailable"),
+    ],
+)
+async def test_search_reports_unavailable_deadline_and_authority_without_internal_details(
+    error, expected_status, code
+):
+    class Runtime:
+        def search(self, *args):
+            raise error
+
+    app = create_app(REPOSITORY_ROOT / "configs/oam.yaml", runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/recall",
+            json={"user_id": "test", "query": "test"},
+            headers={"Authorization": "Bearer synthetic"},
+        )
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["code"] == code
+    assert str(error) not in response.text
 
 
 async def test_openapi_reserves_public_step_four_routes(client) -> None:
     paths = (await client.get("/openapi.json")).json()["paths"]
 
     assert {
-        "/v1/scopes",
-        "/v1/scopes/{scope_id}/grants/{principal_id}",
+        "/v1/users",
+        "/v1/users/{user_id}/grants/{principal_id}",
         "/v1/credentials",
         "/v1/credentials/{credential_id}",
-        "/v1/scopes/{scope_id}/evidence",
-        "/v1/scopes/{scope_id}/resources",
-        "/v1/scopes/{scope_id}/memories",
-        "/v1/scopes/{scope_id}/search",
-        "/v1/scopes/{scope_id}/search-many",
-        "/v1/scopes/{scope_id}/decompose-and-search",
-        "/v1/scopes/{scope_id}/profile",
-        "/v1/scopes/{scope_id}/profile/refresh",
-        "/v1/scopes/{scope_id}/operations/{operation_id}",
-        "/v1/scopes/{scope_id}/operations/{operation_id}/cancel",
-        "/v1/scopes/{scope_id}/operations/{operation_id}/retry",
-        "/v1/scopes/{scope_id}/operations/{operation_id}/reconcile-attempt",
-        "/v1/scopes/{scope_id}/debug/traces/{trace_id}",
-        "/v1/scopes/{scope_id}/profile/diff",
-        "/v1/scopes/{scope_id}/replays",
-        "/v1/scopes/{scope_id}/exports",
+        "/v1/retain",
+        "/v1/users/{user_id}/resources",
+        "/v1/users/{user_id}/memories",
+        "/v1/recall",
+        "/v1/users/{user_id}/search-many",
+        "/v1/users/{user_id}/decompose-and-search",
+        "/v1/users/{user_id}/profile",
+        "/v1/users/{user_id}/profile/refresh",
+        "/v1/users/{user_id}/operations/{operation_id}",
+        "/v1/users/{user_id}/operations/{operation_id}/cancel",
+        "/v1/users/{user_id}/operations/{operation_id}/retry",
+        "/v1/users/{user_id}/operations/{operation_id}/reconcile-attempt",
+        "/v1/users/{user_id}/debug/traces/{trace_id}",
+        "/v1/users/{user_id}/profile/diff",
+        "/v1/users/{user_id}/replays",
+        "/v1/users/{user_id}/exports",
     } <= set(paths)
 
 
 async def test_evidence_route_rejects_body_owned_identity_before_capability_check(client) -> None:
     response = await client.post(
-        "/v1/scopes/scope-1/evidence",
+        "/v1/retain",
         headers={"Authorization": "Bearer synthetic-key"},
         json={
             "tenant_id": "tenant-1",
-            "source_id": "conversation-1",
+            "user_id": "scope-1",
+            "input_type": "interaction",
             "messages": [
                 {
-                    "message_id": "m1",
+                    "learning_eligible": True,
                     "role": "user",
                     "content": "Hello",
                     "event_time": "2026-09-21T00:00:00Z",
@@ -202,13 +263,14 @@ async def test_evidence_route_rejects_body_owned_identity_before_capability_chec
 
 async def test_valid_unwired_evidence_route_fails_closed(client) -> None:
     response = await client.post(
-        "/v1/scopes/scope-1/evidence",
-        headers={"Authorization": "Bearer synthetic-key"},
+        "/v1/retain",
+        headers={"Authorization": "Bearer synthetic-key", "Idempotency-Key": "synthetic-input"},
         json={
-            "source_id": "conversation-1",
+            "user_id": "scope-1",
+            "input_type": "interaction",
             "messages": [
                 {
-                    "message_id": "m1",
+                    "learning_eligible": True,
                     "role": "user",
                     "content": "Hello",
                     "event_time": "2026-09-21T00:00:00Z",
@@ -222,7 +284,7 @@ async def test_valid_unwired_evidence_route_fails_closed(client) -> None:
 
 
 async def test_scoped_routes_require_bearer_before_parsing_content(client) -> None:
-    response = await client.post("/v1/scopes/scope-1/evidence", content=b"not-json")
+    response = await client.post("/v1/retain", content=b"not-json")
 
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "AuthenticationRequired"
@@ -230,7 +292,7 @@ async def test_scoped_routes_require_bearer_before_parsing_content(client) -> No
 
 @pytest.mark.parametrize(
     ("method", "path"),
-    [("POST", "/v1/scopes"), ("GET", "/v1/credentials")],
+    [("POST", "/v1/users"), ("GET", "/v1/credentials")],
 )
 async def test_administration_routes_require_bearer(client, method: str, path: str) -> None:
     response = await client.request(method, path, content=b"not-json")
@@ -311,14 +373,14 @@ async def test_operation_routes_delegate_with_bearer_scope_and_exact_attempt(
     client, runtime = operation_client
     headers = {"Authorization": "Bearer synthetic-key"}
 
-    fetched = await client.get("/v1/scopes/scope-1/operations/op-1", headers=headers)
-    cancelled = await client.post("/v1/scopes/scope-1/operations/op-1/cancel", headers=headers)
+    fetched = await client.get("/v1/users/scope-1/operations/op-1", headers=headers)
+    cancelled = await client.post("/v1/users/scope-1/operations/op-1/cancel", headers=headers)
     retried = await client.post(
-        "/v1/scopes/scope-1/operations/op-1/retry",
+        "/v1/users/scope-1/operations/op-1/retry",
         headers={**headers, "Idempotency-Key": "retry-1"},
     )
     reconciled = await client.post(
-        "/v1/scopes/scope-1/operations/op-1/reconcile-attempt",
+        "/v1/users/scope-1/operations/op-1/reconcile-attempt",
         headers=headers,
         json={
             "work_unit_id": "work-1",

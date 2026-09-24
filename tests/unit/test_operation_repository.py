@@ -67,6 +67,7 @@ def _operation_row(
         1,
         now,
         now,
+        {},
     )
 
 

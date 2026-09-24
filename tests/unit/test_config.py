@@ -118,7 +118,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert config.search.channel_weights == "equal"
     assert config.search.graph_seed_min_similarity == 0.3
     assert config.search.graph_seed_max == 20
-    assert config.search.relation_hops == 1
+    assert config.search.relation_hops == 2
     assert config.search.relation_candidates == 32
     assert config.search.entity_candidates_per_entity == 200
     assert config.search.entity_score_scale == 0.5

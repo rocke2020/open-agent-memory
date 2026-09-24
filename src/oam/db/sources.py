@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Protocol
 
@@ -22,7 +23,7 @@ class SourceVersionConflict(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class AcceptSource:
     source_id: str
-    source_version: int
+    source_version: int | None
     input_role: str
     resource_type: str | None
     media_type: str
@@ -39,10 +40,17 @@ class AcceptSource:
     stage: str
     generation_id: str
     attempts_remaining: int
+    expected_active_version: int | None = None
+    update_mode: str = "replace"
+    max_bytes: int | None = None
 
     def __post_init__(self) -> None:
-        if self.source_version <= 0:
+        if self.source_version is not None and self.source_version <= 0:
             raise ValueError("source_version must be positive")
+        if self.update_mode not in {"replace", "append"}:
+            raise ValueError("unsupported source update mode")
+        if self.expected_active_version is not None and self.expected_active_version <= 0:
+            raise ValueError("expected_active_version must be positive when supplied")
         if len(self.request_hash) != hashlib.sha256().digest_size:
             raise ValueError("request_hash must be a SHA-256 digest")
         if self.attempts_remaining <= 0:
@@ -143,6 +151,9 @@ class SourceRepository:
                     reused=True,
                 )
 
+            if command.source_version is None:
+                command = self._assign_revision(cursor, authority, command)
+
             accepted_seq = int(scope_row[0]) + 1
             cursor.execute(
                 "UPDATE scopes SET accepted_seq = %s WHERE tenant_id = %s AND scope_id = %s",
@@ -160,6 +171,27 @@ class SourceRepository:
                     command.resource_type,
                 ),
             )
+            cursor.execute(
+                "UPDATE sources SET active_version = %s "
+                "WHERE tenant_id = %s AND scope_id = %s AND source_id = %s "
+                "AND input_role = %s AND resource_type IS NOT DISTINCT FROM %s "
+                "AND status = 'active' "
+                "AND active_version IS NOT DISTINCT FROM %s "
+                "AND %s = COALESCE(active_version, 0) + 1 "
+                "RETURNING source_id",
+                (
+                    command.source_version,
+                    authority.tenant_id,
+                    authority.scope_id,
+                    command.source_id,
+                    command.input_role,
+                    command.resource_type,
+                    command.expected_active_version,
+                    command.source_version,
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise SourceVersionConflict(command.source_id)
             cursor.execute(
                 "UPDATE source_versions SET status = 'superseded' "
                 "WHERE tenant_id = %s AND scope_id = %s AND source_id = %s "
@@ -183,25 +215,6 @@ class SourceRepository:
                     len(command.original_bytes),
                 ),
             )
-            cursor.execute(
-                "UPDATE sources SET active_version = %s, status = 'active' "
-                "WHERE tenant_id = %s AND scope_id = %s AND source_id = %s "
-                "AND input_role = %s AND resource_type IS NOT DISTINCT FROM %s "
-                "AND status = 'active' "
-                "AND (active_version IS NULL OR active_version < %s) "
-                "RETURNING source_id",
-                (
-                    command.source_version,
-                    authority.tenant_id,
-                    authority.scope_id,
-                    command.source_id,
-                    command.input_role,
-                    command.resource_type,
-                    command.source_version,
-                ),
-            )
-            if cursor.fetchone() is None:
-                raise SourceVersionConflict(command.source_id)
             cursor.execute(
                 "INSERT INTO evidence "
                 "(tenant_id, scope_id, evidence_id, source_id, source_version, accepted_seq, "
@@ -258,6 +271,44 @@ class SourceRepository:
                 accepted_seq=accepted_seq,
                 reused=False,
             )
+
+    @staticmethod
+    def _assign_revision(cursor: Cursor, authority: AuthorizedScope, command: AcceptSource):
+        """Allocate under the existing user lock, after checking the logical retry key."""
+        cursor.execute(
+            "SELECT s.active_version,v.media_type,v.original_bytes FROM sources s "
+            "LEFT JOIN source_versions v ON "
+            "(v.tenant_id,v.scope_id,v.source_id,v.source_version)="
+            "(s.tenant_id,s.scope_id,s.source_id,s.active_version) "
+            "WHERE s.tenant_id=%s AND s.scope_id=%s AND s.source_id=%s",
+            (authority.tenant_id, authority.scope_id, command.source_id),
+        )
+        active = cursor.fetchone()
+        previous = int(active[0]) if active and active[0] is not None else None
+        content = command.original_bytes
+        if command.update_mode == "append":
+            if not active or active[1] != "text/plain" or command.media_type != "text/plain":
+                raise ValueError("append requires an existing text document")
+            content = bytes(active[2]) + content
+        if command.max_bytes is not None and len(content) > command.max_bytes:
+            raise ValueError("resulting document exceeds byte limit")
+        metadata = command.content_text
+        if command.input_role == "evidence_resource" and metadata is not None:
+            body = json.loads(metadata)
+            body.update(
+                source_version=(previous or 0) + 1,
+                expected_active_version=previous,
+                byte_length=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+            )
+            metadata = json.dumps(body, ensure_ascii=False)
+        return replace(
+            command,
+            source_version=(previous or 0) + 1,
+            expected_active_version=previous,
+            original_bytes=content,
+            content_text=metadata,
+        )
 
     def read_original(
         self,

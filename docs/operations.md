@@ -15,7 +15,7 @@ Required v0.0.1 roles are extraction, Insights, embedding, document vision, Reso
 - `oam preflight` resolves configuration, redacts secrets, and tests enabled role capabilities.
 - `oam migrate` applies versioned PostgreSQL migrations with a separate migration credential.
 - `oam api` runs the FastAPI role and bundled Inspector.
-- `oam worker` validates its distinct queue/content database roles and remains fail-closed until Step 5 installs stage processors; claim and publication ownership primitives are already implemented and tested independently.
+- `oam worker` runs source indexing with separate queue/content database roles. `--once` processes at most one queued source and exits. The long-running process bounds concurrent sources by the minimum configured task, model, provider, database-pool and Scope limits; each source's stages remain serial.
 - `oam recover-bootstrap` uses separate administrative database authority to replace a committed bootstrap key whose one-time handoff failed.
 
 ## 3. Bootstrap and Credentials
@@ -28,10 +28,10 @@ After an interrupted `committed` handoff, rerun `oam migrate` to record `recover
 
 ## 4. Limits and Failure Ownership
 
-The first supported workload limits each Resource to 20 MiB, 20 PDF pages or images, 40 megapixels per image, and 100 megapixels total; each Scope supports 100 reports and 1,000 chats in the trial profile; the deployment admits 10 simultaneous API requests. Inputs exceeding bounds fail before parsing or model dispatch.
+The first supported workload limits each Resource to 20 MiB, 20 PDF pages or images, 40 megapixels per image, and 100 megapixels total; each tenant/user pair supports 100 reports and 1,000 chats in the trial profile; the deployment admits 10 simultaneous API requests. Inputs exceeding bounds fail before parsing or model dispatch.
 
-Workers own retry classification and provider permits. Authentication/schema/refusal failures are terminal; bounded transient failures may retry under the original operation budget. Unknown remote outcomes retain their permit and budget uncertainty until an operator reconciles them. Shutdown stops new claims, renews accepted work while draining, and leaves unfinished rows recoverable.
+The current worker records compatible stage outputs and usage before dependent work and preserves completed stages after failure. Unknown model outcomes remain explicit. Shutdown stops new admission and drains complete active sources before closing the model client. The current concurrency cap is per process and whole-source draining has no fixed shutdown bound; cluster-wide permits, bounded shutdown and replica recovery remain release gates, not current guarantees.
 
 ## 5. Current Implementation Status
 
-Steps 1–4 implement checksum-locked migrations, forced-RLS schema contracts, initial administrator bootstrap, credential rotation, scope repositories and cache behavior, lost-handoff recovery, durable claims/fences, model capability probes, bounded Resource parsing, the API runtime, and static Inspector assets. The foundation has passed isolated PostgreSQL 18 and public HTTP checks recorded in [foundation evidence](foundation-evidence.md). First indexing workers, source-to-search behavior, live model-provider capability, and multi-replica recovery remain unverified or intentionally deferred to later gates.
+The core adds eligible interaction and HTML indexing, supported L1/L2 publication and fast/mid/deep direct recall to the [foundation](foundation-evidence.md). A separate API/worker probe with configured real models has exercised that core path; progressive LongMemEval evaluation is underway and has not passed. L3, full PDF/image ingestion, lifecycle/Inspector integration, deployment permits and multi-replica recovery remain later gates. The [indexing and recall design](indexing-retrieval.md) distinguishes these responsibilities and acceptance evidence.

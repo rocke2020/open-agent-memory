@@ -21,6 +21,7 @@ class ResolvedModelBinding:
     endpoint: str
     capabilities: frozenset[ModelCapability]
     credential_configured: bool
+    reasoning_effort: str | None = None
     _api_key: str | None = field(default=None, repr=False, compare=False)
 
     def redacted(self) -> dict[str, Any]:
@@ -32,6 +33,7 @@ class ResolvedModelBinding:
             "endpoint": self.endpoint,
             "capabilities": sorted(capability.value for capability in self.capabilities),
             "credential_configured": self.credential_configured,
+            "reasoning_effort": self.reasoning_effort,
         }
 
 
@@ -91,5 +93,6 @@ def resolve_model_binding(
         endpoint=endpoint,
         capabilities=binding.capabilities,
         credential_configured=api_key is not None,
+        reasoning_effort=binding.reasoning_effort,
         _api_key=api_key,
     )
