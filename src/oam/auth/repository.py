@@ -56,6 +56,8 @@ class AuthRepository:
     ) -> AuthorizedUser:
         if not user_id.strip() or not capability.strip():
             raise ValueError("user_id and capability cannot be empty")
+        if principal.role != "user" or principal.principal_id != f"user:{user_id}":
+            raise UserDenied(user_id)
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT oam_authorize_user(%s, %s, %s, %s)",

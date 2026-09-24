@@ -4,7 +4,7 @@ import httpx
 import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
-from test_core_http import ROOT, SyntheticIndexModels
+from test_core_http import ROOT, SyntheticIndexModels, use_created_user_key
 from test_core_http import core_database as core_database
 
 from oam.api.app import create_app
@@ -26,7 +26,7 @@ async def temporal_client(core_database):
             transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
         ) as client,
     ):
-        assert (await client.post("/v1/users", json={"user_id": "scope"})).status_code == 201
+        await use_created_user_key(client, "scope")
         yield client, app, config, dsn, tenant
 
 

@@ -11,11 +11,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import httpx
-from psycopg.errors import UniqueViolation
+from psycopg.errors import (
+    InsufficientPrivilege,
+    InvalidAuthorizationSpecification,
+    UniqueViolation,
+)
 from psycopg_pool import ConnectionPool
 
 from oam.auth.administration import CredentialAdministration
-from oam.auth.credentials import AuthorizedUser, PositiveCredentialCache, digest_secret
+from oam.auth.credentials import PositiveCredentialCache, digest_secret, issue_credential
 from oam.auth.repository import AuthRepository, UserDenied
 from oam.config import OAMConfig
 from oam.contracts.credentials import (
@@ -29,7 +33,6 @@ from oam.contracts.operations import ReconcileAttemptRequest
 from oam.contracts.resources import EvidenceResourceCreate, ResourceMediaType
 from oam.contracts.retain import RetainFileDocument, RetainInteraction, RetainTextDocument
 from oam.contracts.search import SearchRequest
-from oam.db.context import bind_user
 from oam.db.sources import AcceptSource, SourceRepository
 from oam.indexing.identity import index_generation
 from oam.models.runtime import RuntimeModels
@@ -141,36 +144,22 @@ class DatabaseRuntime:
         ).search(authority, request, deadline_at=request.deadline_at)
 
     def create_user(self, bearer_secret: str, user_id: str) -> dict:
-        """Create one explicitly authorized personal collection, with no third selector."""
-        with self.pool.connection() as connection, connection.transaction():
-            principal = self._auth.lookup_credential(connection, digest_secret(bearer_secret))
-            if principal is None:
-                raise AuthenticationFailed
-            if principal.role != "administrator":
-                raise AuthorizationFailed
-            authority = AuthorizedUser.from_database_grant(
-                principal, user_id=user_id, capabilities={"memory:read", "memory:append"}
-            )
-            bind_user(connection.cursor(), authority)
-            try:
+        """Create a personal collection and return its first user key after commit."""
+        issued = issue_credential()
+        credential_id = f"key_{secrets.token_hex(12)}"
+        try:
+            with self.pool.connection() as connection, connection.transaction():
                 connection.execute(
-                    "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
-                    "VALUES (%s,%s,%s,'personal','persistent')",
-                    (principal.tenant_id, user_id, user_id),
+                    "SELECT oam_create_user_with_key(%s,%s,%s,%s)",
+                    (digest_secret(bearer_secret), user_id, credential_id, issued.digest),
                 )
-            except UniqueViolation as exc:
-                raise ValueError("user_id already exists") from exc
-            connection.execute(
-                "INSERT INTO grants(tenant_id,user_id,principal_id,capabilities) "
-                "VALUES (%s,%s,%s,%s)",
-                (
-                    principal.tenant_id,
-                    user_id,
-                    principal.principal_id,
-                    ["memory:read", "memory:append", "operation:reconcile"],
-                ),
-            )
-        return {"user_id": user_id}
+        except InvalidAuthorizationSpecification as exc:
+            raise AuthenticationFailed from exc
+        except InsufficientPrivilege as exc:
+            raise AuthorizationFailed from exc
+        except UniqueViolation as exc:
+            raise ValueError("user_id already exists") from exc
+        return {"user_id": user_id, "credential_id": credential_id, "secret": issued.secret}
 
     def retain(
         self,

@@ -19,6 +19,13 @@ ROOT = Path(__file__).parents[2]
 pytestmark = pytest.mark.integration
 
 
+async def use_created_user_key(client: httpx.AsyncClient, user_id: str) -> httpx.Response:
+    created = await client.post("/v1/users", json={"user_id": user_id})
+    assert created.status_code == 201, created.text
+    client.headers["Authorization"] = f"Bearer {created.json()['secret']}"
+    return created
+
+
 @pytest.fixture
 def core_database(monkeypatch):
     dsn = os.environ.get("OAM_TEST_POSTGRES_DSN")
@@ -45,6 +52,55 @@ def core_database(monkeypatch):
         )
     monkeypatch.setenv("OAM_API_DSN", make_conninfo(dsn, options="-c role=oam_api"))
     return dsn, tenant, {"Authorization": f"Bearer {secret}"}
+
+
+async def test_root_creates_user_key_but_cannot_read_personal_operations(core_database):
+    _, _, root_headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=root_headers
+        ) as client,
+    ):
+        created = await client.post("/v1/users", json={"user_id": "alice"})
+        assert created.status_code == 201, created.text
+        alice_headers = {"Authorization": f"Bearer {created.json()['secret']}"}
+        root_write = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "alice",
+                "input_type": "document",
+                "document_id": "root-attempt",
+                "update_mode": "replace",
+                "text": "must not be accepted",
+            },
+            headers={"Idempotency-Key": "root-attempt"},
+        )
+        assert root_write.status_code == 404
+        retained = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "alice",
+                "input_type": "document",
+                "document_id": "private",
+                "update_mode": "replace",
+                "text": "Alice's private document",
+            },
+            headers={**alice_headers, "Idempotency-Key": "alice-private"},
+        )
+        assert retained.status_code == 202, retained.text
+        route = f"/v1/users/alice/operations/{retained.json()['operation_id']}"
+        assert (await client.get(route)).status_code == 404
+        assert (
+            await client.post("/v1/recall", json={"user_id": "alice", "query": "private"})
+        ).status_code == 404
+        assert (await client.get(route, headers=alice_headers)).status_code == 200
+        bob = await client.post("/v1/users", json={"user_id": "bob"})
+        assert bob.status_code == 201, bob.text
+        assert (
+            await client.get(route, headers={"Authorization": f"Bearer {bob.json()['secret']}"})
+        ).status_code == 404
 
 
 async def test_public_accept_commits_exact_mixed_eligibility_input_and_reuses_receipt(
@@ -76,8 +132,7 @@ async def test_public_accept_commits_exact_mixed_eligibility_input_and_reuses_re
             transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
         ) as client,
     ):
-        scope = await client.post("/v1/users", json={"user_id": "scope"})
-        assert scope.status_code == 201, scope.text
+        await use_created_user_key(client, "scope")
         first = await client.post("/v1/retain", json=body, headers={"Idempotency-Key": "input-1"})
         assert first.status_code == 202, first.text
         second = await client.post("/v1/retain", json=body, headers={"Idempotency-Key": "input-1"})
@@ -217,7 +272,7 @@ async def test_html_upload_is_searchable_evidence_without_learned_facts(core_dat
             transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
         ) as client,
     ):
-        assert (await client.post("/v1/users", json={"user_id": "scope"})).status_code == 201
+        await use_created_user_key(client, "scope")
         uploaded = await client.post(
             "/v1/retain",
             headers={"Idempotency-Key": "report"},
@@ -301,7 +356,7 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
             transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
         ) as client,
     ):
-        assert (await client.post("/v1/users", json={"user_id": "scope"})).status_code == 201
+        await use_created_user_key(client, "scope")
         receipt = await client.post("/v1/retain", json=body, headers={"Idempotency-Key": "chat"})
         assert receipt.status_code == 202
         assert (

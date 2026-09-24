@@ -2,7 +2,7 @@
 
 ## Overview
 
-HTTP/OpenAPI is the only required v0.0.1 integration surface. A credential determines the tenant; an explicitly authorized `user_id` identifies that user's personal memory collection. Retain accepts interactions or documents, and recall returns cited context without generating an answer. No independent collection selector, browser-only policy or Python SDK is required. The core routes below have PostgreSQL-backed functional coverage and a separate-process real-model probe; that does not establish benchmark performance or complete-release readiness.
+HTTP/OpenAPI is the only required v0.0.1 integration surface. The implemented bearer-key mode derives the tenant from the credential and accepts personal content only when a user key is bound to the requested `user_id`; an administrator key cannot select a user for content access. Retain accepts interactions or documents, and recall returns cited context without generating an answer. No independent collection selector, browser-only policy or Python SDK is required. The core routes below have PostgreSQL-backed functional coverage; other authentication modes and complete-release readiness remain separate work.
 
 ## 1. Global Routes
 
@@ -15,17 +15,17 @@ Global routes expose service status and configuration without returning retained
 
 ## 2. Administration
 
-`POST /v1/users` accepts `{"user_id":"lin"}` from a tenant administrator and creates the personal collection with explicit creator grants. Administrative authority alone never grants access to every user's content. The same credential-derived tenant and user grant govern retain, recall and operation inspection.
+`POST /v1/users` accepts `{"user_id":"lin"}` from a tenant administrator and atomically creates the personal collection, bound user principal, grant and first user credential. It returns `user_id`, `credential_id` and the secret once after commit. The administrator gets no personal-content grant; old administrator grants remain stored but cannot authorize content under the current SQL function. The user's key governs retain, recall and operation inspection for that user only.
 
 Credential administration issues additional opaque credentials, lists credential metadata, and revokes credentials. Issuance returns each secret once; stored records contain only the SHA-256 digest and immutable tenant/principal binding.
 
-The implemented credential routes are `GET /v1/credentials`, `POST /v1/credentials`, and `DELETE /v1/credentials/{credential_id}`. Issuance accepts an existing same-tenant `principal_id` and optional timezone-aware `expires_at`, and returns the new secret only after commit. Listing accepts `after` and a positive `limit` up to the configured `auth.credential_page_size`, returning metadata and `next_after`. Revocation is idempotent, returns `revocation_effective_by`, and evicts the local cache after commit; unknown and foreign credential IDs have the same response. Every administration request verifies the current credential directly in PostgreSQL.
+The implemented credential routes are `GET /v1/credentials`, `POST /v1/credentials`, and `DELETE /v1/credentials/{credential_id}`. Issuance accepts exactly one of a same-tenant `principal_id` or `user_id`, plus optional timezone-aware `expires_at`; `user_id` issues a sibling key for that existing user. It returns the new secret only after commit. Listing accepts `after` and a positive `limit` up to the configured `auth.credential_page_size`, returning metadata and `next_after`. Revocation is idempotent, returns `revocation_effective_by`, and evicts the local cache after commit; unknown and foreign credential IDs have the same response. Every administration request verifies the current credential directly in PostgreSQL.
 
 ## 3. Retain and Recall
 
 All content requests use `Authorization: Bearer <opaque-key>`. Retain requires an `Idempotency-Key` identifying the logical request; retry with the same key and unchanged input to reuse its receipt instead of duplicating an interaction or append.
 
-Retain verifies the credential before consuming the request body. `api.max_request_bytes` bounds the complete encoded retain body, including JSON escaping or multipart headers/metadata, separately from the interaction-content and Resource-original limits. Its canonical default is 24 MiB and its effective value is published by capabilities. OAM counts actual incoming bytes even without `Content-Length`; an oversized body returns `413 RequestTooLarge` before further buffering/parsing, and partial multipart files are closed. User-specific grants and semantic content limits are checked after the bounded body identifies its user and input type, before accepting work or making model calls.
+Retain verifies the credential before consuming the request body. `api.max_request_bytes` bounds the complete encoded retain body, including JSON escaping or multipart headers/metadata, separately from the interaction-content and Resource-original limits. Its canonical default is 24 MiB and its effective value is published by capabilities. OAM counts actual incoming bytes even without `Content-Length`; an oversized body returns `413 RequestTooLarge` before further buffering/parsing, and partial multipart files are closed. The credential's fixed user identity, user grant and semantic content limits are checked after the bounded body identifies its user and input type, before accepting work or making model calls.
 
 | Route | Contract |
 |---|---|

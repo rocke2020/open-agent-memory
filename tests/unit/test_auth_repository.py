@@ -57,8 +57,8 @@ def test_scope_grant_is_checked_with_credential_derived_tenant() -> None:
     principal = AuthenticatedPrincipal(
         credential_id="key-1",
         tenant_id="tenant-1",
-        principal_id="principal-1",
-        role="writer",
+        principal_id="user:scope-1",
+        role="user",
         expires_at=None,
     )
     connection = Connection((True,))
@@ -75,7 +75,7 @@ def test_scope_grant_is_checked_with_credential_derived_tenant() -> None:
     assert authority.capabilities == frozenset({"memory:append"})
     assert connection.cursor_value.calls[0][1] == (
         "tenant-1",
-        "principal-1",
+        "user:scope-1",
         "scope-1",
         "memory:append",
     )
@@ -96,4 +96,34 @@ def test_denied_scope_grant_does_not_construct_authority() -> None:
             principal,
             user_id="scope-foreign",
             capability="memory:read",
+        )
+
+
+def test_administrator_grant_cannot_authorize_personal_content() -> None:
+    principal = AuthenticatedPrincipal(
+        credential_id="root-key",
+        tenant_id="tenant-1",
+        principal_id="root",
+        role="administrator",
+        expires_at=None,
+    )
+
+    with pytest.raises(repository.UserDenied):
+        repository.AuthRepository().authorize_user(
+            Connection((True,)), principal, user_id="alice", capability="memory:read"
+        )
+
+
+def test_user_grant_cannot_authorize_another_user() -> None:
+    principal = AuthenticatedPrincipal(
+        credential_id="alice-key",
+        tenant_id="tenant-1",
+        principal_id="user:alice",
+        role="user",
+        expires_at=None,
+    )
+
+    with pytest.raises(repository.UserDenied):
+        repository.AuthRepository().authorize_user(
+            Connection((True,)), principal, user_id="bob", capability="memory:read"
         )

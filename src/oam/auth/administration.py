@@ -88,13 +88,14 @@ class CredentialAdministration:
     ) -> CredentialIssuedResponse:
         issued = issue_credential()
         credential_id = f"key_{secrets.token_hex(12)}"
+        principal_id = request.principal_id or f"user:{request.user_id}"
         with _administration_errors(), connection.cursor() as cursor:
             cursor.execute(
                 "SELECT credential_id, principal_id, state, expires_at, revoked_at, created_at "
                 "FROM public.oam_issue_credential(%s, %s, %s, %s, %s)",
                 (
                     actor_secret_digest,
-                    request.principal_id,
+                    principal_id,
                     credential_id,
                     issued.digest,
                     request.expires_at,

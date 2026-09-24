@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import psycopg
 import pytest
-from test_core_http import ROOT
+from test_core_http import ROOT, use_created_user_key
 from test_core_http import core_database as core_database
 
 from oam.api.app import create_app
@@ -25,8 +25,7 @@ async def retain_client(core_database):
             headers=headers,
         ) as client,
     ):
-        created = await client.post("/v1/users", json={"user_id": "lin"})
-        assert created.status_code == 201, created.text
+        await use_created_user_key(client, "lin")
         yield client, dsn, tenant
 
 

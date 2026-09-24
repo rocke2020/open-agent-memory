@@ -211,3 +211,42 @@ def test_database_functions_reject_nonadministrators_and_caller_tenant_spoofing(
     connection.execute("SET LOCAL ROLE oam_queue")
     with pytest.raises(psycopg.errors.InsufficientPrivilege), connection.transaction():
         connection.execute("SELECT * FROM oam_list_credentials(%s, 50, NULL)", (secrets["admin"],))
+
+
+def test_sql_user_authorization_rejects_root_and_cross_user_grants(credentials_database):
+    connection, tenant, _, _ = credentials_database
+    connection.execute("RESET ROLE")
+    for user_id in ("alice", "bob"):
+        connection.execute(
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
+            "VALUES (%s,%s,%s,'personal','persistent')",
+            (tenant, user_id, user_id),
+        )
+    connection.execute(
+        "INSERT INTO principals(tenant_id,principal_id,role,state) "
+        "VALUES (%s,'user:alice','user','active')",
+        (tenant,),
+    )
+    for user_id, principal_id in (
+        ("alice", "admin"),
+        ("alice", "user:alice"),
+        ("bob", "user:alice"),
+    ):
+        connection.execute(
+            "INSERT INTO grants(tenant_id,user_id,principal_id,capabilities) "
+            "VALUES (%s,%s,%s,ARRAY['memory:read'])",
+            (tenant, user_id, principal_id),
+        )
+    connection.execute("SET LOCAL ROLE oam_api")
+    allowed = [
+        connection.execute(
+            "SELECT oam_authorize_user(%s,%s,%s,'memory:read')",
+            (tenant, principal_id, user_id),
+        ).fetchone()[0]
+        for principal_id, user_id in (
+            ("admin", "alice"),
+            ("user:alice", "alice"),
+            ("user:alice", "bob"),
+        )
+    ]
+    assert allowed == [False, True, False]

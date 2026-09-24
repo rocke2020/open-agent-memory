@@ -14,7 +14,7 @@ The repository is implementing v0.0.1. The user-qualified retain/recall API, ser
 - **L3 Profile:** explicitly requested, read-only `main`, `preferences`, and `experiences` projections; unchanged inputs reuse the prior Profile with zero generation calls.
 - **Evidence Resources:** retained text/HTML/PDF/image originals, detailed passages, locators, and abstracts that remain searchable evidence and never automatically become L1–L3.
 
-One credential-derived tenant and one authorized `user_id` identify a personal memory collection. An administrator creates it with `POST /v1/users`; the host sends interactions or documents to `POST /v1/retain` and queries `POST /v1/recall`. Interactions need no caller-managed source/message IDs. Documents use a stable `document_id` with explicit `replace` or text-only `append`; OAM allocates revisions. The [HTTP API](docs/api.md) documents JSON and multipart examples, explicit grants, retry keys and operation readiness.
+One credential-derived tenant and one key-bound `user_id` identify a personal memory collection. An administrator creates it with `POST /v1/users` and receives that user's first key once; the host uses the user key for `POST /v1/retain` and `POST /v1/recall`. The administrator key cannot read or write personal content directly. Interactions need no caller-managed source/message IDs. Documents use a stable `document_id` with explicit `replace` or text-only `append`; OAM allocates revisions. The [HTTP API](docs/api.md) documents JSON and multipart examples, user-key rotation, retry keys and operation readiness.
 
 ## Architecture
 

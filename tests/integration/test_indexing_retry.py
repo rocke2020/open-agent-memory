@@ -6,7 +6,7 @@ import httpx
 import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
-from test_core_http import ROOT, SyntheticIndexModels
+from test_core_http import ROOT, SyntheticIndexModels, use_created_user_key
 from test_core_http import core_database as core_database
 
 from oam.api.app import create_app
@@ -79,7 +79,7 @@ async def accepted_source(core_database):
             headers=headers,
         ) as client,
     ):
-        assert (await client.post("/v1/users", json={"user_id": "lin"})).status_code == 201
+        await use_created_user_key(client, "lin")
         response = await client.post(
             "/v1/retain",
             headers={"Idempotency-Key": "chat"},
