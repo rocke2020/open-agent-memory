@@ -2,7 +2,7 @@
 
 ## Overview
 
-HTTP/OpenAPI is the only required v0.0.1 integration surface. The implemented bearer-key mode derives the tenant from the credential and accepts personal content only when a user key is bound to the requested `user_id`; an administrator key cannot select a user for content access. Retain accepts interactions or documents, and recall returns cited context without generating an answer. No independent collection selector, browser-only policy or Python SDK is required. The core routes below have PostgreSQL-backed functional coverage; other authentication modes and complete-release readiness remain separate work.
+HTTP/OpenAPI is the only required v0.0.1 integration surface. The implemented authentication modes are `dev`, `api_key` and `trusted`; OIDC and LDAP are not available. In `api_key` mode, a user key binds the tenant and `user_id`, and an administrator key cannot select personal content. Retain accepts interactions or documents, and recall returns cited context without generating an answer. No independent collection selector, browser-only policy or Python SDK is required. The core routes below have PostgreSQL-backed functional coverage; complete-release readiness remains separate work.
 
 ## 1. Global Routes
 
@@ -15,17 +15,21 @@ Global routes expose service status and configuration without returning retained
 
 ## 2. Administration
 
+Mode selection belongs to `auth.mode` in the operator configuration. When it is omitted, an active root key selects `api_key`; a fresh rootless database selects loopback-only `dev` and records that selection for restarts. An incomplete root-key bootstrap or an existing keyed database without an active root fails startup. `trusted` must be selected explicitly. `dev` has no authentication or personal privacy boundary and disables key-administration routes. In `trusted` mode, a local data request supplies `X-OAM-Tenant` and `X-OAM-User` without a key; a nonlocal data request also supplies a root key as `Authorization: Bearer <root-key>`. The asserted user must match a path or body `user_id`, and an unknown or disabled tenant cannot be created by assertion. The nonlocal gateway must authenticate callers, replace client-supplied identity headers and block direct access to the data listener. `X-OAM-Role` accepts `user` or `admin` only when the request also carries a valid root key; it cannot assert `root` or bypass the root-key requirement on admin routes.
+
 `POST /v1/users` accepts `{"user_id":"lin"}` from a tenant administrator and atomically creates the personal collection, bound user principal, grant and first user credential. It returns `user_id`, `credential_id` and the secret once after commit. The administrator gets no personal-content grant; old administrator grants remain stored but cannot authorize content under the current SQL function. The user's key governs retain, recall and operation inspection for that user only.
 
 Credential administration issues additional opaque credentials, lists credential metadata, and revokes credentials. Issuance returns each secret once; stored records contain only the SHA-256 digest and immutable tenant/principal binding.
+
+Direct root-key denial is not secrecy from the root operator: an operator who issues and receives a user key can authenticate with that user key.
 
 The implemented credential routes are `GET /v1/credentials`, `POST /v1/credentials`, and `DELETE /v1/credentials/{credential_id}`. Issuance accepts exactly one of a same-tenant `principal_id` or `user_id`, plus optional timezone-aware `expires_at`; `user_id` issues a sibling key for that existing user. It returns the new secret only after commit. Listing accepts `after` and a positive `limit` up to the configured `auth.credential_page_size`, returning metadata and `next_after`. Revocation is idempotent, returns `revocation_effective_by`, and evicts the local cache after commit; unknown and foreign credential IDs have the same response. Every administration request verifies the current credential directly in PostgreSQL.
 
 ## 3. Retain and Recall
 
-All content requests use `Authorization: Bearer <opaque-key>`. Retain requires an `Idempotency-Key` identifying the logical request; retry with the same key and unchanged input to reuse its receipt instead of duplicating an interaction or append.
+`api_key` content requests use `Authorization: Bearer <user-key>`; `trusted` uses asserted tenant/user headers and adds a root key on nonlocal binds; `dev` needs no key on loopback. Retain requires an `Idempotency-Key` identifying the logical request; retry with the same key and unchanged input to reuse its receipt instead of duplicating an interaction or append.
 
-Retain verifies the credential before consuming the request body. `api.max_request_bytes` bounds the complete encoded retain body, including JSON escaping or multipart headers/metadata, separately from the interaction-content and Resource-original limits. Its canonical default is 24 MiB and its effective value is published by capabilities. OAM counts actual incoming bytes even without `Content-Length`; an oversized body returns `413 RequestTooLarge` before further buffering/parsing, and partial multipart files are closed. The credential's fixed user identity, user grant and semantic content limits are checked after the bounded body identifies its user and input type, before accepting work or making model calls.
+Retain resolves the mode-specific identity before consuming the request body. `api.max_request_bytes` bounds the complete encoded retain body, including JSON escaping or multipart headers/metadata, separately from the interaction-content and Resource-original limits. Its canonical default is 24 MiB and its effective value is published by capabilities. OAM counts actual incoming bytes even without `Content-Length`; an oversized body returns `413 RequestTooLarge` before further buffering/parsing, and partial multipart files are closed. The identity's user binding, grant and semantic content limits are checked after the bounded body identifies its user and input type, before accepting work or making model calls.
 
 | Route | Contract |
 |---|---|

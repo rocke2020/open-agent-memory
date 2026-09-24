@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from oam.api.app import create_app
 
-        uvicorn.run(create_app(args.config), host=args.host, port=args.port)
+        uvicorn.run(create_app(args.config, bind_host=args.host), host=args.host, port=args.port)
         return 0
     if args.command == "migrate":
         from oam.db.migrations import migrate_from_environment

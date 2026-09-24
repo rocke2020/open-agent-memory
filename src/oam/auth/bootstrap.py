@@ -12,7 +12,7 @@ from pathlib import Path
 
 import psycopg
 
-from oam.auth.credentials import issue_credential
+from oam.auth.credentials import digest_secret, issue_credential
 from oam.config import ConfigurationError, load_config
 
 
@@ -90,8 +90,16 @@ def bootstrap_from_environment(config_path: str | Path) -> int:
         print(str(error), file=sys.stderr)
         return 2
     output = os.environ.get("OAM_BOOTSTRAP_OUTPUT")
+    root_key_env = load_config(config_path).config.auth.root_key_env
+    provided_secret = os.environ.get(root_key_env)
+    if provided_secret == "":
+        print(f"{root_key_env} cannot be empty", file=sys.stderr)
+        return 2
     try:
-        created = initialize_bootstrap(dsn, Path(output) if output else None)
+        if provided_secret is None:
+            created = initialize_bootstrap(dsn, Path(output) if output else None)
+        else:
+            created = initialize_bootstrap(dsn, provided_secret=provided_secret)
     except (OSError, psycopg.Error, BootstrapTransitionError):
         print(
             "bootstrap failed; inspect OAM_BOOTSTRAP_OUTPUT and bootstrap recovery state",
@@ -99,11 +107,16 @@ def bootstrap_from_environment(config_path: str | Path) -> int:
         )
         return 1
     if created:
-        print(f"bootstrap credential written to {output}")
+        if provided_secret is None:
+            print(f"bootstrap credential written to {output}")
+        else:
+            print("operator-provided bootstrap credential configured")
     return 0
 
 
-def initialize_bootstrap(dsn: str, output_path: Path | None = None) -> bool:
+def initialize_bootstrap(
+    dsn: str, output_path: Path | None = None, *, provided_secret: str | None = None
+) -> bool:
     """Commit one default administrator, then hand off its secret exactly once."""
     with _locked_connection(dsn) as connection:
         row = connection.execute(
@@ -113,17 +126,36 @@ def initialize_bootstrap(dsn: str, output_path: Path | None = None) -> bool:
             raise BootstrapTransitionError("bootstrap state is missing")
         phase = BootstrapPhase(row[0])
         if phase is BootstrapPhase.HANDED_OFF:
+            if provided_secret is not None and not _active_root_digest(
+                connection, digest_secret(provided_secret)
+            ):
+                raise BootstrapTransitionError("configured root key is not active")
             return False
         if phase is BootstrapPhase.COMMITTED:
             _require_recovery(connection)
             raise BootstrapTransitionError("interrupted bootstrap requires operator recovery")
         if phase is BootstrapPhase.RECOVERY_REQUIRED:
             raise BootstrapTransitionError("bootstrap requires operator recovery")
-        if output_path is None:
+        if provided_secret is not None and _active_root_digest(
+            connection, digest_secret(provided_secret)
+        ):
+            return False
+        if (
+            provided_secret is not None
+            and connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM credentials c JOIN principals p "
+                "ON (p.tenant_id,p.principal_id)=(c.tenant_id,c.principal_id) "
+                "WHERE p.role='administrator')"
+            ).fetchone()[0]
+        ):
+            raise BootstrapTransitionError("configured root key does not match existing root")
+        if provided_secret is not None and output_path is not None:
+            raise BootstrapTransitionError("choose a supplied root key or an output destination")
+        if provided_secret is None and output_path is None:
             raise BootstrapTransitionError("bootstrap requires an explicit operator destination")
-        descriptor = _reserve_destination(output_path)
+        descriptor = _reserve_destination(output_path) if output_path is not None else None
         try:
-            issued = issue_credential()
+            secret = provided_secret if provided_secret is not None else issue_credential().secret
             tenant_id = f"tenant_{secrets.token_hex(12)}"
             principal_id = f"principal_{secrets.token_hex(12)}"
             credential_id = f"key_{secrets.token_hex(12)}"
@@ -140,18 +172,44 @@ def initialize_bootstrap(dsn: str, output_path: Path | None = None) -> bool:
                     "INSERT INTO credentials "
                     "(tenant_id, credential_id, principal_id, secret_digest, state) "
                     "VALUES (%s, %s, %s, %s, 'active')",
-                    (tenant_id, credential_id, principal_id, issued.digest),
+                    (tenant_id, credential_id, principal_id, digest_secret(secret)),
                 )
                 cursor.execute(
-                    "UPDATE bootstrap_state SET phase = 'committed', winner_id = %s, "
+                    "UPDATE bootstrap_state SET phase = %s, winner_id = %s, "
                     "tenant_id = %s, principal_id = %s, credential_id = %s, "
-                    "committed_at = clock_timestamp() WHERE singleton = true",
-                    (secrets.token_hex(16), tenant_id, principal_id, credential_id),
+                    "committed_at = clock_timestamp(), "
+                    "handed_off_at = CASE WHEN %s THEN clock_timestamp() ELSE NULL END "
+                    "WHERE singleton = true",
+                    (
+                        "handed_off" if provided_secret is not None else "committed",
+                        secrets.token_hex(16),
+                        tenant_id,
+                        principal_id,
+                        credential_id,
+                        provided_secret is not None,
+                    ),
                 )
-            _handoff(connection, descriptor, issued.secret)
+            if descriptor is not None:
+                _handoff(connection, descriptor, secret)
         finally:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
     return True
+
+
+def _active_root_digest(connection: psycopg.Connection, digest: bytes) -> bool:
+    return (
+        connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM credentials c JOIN principals p "
+            "ON (p.tenant_id,p.principal_id)=(c.tenant_id,c.principal_id) "
+            "JOIN tenants t ON t.tenant_id=c.tenant_id "
+            "WHERE c.secret_digest=%s AND c.state='active' "
+            "AND (c.expires_at IS NULL OR c.expires_at > statement_timestamp()) "
+            "AND p.state='active' AND p.role='administrator' AND t.state='active')",
+            (digest,),
+        ).fetchone()[0]
+        is True
+    )
 
 
 def recover_bootstrap_from_environment(config_path: str | Path) -> int:

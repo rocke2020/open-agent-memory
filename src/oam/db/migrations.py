@@ -113,6 +113,16 @@ def migrate_from_environment(config_path: str | Path) -> int:
             file=sys.stderr,
         )
         return 2
+    configured_root = os.environ.get(resolved.config.auth.root_key_env)
+    if configured_root == "":
+        print(f"{resolved.config.auth.root_key_env} cannot be empty", file=sys.stderr)
+        return 2
+    if resolved.config.auth.mode == "dev" and configured_root is not None:
+        print("dev authentication cannot use a configured root key", file=sys.stderr)
+        return 2
+    if configured_root is not None and os.environ.get("OAM_BOOTSTRAP_OUTPUT"):
+        print("choose a supplied root key or an output destination", file=sys.stderr)
+        return 2
     try:
         apply_migrations(
             dsn,
@@ -124,4 +134,39 @@ def migrate_from_environment(config_path: str | Path) -> int:
         return 1
     from oam.auth.bootstrap import bootstrap_from_environment
 
+    if configured_root is None and (
+        resolved.config.auth.mode == "dev"
+        or (
+            resolved.config.auth.mode in (None, "trusted")
+            and not os.environ.get("OAM_BOOTSTRAP_OUTPUT")
+        )
+    ):
+        with psycopg.connect(dsn) as connection:
+            phase = connection.execute(
+                "SELECT phase FROM bootstrap_state WHERE singleton = true"
+            ).fetchone()[0]
+            has_credentials = connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM credentials)"
+            ).fetchone()[0]
+            if phase == "uninitialized" and (
+                resolved.config.auth.mode == "dev" or not has_credentials
+            ):
+                connection.execute(
+                    "INSERT INTO tenants(tenant_id,state) VALUES ('default','active') "
+                    "ON CONFLICT (tenant_id) DO NOTHING"
+                )
+                return 0
+            if phase == "handed_off" or (phase == "uninitialized" and has_credentials):
+                has_active_root = connection.execute(
+                    "SELECT EXISTS(SELECT 1 FROM credentials c JOIN principals p "
+                    "ON (p.tenant_id,p.principal_id)=(c.tenant_id,c.principal_id) "
+                    "JOIN tenants t ON t.tenant_id=c.tenant_id "
+                    "WHERE c.state='active' AND p.state='active' "
+                    "AND p.role='administrator' AND t.state='active' "
+                    "AND (c.expires_at IS NULL OR c.expires_at > statement_timestamp()))"
+                ).fetchone()[0]
+                if has_active_root:
+                    return 0
+                print("keyed database has no active root credential", file=sys.stderr)
+                return 1
     return bootstrap_from_environment(config_path)

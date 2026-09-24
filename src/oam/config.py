@@ -183,6 +183,8 @@ class DatabaseConfig(FrozenModel):
 
 
 class AuthConfig(FrozenModel):
+    mode: Literal["dev", "api_key", "trusted"] | None
+    root_key_env: str = Field(min_length=1)
     cache_ttl_seconds: PositiveInt
     cache_max_entries: PositiveInt
     credential_page_size: PositiveInt

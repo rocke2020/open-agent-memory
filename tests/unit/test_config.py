@@ -67,6 +67,25 @@ def test_optional_reranker_and_planner_may_be_unbound(tmp_path: Path) -> None:
     assert resolved.config.models.roles.planner is None
 
 
+@pytest.mark.parametrize("mode", ["dev", "api_key", "trusted"])
+def test_first_release_auth_mode_is_selected_from_operator_config(
+    tmp_path: Path, mode: str
+) -> None:
+    path = tmp_path / "oam.yaml"
+    path.write_text(f"auth:\n  mode: {mode}\n", encoding="utf-8")
+
+    assert load_config(path).config.auth.mode == mode
+
+
+@pytest.mark.parametrize("mode", ["oidc", "ldap", "unknown"])
+def test_unimplemented_auth_modes_fail_configuration(tmp_path: Path, mode: str) -> None:
+    path = tmp_path / "oam.yaml"
+    path.write_text(f"auth:\n  mode: {mode}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError):
+        load_config(path)
+
+
 def test_unknown_configuration_keys_fail_closed(tmp_path: Path) -> None:
     path = tmp_path / "oam.yaml"
     path.write_text("models:\n  provider: hidden-default\n", encoding="utf-8")

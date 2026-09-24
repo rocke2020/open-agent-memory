@@ -121,6 +121,8 @@ database:
   worker_pool_max: 6
 
 auth:
+  mode: null
+  root_key_env: OAM_ROOT_API_KEY
   cache_ttl_seconds: 30
   cache_max_entries: 4096
   credential_page_size: 50

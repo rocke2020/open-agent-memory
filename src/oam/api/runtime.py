@@ -19,9 +19,15 @@ from psycopg.errors import (
 from psycopg_pool import ConnectionPool
 
 from oam.auth.administration import CredentialAdministration
-from oam.auth.credentials import PositiveCredentialCache, digest_secret, issue_credential
+from oam.auth.credentials import (
+    AuthenticatedPrincipal,
+    PositiveCredentialCache,
+    digest_secret,
+    issue_credential,
+)
+from oam.auth.modes import AssertedIdentity, RequestActor
 from oam.auth.repository import AuthRepository, UserDenied
-from oam.config import OAMConfig
+from oam.config import ConfigurationError, OAMConfig
 from oam.contracts.credentials import (
     CredentialIssuedResponse,
     CredentialIssueRequest,
@@ -40,7 +46,7 @@ from oam.operations.repository import OperationNotFound, OperationRecord, Operat
 
 
 class AuthenticationFailed(PermissionError):
-    """The supplied opaque bearer credential is not currently valid."""
+    """The supplied request credential is not currently valid."""
 
 
 class AuthorizationFailed(PermissionError):
@@ -48,27 +54,25 @@ class AuthorizationFailed(PermissionError):
 
 
 class APIRuntime(Protocol):
-    def authenticate(self, bearer_secret: str) -> None: ...
+    def authenticate(self, actor: RequestActor) -> None: ...
 
     def list_credentials(
-        self, bearer_secret: str, *, limit: int, after: str | None
+        self, actor: str, *, limit: int, after: str | None
     ) -> CredentialListResponse: ...
 
     def issue_credential(
-        self, bearer_secret: str, request: CredentialIssueRequest
+        self, actor: str, request: CredentialIssueRequest
     ) -> CredentialIssuedResponse: ...
 
-    def revoke_credential(
-        self, bearer_secret: str, credential_id: str
-    ) -> CredentialRevokedResponse: ...
+    def revoke_credential(self, actor: str, credential_id: str) -> CredentialRevokedResponse: ...
 
-    def get(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord: ...
+    def get(self, actor: RequestActor, user_id: str, operation_id: str) -> OperationRecord: ...
 
-    def cancel(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord: ...
+    def cancel(self, actor: RequestActor, user_id: str, operation_id: str) -> OperationRecord: ...
 
     def retry(
         self,
-        bearer_secret: str,
+        actor: RequestActor,
         user_id: str,
         operation_id: str,
         idempotency_key: str,
@@ -76,7 +80,7 @@ class APIRuntime(Protocol):
 
     def reconcile(
         self,
-        bearer_secret: str,
+        actor: RequestActor,
         user_id: str,
         operation_id: str,
         request: ReconcileAttemptRequest,
@@ -126,16 +130,34 @@ class DatabaseRuntime:
         self.pool.close()
         self._http.close()
 
-    def authenticate(self, bearer_secret: str) -> None:
+    def choose_auto_auth_mode(self) -> str:
+        with self.pool.connection() as connection:
+            row = connection.execute("SELECT oam_choose_auto_auth_mode()").fetchone()
+        if row is None or row[0] not in ("api_key", "dev"):
+            raise ConfigurationError(
+                "automatic authentication mode is unavailable for this database"
+            )
+        return row[0]
+
+    def has_active_root(self) -> bool:
+        with self.pool.connection() as connection:
+            return connection.execute("SELECT oam_has_active_root()").fetchone()[0] is True
+
+    def has_configured_root(self, secret: str) -> bool:
+        with self.pool.connection() as connection:
+            principal = self._auth.lookup_credential(connection, digest_secret(secret))
+        return principal is not None and principal.role == "administrator"
+
+    def authenticate(self, actor: RequestActor) -> None:
         """Reject invalid credentials before reading a retained original."""
         with self.pool.connection() as connection:
-            self._authenticate(connection, bearer_secret)
+            self._authenticate(connection, actor)
 
-    def search(self, bearer_secret: str, user_id: str, request: SearchRequest) -> dict:
+    def search(self, actor: RequestActor, user_id: str, request: SearchRequest) -> dict:
         from oam.retrieval.service import RecallService
 
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, user_id, "memory:read")
+            authority = self._authorize(connection, actor, user_id, "memory:read")
         return RecallService(
             self.config,
             self.pool,
@@ -143,7 +165,7 @@ class DatabaseRuntime:
             generation_id=index_generation(self.config, os.environ),
         ).search(authority, request, deadline_at=request.deadline_at)
 
-    def create_user(self, bearer_secret: str, user_id: str) -> dict:
+    def create_user(self, actor: str, user_id: str) -> dict:
         """Create a personal collection and return its first user key after commit."""
         issued = issue_credential()
         credential_id = f"key_{secrets.token_hex(12)}"
@@ -151,7 +173,7 @@ class DatabaseRuntime:
             with self.pool.connection() as connection, connection.transaction():
                 connection.execute(
                     "SELECT oam_create_user_with_key(%s,%s,%s,%s)",
-                    (digest_secret(bearer_secret), user_id, credential_id, issued.digest),
+                    (digest_secret(actor), user_id, credential_id, issued.digest),
                 )
         except InvalidAuthorizationSpecification as exc:
             raise AuthenticationFailed from exc
@@ -163,7 +185,7 @@ class DatabaseRuntime:
 
     def retain(
         self,
-        bearer_secret: str,
+        actor: RequestActor,
         body,
         idempotency_key: str,
         *,
@@ -241,7 +263,7 @@ class DatabaseRuntime:
             )
             max_bytes = self.config.resource.max_bytes
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, body.user_id, "memory:append")
+            authority = self._authorize(connection, actor, body.user_id, "memory:append")
             receipt = SourceRepository().accept(
                 connection,
                 authority,
@@ -283,27 +305,23 @@ class DatabaseRuntime:
         }
 
     def list_credentials(
-        self, bearer_secret: str, *, limit: int, after: str | None
+        self, actor: str, *, limit: int, after: str | None
     ) -> CredentialListResponse:
         with self.pool.connection() as connection:
             return self._administration.list(
-                connection, digest_secret(bearer_secret), limit=limit, after=after
+                connection, digest_secret(actor), limit=limit, after=after
             )
 
     def issue_credential(
-        self, bearer_secret: str, request: CredentialIssueRequest
+        self, actor: str, request: CredentialIssueRequest
     ) -> CredentialIssuedResponse:
         with self.pool.connection() as connection:
-            issued = self._administration.issue(connection, digest_secret(bearer_secret), request)
+            issued = self._administration.issue(connection, digest_secret(actor), request)
         return issued
 
-    def revoke_credential(
-        self, bearer_secret: str, credential_id: str
-    ) -> CredentialRevokedResponse:
+    def revoke_credential(self, actor: str, credential_id: str) -> CredentialRevokedResponse:
         with self.pool.connection() as connection:
-            digest = self._administration.revoke(
-                connection, digest_secret(bearer_secret), credential_id
-            )
+            digest = self._administration.revoke(connection, digest_secret(actor), credential_id)
         if digest is not None:
             self._credential_cache.invalidate(bytes(digest))
         return CredentialRevokedResponse(
@@ -312,22 +330,22 @@ class DatabaseRuntime:
             + timedelta(seconds=self.config.auth.cache_ttl_seconds),
         )
 
-    def get(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord:
+    def get(self, actor: RequestActor, user_id: str, operation_id: str) -> OperationRecord:
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, user_id, "memory:read")
+            authority = self._authorize(connection, actor, user_id, "memory:read")
             record = self._operations.get(connection, authority, operation_id)
         if record is None:
             raise OperationNotFound(operation_id)
         return record
 
-    def cancel(self, bearer_secret: str, user_id: str, operation_id: str) -> OperationRecord:
+    def cancel(self, actor: RequestActor, user_id: str, operation_id: str) -> OperationRecord:
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, user_id, "memory:append")
+            authority = self._authorize(connection, actor, user_id, "memory:append")
             return self._operations.cancel(connection, authority, operation_id)
 
     def retry(
         self,
-        bearer_secret: str,
+        actor: RequestActor,
         user_id: str,
         operation_id: str,
         idempotency_key: str,
@@ -336,7 +354,7 @@ class DatabaseRuntime:
             f"operation-retry\0{user_id}\0{operation_id}\0{idempotency_key}".encode()
         ).digest()
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, bearer_secret, user_id, "memory:append")
+            authority = self._authorize(connection, actor, user_id, "memory:append")
             return self._operations.retry(
                 connection,
                 authority,
@@ -349,7 +367,7 @@ class DatabaseRuntime:
 
     def reconcile(
         self,
-        bearer_secret: str,
+        actor: RequestActor,
         user_id: str,
         operation_id: str,
         request: ReconcileAttemptRequest,
@@ -357,7 +375,7 @@ class DatabaseRuntime:
         with self.pool.connection() as connection:
             authority = self._authorize(
                 connection,
-                bearer_secret,
+                actor,
                 user_id,
                 "operation:reconcile",
             )
@@ -375,7 +393,7 @@ class DatabaseRuntime:
             )
             read_authority = self._authorize(
                 connection,
-                bearer_secret,
+                actor,
                 user_id,
                 "memory:read",
             )
@@ -384,8 +402,18 @@ class DatabaseRuntime:
             raise OperationNotFound(operation_id)
         return record
 
-    def _authenticate(self, connection, bearer_secret: str):
-        digest = digest_secret(bearer_secret)
+    def _authenticate(self, connection, actor: RequestActor):
+        if isinstance(actor, AssertedIdentity):
+            if actor.root_secret is not None:
+                principal = self._auth.lookup_credential(
+                    connection, digest_secret(actor.root_secret)
+                )
+                if principal is None:
+                    raise AuthenticationFailed
+                if principal.role != "administrator" or principal.tenant_id != actor.tenant_id:
+                    raise AuthorizationFailed
+            return actor
+        digest = digest_secret(actor)
         principal = self._credential_cache.get(digest)
         if principal is None:
             lookup = self._credential_cache.begin_lookup(digest)
@@ -395,8 +423,27 @@ class DatabaseRuntime:
             self._credential_cache.store(lookup, principal)
         return principal
 
-    def _authorize(self, connection, bearer_secret: str, user_id: str, capability: str):
-        principal = self._authenticate(connection, bearer_secret)
+    def _authorize(self, connection, actor: RequestActor, user_id: str, capability: str):
+        principal = self._authenticate(connection, actor)
+        if isinstance(principal, AssertedIdentity):
+            if principal.user_id != user_id:
+                raise AuthorizationFailed
+            try:
+                registered = connection.execute(
+                    "SELECT oam_register_asserted_user(%s,%s)",
+                    (principal.tenant_id, principal.user_id),
+                ).fetchone()[0]
+            except UniqueViolation as exc:
+                raise AuthorizationFailed from exc
+            if not registered:
+                raise AuthorizationFailed
+            principal = AuthenticatedPrincipal(
+                credential_id=f"{principal.mode}-asserted",
+                tenant_id=principal.tenant_id,
+                principal_id=f"user:{principal.user_id}",
+                role="user",
+                expires_at=None,
+            )
         try:
             return self._auth.authorize_user(
                 connection,

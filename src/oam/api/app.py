@@ -1,6 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 from importlib.resources import files
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -30,7 +31,8 @@ from oam.auth.administration import (
     CredentialAuthenticationFailed,
     CredentialPrincipalUnavailable,
 )
-from oam.config import OAMConfig, load_config
+from oam.auth.modes import AssertedIdentity
+from oam.config import ConfigurationError, OAMConfig, load_config
 from oam.contracts.credentials import (
     CredentialIssuedResponse,
     CredentialIssueRequest,
@@ -113,20 +115,46 @@ def create_app(
     config_path: str | Path,
     *,
     runtime: APIRuntime | None = None,
+    bind_host: str = "127.0.0.1",
 ) -> FastAPI:
     resolved = load_config(config_path)
+    configured_root = os.environ.get(resolved.config.auth.root_key_env)
+    if configured_root == "":
+        raise ConfigurationError("configured root key cannot be empty")
+    loopback = _is_loopback_bind(bind_host)
+    if resolved.config.auth.mode == "dev" and not loopback:
+        raise ConfigurationError("dev authentication requires a loopback bind")
+    if resolved.config.auth.mode == "dev" and configured_root is not None:
+        raise ConfigurationError("dev authentication cannot use a configured root key")
     owned_runtime: DatabaseRuntime | None = None
     if runtime is None:
         dsn = os.environ.get(resolved.config.database.api_dsn_env)
         if dsn:
             owned_runtime = DatabaseRuntime.from_dsn(resolved.config, dsn)
             runtime = owned_runtime
+    if resolved.config.auth.mode == "trusted" and not loopback and owned_runtime is None:
+        raise ConfigurationError("nonlocal trusted authentication requires an active root key")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if owned_runtime is not None:
-            owned_runtime.open()
         try:
+            if owned_runtime is not None:
+                owned_runtime.open()
+                if configured_root is not None and not owned_runtime.has_configured_root(
+                    configured_root
+                ):
+                    raise ConfigurationError("configured root key is not active in this database")
+                if resolved.config.auth.mode is None and configured_root is not None:
+                    app.state.auth_mode = "api_key"
+                elif resolved.config.auth.mode is None:
+                    app.state.auth_mode = owned_runtime.choose_auto_auth_mode()
+                if app.state.auth_mode == "dev" and not loopback:
+                    raise ConfigurationError("dev authentication requires a loopback bind")
+                if (
+                    app.state.auth_mode == "api_key"
+                    or (app.state.auth_mode == "trusted" and not loopback)
+                ) and not owned_runtime.has_active_root():
+                    raise ConfigurationError("authentication mode requires an active root key")
             yield
         finally:
             if owned_runtime is not None:
@@ -139,11 +167,23 @@ def create_app(
     )
     app.state.resolved_config = resolved
     app.state.runtime = runtime
+    app.state.auth_mode = resolved.config.auth.mode or "api_key"
 
     @app.middleware("http")
     async def request_boundary(request: Request, call_next):
         bearer_secret = _bearer_secret(request.headers.get("authorization"))
-        if _requires_bearer(request.url.path) and bearer_secret is None:
+        mode = app.state.auth_mode
+        needs_key = _requires_bearer(request.url.path) and (
+            mode == "api_key"
+            or _is_admin_route(request.url.path)
+            or (mode == "trusted" and not loopback)
+        )
+        if mode == "dev" and _is_admin_route(request.url.path):
+            response = JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": {"code": "CapabilityUnavailable", "retryable": False}},
+            )
+        elif needs_key and bearer_secret is None:
             response = JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={
@@ -154,8 +194,52 @@ def create_app(
                 },
             )
         else:
-            request.state.bearer_secret = bearer_secret
-            response = await call_next(request)
+            actor: str | AssertedIdentity | None = bearer_secret
+            if _requires_bearer(request.url.path) and not _is_admin_route(request.url.path):
+                if mode == "trusted":
+                    tenant = request.headers.get("x-oam-tenant", "").strip()
+                    user = request.headers.get("x-oam-user", "").strip()
+                    raw_role = request.headers.get("x-oam-role")
+                    asserted_role = raw_role.strip().lower() if raw_role is not None else "user"
+                    if not tenant or not user:
+                        response = JSONResponse(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            content={
+                                "detail": {"code": "AuthenticationRequired", "retryable": False}
+                            },
+                        )
+                    elif asserted_role not in ("user", "admin"):
+                        response = JSONResponse(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            content={"detail": {"code": "InvalidIdentityRole", "retryable": False}},
+                        )
+                    elif raw_role is not None and bearer_secret is None:
+                        response = JSONResponse(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            content={
+                                "detail": {"code": "AuthenticationRequired", "retryable": False}
+                            },
+                        )
+                    else:
+                        actor = AssertedIdentity(
+                            "trusted", tenant, user, bearer_secret, asserted_role
+                        )
+                        request.state.actor = actor
+                        response = await call_next(request)
+                elif mode == "dev":
+                    actor = AssertedIdentity(
+                        "dev",
+                        request.headers.get("x-oam-tenant", "default").strip(),
+                        request.headers.get("x-oam-user", "default").strip(),
+                    )
+                    request.state.actor = actor
+                    response = await call_next(request)
+                else:
+                    request.state.actor = actor
+                    response = await call_next(request)
+            else:
+                request.state.actor = actor
+                response = await call_next(request)
         response.headers["X-Request-ID"] = f"req_{uuid4().hex}"
         response.headers["OAM-Contract-Version"] = resolved.config.contract_version
         return response
@@ -181,6 +265,7 @@ def create_app(
             section: getattr(config, section).model_dump(mode="json")
             for section in PUBLIC_LIMIT_SECTIONS
         }
+        limits["auth"] = config.auth.model_dump(mode="json", exclude={"mode", "root_key_env"})
         limits["database"] = {
             "api_pool_max": config.database.api_pool_max,
             "worker_pool_max": config.database.worker_pool_max,
@@ -231,7 +316,7 @@ def _register_reserved_routes(
     @app.post("/v1/users", status_code=201, tags=["Administration"])
     def create_user(request: Request, body: UserRequest) -> dict:
         return _content_call(
-            lambda: _require_runtime(runtime).create_user(request.state.bearer_secret, body.user_id)
+            lambda: _require_runtime(runtime).create_user(request.state.actor, body.user_id)
         )
 
     @app.put(
@@ -256,7 +341,7 @@ def _register_reserved_routes(
             )
         return _credential_call(
             lambda: _require_runtime(runtime).list_credentials(
-                request.state.bearer_secret, limit=selected_limit, after=after
+                request.state.actor, limit=selected_limit, after=after
             )
         )
 
@@ -270,7 +355,7 @@ def _register_reserved_routes(
         request: Request, body: CredentialIssueRequest
     ) -> CredentialIssuedResponse:
         return _credential_call(
-            lambda: _require_runtime(runtime).issue_credential(request.state.bearer_secret, body)
+            lambda: _require_runtime(runtime).issue_credential(request.state.actor, body)
         )
 
     @app.delete(
@@ -280,9 +365,7 @@ def _register_reserved_routes(
     )
     def revoke_credential(request: Request, credential_id: str) -> CredentialRevokedResponse:
         return _credential_call(
-            lambda: _require_runtime(runtime).revoke_credential(
-                request.state.bearer_secret, credential_id
-            )
+            lambda: _require_runtime(runtime).revoke_credential(request.state.actor, credential_id)
         )
 
     @app.post(
@@ -328,7 +411,7 @@ def _register_reserved_routes(
     ) -> dict:
         await run_in_threadpool(
             lambda: _content_call(
-                lambda: _require_runtime(runtime).authenticate(request.state.bearer_secret)
+                lambda: _require_runtime(runtime).authenticate(request.state.actor)
             )
         )
         limit = config.api.max_request_bytes
@@ -383,7 +466,7 @@ def _register_reserved_routes(
         return await run_in_threadpool(
             lambda: _content_call(
                 lambda: _require_runtime(runtime).retain(
-                    request.state.bearer_secret, body, idempotency_key, **upload
+                    request.state.actor, body, idempotency_key, **upload
                 )
             )
         )
@@ -400,9 +483,7 @@ def _register_reserved_routes(
     def search(request: Request, body: RecallRequest) -> dict:
         _validate_limits(body, config)
         return _content_call(
-            lambda: _require_runtime(runtime).search(
-                request.state.bearer_secret, body.user_id, body
-            )
+            lambda: _require_runtime(runtime).search(request.state.actor, body.user_id, body)
         )
 
     @app.post("/v1/users/{user_id}/search-many", tags=["Recall"])
@@ -435,7 +516,7 @@ def _register_reserved_routes(
     ) -> OperationResponse:
         active_runtime = _require_runtime(runtime)
         return _operation_call(
-            lambda: active_runtime.get(request.state.bearer_secret, user_id, operation_id)
+            lambda: active_runtime.get(request.state.actor, user_id, operation_id)
         )
 
     @app.post(
@@ -450,7 +531,7 @@ def _register_reserved_routes(
     ) -> OperationResponse:
         active_runtime = _require_runtime(runtime)
         return _operation_call(
-            lambda: active_runtime.cancel(request.state.bearer_secret, user_id, operation_id)
+            lambda: active_runtime.cancel(request.state.actor, user_id, operation_id)
         )
 
     @app.post(
@@ -468,7 +549,7 @@ def _register_reserved_routes(
         active_runtime = _require_runtime(runtime)
         return _operation_call(
             lambda: active_runtime.retry(
-                request.state.bearer_secret,
+                request.state.actor,
                 user_id,
                 operation_id,
                 idempotency_key,
@@ -489,7 +570,7 @@ def _register_reserved_routes(
         active_runtime = _require_runtime(runtime)
         return _operation_call(
             lambda: active_runtime.reconcile(
-                request.state.bearer_secret,
+                request.state.actor,
                 user_id,
                 operation_id,
                 body,
@@ -574,6 +655,22 @@ def _bearer_secret(authorization: str | None) -> str | None:
 
 def _requires_bearer(path: str) -> bool:
     return path.startswith("/v1/") and path != "/v1/capabilities"
+
+
+def _is_admin_route(path: str) -> bool:
+    if path == "/v1/users" or path == "/v1/credentials" or path.startswith("/v1/credentials/"):
+        return True
+    parts = path.split("/")
+    return len(parts) == 6 and parts[1:3] == ["v1", "users"] and parts[4] == "grants"
+
+
+def _is_loopback_bind(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _require_runtime(runtime: APIRuntime | None) -> APIRuntime:

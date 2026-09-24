@@ -10,6 +10,8 @@ The foundation gate requires a clean focused package, self-contained public docu
 
 The repository records deterministic unit/contract coverage and PostgreSQL integration coverage for this foundation. Integration tests are skipped unless both `OAM_TEST_POSTGRES_DSN` and `OAM_TEST_POSTGRES_ISOLATED=1` identify an explicitly isolated database. Bootstrap tests create separate databases on that isolated server and retain them for diagnosis; the test operator needs database-creation authority. Current foundation evidence includes a real PostgreSQL 18 run, but does not establish production deployment or replica recovery.
 
+Authentication acceptance requires an isolated API/SQL matrix for `api_key` root denial, same-user and cross-user keys, rootless `dev` loopback startup and keyed-database downgrade rejection, plus `trusted` local assertions, first-seen user registration, tenant/user mismatches, nonlocal root-key proof and root-only administration. A candidate nonlocal trusted deployment must separately prove that its gateway authenticates callers, replaces spoofed identity headers and blocks direct listener access; application tests alone cannot pass that deployment gate. OIDC and LDAP are outside v0.0.1.
+
 The dated commands, artifact probe, and explicit exclusions are recorded in [Steps 1–4 foundation evidence](foundation-evidence.md).
 
 ## 2. Step 5 Core Indexing and Recall Gate
