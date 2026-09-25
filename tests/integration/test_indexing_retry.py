@@ -22,10 +22,11 @@ pytestmark = pytest.mark.integration
 
 
 class IntermittentModels(SyntheticIndexModels):
-    def __init__(self, failures, *, timeout=False):
+    def __init__(self, failures, *, timeout=False, overbound_records=0):
         super().__init__()
         self.failures = failures
         self.timeout = timeout
+        self.overbound_records = overbound_records
         self.first_calls = 0
 
     def generate(self, role, **kwargs):
@@ -36,14 +37,34 @@ class IntermittentModels(SyntheticIndexModels):
             elif self.failures:
                 self.failures -= 1
                 if self.timeout:
-                    raise httpx.ReadTimeout("response outcome is unknown")
+                    raise self.timeout("response outcome is unknown")
                 self.generation_calls.append(role)
+                content = (
+                    json.dumps(
+                        {
+                            "outcome": "facts",
+                            "facts": [{"text": text, "quote": text}] * self.overbound_records,
+                        }
+                    )
+                    if self.overbound_records
+                    else '{"outcome":"facts","facts":[]}'
+                )
                 return ModelResult(
-                    content='{"outcome":"facts","facts":[]}',
+                    content=content,
                     usage=Usage(
                         input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
                     ),
                 )
+        return super().generate(role, **kwargs)
+
+
+class ConnectTimeoutModels(IntermittentModels):
+    def generate(self, role, **kwargs):
+        if role == "extraction":
+            text = json.loads(kwargs["user"])["center"]["text"]
+            if text != "Lin prefers concise updates." and self.failures:
+                self.failures -= 1
+                raise httpx.ConnectTimeout("connection failed before request dispatch")
         return super().generate(role, **kwargs)
 
 
@@ -111,11 +132,14 @@ def run_source(dsn, config, models):
     )
 
 
+@pytest.mark.parametrize("overbound", [False, True])
 async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_attempt(
-    accepted_source,
+    accepted_source, overbound
 ):
     client, dsn, tenant, config, operation_id = accepted_source
-    models = IntermittentModels(2)
+    models = IntermittentModels(
+        2, overbound_records=config.extraction.max_facts_per_group + 1 if overbound else 0
+    )
     for _ in range(2):
         with pytest.raises(ExtractionError):
             run_source(dsn, config, models)
@@ -145,9 +169,14 @@ async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_at
         )
 
 
-async def test_known_invalid_responses_stop_at_the_existing_claim_budget(accepted_source):
+@pytest.mark.parametrize("overbound", [False, True])
+async def test_known_invalid_responses_stop_at_the_existing_claim_budget(
+    accepted_source, overbound
+):
     client, dsn, tenant, config, operation_id = accepted_source
-    models = IntermittentModels(10)
+    models = IntermittentModels(
+        10, overbound_records=config.extraction.max_facts_per_group + 1 if overbound else 0
+    )
     for _ in range(config.retry.max_attempts):
         with pytest.raises(ExtractionError):
             run_source(dsn, config, models)
@@ -163,10 +192,58 @@ async def test_known_invalid_responses_stop_at_the_existing_claim_budget(accepte
         ).fetchone() == ("failed_terminal", 0)
 
 
-async def test_unknown_timeout_is_not_automatically_requeued(accepted_source):
+async def test_pre_dispatch_connect_timeout_reuses_completed_stages(accepted_source):
     client, dsn, tenant, config, operation_id = accepted_source
-    with pytest.raises(httpx.ReadTimeout):
-        run_source(dsn, config, IntermittentModels(1, timeout=True))
+    models = ConnectTimeoutModels(1)
+
+    with pytest.raises(httpx.ConnectTimeout):
+        run_source(dsn, config, models)
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == "processing"
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT disposition,usage,response_ref FROM attempts WHERE tenant_id=%s",
+            (tenant,),
+        ).fetchone() == ("failed", None, None)
+
+    assert run_source(dsn, config, models) is True
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == "succeeded"
+    assert operation["stage_state"]["index_attempts"] == 2
+    assert operation["usage"]["coverage"] == "complete"
+    assert operation["usage"]["total_tokens"] == 90
+    assert models.first_calls == 1
+
+
+async def test_pre_dispatch_connect_timeout_stops_at_claim_budget(accepted_source):
+    client, dsn, tenant, config, operation_id = accepted_source
+    models = ConnectTimeoutModels(config.retry.max_attempts + 1)
+    for attempt in range(config.retry.max_attempts):
+        with pytest.raises(httpx.ConnectTimeout):
+            run_source(dsn, config, models)
+        operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+        assert operation["status"] == (
+            "partial" if attempt + 1 == config.retry.max_attempts else "processing"
+        )
+    assert run_source(dsn, config, models) is False
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT status,attempts_remaining FROM work_units WHERE tenant_id=%s", (tenant,)
+        ).fetchone() == ("failed_terminal", 0)
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM attempts WHERE tenant_id=%s AND disposition='failed'",
+                (tenant,),
+            ).fetchone()[0]
+            == config.retry.max_attempts
+        )
+
+
+@pytest.mark.parametrize("timeout", [httpx.ReadTimeout, httpx.WriteTimeout])
+async def test_unknown_timeout_is_not_automatically_requeued(accepted_source, timeout):
+    client, dsn, tenant, config, operation_id = accepted_source
+    with pytest.raises(timeout):
+        run_source(dsn, config, IntermittentModels(1, timeout=timeout))
     assert run_source(dsn, config, IntermittentModels(0)) is False
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "partial"

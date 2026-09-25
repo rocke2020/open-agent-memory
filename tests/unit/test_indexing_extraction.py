@@ -27,8 +27,11 @@ def test_rejected_completed_output_retains_usage_without_becoming_valid_no_facts
     assert failure.value.retryable is True
 
 
-def test_record_bound_failure_is_metered_but_does_not_request_another_model_attempt():
-    reply = {"outcome": "facts", "facts": [{"text": "A.", "quote": "A."}] * 65}
+def test_record_bound_failure_is_metered_and_uses_existing_retry_budget():
+    limit = load_config(
+        Path(__file__).parents[2] / "configs/oam.yaml"
+    ).config.extraction.max_facts_per_group
+    reply = {"outcome": "facts", "facts": [{"text": "A.", "quote": "A."}] * (limit + 1)}
     with extraction_models(reply) as (models, config), pytest.raises(ExtractionError) as failure:
         extract_facts(
             models,
@@ -38,7 +41,7 @@ def test_record_bound_failure_is_metered_but_does_not_request_another_model_atte
             timeout_seconds=10,
         )
     assert failure.value.usage.total_tokens == 20
-    assert failure.value.retryable is False
+    assert failure.value.retryable is True
 
 
 @contextmanager
@@ -139,6 +142,7 @@ def test_valid_no_facts_is_distinct_from_malformed_or_empty_generation():
     for reply in [
         "not JSON",
         {},
+        {"facts": [{"text": "Hello.", "quote": "Hello."}]},
         {"outcome": "facts", "facts": []},
         {"outcome": "no_facts", "facts": [{}]},
     ]:

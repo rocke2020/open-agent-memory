@@ -38,10 +38,11 @@ entities, causes, or stronger certainty. Unknown event times remain absent. Neve
 Return JSON. A question alone does not establish that its premise is true. Never turn a question
 into an asserted fact or infer a personal trait merely from the topic being asked about.
 Questions may contain explicitly stated facts or preferences; extract only those assertions.
-If the center has no supported assertion, return exactly {"facts":[],"outcome":"no_facts"}.
-Otherwise return {"facts":[...],"outcome":"facts"} with at least one supported fact.
-Write the facts array first, then its matching outcome. An empty array MUST use "no_facts",
-never "facts". Use only these two top-level keys, without wrappers or metadata.
+Return exactly one object with both required top-level keys, "outcome" first and "facts" second.
+If the center has no supported assertion, return exactly {"outcome":"no_facts","facts":[]}.
+Otherwise return {"outcome":"facts","facts":[...]} with at least one supported fact.
+Never return a facts-only object. Check that both keys are present and consistent before returning.
+Use only these two top-level keys, without wrappers or metadata.
 Each fact has text, category ('fact', 'preference', or 'experience'), quote,
 entities (source-supported names), caused_by and updates (zero-based earlier fact indices),
 and annotations. Copy each quote exactly from the center source. OAM resolves its character span.
@@ -284,7 +285,9 @@ def extract_facts(
             "empty facts are valid only with explicit no_facts", usage=usage, retryable=True
         )
     if len(records) > config.extraction.max_facts_per_group:
-        raise ExtractionError("fact output exceeds configured record bound", usage=usage)
+        raise ExtractionError(
+            "fact output exceeds configured record bound", usage=usage, retryable=True
+        )
     accepted = []
     diagnostics = []
     accepted_indices: set[int] = set()

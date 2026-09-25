@@ -95,10 +95,15 @@ class RecallService:
             with self._repository(authority, request, deadline) as repository:
                 return getattr(repository, method)(*args)
 
-        def stage(name, call):
+        def stage(name, call, *, timed=False):
             began = time.monotonic()
+            duration_ms = None
             try:
                 value = call()
+                if timed:
+                    value, error, duration_ms = value
+                    if error is not None:
+                        raise error
             except (PermissionError, TimeoutError):
                 raise
             except (RuntimeError, ValueError, httpx.HTTPError, psycopg.Error) as exc:
@@ -107,7 +112,9 @@ class RecallService:
                 degraded.append(name)
                 return None
             finally:
-                timing[name] = (time.monotonic() - began) * 1000
+                timing[name] = (
+                    duration_ms if duration_ms is not None else (time.monotonic() - began) * 1000
+                )
             executed.append(name)
             return value
 
@@ -153,13 +160,47 @@ class RecallService:
                 and row["score"] >= self.config.search.graph_seed_min_similarity
             )[: self.config.search.graph_seed_max]
             if mode != "fast":
-                for name, method in (("graph", "ordinary"), ("hierarchy", "hierarchy")):
-                    result = stage(name, lambda method=method: read(method, seeds, vector))
+
+                def record_expansion(name, result):
                     if result is not None:
                         ranks, evidence = result
                         arms[name] = ranks
                         for node_id, node_paths in evidence.items():
                             paths.setdefault(node_id, []).extend(node_paths)
+
+                expansions = (("graph", "ordinary"), ("hierarchy", "hierarchy"))
+                if getattr(self.pool, "max_size", 1) >= 2:
+
+                    def timed_expansion(method):
+                        began = time.monotonic()
+                        try:
+                            result = read(method, seeds, vector)
+                        except Exception as error:
+                            return None, error, (time.monotonic() - began) * 1000
+                        return result, None, (time.monotonic() - began) * 1000
+
+                    with ThreadPoolExecutor(
+                        max_workers=2, thread_name_prefix="oam-recall-expand"
+                    ) as executor:
+                        futures = {
+                            name: executor.submit(timed_expansion, method)
+                            for name, method in expansions
+                        }
+                        for name, _ in expansions:
+                            outcome = stage(
+                                name,
+                                lambda name=name: futures[name].result(
+                                    timeout=_remaining(deadline)
+                                ),
+                                timed=True,
+                            )
+                            if outcome is not None:
+                                record_expansion(name, outcome)
+                else:
+                    for name, method in expansions:
+                        record_expansion(
+                            name, stage(name, lambda method=method: read(method, seeds, vector))
+                        )
             if request.time_window:
 
                 def temporal():

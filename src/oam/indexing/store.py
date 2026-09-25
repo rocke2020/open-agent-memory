@@ -7,6 +7,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+import httpx
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -257,7 +258,8 @@ class IndexStore:
         known_usage = (
             error.usage if isinstance(error, (ExtractionError, ModelOutputError)) else None
         )
-        retryable = (
+        not_dispatched = isinstance(error, httpx.ConnectTimeout)
+        retryable = not_dispatched or (
             isinstance(error, ExtractionError) and known_usage is not None and error.retryable
         )
         with self.transaction() as connection:
@@ -270,7 +272,14 @@ class IndexStore:
                 (retryable, *self.key, self.claim.work_unit_id, self.worker_id, self.claim.fence),
             ).fetchone()
             if owned:
-                if known_usage is not None:
+                if not_dispatched:
+                    connection.execute(
+                        "UPDATE attempts SET disposition='failed',usage=NULL,response_ref=NULL,"
+                        "finished_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
+                        "AND work_unit_id=%s AND attempt_id=%s",
+                        (*self.key, self.claim.work_unit_id, self.claim.attempt_id),
+                    )
+                elif known_usage is not None:
                     connection.execute(
                         "UPDATE attempts SET disposition='failed',usage=%s,"
                         "response_ref=request_ref,finished_at=clock_timestamp() "

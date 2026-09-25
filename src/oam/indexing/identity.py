@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from oam.config import OAMConfig
 from oam.models.bindings import resolve_model_binding
 
-INDEX_RECIPE = "oam-source-fact-insight-v5"
+INDEX_RECIPE = "oam-source-fact-insight-v6"
 
 
 def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:

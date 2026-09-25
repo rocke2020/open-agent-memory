@@ -50,6 +50,7 @@ class RecallRepository:
         self.request = request
         self.time_parameters = {}
         bind_user(connection.cursor(), authority)
+        connection.execute("SELECT set_config('jit','off',true)")
 
     def _eligible(self, *, temporal: bool = False) -> str:
         predicate = "true"
@@ -198,11 +199,13 @@ class RecallRepository:
             "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision)), '[]') AS supports, "
             "COALESCE((SELECT jsonb_agg(jsonb_build_object('source_id',sp.source_id,"
             "'source_version',sp.source_version,'evidence_id',sp.evidence_id,"
-            "'passage_id',sp.passage_id,'span',sp.span) ORDER BY sp.source_id,sp.passage_id) "
-            "FROM valid_support sp WHERE sp.memory_id=u.memory_id OR sp.memory_id IN ("
-            "SELECT isp.memory_id FROM insight_support isp WHERE "
+            "'passage_id',sp.passage_id,'span',sp.span) "
+            "ORDER BY sp.source_id,sp.passage_id,sp.memory_id) "
+            "FROM valid_support sp WHERE sp.memory_id=ANY(CASE WHEN u.kind='insight' "
+            "THEN ARRAY(SELECT isp.memory_id FROM insight_support isp WHERE "
             "(isp.tenant_id,isp.user_id,isp.insight_id,isp.insight_revision)="
-            "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision))), "
+            "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision)) "
+            "ELSE ARRAY[u.memory_id] END)), "
             "jsonb_build_array(u.locator)) AS citations, "
             "COALESCE((SELECT jsonb_agg(jsonb_build_object("
             "'role',ut.role,'range',ut.time_span::text,"
