@@ -115,6 +115,21 @@ class LocalModels:
         )
 
 
+def test_document_abstract_admission_counts_system_and_user_before_model_call():
+    store = MemoryStore(content=b"One cited sentence.")
+    store.config = store.config.model_copy(
+        update={"extraction": store.config.extraction.model_copy(update={"max_input_tokens": 10})}
+    )
+    models = LocalModels()
+    try:
+        index_source._resource(store, models)
+    except ValueError as error:
+        assert "abstract input" in str(error)
+    else:
+        raise AssertionError("oversize complete abstract request was dispatched")
+    assert models.generated_roles == []
+
+
 def test_plain_text_resource_preserves_exact_chunks_and_document_revision():
     text = "  Dose <10 mg.\n\n" + "Read literally <tag> & keep spaces.\n" * 200
     store = MemoryStore(content=text.encode())

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import math
 import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
 from oam.config import ChunkConfig
-
-ASCII_CHARACTERS_PER_ESTIMATED_TOKEN = 4
+from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimated_tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +31,12 @@ def chunk_text(
         raise ValueError("owned source overlap must remain zero")
     if not text.strip():
         return ()
-    weights = _weights(text)
+    weights = cumulative_units(text)
+    if any(
+        weights[index + 1] - weights[index] > config.max_estimated_tokens * UNITS_PER_TOKEN
+        for index in range(len(text))
+    ):
+        raise ValueError("single source character exceeds chunk hard maximum")
     boundaries = [match.end() for match in re.finditer(r"\n", text)]
     if not boundaries or boundaries[-1] != len(text):
         boundaries.append(len(text))
@@ -41,7 +44,7 @@ def chunk_text(
     start = 0
     context = _tail(previous_context, config.previous_context_estimated_tokens)
     while start < len(text):
-        target = _bounded_end(weights, start, config.target_estimated_tokens)
+        target = max(start + 1, _bounded_end(weights, start, config.target_estimated_tokens))
         maximum = _bounded_end(weights, start, config.max_estimated_tokens)
         boundary_index = bisect_right(boundaries, target) - 1
         if boundary_index >= 0 and boundaries[boundary_index] > start:
@@ -60,9 +63,7 @@ def chunk_text(
                 start=start,
                 end=end,
                 previous_context=context,
-                estimated_tokens=math.ceil(
-                    (weights[end] - weights[start]) / ASCII_CHARACTERS_PER_ESTIMATED_TOKEN
-                ),
+                estimated_tokens=estimated_tokens(weights[end] - weights[start]),
             )
         )
         context = _tail(context + content, config.previous_context_estimated_tokens)
@@ -70,20 +71,11 @@ def chunk_text(
     return tuple(chunks)
 
 
-def _weights(text: str) -> list[int]:
-    cumulative = [0]
-    for character in text:
-        cumulative.append(
-            cumulative[-1] + (1 if character.isascii() else ASCII_CHARACTERS_PER_ESTIMATED_TOKEN)
-        )
-    return cumulative
-
-
 def _bounded_end(weights: list[int], start: int, tokens: int) -> int:
-    return bisect_right(weights, weights[start] + tokens * ASCII_CHARACTERS_PER_ESTIMATED_TOKEN) - 1
+    return bisect_right(weights, weights[start] + tokens * UNITS_PER_TOKEN) - 1
 
 
 def _tail(text: str, tokens: int) -> str:
-    weights = _weights(text)
-    start = bisect_left(weights, weights[-1] - tokens * ASCII_CHARACTERS_PER_ESTIMATED_TOKEN)
+    weights = cumulative_units(text)
+    start = bisect_left(weights, weights[-1] - tokens * UNITS_PER_TOKEN)
     return text[start:]

@@ -4,6 +4,21 @@ from pathlib import Path
 
 from oam.config import load_config
 from oam.indexing import extraction
+from oam.tokens import estimate_units, estimated_tokens
+
+
+def test_model_prompt_bound_counts_the_complete_serialized_messages():
+    system = "Use only supplied facts."
+    envelope = {"facts": [{"text": "甲😀"}]}
+    user = extraction.json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+    messages = extraction.json.dumps(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert extraction.model_input_tokens(system, envelope) == estimated_tokens(
+        estimate_units(messages)
+    )
 
 
 def test_insight_packing_bounds_complete_prompt_and_keeps_priority_order():
@@ -21,7 +36,6 @@ def test_insight_packing_bounds_complete_prompt_and_keeps_priority_order():
         extraction.model_input_tokens(
             extraction.INSIGHT_SYSTEM,
             {"facts": [fact.model_dump(mode="json") for fact in packed]},
-            config,
         )
         <= config.extraction.max_input_tokens
     )
@@ -29,7 +43,6 @@ def test_insight_packing_bounds_complete_prompt_and_keeps_priority_order():
         extraction.model_input_tokens(
             extraction.INSIGHT_SYSTEM,
             {"facts": [fact.model_dump(mode="json") for fact in facts[: len(packed) + 1]]},
-            config,
         )
         > config.extraction.max_input_tokens
     )

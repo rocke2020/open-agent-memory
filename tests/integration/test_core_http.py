@@ -815,9 +815,8 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
 
 
 async def test_chat_and_html_report_share_one_cited_recall_budget(core_database):
-    import tiktoken
-
     from oam.config import load_config
+    from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
     from oam.workers.index_source import process_one
 
     dsn, tenant, headers = core_database
@@ -913,9 +912,8 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
             )
             assert "Lin prefers brief explanations" in payload["context"]
             assert "Glucose 92 mg/dL" in payload["context"]
-            assert payload["context_tokens"] == len(
-                tiktoken.get_encoding(payload["tokenizer"]).encode_ordinary(payload["context"])
-            )
+            assert payload["tokenizer"] == ESTIMATOR
+            assert payload["context_tokens"] == estimated_tokens(estimate_units(payload["context"]))
             assert payload["context_tokens"] <= 2048
             assert payload["diagnostics"]["generative_calls"] == 0
         assert models.generation_calls == generation_calls

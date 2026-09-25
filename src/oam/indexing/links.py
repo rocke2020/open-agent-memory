@@ -13,7 +13,7 @@ from oam.db.eligibility import ELIGIBLE_UNITS
 
 _FACTS = f"""
 WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}),
-facts AS NOT MATERIALIZED (
+facts AS MATERIALIZED (
     SELECT * FROM eligible
     WHERE tenant_id=%(tenant)s AND user_id=%(user)s
       AND kind='fact' AND generation_id=%(generation)s
@@ -186,6 +186,7 @@ def build_links(
     }
     with connection.cursor() as cursor:
         bind_user(cursor, authority)
+        cursor.execute("SET LOCAL enable_nestloop = off")
         cursor.execute(_SEMANTIC, parameters)
         result["semantic_links"] = cursor.fetchone()[0]
         temporal_count = 0

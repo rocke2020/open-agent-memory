@@ -24,8 +24,11 @@ def database():
     if not dsn or os.environ.get("OAM_TEST_POSTGRES_ISOLATED") != "1":
         pytest.skip("requires an explicitly isolated PostgreSQL database")
     target = conninfo_to_dict(dsn)
-    if target.get("host") not in {"localhost", "127.0.0.1"} or target.get("port") != "15433":
-        pytest.skip("index link fixtures require the approved local port 15433")
+    if target.get("host") not in {"localhost", "127.0.0.1"} or target.get("port") not in {
+        "15433",
+        "15435",
+    }:
+        pytest.skip("index link fixtures require an approved local test port")
     with (
         psycopg.connect(dsn, autocommit=True) as connection,
         connection.transaction(force_rollback=True),

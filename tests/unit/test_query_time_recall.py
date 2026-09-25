@@ -15,6 +15,7 @@ from oam.models.runtime import Usage
 from oam.retrieval.algorithms import TemporalExpansion
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.service import RecallService, RecallUnavailable
+from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 CONFIG = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
 
@@ -48,6 +49,9 @@ class DatedRepository:
         return [
             {"unit_id": name, "kind": "passage", "score": 0.8} for name in tuple(self.rows)[:limit]
         ]
+
+    def ordinary(self, seeds, vector):
+        return (), {}
 
     def valid_paths(self, paths, vector):
         return paths
@@ -124,6 +128,27 @@ def test_explicit_window_overrides_date_in_query():
     assert result["diagnostics"]["query_time"]["status"] == "explicit"
 
 
+def test_mid_keeps_temporal_rank_and_out_of_window_direct_evidence():
+    service = DatedService(
+        CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
+    )
+    request = SearchRequest(
+        query="apple harvest in 2025",
+        recall_level="mid",
+        reference_time="2026-09-23T12:00:00Z",
+    )
+
+    result = service.search(object(), request)
+
+    assert [item["unit_id"] for item in result["items"]] == ["new", "old"]
+    assert result["diagnostics"]["executed_arms"] == [
+        "lexical",
+        "dense",
+        "graph",
+        "temporal",
+    ]
+
+
 def test_ambiguous_query_retains_ordinary_recall_with_diagnostic():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
@@ -136,6 +161,25 @@ def test_ambiguous_query_retains_ordinary_recall_with_diagnostic():
     assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
     assert result["diagnostics"]["query_time"]["status"] == "ambiguous_time_expression"
     assert "temporal" in result["diagnostics"]["omitted_stages"]
+
+
+def test_context_budget_reports_estimate_of_complete_rendered_blocks():
+    service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
+    result = service.search(
+        object(), SearchRequest(query="apple", recall_level="fast", max_context_tokens=64)
+    )
+    assert result["tokenizer"] == ESTIMATOR
+    assert result["context_tokens"] == estimated_tokens(estimate_units(result["context"]))
+    assert len(result["items"]) == 2
+
+
+def test_query_budget_uses_unicode_estimate():
+    config = CONFIG.model_copy(
+        update={"search": CONFIG.search.model_copy(update={"max_query_tokens": 2})}
+    )
+    service = DatedService(config, None, EmbeddingOnly(), generation_id="generation")
+    with pytest.raises(ValueError, match="query exceeds"):
+        service.search(object(), SearchRequest(query="甲乙", recall_level="fast"))
 
 
 @pytest.mark.parametrize(
@@ -282,10 +326,10 @@ class ExpansionService(RecallService):
         yield ExpansionRepository(request, self.activity)
 
 
-def test_mid_expansions_overlap_on_distinct_repositories_and_keep_arm_order():
+def test_deep_expansions_overlap_on_distinct_repositories_and_keep_arm_order():
     service = ExpansionService()
 
-    result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))
+    result = service.search(object(), SearchRequest(query="apple", recall_level="deep"))
 
     assert service.activity["peak"] == 2
     assert len(service.activity["repositories"]) == 2
@@ -299,30 +343,97 @@ def test_mid_expansions_overlap_on_distinct_repositories_and_keep_arm_order():
     assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
 
 
-def test_mid_expansions_remain_serial_with_one_database_connection():
+def test_mid_skips_hierarchy_and_uses_only_one_graph_repository():
     service = ExpansionService(pool_size=1)
 
     result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))
 
     assert service.activity["peak"] == 1
+    assert len(service.activity["repositories"]) == 1
     assert service.activity["active"] == 0
+    assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
+    assert "hierarchy" in result["diagnostics"]["omitted_stages"]
     assert result["diagnostics"]["degraded"] == []
 
 
 @pytest.mark.parametrize("allow_partial", [False, True])
-@pytest.mark.parametrize("failed_arm", ["graph", "hierarchy"])
-def test_mid_expansion_failure_drains_other_job_and_obeys_partial_policy(allow_partial, failed_arm):
+@pytest.mark.parametrize(
+    "mode,failed_arm", [("mid", "graph"), ("deep", "graph"), ("deep", "hierarchy")]
+)
+def test_expansion_failure_drains_other_job_and_obeys_partial_policy(
+    allow_partial, mode, failed_arm
+):
     service = ExpansionService(fail=failed_arm)
-    request = SearchRequest(query="apple", recall_level="mid", allow_partial=allow_partial)
+    request = SearchRequest(query="apple", recall_level=mode, allow_partial=allow_partial)
 
     if allow_partial:
         result = service.search(object(), request)
         assert result["diagnostics"]["degraded"] == [failed_arm]
-        assert (set(result["diagnostics"]["executed_arms"]) & {"graph", "hierarchy"}) == {
-            "hierarchy" if failed_arm == "graph" else "graph"
-        }
+        expected = {"hierarchy" if failed_arm == "graph" else "graph"} if mode == "deep" else set()
+        assert (set(result["diagnostics"]["executed_arms"]) & {"graph", "hierarchy"}) == expected
         assert result["diagnostics"]["timing_ms"][failed_arm] >= 30
     else:
         with pytest.raises(RecallUnavailable, match=f"{failed_arm} stage failed"):
             service.search(object(), request)
     assert service.activity["active"] == 0
+
+
+class DirectEvidenceRepository(DatedRepository):
+    def lexical(self, query, limit):
+        return []
+
+    def dense(self, vector, limit):
+        return [{"unit_id": "z_direct", "kind": "fact", "score": 0.9}]
+
+    def ordinary(self, seeds, vector):
+        return ("a_graph",), {}
+
+    def hierarchy(self, seeds, vector):
+        raise AssertionError("mid must not run hierarchy")
+
+    def hydrate(self, unit_ids):
+        return [
+            {
+                "unit_id": unit_id,
+                "kind": "fact",
+                "origin": "memory",
+                "text": unit_id,
+                "citations": [],
+                "time_evidence": [],
+                "locator": {},
+            }
+            for unit_id in unit_ids
+        ]
+
+
+class DirectEvidenceService(RecallService):
+    @contextmanager
+    def _repository(self, authority, request, deadline):
+        yield DirectEvidenceRepository(request)
+
+
+def test_mid_direct_evidence_outweighs_graph_only_candidate_with_empty_lexical_arm():
+    service = DirectEvidenceService(
+        CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
+    )
+
+    result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))
+
+    assert [item["unit_id"] for item in result["items"]] == ["z_direct", "a_graph"]
+    assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
+
+
+def test_mid_partial_embedding_failure_keeps_lexical_arm_weight():
+    class FailedEmbedding:
+        def embed(self, texts, **kwargs):
+            raise RuntimeError("embedding unavailable")
+
+    service = DatedService(CONFIG, None, FailedEmbedding(), generation_id="generation")
+
+    result = service.search(
+        object(), SearchRequest(query="apple", recall_level="mid", allow_partial=True)
+    )
+
+    assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
+    assert result["diagnostics"]["executed_arms"] == ["lexical"]
+    assert result["diagnostics"]["degraded"] == ["embedding"]

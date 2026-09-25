@@ -29,7 +29,11 @@ search:
   max_queries: 4
   query_concurrency: 2
   rrf_k: 60
-  channel_weights: equal
+  mid_arm_weights:
+    lexical: 1.0
+    dense: 2.0
+    graph: 0.5
+    temporal: 1.0
   graph_seed_min_similarity: 0.3
   graph_seed_max: 20
   relation_hops: 2
@@ -78,7 +82,7 @@ recall:
 context:
   default_tokens: 2048
   max_tokens: 8192
-  tokenizer: o200k_base
+  tokenizer: oam-unicode-quarter-v1
 
 chunks:
   default_tokens: 8192

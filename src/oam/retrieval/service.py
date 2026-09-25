@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 
 import httpx
 import psycopg
-import tiktoken
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
@@ -23,6 +22,7 @@ from oam.retrieval.algorithms import (
 )
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.repository import RecallRepository
+from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 
 class RecallUnavailable(RuntimeError):
@@ -35,7 +35,6 @@ class RecallService:
         self.pool = pool
         self.models = models
         self.generation_id = generation_id
-        self.tokenizer = tiktoken.get_encoding(config.context.tokenizer)
 
     @contextmanager
     def _repository(self, authority, request, deadline):
@@ -59,7 +58,7 @@ class RecallService:
             raise NotImplementedError("stored Profile inclusion is unavailable")
         if request.include.chunks is not None:
             raise NotImplementedError("separate recalled chunks are unavailable")
-        if len(self.tokenizer.encode_ordinary(request.query)) > self.config.search.max_query_tokens:
+        if estimated_tokens(estimate_units(request.query)) > self.config.search.max_query_tokens:
             raise ValueError("query exceeds configured token limit")
         started = time.monotonic()
         mode = request.recall_level.value
@@ -171,8 +170,10 @@ class RecallService:
                         for node_id, node_paths in evidence.items():
                             paths.setdefault(node_id, []).extend(node_paths)
 
-                expansions = (("graph", "ordinary"), ("hierarchy", "hierarchy"))
-                if getattr(self.pool, "max_size", 1) >= 2:
+                expansions = (("graph", "ordinary"),)
+                if mode == "deep":
+                    expansions += (("hierarchy", "hierarchy"),)
+                if len(expansions) > 1 and getattr(self.pool, "max_size", 1) >= 2:
 
                     def timed_expansion(method):
                         began = time.monotonic()
@@ -287,10 +288,15 @@ class RecallService:
             paths = current
 
         def fused_ids():
+            weights = (
+                tuple(getattr(self.config.search.mid_arm_weights, name) for name in arms)
+                if mode == "mid"
+                else None
+            )
             return tuple(
                 item.node_id
                 for item in reciprocal_rank_fusion(
-                    tuple(arms.values()), rrf_k=self.config.search.rrf_k
+                    tuple(arms.values()), rrf_k=self.config.search.rrf_k, weights=weights
                 )[: tier.fused_candidates]
             )
 
@@ -329,6 +335,7 @@ class RecallService:
         hydrated = read("hydrate", final_ids)
         budget = request.max_context_tokens or self.config.context.default_tokens
         items, blocks = [], []
+        used_units = 0
         for row in hydrated:
             item = {key: value for key, value in row.items() if key != "locator"}
             item["paths"] = paths.get(item["unit_id"], [])
@@ -340,11 +347,12 @@ class RecallService:
                 f"[{item['unit_id']}] {item['kind']} {item['origin']}\n{item['text']}\n"
                 f"Citations: {citations}\nTime: {time_evidence}"
             )
-            proposed = "\n\n".join((*blocks, block))
-            if len(self.tokenizer.encode_ordinary(proposed)) > budget:
+            next_units = used_units + (2 if blocks else 0) + estimate_units(block)
+            if estimated_tokens(next_units) > budget:
                 continue
             items.append(item)
             blocks.append(block)
+            used_units = next_units
             if len(items) == tier.max_results:
                 break
         _remaining(deadline)
@@ -352,8 +360,8 @@ class RecallService:
         return {
             "items": items,
             "context": context,
-            "context_tokens": len(self.tokenizer.encode_ordinary(context)),
-            "tokenizer": self.config.context.tokenizer,
+            "context_tokens": estimated_tokens(used_units),
+            "tokenizer": ESTIMATOR,
             "diagnostics": {
                 "recall_level": mode,
                 "generation_id": self.generation_id,

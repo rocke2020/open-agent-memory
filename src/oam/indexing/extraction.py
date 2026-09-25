@@ -6,7 +6,6 @@ import json
 from datetime import datetime
 from typing import Annotated, Literal
 
-import tiktoken
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -22,6 +21,7 @@ from pydantic import (
 from oam.config import OAMConfig
 from oam.indexing.chunker import TextChunk
 from oam.models.runtime import RuntimeModels, Usage
+from oam.tokens import estimate_units, estimated_tokens
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Offset = Annotated[StrictInt, Field(ge=0)]
@@ -167,14 +167,14 @@ class InsightResult(FrozenProjection):
         return self
 
 
-def model_input_tokens(system: str, envelope: dict, config: OAMConfig) -> int:
+def model_input_tokens(system: str, envelope: dict) -> int:
     user = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
     messages = json.dumps(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    return len(tiktoken.get_encoding(config.context.tokenizer).encode_ordinary(messages))
+    return estimated_tokens(estimate_units(messages))
 
 
 def pack_insight_facts(
@@ -184,10 +184,7 @@ def pack_insight_facts(
     for fact in facts[: config.extraction.max_facts_per_group]:
         candidate = [*packed, fact]
         envelope = {"facts": [item.model_dump(mode="json") for item in candidate]}
-        if (
-            model_input_tokens(INSIGHT_SYSTEM, envelope, config)
-            > config.extraction.max_input_tokens
-        ):
+        if model_input_tokens(INSIGHT_SYSTEM, envelope) > config.extraction.max_input_tokens:
             break
         packed = candidate
     return tuple(packed)
@@ -386,8 +383,7 @@ def _generate_json(
     timeout_seconds: float,
 ) -> tuple[dict, Usage]:
     user = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
-    tokenizer = tiktoken.get_encoding(config.context.tokenizer)
-    if model_input_tokens(system, envelope, config) > config.extraction.max_input_tokens:
+    if model_input_tokens(system, envelope) > config.extraction.max_input_tokens:
         raise ExtractionError("complete extraction input exceeds configured token bound")
     result = models.generate(
         role,
@@ -396,10 +392,6 @@ def _generate_json(
         max_output_tokens=config.extraction.max_output_tokens,
         timeout_seconds=timeout_seconds,
     )
-    if len(tokenizer.encode_ordinary(result.content)) > config.extraction.max_output_tokens:
-        raise ExtractionError(
-            "extraction output exceeds configured token bound", usage=result.usage
-        )
     try:
         body = json.loads(result.content)
     except ValueError as exc:

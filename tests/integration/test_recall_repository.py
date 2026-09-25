@@ -127,7 +127,7 @@ def test_literal_identifier_does_not_match_a_longer_identifier(recall_database):
     assert [row["unit_id"] for row in repository.anchors("LAB-204", 10)] == ["exact"]
 
 
-def test_fast_service_returns_cited_context_with_exact_budget(recall_database):
+def test_fast_service_returns_cited_context_with_estimated_budget(recall_database):
     from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
@@ -392,9 +392,9 @@ def test_expanded_modes_follow_causal_direction_and_sibling_hierarchy(recall_dat
     )
 
     ids = {item["unit_id"] for item in result["items"]}
-    assert ids == {"move", "rent", "job", "cheap"}
+    assert ids == ({"move", "rent", "job", "cheap"} if mode == "deep" else {"move", "rent", "job"})
     assert "graph" in result["diagnostics"]["executed_stages"]
-    assert "hierarchy" in result["diagnostics"]["executed_stages"]
+    assert ("hierarchy" in result["diagnostics"]["executed_stages"]) == (mode == "deep")
     assert "rerank" in result["diagnostics"]["omitted_stages"]
     assert result["diagnostics"]["degraded"] == []
 

@@ -81,7 +81,7 @@ def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(insight_co
         def guard(self, connection):
             pass
 
-        def execute(self, query, parameters):
+        def execute(self, query, parameters=None):
             if query.startswith("WITH eligible"):
                 rows = [("f1", "A", "source-a", 1), ("f2", "B", "source-b", 1)]
                 return SimpleNamespace(fetchall=lambda: rows)

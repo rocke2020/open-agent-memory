@@ -80,12 +80,19 @@ class SearchTier(FrozenModel):
         return self
 
 
+class MidArmWeights(FrozenModel):
+    lexical: PositiveFloat
+    dense: PositiveFloat
+    graph: PositiveFloat
+    temporal: PositiveFloat
+
+
 class SearchConfig(FrozenModel):
     max_query_tokens: PositiveInt
     max_queries: PositiveInt
     query_concurrency: PositiveInt
     rrf_k: PositiveInt
-    channel_weights: Literal["equal"]
+    mid_arm_weights: MidArmWeights
     graph_seed_min_similarity: float = Field(ge=0, le=1)
     graph_seed_max: PositiveInt
     relation_hops: Literal[2]
@@ -118,7 +125,7 @@ class RecallConfig(FrozenModel):
 class ContextConfig(FrozenModel):
     default_tokens: PositiveInt
     max_tokens: PositiveInt
-    tokenizer: Literal["o200k_base"]
+    tokenizer: Literal["oam-unicode-quarter-v1"]
 
     @model_validator(mode="after")
     def validate_budget(self) -> ContextConfig:

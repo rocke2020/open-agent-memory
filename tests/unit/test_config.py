@@ -134,7 +134,12 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
         0.7,
         20,
     )
-    assert config.search.channel_weights == "equal"
+    assert config.search.mid_arm_weights.model_dump() == {
+        "lexical": 1.0,
+        "dense": 2.0,
+        "graph": 0.5,
+        "temporal": 1.0,
+    }
     assert config.search.graph_seed_min_similarity == 0.3
     assert config.search.graph_seed_max == 20
     assert config.search.relation_hops == 2
@@ -144,7 +149,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert config.search.ann_iterative_scan == "strict_order"
     assert config.search.ann_scan_max_tuples == 20_000
     assert (config.context.default_tokens, config.context.max_tokens) == (2048, 8192)
-    assert config.context.tokenizer == "o200k_base"
+    assert config.context.tokenizer == "oam-unicode-quarter-v1"
     assert (config.chunks.default_tokens, config.chunks.max_tokens) == (8192, 8192)
     assert (
         config.profile.main_tokens,

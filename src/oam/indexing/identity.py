@@ -6,8 +6,9 @@ from collections.abc import Mapping
 
 from oam.config import OAMConfig
 from oam.models.bindings import resolve_model_binding
+from oam.tokens import ESTIMATOR
 
-INDEX_RECIPE = "oam-source-fact-insight-v6"
+INDEX_RECIPE = "oam-source-fact-insight-v7"
 
 
 def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
@@ -23,6 +24,7 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
             }
     identity = {
         "recipe": INDEX_RECIPE,
+        "estimator": ESTIMATOR,
         "chunk": config.chunk.model_dump(mode="json"),
         "extraction": config.extraction.model_dump(mode="json"),
         "index": config.index.model_dump(mode="json"),
