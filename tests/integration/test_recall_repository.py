@@ -317,6 +317,42 @@ def test_insight_requires_current_immutable_support_revision(recall_database):
     assert repository.hydrate(("parent",)) == []
 
 
+def test_hydrated_insight_orders_shared_passage_support_by_memory_id(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "z", "z claim")
+    add_fact(connection, authority, "a", "a claim")
+    connection.execute(
+        "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
+        "support_kind,span) VALUES (%s,%s,'a','z','z','quote',%s)",
+        (authority.tenant_id, authority.user_id, Jsonb({"start": 1, "end": 3})),
+    )
+    add_insight(connection, authority, "parent", ("z", "a"))
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    citations = repository.hydrate(("parent",))[0]["citations"]
+    assert [(item["source_id"], item["passage_id"], item["span"]) for item in citations] == [
+        ("a", "a", {"start": 0, "end": 7}),
+        ("z", "z", {"start": 1, "end": 3}),
+        ("z", "z", {"start": 0, "end": 7}),
+    ]
+
+
+def test_recall_disables_jit_only_for_its_transaction(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL jit=on")
+    with connection.transaction(force_rollback=True):
+        RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+        assert connection.execute("SHOW jit").fetchone()[0] == "off"
+    assert connection.execute("SHOW jit").fetchone()[0] == "on"
+
+
 @pytest.mark.parametrize("mode", ["mid", "deep"])
 def test_expanded_modes_follow_causal_direction_and_sibling_hierarchy(recall_database, mode):
     from oam.retrieval.service import RecallService

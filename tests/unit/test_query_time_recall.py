@@ -1,8 +1,10 @@
 """Natural-language time in the public recall service."""
 
+import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 
 import pytest
@@ -228,3 +230,99 @@ def test_fast_temporal_deadline_cannot_report_complete_recall(monkeypatch):
     assert {item["unit_id"] for item in partial["items"]} == {"new", "old"}
     assert partial["diagnostics"]["temporal_stop"] == "deadline"
     assert "temporal_deadline" in partial["diagnostics"]["degraded"]
+
+
+class ExpansionRepository(DatedRepository):
+    def __init__(self, request, activity):
+        super().__init__(request)
+        self.activity = activity
+
+    def dense(self, vector, limit):
+        return [{"unit_id": "old", "kind": "fact", "score": 0.9}]
+
+    def ordinary(self, seeds, vector):
+        return self._expand("graph", "old")
+
+    def hierarchy(self, seeds, vector):
+        return self._expand("hierarchy", "new")
+
+    def _expand(self, name, node):
+        with self.activity["lock"]:
+            self.activity["active"] += 1
+            self.activity["peak"] = max(self.activity["peak"], self.activity["active"])
+            self.activity["repositories"].add(id(self))
+        try:
+            time.sleep(0.04)
+            if self.activity.get("fail") == name:
+                raise RuntimeError("expansion failed")
+            return (node,), {}
+        finally:
+            with self.activity["lock"]:
+                self.activity["active"] -= 1
+
+
+class ExpansionService(RecallService):
+    def __init__(self, *, pool_size=2, fail=None):
+        super().__init__(
+            CONFIG,
+            SimpleNamespace(max_size=pool_size),
+            EmbeddingOnly(),
+            generation_id="generation",
+        )
+        self.activity = {
+            "lock": Lock(),
+            "active": 0,
+            "peak": 0,
+            "repositories": set(),
+            "fail": fail,
+        }
+
+    @contextmanager
+    def _repository(self, authority, request, deadline):
+        yield ExpansionRepository(request, self.activity)
+
+
+def test_mid_expansions_overlap_on_distinct_repositories_and_keep_arm_order():
+    service = ExpansionService()
+
+    result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))
+
+    assert service.activity["peak"] == 2
+    assert len(service.activity["repositories"]) == 2
+    assert service.activity["active"] == 0
+    assert result["diagnostics"]["executed_arms"] == [
+        "lexical",
+        "dense",
+        "graph",
+        "hierarchy",
+    ]
+    assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
+
+
+def test_mid_expansions_remain_serial_with_one_database_connection():
+    service = ExpansionService(pool_size=1)
+
+    result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))
+
+    assert service.activity["peak"] == 1
+    assert service.activity["active"] == 0
+    assert result["diagnostics"]["degraded"] == []
+
+
+@pytest.mark.parametrize("allow_partial", [False, True])
+@pytest.mark.parametrize("failed_arm", ["graph", "hierarchy"])
+def test_mid_expansion_failure_drains_other_job_and_obeys_partial_policy(allow_partial, failed_arm):
+    service = ExpansionService(fail=failed_arm)
+    request = SearchRequest(query="apple", recall_level="mid", allow_partial=allow_partial)
+
+    if allow_partial:
+        result = service.search(object(), request)
+        assert result["diagnostics"]["degraded"] == [failed_arm]
+        assert (set(result["diagnostics"]["executed_arms"]) & {"graph", "hierarchy"}) == {
+            "hierarchy" if failed_arm == "graph" else "graph"
+        }
+        assert result["diagnostics"]["timing_ms"][failed_arm] >= 30
+    else:
+        with pytest.raises(RecallUnavailable, match=f"{failed_arm} stage failed"):
+            service.search(object(), request)
+    assert service.activity["active"] == 0
