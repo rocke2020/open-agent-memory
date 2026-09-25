@@ -239,6 +239,22 @@ async def test_openapi_reserves_public_step_four_routes(client) -> None:
     } <= set(paths)
 
 
+async def test_openapi_exposes_https_evidence_url_retain_variant(client) -> None:
+    schema = (await client.get("/openapi.json")).json()
+    request = schema["paths"]["/v1/retain"]["post"]["requestBody"]["content"]["application/json"][
+        "schema"
+    ]
+
+    assert request["discriminator"]["mapping"]["document_url"] == (
+        "#/components/schemas/RetainURLDocument"
+    )
+    assert set(schema["components"]["schemas"]["RetainURLDocument"]["properties"]) >= {
+        "url",
+        "media_type",
+        "document_id",
+    }
+
+
 async def test_evidence_route_rejects_body_owned_identity_before_capability_check(client) -> None:
     response = await client.post(
         "/v1/retain",

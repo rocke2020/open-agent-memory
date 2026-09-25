@@ -112,7 +112,9 @@ class RecallRepository:
 
     def user_state(self) -> dict:
         rows = self._execute(
-            "SELECT sc.index_generation_id,CASE "
+            "SELECT sc.index_generation_id,"
+            "COALESCE(bool_or(op.stage_state->>'parse_coverage'='partial'),false) "
+            "AS parse_partial,CASE "
             "WHEN bool_or(op.status IN ('partial_failed','failed_terminal','cancelled') "
             "OR op.stage_state->>'extraction_coverage'='partial' OR op.stage_state ? 'error') "
             "THEN 'partial' WHEN bool_or(s.source_id IS NOT NULL AND "

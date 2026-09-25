@@ -19,6 +19,10 @@ from oam.resources.types import (
 )
 
 _RENDER_DPI = 72
+PDF_VISION_SCALE = 2
+MAJOR_IMAGE_PAGE_FRACTION = 0.25
+TABLE_LINE_LENGTH_FRACTION = 0.08
+CORRUPT_TEXT_FRACTION = 0.1
 
 
 def parse_pdf(
@@ -65,3 +69,80 @@ def parse_pdf(
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def native_text_usable(text: str) -> bool:
+    """Reject empty or visibly damaged text layers before selecting native extraction."""
+    return bool(text) and (
+        sum(character == "\ufffd" or ord(character) < 32 for character in text) / len(text)
+        < CORRUPT_TEXT_FRACTION
+    )
+
+
+def render_pdf_page(
+    original: OriginalDescriptor,
+    page_number: int,
+    limits: ResourceConfig,
+    *,
+    remaining_pixels: int,
+) -> tuple[bytes, int]:
+    """Render one bounded physical page for document vision."""
+    import pypdfium2 as pdfium
+
+    if original.media_type is not ResourceMediaType.PDF:
+        raise ResourceParseError("PDF renderer requires application/pdf original bytes")
+    try:
+        with pdfium.PdfDocument(original.content) as document:
+            if not 1 <= page_number <= len(document):
+                raise ResourceParseError("PDF page number is out of range")
+            page = document[page_number - 1]
+            try:
+                width, height = page.get_size()
+                pixels = round(width * PDF_VISION_SCALE) * round(height * PDF_VISION_SCALE)
+                if pixels > limits.max_pixels_per_image or pixels > remaining_pixels:
+                    raise ResourceLimitError("PDF rendered page exceeds Resource pixel limit")
+                bitmap = page.render(scale=PDF_VISION_SCALE)
+                try:
+                    output = BytesIO()
+                    bitmap.to_pil().save(output, format="PNG")
+                    return output.getvalue(), pixels
+                finally:
+                    bitmap.close()
+            finally:
+                page.close()
+    except (ResourceParseError, ResourceLimitError):
+        raise
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise ResourceParseError("PDF page rendering failed") from exc
+
+
+def page_has_visual_structure(original: OriginalDescriptor, page_number: int) -> bool:
+    """Select text pages with a large image or a vector-drawn table grid."""
+    import pypdfium2 as pdfium
+
+    try:
+        with pdfium.PdfDocument(original.content) as document:
+            page = document[page_number - 1]
+            try:
+                width, height = page.get_size()
+                page_area = width * height
+                for item in page.get_objects(filter=(pdfium.raw.FPDF_PAGEOBJ_IMAGE,)):
+                    left, bottom, right, top = item.get_bounds()
+                    image_area = abs((right - left) * (top - bottom))
+                    if page_area and image_area / page_area >= MAJOR_IMAGE_PAGE_FRACTION:
+                        return True
+                horizontal_lines = 0
+                vertical_lines = 0
+                for item in page.get_objects(filter=(pdfium.raw.FPDF_PAGEOBJ_PATH,)):
+                    left, bottom, right, top = item.get_bounds()
+                    line_width = abs(right - left)
+                    line_height = abs(top - bottom)
+                    if line_width >= width * TABLE_LINE_LENGTH_FRACTION and line_height <= 3:
+                        horizontal_lines += 1
+                    if line_height >= height * TABLE_LINE_LENGTH_FRACTION and line_width <= 3:
+                        vertical_lines += 1
+                return horizontal_lines >= 3 and vertical_lines >= 2
+            finally:
+                page.close()
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise ResourceParseError("PDF page inspection failed") from exc

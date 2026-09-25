@@ -176,6 +176,17 @@ class IndexStore:
             (Jsonb(stages), *self.key, self.claim.operation_id),
         )
 
+    def mark_deferred_failure_stage(self, stage: str) -> None:
+        """Restore an unresolved model call after earlier PDF passages are published."""
+        with self.transaction() as connection:
+            self.guard(connection)
+            connection.execute(
+                "UPDATE attempts SET disposition='unknown_external_outcome',request_ref=%s,"
+                "response_ref=NULL,usage=NULL WHERE tenant_id=%s AND user_id=%s "
+                "AND work_unit_id=%s AND attempt_id=%s",
+                (stage, *self.key, self.claim.work_unit_id, self.claim.attempt_id),
+            )
+
     def resource_metadata(self):
         """Read the accepted upload envelope, not derived document passages."""
         from oam.contracts.resources import EvidenceResourceCreate
@@ -340,7 +351,7 @@ class IndexStore:
             if disposition == "failed" and stage is not None and usage is not None
         )
         for stage, usage in rows:
-            if stage.startswith("extract:") or stage in {"insight", "abstract"}:
+            if stage.startswith(("extract:", "vision:")) or stage in {"insight", "abstract"}:
                 generation.append(usage)
             elif stage.startswith(("passage:", "facts_embed:", "insight_embed")):
                 embedding.append(usage)

@@ -2,6 +2,8 @@ contract_version: "0.0.1"
 
 resource:
   max_bytes: 20971520
+  url_fetch_timeout_seconds: 30
+  pdf_child_timeout_seconds: 30
   max_pdf_pages: 20
   max_images: 20
   max_pixels_per_image: 40000000

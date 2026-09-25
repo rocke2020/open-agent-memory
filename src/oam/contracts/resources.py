@@ -26,6 +26,7 @@ class EvidenceResourceCreate(SourceInputMetadata):
     filename: str = Field(min_length=1)
     byte_length: PositiveInt
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_url: str | None = None
     resource_type: Literal["evidence"] = "evidence"
     temporal_annotations: list[ResourceTemporalAnnotation] = Field(default_factory=list)
 

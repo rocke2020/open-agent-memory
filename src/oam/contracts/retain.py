@@ -76,7 +76,22 @@ class RetainFileDocument(RetainMetadata):
     temporal_annotations: list[ResourceTemporalAnnotation] = Field(default_factory=list)
 
 
-RetainJSON = Annotated[RetainInteraction | RetainTextDocument, Field(discriminator="input_type")]
+class RetainURLDocument(RetainMetadata):
+    input_type: Literal["document_url"]
+    document_id: NonBlank = Field(max_length=256)
+    update_mode: Literal["replace"]
+    media_type: Literal["text/html", "application/pdf", "image/png", "image/jpeg"]
+    url: str = Field(min_length=1, max_length=2048)
+    temporal_annotations: list[ResourceTemporalAnnotation] = Field(default_factory=list)
+
+    def validate_limits(self, config: OAMConfig) -> None:
+        """The fetched original receives the Resource limits after URL admission."""
+
+
+RetainJSON = Annotated[
+    RetainInteraction | RetainTextDocument | RetainURLDocument,
+    Field(discriminator="input_type"),
+]
 RETAIN_JSON = TypeAdapter(RetainJSON)
 
 

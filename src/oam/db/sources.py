@@ -114,6 +114,40 @@ WHERE tenant_id = %s
 
 
 class SourceRepository:
+    def find_idempotent(
+        self,
+        connection: Connection,
+        authority: AuthorizedUser,
+        *,
+        operation_kind: str,
+        idempotency_key: str,
+        request_hash: bytes,
+    ) -> AcceptanceReceipt | None:
+        """Avoid refetching a URL whose exact caller request was already accepted."""
+        if not authority.allows("memory:append"):
+            raise PermissionError("user does not grant memory:append")
+        with connection.transaction():
+            cursor = connection.cursor()
+            bind_user(cursor, authority)
+            cursor.execute(
+                FIND_IDEMPOTENT_OPERATION_SQL,
+                (
+                    authority.tenant_id,
+                    authority.user_id,
+                    authority.principal_id,
+                    operation_kind,
+                    idempotency_key,
+                ),
+            )
+            existing = cursor.fetchone()
+        if existing is None:
+            return None
+        if bytes(existing[1]) != request_hash:
+            raise IdempotencyConflict(f"idempotency key {idempotency_key!r} has another payload")
+        return AcceptanceReceipt(
+            operation_id=str(existing[0]), accepted_seq=int(existing[2]), reused=True
+        )
+
     def accept(
         self,
         connection: Connection,

@@ -28,7 +28,7 @@ class DatedRepository:
         }
 
     def user_state(self):
-        return {"index_generation_id": "generation", "readiness": "ready"}
+        return {"index_generation_id": "generation", "readiness": "ready", "parse_partial": False}
 
     def temporal_matches(self, unit_ids):
         window = self.request.time_window

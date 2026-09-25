@@ -33,6 +33,8 @@ class FrozenModel(BaseModel):
 
 class ResourceConfig(FrozenModel):
     max_bytes: PositiveInt
+    url_fetch_timeout_seconds: PositiveInt
+    pdf_child_timeout_seconds: PositiveInt
     max_pdf_pages: PositiveInt
     max_images: PositiveInt
     max_pixels_per_image: PositiveInt

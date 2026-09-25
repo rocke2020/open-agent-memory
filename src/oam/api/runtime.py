@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -37,12 +38,19 @@ from oam.contracts.credentials import (
 from oam.contracts.evidence import EvidenceAppendRequest
 from oam.contracts.operations import ReconcileAttemptRequest
 from oam.contracts.resources import EvidenceResourceCreate, ResourceMediaType
-from oam.contracts.retain import RetainFileDocument, RetainInteraction, RetainTextDocument
+from oam.contracts.retain import (
+    RetainFileDocument,
+    RetainInteraction,
+    RetainTextDocument,
+    RetainURLDocument,
+)
 from oam.contracts.search import SearchRequest
-from oam.db.sources import AcceptSource, SourceRepository
+from oam.db.context import bind_user
+from oam.db.sources import AcceptanceReceipt, AcceptSource, SourceRepository
 from oam.indexing.identity import index_generation
 from oam.models.runtime import RuntimeModels
 from oam.operations.repository import OperationNotFound, OperationRecord, OperationRepository
+from oam.resources.url_fetch import fetch_resource_url, safe_source_url
 
 
 class AuthenticationFailed(PermissionError):
@@ -94,6 +102,7 @@ class DatabaseRuntime:
     config: OAMConfig
     pool: ConnectionPool
     models: object | None = None
+    url_fetcher: Callable[..., bytes] = fetch_resource_url
     _http: httpx.Client = field(init=False, repr=False)
     _auth: AuthRepository = field(init=False, repr=False)
     _operations: OperationRepository = field(init=False, repr=False)
@@ -200,6 +209,31 @@ class DatabaseRuntime:
             name: caller.get(name)
             for name in ("source_created_at", "source_updated_at", "reference_timezone")
         }
+        url_request_bytes = None
+        if isinstance(body, RetainURLDocument):
+            source_url = safe_source_url(body.url)
+            url_request_bytes = json.dumps(
+                caller, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode()
+            request_hash = hashlib.sha256(url_request_bytes).digest()
+            with self.pool.connection() as connection:
+                authority = self._authorize(connection, actor, body.user_id, "memory:append")
+                prior = SourceRepository().find_idempotent(
+                    connection,
+                    authority,
+                    operation_kind="index_resource",
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                )
+                if prior is not None:
+                    return self._retain_response(connection, authority, prior)
+            content = self.url_fetcher(
+                body.url,
+                body.media_type,
+                max_bytes=self.config.resource.max_bytes,
+                timeout_seconds=self.config.resource.url_fetch_timeout_seconds,
+            )
+            metadata_fields["source_url"] = source_url
         if isinstance(body, RetainInteraction):
             body.validate_limits(self.config)
             source_id = f"src_{identifier}"
@@ -225,13 +259,19 @@ class DatabaseRuntime:
                 body.validate_limits(self.config)
                 original, stored_media_type = body.text.encode(), ResourceMediaType.TEXT.value
                 stored_filename = body.document_id
+            elif isinstance(body, RetainURLDocument):
+                original, stored_media_type = content, body.media_type
+                stored_filename = body.document_id
             else:
                 if not isinstance(body, RetainFileDocument) or content is None:
                     raise ValueError("document original is required")
-                if media_type != ResourceMediaType.HTML.value:
-                    raise NotImplementedError(
-                        "only text and HTML documents are available in this core stage"
-                    )
+                if media_type not in {
+                    ResourceMediaType.HTML.value,
+                    ResourceMediaType.PDF.value,
+                    ResourceMediaType.PNG.value,
+                    ResourceMediaType.JPEG.value,
+                }:
+                    raise ValueError("unsupported document media type")
                 if not content or len(content) > self.config.resource.max_bytes:
                     raise ValueError("document exceeds byte limit or is empty")
                 original, stored_media_type = content, media_type
@@ -247,7 +287,7 @@ class DatabaseRuntime:
             ).model_dump_json()
             input_role, resource_type = "evidence_resource", "evidence"
             update_mode, operation_kind = body.update_mode, "index_resource"
-            request_bytes = (
+            request_bytes = url_request_bytes or (
                 json.dumps(
                     {
                         "request": caller,
@@ -290,11 +330,20 @@ class DatabaseRuntime:
                     max_bytes=max_bytes,
                 ),
             )
-            source = connection.execute(
+            return self._retain_response(connection, authority, receipt)
+
+    def _retain_response(self, connection, authority, receipt: AcceptanceReceipt) -> dict:
+        with connection.transaction():
+            cursor = connection.cursor()
+            bind_user(cursor, authority)
+            cursor.execute(
                 "SELECT source_id,source_version FROM operations "
                 "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
                 (authority.tenant_id, authority.user_id, receipt.operation_id),
-            ).fetchone()
+            )
+            source = cursor.fetchone()
+        if source is None:
+            raise RuntimeError("accepted operation is unavailable")
         return {
             "operation_id": receipt.operation_id,
             "source_id": source[0],

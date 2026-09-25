@@ -118,8 +118,11 @@ class RecallService:
             executed.append(name)
             return value
 
-        if read("user_state")["index_generation_id"] != self.generation_id:
+        initial_index_state = read("user_state")
+        if initial_index_state["index_generation_id"] != self.generation_id:
             raise RecallUnavailable("query generation differs from active user generation")
+        if initial_index_state["parse_partial"] and not request.allow_partial:
+            raise RecallUnavailable("PDF parse is incomplete; set allow_partial to read it")
 
         def text_arms():
             return (
@@ -321,6 +324,8 @@ class RecallService:
         index_state = read("user_state")
         if index_state["index_generation_id"] != self.generation_id:
             raise RecallUnavailable("user generation changed during recall")
+        if index_state["parse_partial"] and not request.allow_partial:
+            raise RecallUnavailable("PDF parse became incomplete during recall")
         hydrated = read("hydrate", final_ids)
         budget = request.max_context_tokens or self.config.context.default_tokens
         items, blocks = [], []

@@ -1,8 +1,11 @@
+import base64
 import json
+from io import BytesIO
 from pathlib import Path
 
 import httpx
 import pytest
+from PIL import Image
 
 from oam.config import ModelsConfig, load_config
 from oam.models.runtime import ModelOutputError, RuntimeModels
@@ -17,6 +20,7 @@ def runtime_config():
                 "insights": "chat",
                 "abstract": "chat",
                 "embedding": "vector",
+                "document_vision": "vision",
                 "reranker": "rank",
             },
             "bindings": {
@@ -30,6 +34,7 @@ def runtime_config():
                 for alias, capability in (
                     ("chat", "chat"),
                     ("vector", "embeddings"),
+                    ("vision", "vision"),
                     ("rank", "rerank"),
                 )
             },
@@ -125,6 +130,48 @@ def test_runtime_generation_preserves_visible_content_and_does_not_add_reasoning
     assert payload["max_tokens"] == 1024
     assert requests[0].extensions["timeout"]["read"] == 4.5
     assert requests[0].headers["authorization"] == "Bearer synthetic-secret"
+
+
+def test_runtime_document_vision_sends_image_bytes_and_reads_visible_json():
+    image = BytesIO()
+    Image.new("RGB", (12, 8), "white").save(image, format="PNG")
+
+    def respond(request):
+        payload = json.loads(request.content)
+        assert payload["model"] == "synthetic-vision"
+        assert payload["max_tokens"] >= 1024
+        content = payload["messages"][1]["content"]
+        assert content[0] == {"type": "text", "text": "Read the report table."}
+        prefix, encoded = content[1]["image_url"]["url"].split(",", 1)
+        assert prefix == "data:image/png;base64"
+        assert base64.b64decode(encoded) == image.getvalue()
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"blocks":[{"text":"Glucose 92 mg/dL"}]}'},
+                    }
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        result = RuntimeModels(
+            runtime_config(),
+            {"MODEL_URL": "https://models.example.test/v1", "MODEL_KEY": "synthetic"},
+            http,
+        ).generate_vision(
+            image.getvalue(),
+            media_type="image/png",
+            system="Extract cited details.",
+            user="Read the report table.",
+            max_output_tokens=1024,
+            timeout_seconds=2,
+        )
+
+    assert json.loads(result.content) == {"blocks": [{"text": "Glucose 92 mg/dL"}]}
 
 
 @pytest.mark.parametrize(

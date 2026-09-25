@@ -11,13 +11,15 @@ from oam.contracts.resources import ResourceMediaType
 from oam.resources.html import parse_html
 from oam.resources.images import inspect_images
 from oam.resources.originals import OriginalDescriptor
-from oam.resources.pdf import parse_pdf
+from oam.resources.pdf import native_text_usable, parse_pdf
 from oam.resources.types import ResourceLimitError, ResourceParseError
 
 
 def _limits(**overrides: int) -> ResourceConfig:
     values = {
         "max_bytes": 1_024,
+        "url_fetch_timeout_seconds": 30,
+        "pdf_child_timeout_seconds": 30,
         "max_pdf_pages": 2,
         "max_images": 2,
         "max_pixels_per_image": 100,
@@ -127,6 +129,12 @@ def test_pdf_parser_rejects_page_limit_before_text_extraction() -> None:
 
     with pytest.raises(ResourceLimitError, match="page limit.*1"):
         parse_pdf(original, _limits(max_bytes=10_000, max_pdf_pages=1))
+
+
+def test_pdf_text_layer_quality_distinguishes_legible_from_corrupt_text() -> None:
+    assert native_text_usable("Sodium 140 mmol/L with one �")
+    assert not native_text_usable("�\x00�\x00�\x00�\x00�\x00")
+    assert not native_text_usable("")
 
 
 def test_image_inspection_reports_format_dimensions_and_stable_locators() -> None:

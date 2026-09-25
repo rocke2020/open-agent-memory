@@ -60,6 +60,7 @@ from oam.operations.repository import (
     RetryRequiresPlanning,
 )
 from oam.operations.state import OperationStatus as StoredOperationStatus
+from oam.resources.url_fetch import ResourceFetchUnavailable
 from oam.retrieval.service import RecallUnavailable
 
 CSP = "; ".join(
@@ -615,6 +616,8 @@ def _content_call(call):
         raise HTTPException(503, detail={"code": "CapabilityUnavailable"}) from exc
     except RecallUnavailable as exc:
         raise HTTPException(503, detail={"code": "RecallUnavailable"}) from exc
+    except ResourceFetchUnavailable as exc:
+        raise HTTPException(502, detail={"code": "ResourceFetchUnavailable"}) from exc
     except TimeoutError as exc:
         raise HTTPException(504, detail={"code": "RecallDeadlineExceeded"}) from exc
     except (IdempotencyConflict, SourceVersionConflict) as exc:

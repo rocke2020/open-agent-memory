@@ -1,0 +1,56 @@
+{
+  "synthetic": true,
+  "contains_real_person_data": false,
+  "subject_code": "SYN-001",
+  "collected_on": "2026-08-14",
+  "languages": {
+    "en": {
+      "html": {
+        "file": "en-report.html",
+        "sha256": "97a5bca8dcf6d028819aa9392137f4dbbeb6e0769fba08ea17616a78d9ba6c36"
+      },
+      "native_pdf": {
+        "file": "en-native.pdf",
+        "sha256": "c3b1ec0bdfe8233231fa527ee4a47f67ede833733dd549964ab19602e1515fde"
+      },
+      "scanned_pdf": {
+        "file": "en-scanned.pdf",
+        "sha256": "ca4f7468bd1486ef8b21eb6ed2e8b9a74149ffa33df454fe67465f28e0ee327c"
+      },
+      "image": {
+        "file": "en-report.png",
+        "sha256": "f9d9e22a11278759e68cabfae7dc577f0dd723c1d0aa09b0279bd72e97908b52"
+      },
+      "allergy_pdf": {
+        "file": "en-allergy-native.pdf",
+        "sha256": "429207f27e1104804f59a39c0c59076e066d337268c6846070d87f0a55a5bc7a"
+      },
+      "vector_table_pdf": {
+        "file": "en-vector-table.pdf",
+        "sha256": "abbbd3c035149489d38045d713b564936709b6375159c11777ea3d75e84e737e"
+      }
+    },
+    "zh": {
+      "html": {
+        "file": "zh-report.html",
+        "sha256": "5ea3cb6d6d832b76393398b10d3e29157c108b06906edf0e9c01f21412c89f45"
+      },
+      "native_pdf": {
+        "file": "zh-native.pdf",
+        "sha256": "0abc70956b80241a4a4ba76c112b6f8e7b21c0670bcb009b7d66df629a18cac1"
+      },
+      "scanned_pdf": {
+        "file": "zh-scanned.pdf",
+        "sha256": "62d93484a887d4bd9961ed851d66992607077592ae6f4e6c32419539fc4df588"
+      },
+      "image": {
+        "file": "zh-report.png",
+        "sha256": "107b10832539aa67a58661e6183e30ee8e49056a68defda0738fbe3471b90e1c"
+      },
+      "allergy_pdf": {
+        "file": "zh-allergy-native.pdf",
+        "sha256": "4666217e129f86101d2eec1365e1c58af551a03b68f2ef0b2e0371223ea210db"
+      }
+    }
+  }
+}

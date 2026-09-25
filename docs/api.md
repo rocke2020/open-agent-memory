@@ -33,7 +33,7 @@ Retain resolves the mode-specific identity before consuming the request body. `a
 
 | Route | Contract |
 |---|---|
-| `POST /v1/retain` | Accept JSON interaction/text document, or multipart document metadata plus the complete `original` file; return `202` with a durable operation and server-assigned source identity. |
+| `POST /v1/retain` | Accept a JSON interaction, text document or HTTPS Evidence URL, or multipart document metadata plus the complete `original` file; return `202` with a durable operation and server-assigned source identity. |
 | `POST /v1/recall` | Accept `user_id` and `query`; run non-generative `fast`, `mid` or `deep` recall, defaulting to `mid`. |
 | `GET /v1/users/{user_id}/operations/{operation_id}` | Inspect accepted work, readiness, failures and usage under the same user grant. |
 | `POST /v1/users/{user_id}/operations/{operation_id}/{action}` | Use `cancel`, `retry` or `reconcile-attempt` with the existing operation capability and policy checks. |
@@ -67,7 +67,9 @@ A document supplies a stable `document_id` within its tenant/user pair and an ex
 }
 ```
 
-File documents use `multipart/form-data` on the same `/v1/retain` endpoint. The `metadata` part contains `{"user_id":"lin","input_type":"document","document_id":"scan-2026","update_mode":"replace"}`; the `original` part contains the complete file with its filename and media type. OAM validates size/type and computes its length and digest. File append is rejected; replace the complete HTML/PDF/image file or use a separate document ID. PDF/image processing remains a later integration gate.
+File documents use `multipart/form-data` on the same `/v1/retain` endpoint. The `metadata` part contains `{"user_id":"lin","input_type":"document","document_id":"scan-2026","update_mode":"replace"}`; the `original` part contains the complete file with its filename and media type. OAM validates size/type and computes its length and digest. File append is rejected; replace the complete HTML/PDF/image file or use a separate document ID.
+
+An HTTPS Evidence URL uses a JSON body such as `{"user_id":"lin","input_type":"document_url","document_id":"scan-2026","update_mode":"replace","media_type":"application/pdf","url":"https://reports.example.org/scan.pdf"}`. The declared media type is one of `text/html`, `application/pdf`, `image/png` or `image/jpeg`. OAM authorizes the user before a single bounded fetch, rejects nonpublic destinations, redirects and mismatched returned bytes, and commits the exact fetched original before indexing. A committed identical idempotency key returns its receipt without another fetch; a failed fetch creates no accepted source. URL ingestion does not crawl links or refresh automatically. A URL query may be needed for fetching but is never included in citations or public error text.
 
 Neither format accepts caller-managed `source_id`, `message_id`, `source_version`, `expected_active_version`, `byte_length` or `sha256`. OAM owns source/revision allocation; the latest accepted document revision immediately excludes older derivatives while new indexing is pending. Documents remain Evidence and never automatically become learned facts or Insights.
 
@@ -83,8 +85,8 @@ Every response carries a request ID and contract version. Accepted asynchronous 
 
 Recall returns typed `items`, exact rendered `context`, `context_tokens`, `tokenizer`, and diagnostics for query-time interpretation, executed/omitted stages, executed fusion arms, partial coverage, usage and timings. Each Insight item includes its assigned subtype and exact supporting facts; empty results do not invent evidence. The context-token count covers the exact returned context, including citations and time qualifiers.
 
-Errors use safe details; validation and authorization complete before external calls. Invalid credentials return `401`; retain wire-body overflow returns `413`; conflicting reuse of an idempotency key returns `409`; invalid explicit input returns `422`; unavailable capability/mandatory recall stages return `503`; exhausted deadlines return `504`. Unavailable authority uses a non-enumerating `404` where required.
+Errors use safe details; authorization completes before external fetches or model calls. Invalid credentials return `401`; retain wire-body overflow returns `413`; conflicting reuse of an idempotency key returns `409`; invalid explicit input or URL content returns `422`; an unavailable URL source returns `502`; unavailable capability/mandatory recall stages return `503`; exhausted recall deadlines return `504`. Unavailable authority uses a non-enumerating `404` where required.
 
 ## 5. Current Implementation Status
 
-The user-qualified retain/recall surface, server-managed document updates, Insight subtypes and temporal ranking are implemented. Current tests cover atomic append/idempotency, exact source support, temporal ranking without global date exclusion, fast multi-hop spreading and readiness diagnostics. Real-model probes have exercised supported L2 and separate HTML Evidence through the public API; rejected derived annotations remain visible as partial indexing coverage. Profile inclusion, separate source-chunk output, batch/planner, full Resource/lifecycle and Inspector integration remain later gates. OpenAPI presence alone is not an availability or release claim.
+The user-qualified retain/recall surface, server-managed document updates, Insight subtypes and temporal ranking are implemented. Current deterministic tests cover uploaded and URL-fetched HTML/PDF/image Evidence, original-byte preservation, PDF child processing, joint citations, atomic append/idempotency, exact source support, temporal ranking and readiness diagnostics. Real-model probes have exercised supported L2 and separate HTML Evidence through the public API; actual document-vision and cross-language quality remain unverified. Profile inclusion, separate source-chunk output, batch/planner, full Resource/lifecycle and Inspector integration remain later gates. OpenAPI presence alone is not an availability or release claim.

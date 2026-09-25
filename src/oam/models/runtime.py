@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import math
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -88,23 +89,50 @@ class RuntimeModels:
             },
             timeout_seconds,
         )
-        usage = _usage(body.get("usage"))
-        try:
-            choices = body["choices"]
-            if not isinstance(choices, list) or len(choices) != 1:
-                raise ValueError
-            choice = choices[0]
-            message = choice["message"]
-            if not isinstance(message, dict) or choice.get("finish_reason") != "stop":
-                raise ValueError
-            content = message.get("content")
-            if message.get("refusal") or not isinstance(content, str) or not content.strip():
-                raise ValueError
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ModelOutputError(
-                "generation requires nonempty, unrefused stop-only content", usage=usage
-            ) from exc
-        return ModelResult(content=content, usage=usage)
+        return _generation_result(body)
+
+    def generate_vision(
+        self,
+        image: bytes,
+        *,
+        media_type: str,
+        system: str,
+        user: str,
+        max_output_tokens: int,
+        timeout_seconds: float,
+    ) -> ModelResult:
+        if type(max_output_tokens) is not int or max_output_tokens < MIN_GENERATION_OUTPUT_TOKENS:
+            raise ValueError("generation requires at least 1024 output tokens")
+        if not image or media_type not in {"image/png", "image/jpeg"}:
+            raise ValueError("vision requires nonempty PNG or JPEG bytes")
+        if not system.strip() or not user.strip():
+            raise ValueError("vision requires nonempty system and user content")
+        binding = self._binding("document_vision", "vision")
+        encoded = base64.b64encode(image).decode("ascii")
+        body = self._post(
+            binding,
+            "/chat/completions",
+            {
+                "model": binding.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+                            },
+                        ],
+                    },
+                ],
+                "max_tokens": max_output_tokens,
+                "response_format": {"type": "json_object"},
+            },
+            timeout_seconds,
+        )
+        return _generation_result(body)
 
     def embed(self, texts: tuple[str, ...], *, timeout_seconds: float) -> EmbeddingResult:
         _require_texts(texts)
@@ -192,6 +220,26 @@ class RuntimeModels:
         if not isinstance(body, dict):
             raise ModelOutputError("model endpoint returned a non-object response")
         return body
+
+
+def _generation_result(body: dict[str, Any]) -> ModelResult:
+    usage = _usage(body.get("usage"))
+    try:
+        choices = body["choices"]
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise ValueError
+        choice = choices[0]
+        message = choice["message"]
+        if not isinstance(message, dict) or choice.get("finish_reason") != "stop":
+            raise ValueError
+        content = message.get("content")
+        if message.get("refusal") or not isinstance(content, str) or not content.strip():
+            raise ValueError
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ModelOutputError(
+            "generation requires nonempty, unrefused stop-only content", usage=usage
+        ) from exc
+    return ModelResult(content=content, usage=usage)
 
 
 def _require_texts(texts: tuple[str, ...]) -> None:

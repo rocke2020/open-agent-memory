@@ -65,6 +65,8 @@ def test_conformance_fixture_copy_matches_unit_fixture_bytes() -> None:
     }
 
     assert {path.name for path in UNIT_FIXTURES.iterdir()} == expected_names
-    assert {path.name for path in CONFORMANCE_FIXTURES.iterdir()} == expected_names
+    assert {
+        path.name for path in CONFORMANCE_FIXTURES.iterdir() if path.is_file()
+    } == expected_names
     for name in expected_names:
         assert (UNIT_FIXTURES / name).read_bytes() == (CONFORMANCE_FIXTURES / name).read_bytes()
