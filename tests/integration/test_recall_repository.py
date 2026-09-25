@@ -399,6 +399,104 @@ def test_expanded_modes_follow_causal_direction_and_sibling_hierarchy(recall_dat
     assert result["diagnostics"]["degraded"] == []
 
 
+def test_hierarchy_applies_eligibility_before_parent_and_sibling_limits(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "seed", "Seed fact")
+    add_fact(connection, authority, "hidden", "Hidden support", eligible=False)
+    add_fact(connection, authority, "alpha", "First sibling", direction=0.8)
+    add_fact(connection, authority, "beta", "Second sibling", direction=0.8)
+    add_insight(connection, authority, "a_bad", ("seed", "hidden"))
+    add_insight(connection, authority, "b_good", ("seed", "alpha", "beta"))
+    connection.execute(
+        "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
+        "source_version,evidence_id,memory_id,generation_id,content_text,locator,embedding,"
+        "lexical_text) SELECT tenant_id,user_id,'a_stale',kind,origin,source_id,"
+        "source_version,evidence_id,memory_id,'stale',content_text,locator,"
+        "(SELECT embedding FROM search_units WHERE tenant_id=%s AND unit_id='seed'),"
+        "lexical_text FROM search_units WHERE tenant_id=%s AND unit_id='alpha'",
+        (authority.tenant_id, authority.tenant_id),
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={
+            "search": config.search.model_copy(
+                update={"hierarchy_parents_per_seed": 1, "hierarchy_children_per_parent": 1}
+            )
+        }
+    )
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
+
+    assert repository.hierarchy(("seed",), vector) == (
+        ("alpha",),
+        {"alpha": [{"arm": "hierarchy", "nodes": ["seed", "b_good", "alpha"]}]},
+    )
+
+
+def test_hierarchy_retains_all_valid_parent_paths_for_one_sibling(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "seed", "Seed fact")
+    add_fact(connection, authority, "sibling", "Shared sibling")
+    add_insight(connection, authority, "first", ("seed", "sibling"))
+    add_insight(connection, authority, "second", ("seed", "sibling"))
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
+
+    assert repository.hierarchy(("seed",), vector) == (
+        ("sibling",),
+        {
+            "sibling": [
+                {"arm": "hierarchy", "nodes": ["seed", "first", "sibling"]},
+                {"arm": "hierarchy", "nodes": ["seed", "second", "sibling"]},
+            ]
+        },
+    )
+
+
+def test_hierarchy_rechecks_source_revision_and_generation(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "seed", "Seed fact")
+    add_fact(connection, authority, "sibling", "Sibling fact")
+    add_insight(connection, authority, "parent", ("seed", "sibling"))
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
+    assert repository.hierarchy(("seed",), vector)[0] == ("sibling",)
+
+    connection.execute(
+        "UPDATE source_versions SET status='superseded' WHERE tenant_id=%s AND source_id='sibling'",
+        (authority.tenant_id,),
+    )
+    assert repository.hierarchy(("seed",), vector) == ((), {})
+    connection.execute(
+        "UPDATE source_versions SET status='active' WHERE tenant_id=%s AND source_id='sibling'",
+        (authority.tenant_id,),
+    )
+    connection.execute(
+        "UPDATE sources SET status='deleted' WHERE tenant_id=%s AND source_id='sibling'",
+        (authority.tenant_id,),
+    )
+    assert repository.hierarchy(("seed",), vector) == ((), {})
+    connection.execute(
+        "UPDATE sources SET status='active' WHERE tenant_id=%s AND source_id='sibling'",
+        (authority.tenant_id,),
+    )
+    connection.execute(
+        "UPDATE users SET index_generation_id='new' WHERE tenant_id=%s AND user_id=%s",
+        (authority.tenant_id, authority.user_id),
+    )
+    assert repository.hierarchy(("seed",), vector) == ((), {})
+
+
 @pytest.mark.parametrize("mode", ["fast", "mid"])
 def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_database, mode):
     from datetime import UTC, datetime
