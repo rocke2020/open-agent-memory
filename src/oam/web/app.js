@@ -362,7 +362,9 @@
       event.preventDefault();
       const generation = state.generation;
       if (!state.draftKey) state.draftKey = crypto.randomUUID();
-      const metadata = { user_id: state.user, input_type: "document", document_id: id.value.trim(), update_mode: "replace" };
+      const metadata = { input_type: "document", document_id: id.value.trim(), update_mode: "replace" };
+      if (existing) metadata.user_id = state.user;
+      else metadata.resource_type = "evidence";
       const headers = { "Idempotency-Key": state.draftKey };
       if (existing) headers["If-Match"] = String(existing.active_version);
       let body;
@@ -378,7 +380,7 @@
         headers["Content-Type"] = "application/json";
         body = JSON.stringify({ ...metadata, text: text.value });
       }
-      const path = existing ? route(`resources/${encodeURIComponent(existing.resource_id)}`) : "/v1/retain";
+      const path = existing ? route(`resources/${encodeURIComponent(existing.resource_id)}`) : route("resources");
       try {
         const receipt = await json(path, { method: existing ? "PUT" : "POST", headers, body });
         if (!current(generation)) return;

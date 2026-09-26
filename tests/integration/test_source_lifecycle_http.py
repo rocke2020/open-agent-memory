@@ -34,7 +34,11 @@ async def test_public_resource_delete_cleans_export_and_keeps_new_independent_so
             "update_mode": "replace",
             "text": "Synthetic private report.",
         }
-        retained = await client.post("/v1/retain", json=body, headers={"Idempotency-Key": "v1"})
+        retained = await client.post(
+            "/v1/users/lin/resources",
+            json={"resource_type": "evidence", **{k: v for k, v in body.items() if k != "user_id"}},
+            headers={"Idempotency-Key": "v1"},
+        )
         assert retained.status_code == 202, retained.text
         with psycopg.connect(dsn) as connection:
             connection.execute(
@@ -102,7 +106,11 @@ async def test_public_resource_delete_cleans_export_and_keeps_new_independent_so
         assert operation.status_code == 200
         assert operation.json()["status"] == "succeeded"
         body.update(document_id="independent", text="Synthetic independent report.")
-        other = await client.post("/v1/retain", json=body, headers={"Idempotency-Key": "other"})
+        other = await client.post(
+            "/v1/users/lin/resources",
+            json={"resource_type": "evidence", **{k: v for k, v in body.items() if k != "user_id"}},
+            headers={"Idempotency-Key": "other"},
+        )
         assert other.status_code == 202, other.text
         listing = await client.get("/v1/users/lin/resources")
         assert [item["resource_id"] for item in listing.json()["items"]] == ["independent"]
@@ -117,8 +125,15 @@ async def test_public_resource_delete_cleans_export_and_keeps_new_independent_so
         first_png = (ROOT / "conformance/fixtures/medical/bilingual/en-report.png").read_bytes()
         second_png = (ROOT / "conformance/fixtures/medical/bilingual/zh-report.png").read_bytes()
         created_file = await client.post(
-            "/v1/retain",
-            data={"metadata": json.dumps(metadata)},
+            "/v1/users/lin/resources",
+            data={
+                "metadata": json.dumps(
+                    {
+                        "resource_type": "evidence",
+                        **{k: v for k, v in metadata.items() if k != "user_id"},
+                    }
+                )
+            },
             files={"original": ("en-report.png", first_png, "image/png")},
             headers={"Idempotency-Key": "scan-v1"},
         )

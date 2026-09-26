@@ -2,7 +2,7 @@
 
 ## Overview
 
-HTTP/OpenAPI is the only required v0.0.1 integration surface. The implemented authentication modes are `dev`, `api_key` and `trusted`; OIDC and LDAP are not available. In `api_key` mode, a user key binds the tenant and `user_id`, and an administrator key cannot select personal content. Retain accepts interactions or documents, and recall returns cited context without generating an answer. No independent collection selector, browser-only policy or Python SDK is required. The core routes below have PostgreSQL-backed functional coverage; complete-release readiness remains separate work.
+HTTP/OpenAPI is the only required v0.0.1 integration surface. The implemented authentication modes are `dev`, `api_key` and `trusted`; OIDC and LDAP are not available. In `api_key` mode, a user key binds the tenant and `user_id`, and an administrator key cannot select personal content. Retain accepts interactions, the Resource collection accepts Evidence and Profile originals, and recall returns cited context without generating an answer. No independent collection selector, browser-only policy or Python SDK is required. The core routes below have PostgreSQL-backed functional coverage; complete-release readiness remains separate work.
 
 ## 1. Global Routes
 
@@ -29,12 +29,15 @@ The implemented credential routes are `GET /v1/credentials`, `POST /v1/credentia
 
 `api_key` content requests use `Authorization: Bearer <user-key>`; `trusted` uses asserted tenant/user headers and adds a root key on nonlocal binds; `dev` needs no key on loopback. Retain requires an `Idempotency-Key` identifying the logical request; retry with the same key and unchanged input to reuse its receipt instead of duplicating an interaction or append.
 
-Retain resolves the mode-specific identity before consuming the request body. `api.max_request_bytes` bounds the complete encoded retain body, including JSON escaping or multipart headers/metadata, separately from the interaction-content and Resource-original limits. Its canonical default is 24 MiB and its effective value is published by capabilities. OAM counts actual incoming bytes even without `Content-Length`; an oversized body returns `413 RequestTooLarge` before further buffering/parsing, and partial multipart files are closed. The identity's user binding, grant and semantic content limits are checked after the bounded body identifies its user and input type, before accepting work or making model calls.
+Write routes resolve the mode-specific identity before consuming the request body. `api.max_request_bytes` bounds the complete encoded body, including JSON escaping or multipart headers/metadata, separately from the interaction-content and Resource-original limits. Its canonical default is 24 MiB and its effective value is published by capabilities. OAM counts actual incoming bytes even without `Content-Length`; an oversized body returns `413 RequestTooLarge` before further buffering/parsing, and partial multipart files are closed. The identity's user binding, grant and semantic content limits are checked after the bounded body identifies its user and input type, before accepting work or making model calls.
 
 | Route | Contract |
 |---|---|
-| `POST /v1/retain` | Accept a JSON interaction, text document or HTTPS Evidence URL, or multipart document metadata plus the complete `original` file; return `202` with a durable operation and server-assigned source identity. |
+| `POST /v1/retain` | Accept a JSON interaction and return `202` with a durable operation and server-assigned source identity. |
+| `POST /v1/users/{user_id}/resources` | Accept an Evidence text document, HTTPS URL or multipart file, or a registered structured Profile Resource, distinguished by `resource_type`; preserve the original and return a durable `202` source receipt. An `Idempotency-Key` is required; Profile revision requires `If-Match`. |
 | `POST /v1/recall` | Accept `user_id` and `query`; run non-generative `fast`, `mid` or `deep` recall, defaulting to `mid`. |
+| `GET /v1/users/{user_id}/profile` | Read selected stored sections, current exact Resource fields, revision and freshness without generation. |
+| `POST /v1/users/{user_id}/profile/refresh` | Return `200` with unchanged stored fields and zero generation calls, or `202` with a durable refresh operation. |
 | `POST /v1/users/{user_id}/search-many` | Accept a caller-provided `queries` list; run one selected recall level with a shared deadline and context budget, returning ordered per-query outcomes. |
 | `POST /v1/users/{user_id}/decompose-and-search` | Accept one query; use one configured planner call to propose bounded searches, or disclose a direct-query fallback, then run the same batch path. |
 | `GET /v1/users/{user_id}/resources` and `/resources/{resource_id}` | List or inspect only active Evidence Resources, current version metadata, extraction passages, abstract state and operation readiness. |
@@ -48,7 +51,7 @@ Retain resolves the mode-specific identity before consuming the request body. `a
 
 ### Interaction
 
-The host supplies every message's role, exact content, timezone-aware `event_time` and explicit `learning_eligible` decision. OAM assigns the interaction source identity and uses message order for locators. A saved document-derived assistant answer must remain ineligible for learning.
+The host posts to `/v1/retain` and supplies every message's role, exact content, timezone-aware `event_time` and explicit `learning_eligible` decision. OAM assigns the interaction source identity and uses message order for locators. A saved document-derived assistant answer must remain ineligible for learning.
 
 ```json
 {
@@ -63,11 +66,11 @@ The host supplies every message's role, exact content, timezone-aware `event_tim
 
 ### Text or File Document
 
-A document supplies a stable `document_id` within its tenant/user pair and an explicit `update_mode`. Text `replace` supplies the full body; text `append` supplies only the new text for an existing text document. Append concatenates exactly, without inserting whitespace or separators, and allocates the next immutable revision atomically. Include any desired separator in the supplied text.
+A document posts to `/v1/users/lin/resources` with a stable `document_id` within its tenant/user pair and an explicit `update_mode`. Text `replace` supplies the full body; text `append` supplies only the new text for an existing text document. Append concatenates exactly, without inserting whitespace or separators, and allocates the next immutable revision atomically. Include any desired separator in the supplied text.
 
 ```json
 {
-  "user_id": "lin",
+  "resource_type": "evidence",
   "input_type": "document",
   "document_id": "checkup-2026",
   "update_mode": "replace",
@@ -75,15 +78,21 @@ A document supplies a stable `document_id` within its tenant/user pair and an ex
 }
 ```
 
-File documents use `multipart/form-data` on the same `/v1/retain` endpoint. The `metadata` part contains `{"user_id":"lin","input_type":"document","document_id":"scan-2026","update_mode":"replace"}`; the `original` part contains the complete file with its filename and media type. OAM validates size/type and computes its length and digest. File append is rejected; replace the complete HTML/PDF/image file or use a separate document ID.
+File documents use `multipart/form-data` on `/v1/users/lin/resources`. The `metadata` part contains `{"resource_type":"evidence","input_type":"document","document_id":"scan-2026","update_mode":"replace"}`; the `original` part contains the complete file with its filename and media type. OAM validates size/type and computes its length and digest. File append is rejected; replace the complete HTML/PDF/image file or use a separate document ID.
 
-An HTTPS Evidence URL uses a JSON body such as `{"user_id":"lin","input_type":"document_url","document_id":"scan-2026","update_mode":"replace","media_type":"application/pdf","url":"https://reports.example.org/scan.pdf"}`. The declared media type is one of `text/html`, `application/pdf`, `image/png` or `image/jpeg`. OAM authorizes the user before a single bounded fetch, rejects nonpublic destinations, redirects and mismatched returned bytes, and commits the exact fetched original before indexing. A committed identical idempotency key returns its receipt without another fetch; a failed fetch creates no accepted source. URL ingestion does not crawl links or refresh automatically. A URL query may be needed for fetching but is never included in citations or public error text.
+An HTTPS Evidence URL uses a JSON body such as `{"resource_type":"evidence","input_type":"document_url","document_id":"scan-2026","update_mode":"replace","media_type":"application/pdf","url":"https://reports.example.org/scan.pdf"}` on `/v1/users/lin/resources`. The declared media type is one of `text/html`, `application/pdf`, `image/png` or `image/jpeg`. OAM authorizes the user before a single bounded fetch, rejects nonpublic destinations, redirects and mismatched returned bytes, and commits the exact fetched original before indexing. A committed identical idempotency key returns its receipt without another fetch; a failed fetch creates no accepted source. URL ingestion does not crawl links or refresh automatically. A URL query may be needed for fetching but is never included in citations or public error text.
 
 Neither retain format accepts caller-managed `source_id`, `message_id`, `source_version`, `expected_active_version`, `byte_length` or `sha256`. OAM owns source/revision allocation; the latest accepted document revision immediately excludes older derivatives while new indexing is pending. `PUT /resources/{resource_id}` is the compare-and-set revision route: send the same document JSON or multipart shape with matching `user_id` and `document_id`, `update_mode: "replace"`, `Idempotency-Key`, and `If-Match: <active-version>`. It checks the current version before reading an uploaded body or fetching an HTTPS URL and rechecks it atomically at acceptance. An exact retry with the same key reuses its original receipt. Documents remain Evidence and never automatically become learned facts or Insights.
 
 ### Recall
 
-The minimal body is `{"user_id":"lin","query":"How should I summarize the checkup?"}`. The host selects `"recall_level":"fast"` explicitly for pre-agent retrieval and may set `max_context_tokens`; later agent calls may select any preset independently. `allow_partial` defaults to false.
+The minimal body is `{"user_id":"lin","query":"How should I summarize the checkup?"}`. The host selects `"recall_level":"fast"` explicitly for pre-agent retrieval and may set `max_context_tokens`; later agent calls may select any preset independently. Omitted `profile_sections` selects stored `main`; `"profile_sections":[]` disables Profile inclusion. Selected sections are read from storage and share the context budget with Memory and Evidence. `allow_partial` defaults to false.
+
+### Profile Resources and Refresh
+
+`POST /v1/users/lin/resources` currently accepts `{"resource_id":"basic","resource_type":"profile","subtype":"basic-profile/v1","content":{"date_of_birth":"1990-05-10","interests":["hiking"]}}` or registered `preferences/v1` content with `example_language` and `domain`. An `Idempotency-Key` is required; a revision also requires `If-Match` with the current version number. Known fields map deterministically to `main` or `preferences` and remain excluded from ordinary Evidence recall. A mapping error rejects the candidate before source activation. The complete JSON original is retained under the user and new versions immediately supersede prior exact values.
+
+`GET /v1/users/{user_id}/profile` defaults to `main` and accepts repeated `sections` query parameters plus optional non-negative `max_tokens`. It reports `missing`, `partial`, `dirty`, `stale` or `current` freshness and omits fields whose support is no longer eligible. `POST /v1/users/{user_id}/profile/refresh` accepts `sections`, defaulting to `main`; it does no model work on unchanged complete inputs. Changed inputs queue one durable operation, whose worker validates generated fields against current eligible support before publishing a stored revision. A failed refresh leaves eligible prior fields available with non-current freshness. An ambiguous external model outcome blocks another refresh for the same input identity with `409 ProfileRefreshUnresolved` until the attempt is reconciled. Evidence-only writes do not dirty this input identity.
 
 Optional paired `time_basis`/`time_window` override query-date parsing. The half-open window affects temporal ranking only, not other retrieval arms or final inclusion. Without a window, OAM uses one captured UTC reference instant, or the supplied timezone-aware `reference_time` and IANA `reference_timezone`. Supported English/Chinese dates and bounded Japanese expressions can enable temporal spreading even in fast mode. Ambiguous, invalid or unsupported implicit dates leave ordinary recall running with a diagnostic; invalid explicit windows fail validation. Recall accepts no independent tenant or collection selector and makes zero generative model calls.
 
@@ -109,8 +118,8 @@ Every response carries a request ID and contract version. Accepted asynchronous 
 
 Recall returns typed `items`, the complete rendered `context`, an estimated integer `context_tokens`, `tokenizer: "oam-unicode-quarter-v1"`, `trace_id`, and diagnostics for query-time interpretation, executed/omitted stages, executed fusion arms, partial coverage, usage and timings. Each Insight item includes its assigned subtype and exact supporting facts; empty results do not invent evidence. The estimate counts every selected block, including citations, time qualifiers and separators, under one caller budget. It is a local Unicode estimate, not an exact model-token limit or provider usage count; callers with a strict model budget should count the returned context using their model's tokenizer.
 
-Errors use safe details; authorization completes before external fetches or model calls. Invalid credentials return `401`; retain/revision wire-body overflow returns `413`; a stale `If-Match`, changed idempotent request or expired export policy returns `409`; invalid explicit input or URL content returns `422`; an unavailable URL source returns `502`; unavailable capability, mandatory recall stage or in-flight inspection policy returns `503`; exhausted recall deadlines return `504`. Unavailable authority and hidden source/trace/export IDs use a non-enumerating `404` where required.
+Errors use safe details; authorization completes before external fetches or model calls. Invalid credentials return `401`; write-body overflow returns `413`; a stale `If-Match`, changed idempotent request unresolved Profile refresh or expired export policy returns `409`; invalid explicit input or URL content returns `422`; an unavailable URL source returns `502`; unavailable capability, mandatory recall stage or in-flight inspection policy returns `503`; exhausted recall deadlines return `504`. Unavailable authority and hidden source/trace/export IDs use a non-enumerating `404` where required.
 
 ## 6. Current Implementation Status
 
-The user-qualified retain/recall, batch/planner, Evidence lifecycle, recorded debug/export and Inspector paths are implemented. Isolated PostgreSQL checks cover Resource revision/deletion, durable cleanup, active-source inspection, recorded trace redaction and portable export invalidation; a local browser check covers create/revise/delete, inert source text, narrow layout and credential clearing. These checks do not establish live document-vision or cross-language quality, full Profile behavior, multi-replica recovery or release readiness. Profile Resource creation and generated Profile sections remain Step 7 work; source-chunk output and model reruns remain unavailable. OpenAPI presence alone is not an availability claim.
+The user-qualified retain/recall, batch/planner, typed Evidence/Profile admission, stored Profiles, Evidence lifecycle, recorded debug/export and Inspector paths are implemented. Isolated PostgreSQL checks cover Resource revision/deletion, durable cleanup, active-source inspection, recorded trace redaction, portable export invalidation, public Profile Resource admission, L2-backed refresh, unchanged reuse, failed-refresh preservation, Evidence exclusion and requested Profile recall. A local browser check covers create/revise/delete, inert source text, narrow layout and credential clearing. These checks do not establish live Profile model or document-vision quality, cross-language quality, multi-replica recovery or release readiness. Separate source-chunk output and model reruns remain unavailable. OpenAPI presence alone is not an availability claim.

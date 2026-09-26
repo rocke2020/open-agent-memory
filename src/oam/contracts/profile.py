@@ -1,5 +1,5 @@
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
@@ -27,3 +27,12 @@ class ProfileRefreshUnchanged(FrozenContract):
 class ProfileRefreshAccepted(FrozenContract):
     status: Literal["accepted"] = "accepted"
     operation_id: str = Field(min_length=1)
+
+
+class ProfileResourceRequest(FrozenContract):
+    resource_id: str = Field(min_length=1, max_length=256)
+    resource_type: Literal["profile"]
+    subtype: Literal["basic-profile/v1", "preferences/v1"]
+    source_revision: str | None = None
+    as_of: str | None = None
+    content: dict[str, Any]

@@ -73,9 +73,9 @@ async def test_root_creates_user_key_but_cannot_read_personal_operations(core_da
         assert created.status_code == 201, created.text
         alice_headers = {"Authorization": f"Bearer {created.json()['secret']}"}
         root_write = await client.post(
-            "/v1/retain",
+            "/v1/users/alice/resources",
             json={
-                "user_id": "alice",
+                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "root-attempt",
                 "update_mode": "replace",
@@ -85,9 +85,9 @@ async def test_root_creates_user_key_but_cannot_read_personal_operations(core_da
         )
         assert root_write.status_code == 404
         retained = await client.post(
-            "/v1/retain",
+            "/v1/users/alice/resources",
             json={
-                "user_id": "alice",
+                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "private",
                 "update_mode": "replace",
@@ -284,7 +284,7 @@ async def test_html_upload_is_searchable_evidence_without_learned_facts(core_dat
         b"<td>5.2 mmol/L</td></tr></table></body></html>"
     )
     metadata = {
-        "user_id": "scope",
+        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "report",
         "update_mode": "replace",
@@ -297,7 +297,7 @@ async def test_html_upload_is_searchable_evidence_without_learned_facts(core_dat
     ):
         await use_created_user_key(client, "scope")
         uploaded = await client.post(
-            "/v1/retain",
+            "/v1/users/scope/resources",
             headers={"Idempotency-Key": "report"},
             data={"metadata": json.dumps(metadata)},
             files={"original": ("report.html", original, "text/html")},
@@ -386,7 +386,7 @@ async def test_public_pdf_and_image_retain_to_cited_recall(
     app = create_app(ROOT / "configs/oam.yaml")
     models = SyntheticIndexModels()
     metadata = {
-        "user_id": "scope",
+        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "report",
         "update_mode": "replace",
@@ -399,7 +399,7 @@ async def test_public_pdf_and_image_retain_to_cited_recall(
     ):
         await use_created_user_key(client, "scope")
         uploaded = await client.post(
-            "/v1/retain",
+            "/v1/users/scope/resources",
             headers={"Idempotency-Key": "report"},
             data={"metadata": json.dumps(metadata)},
             files={
@@ -468,12 +468,12 @@ async def test_mixed_native_and_image_pdf_keeps_both_cited_details(core_database
     ):
         await use_created_user_key(client, "scope")
         accepted = await client.post(
-            "/v1/retain",
+            "/v1/users/scope/resources",
             headers={"Idempotency-Key": "mixed-report"},
             data={
                 "metadata": json.dumps(
                     {
-                        "user_id": "scope",
+                        "resource_type": "evidence",
                         "input_type": "document",
                         "document_id": "mixed-report",
                         "update_mode": "replace",
@@ -540,7 +540,7 @@ async def test_failed_url_fetch_does_not_reserve_the_idempotency_key(core_databa
         return original
 
     request = {
-        "user_id": "scope",
+        "resource_type": "evidence",
         "input_type": "document_url",
         "document_id": "retry-report",
         "update_mode": "replace",
@@ -556,19 +556,19 @@ async def test_failed_url_fetch_does_not_reserve_the_idempotency_key(core_databa
         await use_created_user_key(client, "scope")
         app.state.runtime.url_fetcher = fetch
         unsafe = await client.post(
-            "/v1/retain",
+            "/v1/users/scope/resources",
             json={**request, "url": "https://127.0.0.1/private.pdf"},
             headers={"Idempotency-Key": "unsafe-report"},
         )
         assert unsafe.status_code == 422
         assert attempts == 0
         first = await client.post(
-            "/v1/retain", json=request, headers={"Idempotency-Key": "retry-report"}
+            "/v1/users/scope/resources", json=request, headers={"Idempotency-Key": "retry-report"}
         )
         assert first.status_code == 502
         assert first.json()["detail"]["code"] == "ResourceFetchUnavailable"
         second = await client.post(
-            "/v1/retain", json=request, headers={"Idempotency-Key": "retry-report"}
+            "/v1/users/scope/resources", json=request, headers={"Idempotency-Key": "retry-report"}
         )
         assert second.status_code == 202, second.text
     assert attempts == 2
@@ -605,7 +605,7 @@ async def test_bilingual_report_public_retain_to_cited_recall(core_database, lan
     config = load_config(ROOT / "configs/oam.yaml").config
     app = create_app(ROOT / "configs/oam.yaml")
     metadata = {
-        "user_id": "scope",
+        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "report",
         "update_mode": "replace",
@@ -618,7 +618,7 @@ async def test_bilingual_report_public_retain_to_cited_recall(core_database, lan
     ):
         await use_created_user_key(client, "scope")
         uploaded = await client.post(
-            "/v1/retain",
+            "/v1/users/scope/resources",
             headers={"Idempotency-Key": f"{language}-{kind}"},
             data={"metadata": json.dumps(metadata)},
             files={"original": (f"report.{kind}", original, media_type)},
@@ -683,7 +683,7 @@ async def test_public_url_evidence_fetches_once_and_reuses_the_stored_original(
         return original
 
     request = {
-        "user_id": "scope",
+        "resource_type": "evidence",
         "input_type": "document_url",
         "document_id": "url-report",
         "update_mode": "replace",
@@ -698,22 +698,22 @@ async def test_public_url_evidence_fetches_once_and_reuses_the_stored_original(
     ):
         app.state.runtime.url_fetcher = fetch
         denied = await client.post(
-            "/v1/retain", json=request, headers={"Idempotency-Key": "url-report"}
+            "/v1/users/scope/resources", json=request, headers={"Idempotency-Key": "url-report"}
         )
         assert denied.status_code == 404
         assert calls == []
         await use_created_user_key(client, "scope")
         accepted = await client.post(
-            "/v1/retain", json=request, headers={"Idempotency-Key": "url-report"}
+            "/v1/users/scope/resources", json=request, headers={"Idempotency-Key": "url-report"}
         )
         assert accepted.status_code == 202, (accepted.text, calls)
         repeated = await client.post(
-            "/v1/retain", json=request, headers={"Idempotency-Key": "url-report"}
+            "/v1/users/scope/resources", json=request, headers={"Idempotency-Key": "url-report"}
         )
         assert repeated.status_code == 202 and repeated.json()["reused"] is True
         assert repeated.json()["operation_id"] == accepted.json()["operation_id"]
         changed = await client.post(
-            "/v1/retain",
+            "/v1/users/scope/resources",
             json={**request, "url": url.replace("sig=", "sig=changed-")},
             headers={"Idempotency-Key": "url-report"},
         )
@@ -778,7 +778,7 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
     app = create_app(ROOT / "configs/oam.yaml")
     models = FailedVision()
     metadata = {
-        "user_id": "scope",
+        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "partial-report",
         "update_mode": "replace",
@@ -791,7 +791,7 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
     ):
         await use_created_user_key(client, "scope")
         uploaded = await client.post(
-            "/v1/retain",
+            "/v1/users/scope/resources",
             headers={"Idempotency-Key": "partial-report"},
             data={"metadata": json.dumps(metadata)},
             files={"original": ("partial.pdf", original, "application/pdf")},
@@ -891,12 +891,12 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
             worker_id="chat-worker",
         )
         retained_report = await client.post(
-            "/v1/retain",
+            "/v1/users/scope/resources",
             headers={"Idempotency-Key": "report"},
             data={
                 "metadata": json.dumps(
                     {
-                        "user_id": "scope",
+                        "resource_type": "evidence",
                         "input_type": "document",
                         "document_id": "synthetic-report",
                         "update_mode": "replace",
@@ -1013,10 +1013,11 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
         assert recalled.json()["diagnostics"]["readiness"] == (
             "partial" if invalid_fact else "ready"
         )
-        assert any(
-            item["kind"] == "fact" and "prefers" in item["text"]
-            for item in recalled.json()["items"]
-        )
+        assert {(item["kind"], item["text"]) for item in recalled.json()["items"]} == {
+            ("passage", "Lin prefers short explanations."),
+            ("passage", "Lin prefers updates in the morning."),
+        }
+        assert all(item["citations"][0]["role"] == "user" for item in recalled.json()["items"])
         assert not any(item["kind"] == "insight" for item in recalled.json()["items"])
         assert "glucose" not in recalled.json()["context"]
         assert recalled.json()["context_tokens"] > 0
@@ -1150,3 +1151,380 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
             == 2
         )
     assert models.generation_calls == ["extraction", "extraction", "insights"]
+
+
+async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(core_database):
+    from oam.config import load_config
+    from oam.models.runtime import ModelResult, Usage
+    from oam.workers.index_source import process_one
+
+    dsn, _, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+
+    class ProfileModels(SyntheticIndexModels):
+        fail_profile = False
+        timeout_profile = False
+
+        def generate(self, role, **kwargs):
+            if role != "profile":
+                return super().generate(role, **kwargs)
+            self.generation_calls.append(role)
+            if self.timeout_profile:
+                raise httpx.ReadTimeout("synthetic uncertain Profile response")
+            prompt = json.loads(kwargs["user"])
+            assert "glucose 9" not in json.dumps(prompt).lower()
+            assert "report-only" not in json.dumps(prompt).lower()
+            assert "1990-05-10" not in json.dumps(prompt)
+            fact = next(item for item in prompt["inputs"] if item["kind"] == "fact")
+            support_id = "report-only" if self.fail_profile else fact["id"]
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "main": [],
+                        "preferences": [
+                            {"key": "response_style", "value": "brief", "support_ids": [support_id]}
+                        ],
+                        "experiences": [],
+                    }
+                ),
+                usage=Usage(
+                    input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
+                ),
+            )
+
+    models = ProfileModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        root_invalid_resource = await client.post(
+            "/v1/users/scope/resources",
+            json={
+                "resource_id": "unauthorized",
+                "resource_type": "profile",
+                "subtype": "basic-profile/v1",
+                "content": {"unknown": "value"},
+            },
+            headers={**headers, "Idempotency-Key": "unauthorized-profile"},
+        )
+        assert root_invalid_resource.status_code == 404
+        chat = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I prefer brief explanations.",
+                        "event_time": "2026-09-01T09:00:00Z",
+                        "learning_eligible": True,
+                    },
+                    {
+                        "role": "user",
+                        "content": "I prefer short examples.",
+                        "event_time": "2026-09-01T09:01:00Z",
+                        "learning_eligible": True,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "The report says glucose 9.",
+                        "event_time": "2026-09-01T09:02:00Z",
+                        "learning_eligible": False,
+                    },
+                ],
+            },
+            headers={"Idempotency-Key": "profile-chat"},
+        )
+        assert chat.status_code == 202, chat.text
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-chat")
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp() WHERE stage='consolidate'"
+            )
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-l2")
+        report = await client.post(
+            "/v1/users/scope/resources",
+            json={
+                "resource_type": "evidence",
+                "input_type": "document",
+                "document_id": "report-only",
+                "update_mode": "replace",
+                "text": "Report-only glucose 9 mg/dL.",
+            },
+            headers={"Idempotency-Key": "profile-report"},
+        )
+        assert report.status_code == 202, report.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-report"
+        )
+        resource = await client.post(
+            "/v1/users/scope/resources",
+            json={
+                "resource_id": "basic",
+                "resource_type": "profile",
+                "subtype": "basic-profile/v1",
+                "content": {"date_of_birth": "1990-05-10"},
+            },
+            headers={"Idempotency-Key": "profile-basic"},
+        )
+        assert resource.status_code == 202, resource.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-resource"
+        )
+        before = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
+        assert before.status_code == 200, before.text
+        assert before.json()["freshness"] != "current"
+        requested = await client.post(
+            "/v1/users/scope/profile/refresh", json={"sections": ["main", "preferences"]}
+        )
+        assert requested.status_code == 202, requested.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-refresh"
+        )
+        stored = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
+        assert stored.status_code == 200, stored.text
+        payload = stored.json()
+        assert payload["freshness"] == "current"
+        assert any(field["value"] == "1990-05-10" for field in payload["sections"]["main"])
+        assert any(field["value"] == "brief" for field in payload["sections"]["preferences"])
+        calls = len(models.generation_calls)
+        unchanged = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert unchanged.status_code == 200, unchanged.text
+        assert unchanged.json()["generation_calls"] == 0
+        assert len(models.generation_calls) == calls
+        app.state.runtime.models = models
+        recalled = await client.post(
+            "/v1/recall",
+            json={
+                "user_id": "scope",
+                "query": "brief explanations",
+                "profile_sections": ["main", "preferences"],
+            },
+        )
+        assert recalled.status_code == 200, recalled.text
+        assert recalled.json()["profile"]["sections"]["main"]
+        assert recalled.json()["diagnostics"]["generative_calls"] == 0
+        assert len(models.generation_calls) == calls
+
+        revised_body = {
+            "resource_id": "basic",
+            "resource_type": "profile",
+            "subtype": "basic-profile/v1",
+            "content": {"date_of_birth": "1991-05-10"},
+        }
+        wrong_revision = await client.post(
+            "/v1/users/scope/resources",
+            json=revised_body,
+            headers={"Idempotency-Key": "profile-basic-wrong", "If-Match": "9"},
+        )
+        assert wrong_revision.status_code == 409
+        revised = await client.post(
+            "/v1/users/scope/resources",
+            json=revised_body,
+            headers={"Idempotency-Key": "profile-basic-v2", "If-Match": "1"},
+        )
+        assert revised.status_code == 202, revised.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-resource-v2"
+        )
+        dirty = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
+        assert dirty.json()["freshness"] == "dirty"
+        assert any(field["value"] == "1991-05-10" for field in dirty.json()["sections"]["main"])
+        assert all(field["value"] != "1990-05-10" for field in dirty.json()["sections"]["main"])
+        models.fail_profile = True
+        failed = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert failed.status_code == 202
+        with pytest.raises(ValueError, match="unsupported"):
+            process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-failed")
+        preserved = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
+        assert any(
+            field["value"] == "brief" for field in preserved.json()["sections"]["preferences"]
+        )
+        assert any(field["value"] == "1991-05-10" for field in preserved.json()["sections"]["main"])
+        models.fail_profile = False
+        retry = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert retry.status_code == 202
+        assert retry.json()["operation_id"] != failed.json()["operation_id"]
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-retry")
+        assert (await client.get("/v1/users/scope/profile")).json()["freshness"] == "current"
+        evidence_only = await client.post(
+            "/v1/users/scope/resources",
+            json={
+                "resource_type": "evidence",
+                "input_type": "document",
+                "document_id": "second-report",
+                "update_mode": "replace",
+                "text": "Independent report evidence.",
+            },
+            headers={"Idempotency-Key": "second-report"},
+        )
+        assert evidence_only.status_code == 202
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="second-report")
+        assert (await client.get("/v1/users/scope/profile")).json()["freshness"] == "current"
+        profile_calls_before_new_chat = models.generation_calls.count("profile")
+        more_chat = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I use Python for small data checks.",
+                        "event_time": "2026-09-02T09:00:00Z",
+                        "learning_eligible": True,
+                    }
+                ],
+            },
+            headers={"Idempotency-Key": "more-profile-chat"},
+        )
+        assert more_chat.status_code == 202
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="more-chat")
+        pending = await client.get("/v1/users/scope/profile")
+        assert pending.json()["freshness"] == "partial"
+        assert models.generation_calls.count("profile") == profile_calls_before_new_chat
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp() "
+                "WHERE stage='consolidate' AND status='queued'"
+            )
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="more-l2")
+        after_l2 = await client.get("/v1/users/scope/profile")
+        assert after_l2.json()["freshness"] == "dirty"
+        assert models.generation_calls.count("profile") == profile_calls_before_new_chat
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE sources SET status='deleted' WHERE source_id=%s",
+                (chat.json()["source_id"],),
+            )
+        withdrawn = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
+        assert withdrawn.status_code == 200
+        assert withdrawn.json()["freshness"] == "stale"
+        assert all(
+            field["value"] != "brief" for field in withdrawn.json()["sections"]["preferences"]
+        )
+        assert any(field["value"] == "1991-05-10" for field in withdrawn.json()["sections"]["main"])
+        timeout_resource = await client.post(
+            "/v1/users/scope/resources",
+            json={
+                **revised_body,
+                "content": {"date_of_birth": "1992-05-10"},
+            },
+            headers={"Idempotency-Key": "profile-basic-v3", "If-Match": "2"},
+        )
+        assert timeout_resource.status_code == 202
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-v3")
+        uncertain = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert uncertain.status_code == 202
+        models.timeout_profile = True
+        with pytest.raises(httpx.ReadTimeout):
+            process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-timeout")
+        again = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert again.status_code == 409
+
+
+async def test_empty_user_profile_refresh_publishes_without_a_model_call(core_database):
+    from oam.config import load_config
+    from oam.workers.index_source import process_one
+
+    dsn, _, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    models = SyntheticIndexModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "new-user")
+        requested = await client.post("/v1/users/new-user/profile/refresh", json={})
+        assert requested.status_code == 202, requested.text
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="empty-profile",
+        )
+        profile = await client.get("/v1/users/new-user/profile")
+        assert profile.status_code == 200, profile.text
+        assert profile.json()["freshness"] == "current"
+        assert profile.json()["sections"] == {"main": []}
+        assert models.generation_calls == []
+
+
+@pytest.mark.parametrize("surface", ["profile", "recall"])
+async def test_profile_response_rejects_resource_revision_during_assembly(
+    core_database, monkeypatch, surface
+):
+    from oam.contracts.profile import ProfileResourceRequest
+    from oam.profiles import service as profile_service
+    from oam.retrieval.service import RecallService
+
+    _, _, headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        resource = {
+            "resource_id": "basic",
+            "resource_type": "profile",
+            "subtype": "basic-profile/v1",
+            "content": {"date_of_birth": "1990-05-10"},
+        }
+        accepted = await client.post(
+            "/v1/users/scope/resources",
+            json=resource,
+            headers={"Idempotency-Key": "profile-before-revision"},
+        )
+        assert accepted.status_code == 202, accepted.text
+        secret = client.headers["Authorization"].removeprefix("Bearer ")
+
+        def revise():
+            receipt = app.state.runtime.retain_profile_resource(
+                secret,
+                "scope",
+                ProfileResourceRequest.model_validate(
+                    {**resource, "content": {"date_of_birth": "1991-06-11"}}
+                ),
+                "profile-during-assembly",
+                expected_version=1,
+            )
+            assert receipt["revision"] == 2
+
+        if surface == "profile":
+            original_view = profile_service._view
+
+            def view_then_revise(*args, **kwargs):
+                result = original_view(*args, **kwargs)
+                assert result["sections"]["main"][0]["value"] == "1990-05-10"
+                revise()
+                return result
+
+            monkeypatch.setattr(profile_service, "_view", view_then_revise)
+            response = await client.get("/v1/users/scope/profile")
+        else:
+
+            def recall_after_revision(self, *args, **kwargs):
+                revise()
+                return {"context": "", "context_tokens": 0, "items": []}
+
+            monkeypatch.setattr(RecallService, "search", recall_after_revision)
+            response = await client.post(
+                "/v1/recall", json={"user_id": "scope", "query": "date of birth"}
+            )
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["code"] == "SourcePolicyChanged"
+        assert "1990-05-10" not in response.text

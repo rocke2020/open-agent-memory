@@ -12,6 +12,7 @@ import psycopg
 from pydantic import ValidationError
 
 from oam.config import OAMConfig
+from oam.contracts.profile import ProfileSection
 from oam.contracts.search import SearchManyRequest, SearchRequest
 from oam.models.runtime import (
     MIN_GENERATION_OUTPUT_TOKENS,
@@ -141,8 +142,11 @@ def _planned_batch(
 
 
 def _validate_options(request: SearchManyRequest | SearchRequest) -> None:
-    if request.profile_sections:
-        raise NotImplementedError("stored Profile inclusion is unavailable")
+    allowed = {section.value for section in ProfileSection}
+    if len(set(request.profile_sections)) != len(request.profile_sections) or any(
+        section not in allowed for section in request.profile_sections
+    ):
+        raise ValueError("invalid Profile section selection")
     if request.include.chunks is not None:
         raise NotImplementedError("separate recalled chunks are unavailable")
 

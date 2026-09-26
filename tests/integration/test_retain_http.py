@@ -72,9 +72,9 @@ async def test_retain_interaction_assigns_identity_and_reuses_exact_logical_requ
 
 async def test_concurrent_document_appends_and_retry_do_not_lose_or_duplicate_text(retain_client):
     client, dsn, tenant = retain_client
-    base = {"user_id": "lin", "input_type": "document", "document_id": "report"}
+    base = {"resource_type": "evidence", "input_type": "document", "document_id": "report"}
     first = await client.post(
-        "/v1/retain",
+        "/v1/users/lin/resources",
         json={**base, "update_mode": "replace", "text": "First."},
         headers={"Idempotency-Key": "base"},
     )
@@ -82,7 +82,7 @@ async def test_concurrent_document_appends_and_retry_do_not_lose_or_duplicate_te
 
     async def append(text, key):
         return await client.post(
-            "/v1/retain",
+            "/v1/users/lin/resources",
             json={**base, "update_mode": "append", "text": text},
             headers={"Idempotency-Key": key},
         )
@@ -104,9 +104,9 @@ async def test_concurrent_document_appends_and_retry_do_not_lose_or_duplicate_te
 async def test_user_without_a_grant_cannot_retain_or_recall(retain_client):
     client, _, _ = retain_client
     denied = await client.post(
-        "/v1/retain",
+        "/v1/users/ungranted/resources",
         json={
-            "user_id": "ungranted",
+            "resource_type": "evidence",
             "input_type": "document",
             "document_id": "report",
             "update_mode": "replace",
@@ -130,7 +130,7 @@ async def test_invalid_database_credential_is_rejected_before_upload(retain_clie
         yield b'{"user_id":"lin","input_type":"document"}'
 
     response = await client.post(
-        "/v1/retain",
+        "/v1/users/lin/resources",
         content=body(),
         headers={
             "Authorization": "Bearer invalid-credential",

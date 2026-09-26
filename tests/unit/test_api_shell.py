@@ -160,7 +160,7 @@ async def test_http_admission_uses_selected_config_limits(
             }
         elif route == "resources":
             payload = {
-                "user_id": "scope",
+                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "report",
                 "update_mode": "replace",
@@ -170,8 +170,12 @@ async def test_http_admission_uses_selected_config_limits(
             payload = {"user_id": "scope", **payload}
         path = (
             "/v1/retain"
-            if route in {"evidence", "resources"}
-            else ("/v1/recall" if route == "search" else f"/v1/users/scope/{route}")
+            if route == "evidence"
+            else (
+                "/v1/users/scope/resources"
+                if route == "resources"
+                else ("/v1/recall" if route == "search" else f"/v1/users/scope/{route}")
+            )
         )
         response = await client.post(
             path,
@@ -330,19 +334,22 @@ async def test_openapi_reserves_public_step_four_routes(client) -> None:
     } <= set(paths)
 
 
-async def test_openapi_exposes_https_evidence_url_retain_variant(client) -> None:
+async def test_openapi_exposes_typed_resource_variants(client) -> None:
     schema = (await client.get("/openapi.json")).json()
-    request = schema["paths"]["/v1/retain"]["post"]["requestBody"]["content"]["application/json"][
-        "schema"
-    ]
+    request = schema["paths"]["/v1/users/{user_id}/resources"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
 
-    assert request["discriminator"]["mapping"]["document_url"] == (
-        "#/components/schemas/RetainURLDocument"
-    )
-    assert set(schema["components"]["schemas"]["RetainURLDocument"]["properties"]) >= {
+    assert {item["$ref"] for item in request["oneOf"]} == {
+        "#/components/schemas/ProfileResourceRequest",
+        "#/components/schemas/EvidenceTextResourceRequest",
+        "#/components/schemas/EvidenceURLResourceRequest",
+    }
+    assert set(schema["components"]["schemas"]["EvidenceURLResourceRequest"]["properties"]) >= {
         "url",
         "media_type",
         "document_id",
+        "resource_type",
     }
 
 

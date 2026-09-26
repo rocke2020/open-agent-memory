@@ -89,10 +89,18 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
             client.headers["Authorization"] = f"Bearer {created.json()['secret']}"
             if delegated:
                 path = "/v1/users/lin/decompose-and-search"
-                body = {"query": "What fruit does Lin grow?", "recall_level": "fast"}
+                body = {
+                    "query": "What fruit does Lin grow?",
+                    "recall_level": "fast",
+                    "profile_sections": [],
+                }
             else:
                 path = "/v1/users/lin/search-many"
-                body = {"queries": ["apple orchard", "pear orchard"], "recall_level": "fast"}
+                body = {
+                    "queries": ["apple orchard", "pear orchard"],
+                    "recall_level": "fast",
+                    "profile_sections": [],
+                }
             root_response = await client.post(path, json=body, headers=root_headers)
             assert root_response.status_code == 404
             response = await client.post(path, json=body)

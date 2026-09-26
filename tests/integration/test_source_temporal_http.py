@@ -232,9 +232,19 @@ async def test_caller_annotation_rejects_conflicting_generated_time(
     wrong = await client.post("/v1/recall", json=timed_query(2024))
     correct = await client.post("/v1/recall", json=timed_query(2025))
 
-    assert {item["kind"] for item in wrong.json()["items"]} == {"passage", "fact"}
+    assert wrong.status_code == correct.status_code == 200
+    assert [item["kind"] for item in wrong.json()["items"]] == ["passage"]
+    passage = wrong.json()["items"][0]
+    assert passage["text"] == "Apple harvest was in 2025."
+    event = next(value for value in passage["time_evidence"] if value["role"] == "event")
+    assert event["detail"]["origin"] == "caller"
+    assert event["detail"]["start"] == "2025-01-01T00:00:00Z"
+    assert event["detail"]["end"] == "2026-01-01T00:00:00Z"
     assert all(not item["paths"] for item in wrong.json()["items"])
     assert {item["kind"] for item in correct.json()["items"]} == {"passage", "fact"}
+    assert all(
+        any(path["arm"] == "temporal" for path in item["paths"]) for item in correct.json()["items"]
+    )
     operation = await client.get(f"/v1/users/scope/operations/{receipt.json()['operation_id']}")
     expected_coverage = "partial" if generated_year == 2024 else "complete"
     assert operation.json()["stage_state"]["extraction_coverage"] == expected_coverage
@@ -256,7 +266,7 @@ async def test_html_annotations_stay_evidence_and_validate_before_models(
     if not valid_quote:
         annotation["quote"] = "2024"
     metadata = {
-        "user_id": "scope",
+        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "report",
         "update_mode": "replace",
@@ -264,7 +274,7 @@ async def test_html_annotations_stay_evidence_and_validate_before_models(
         "temporal_annotations": [annotation],
     }
     receipt = await client.post(
-        "/v1/retain",
+        "/v1/users/scope/resources",
         data={"metadata": json.dumps(metadata)},
         files={"original": ("report.html", original, "text/html")},
         headers={"Idempotency-Key": "report"},
@@ -301,20 +311,20 @@ async def test_document_replace_immediately_hides_old_projection(temporal_client
     models = NoFactModels()
     app.state.runtime.models = models
     base = {
-        "user_id": "scope",
+        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "garden",
         "update_mode": "replace",
     }
     first = await client.post(
-        "/v1/retain",
+        "/v1/users/scope/resources",
         json={**base, "text": "Old apple grove."},
         headers={"Idempotency-Key": "v1"},
     )
     assert first.status_code == 202
     assert process(config, dsn, models)
     second = await client.post(
-        "/v1/retain",
+        "/v1/users/scope/resources",
         json={**base, "text": "New apple garden."},
         headers={"Idempotency-Key": "v2"},
     )

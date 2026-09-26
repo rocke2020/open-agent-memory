@@ -1,9 +1,11 @@
+import json
 import os
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import (
@@ -46,11 +48,16 @@ from oam.contracts.operations import (
     OperationStatus,
     ReconcileAttemptRequest,
 )
-from oam.contracts.profile import ProfileRefreshRequest
+from oam.contracts.profile import (
+    ProfileRefreshRequest,
+    ProfileResourceRequest,
+    ProfileSection,
+)
 from oam.contracts.retain import (
     RETAIN_JSON,
     RecallRequest,
     RetainFileDocument,
+    RetainInteraction,
     RetainTextDocument,
     RetainURLDocument,
     UserRequest,
@@ -71,6 +78,7 @@ from oam.operations.repository import (
     RetryRequiresPlanning,
 )
 from oam.operations.state import OperationStatus as StoredOperationStatus
+from oam.profiles.service import ProfileRefreshUnresolved
 from oam.resources.url_fetch import ResourceFetchUnavailable
 from oam.retrieval.service import RecallUnavailable
 
@@ -295,7 +303,7 @@ def create_app(
                 "deep_recall": True,
                 "batch_recall": True,
                 "planner": config.models.roles.planner is not None,
-                "profiles": False,
+                "profiles": runtime is not None,
                 "inspector": True,
                 "source_lifecycle": True,
                 "recorded_debug": True,
@@ -327,11 +335,52 @@ def create_app(
         )
 
     _register_reserved_routes(app, runtime, resolved.config)
-    # The retain endpoint dispatches JSON and multipart itself; register the
-    # JSON union's definitions for OpenAPI clients as well as runtime validation.
+    # These endpoints dispatch their own bounded bodies; publish their tagged
+    # schemas explicitly for OpenAPI clients.
     definitions = RETAIN_JSON.json_schema(ref_template="#/components/schemas/{model}")["$defs"]
-    app.openapi().setdefault("components", {}).setdefault("schemas", {}).update(definitions)
+    schemas = app.openapi().setdefault("components", {}).setdefault("schemas", {})
+    schemas.update(definitions)
+    schemas["ProfileResourceRequest"] = ProfileResourceRequest.model_json_schema(
+        ref_template="#/components/schemas/{model}"
+    )
+    schemas["EvidenceTextResourceRequest"] = _resource_evidence_schema(RetainTextDocument)
+    schemas["EvidenceURLResourceRequest"] = _resource_evidence_schema(RetainURLDocument)
     return app
+
+
+def _resource_evidence_schema(model) -> dict:
+    schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
+    schema.pop("$defs", None)
+    schema["properties"].pop("user_id")
+    schema["properties"]["resource_type"] = {"const": "evidence", "type": "string"}
+    schema["required"] = [name for name in schema["required"] if name != "user_id"] + [
+        "resource_type"
+    ]
+    return schema
+
+
+def _bounded_request(request: Request, limit: int) -> tuple[Request, Callable[[], bool]]:
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+            if length < 0:
+                raise ValueError
+        except ValueError as exc:
+            raise HTTPException(400, detail={"code": "InvalidContentLength"}) from exc
+        if length > limit:
+            raise HTTPException(413, detail={"code": "RequestTooLarge"})
+    consumed = 0
+
+    async def limited_receive():
+        nonlocal consumed
+        message = await request.receive()
+        consumed += len(message.get("body", b""))
+        if consumed > limit:
+            raise MultiPartException("request exceeds byte limit")
+        return message
+
+    return Request(request.scope, receive=limited_receive), lambda: consumed > limit
 
 
 def _register_reserved_routes(
@@ -405,28 +454,12 @@ def _register_reserved_routes(
                     "application/json": {
                         "schema": {
                             key: value
-                            for key, value in RETAIN_JSON.json_schema(
+                            for key, value in RetainInteraction.model_json_schema(
                                 ref_template="#/components/schemas/{model}"
                             ).items()
                             if key != "$defs"
                         }
-                    },
-                    "multipart/form-data": {
-                        "schema": {
-                            "type": "object",
-                            "required": ["metadata", "original"],
-                            "properties": {
-                                "metadata": {
-                                    "type": "string",
-                                    "description": (
-                                        "JSON: user_id, input_type=document, "
-                                        "document_id, update_mode=replace."
-                                    ),
-                                },
-                                "original": {"type": "string", "format": "binary"},
-                            },
-                        }
-                    },
+                    }
                 },
             }
         },
@@ -440,7 +473,134 @@ def _register_reserved_routes(
                 lambda: _require_runtime(runtime).authenticate(request.state.actor)
             )
         )
-        body, upload = await _parse_retain_request(request, config)
+        bounded, over_limit = _bounded_request(request, config.api.max_request_bytes)
+        try:
+            if bounded.headers.get("content-type", "").startswith("multipart/form-data"):
+                raise ValueError("interaction retain requires JSON")
+            else:
+                body = RetainInteraction.model_validate_json(await bounded.body())
+                _validate_limits(body, config)
+        except (MultiPartException, StarletteHTTPException) as exc:
+            if over_limit():
+                raise HTTPException(413, detail={"code": "RequestTooLarge"}) from exc
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, detail={"code": "InvalidRetainRequest"}) from exc
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).retain(request.state.actor, body, idempotency_key)
+            )
+        )
+
+    @app.post(
+        "/v1/users/{user_id}/resources",
+        status_code=202,
+        tags=["Resources"],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "oneOf": [
+                                {"$ref": "#/components/schemas/ProfileResourceRequest"},
+                                {"$ref": "#/components/schemas/EvidenceTextResourceRequest"},
+                                {"$ref": "#/components/schemas/EvidenceURLResourceRequest"},
+                            ]
+                        }
+                    },
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["metadata", "original"],
+                            "properties": {
+                                "metadata": {
+                                    "type": "string",
+                                    "description": (
+                                        "JSON with resource_type=evidence, input_type=document, "
+                                        "document_id and update_mode=replace"
+                                    ),
+                                },
+                                "original": {"type": "string", "format": "binary"},
+                            },
+                        }
+                    },
+                },
+            }
+        },
+    )
+    async def create_resource(
+        request: Request,
+        user_id: str,
+        idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+        if_match: int | None = Header(default=None, alias="If-Match", ge=1),
+    ) -> dict:
+        await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).authenticate(request.state.actor)
+            )
+        )
+        bounded, over_limit = _bounded_request(request, config.api.max_request_bytes)
+        upload = {}
+        try:
+            if bounded.headers.get("content-type", "").startswith("multipart/form-data"):
+                async with bounded.form(max_files=1, max_fields=1) as form:
+                    if if_match is not None:
+                        raise ValueError("If-Match is unavailable for Evidence admission")
+                    metadata = form.get("metadata")
+                    if not isinstance(metadata, str):
+                        raise ValueError("multipart Resource metadata must be JSON text")
+                    wire = json.loads(metadata)
+                    if not isinstance(wire, dict) or wire.pop("resource_type", None) != "evidence":
+                        raise ValueError("multipart Resource must declare evidence type")
+                    if "user_id" in wire:
+                        raise ValueError("Resource user_id belongs in the path")
+                    body = RetainFileDocument.model_validate({**wire, "user_id": user_id})
+                    original = form.get("original")
+                    if original is None or not hasattr(original, "read"):
+                        raise ValueError("original file is required")
+                    content = await original.read(config.resource.max_bytes + 1)
+                    if not content or len(content) > config.resource.max_bytes:
+                        raise ValueError("original exceeds byte limit or is empty")
+                    upload = {
+                        "content": content,
+                        "media_type": original.content_type,
+                        "filename": original.filename,
+                    }
+            else:
+                wire = json.loads(await bounded.body())
+                if not isinstance(wire, dict) or "user_id" in wire:
+                    raise ValueError("Resource body must be an object without user_id")
+                kind = wire.pop("resource_type", None)
+                if kind == "profile":
+                    body = ProfileResourceRequest.model_validate({**wire, "resource_type": kind})
+                elif kind == "evidence":
+                    if if_match is not None:
+                        raise ValueError("If-Match is unavailable for Evidence admission")
+                    body = RETAIN_JSON.validate_python({**wire, "user_id": user_id})
+                    if not isinstance(body, (RetainTextDocument, RetainURLDocument)):
+                        raise ValueError("Resource input_type must be document or document_url")
+                    _validate_limits(body, config)
+                else:
+                    raise ValueError("Resource type must be profile or evidence")
+        except (MultiPartException, StarletteHTTPException) as exc:
+            if over_limit():
+                raise HTTPException(413, detail={"code": "RequestTooLarge"}) from exc
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, detail={"code": "InvalidResourceRequest"}) from exc
+        if isinstance(body, ProfileResourceRequest):
+            return await run_in_threadpool(
+                lambda: _content_call(
+                    lambda: _require_runtime(runtime).retain_profile_resource(
+                        request.state.actor,
+                        user_id,
+                        body,
+                        idempotency_key,
+                        expected_version=if_match,
+                    )
+                )
+            )
         return await run_in_threadpool(
             lambda: _content_call(
                 lambda: _require_runtime(runtime).retain(
@@ -571,12 +731,38 @@ def _register_reserved_routes(
         )
 
     @app.get("/v1/users/{user_id}/profile", tags=["Profiles"])
-    async def get_profile(user_id: str) -> None:
-        _unavailable()
+    async def get_profile(
+        request: Request,
+        user_id: str,
+        sections: Annotated[list[ProfileSection] | None, Query()] = None,
+        max_tokens: int | None = Query(default=None, ge=0),
+    ) -> dict:
+        selected = sections if sections is not None else [ProfileSection.MAIN]
+        budget = max_tokens if max_tokens is not None else config.context.default_tokens
+        if budget > config.context.max_tokens:
+            raise HTTPException(422, detail={"code": "InputLimitExceeded"})
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).get_profile(
+                    request.state.actor, user_id, selected, budget
+                )
+            )
+        )
 
     @app.post("/v1/users/{user_id}/profile/refresh", tags=["Profiles"])
-    async def refresh_profile(user_id: str, body: ProfileRefreshRequest) -> None:
-        _unavailable()
+    async def refresh_profile(
+        request: Request, user_id: str, body: ProfileRefreshRequest, response: Response
+    ) -> dict:
+        outcome = await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).refresh_profile(
+                    request.state.actor, user_id, body.sections
+                )
+            )
+        )
+        if outcome["status"] == "accepted":
+            response.status_code = status.HTTP_202_ACCEPTED
+        return outcome
 
     @app.get(
         "/v1/users/{user_id}/operations/{operation_id}",
@@ -808,6 +994,8 @@ def _content_call(call):
         raise HTTPException(404, detail={"code": "ExportUnavailable"}) from exc
     except ExportPolicyChanged as exc:
         raise HTTPException(409, detail={"code": "ExportPolicyChanged"}) from exc
+    except ProfileRefreshUnresolved as exc:
+        raise HTTPException(409, detail={"code": "ProfileRefreshUnresolved"}) from exc
     except ValueError as exc:
         raise HTTPException(422, detail={"code": "InvalidRequest", "message": str(exc)}) from exc
 
