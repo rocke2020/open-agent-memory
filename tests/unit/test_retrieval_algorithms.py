@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -11,6 +12,27 @@ def test_rank_fusion_counts_each_arm_once_and_breaks_ties_by_id() -> None:
 
     assert [item.node_id for item in result] == ["a", "b"]
     assert [item.score for item in result] == pytest.approx([5 / 6, 5 / 6])
+
+
+def test_mid_fusion_can_surface_a_lexical_only_candidate() -> None:
+    from oam.config import load_config
+    from oam.retrieval.algorithms import reciprocal_rank_fusion
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    target = "user_preference"
+    lexical = (target, *(f"lexical_{index}" for index in range(47)))
+    dense = tuple(f"dense_{index}" for index in range(48))
+    graph = tuple(f"graph_{index}" for index in range(32))
+    weights = config.search.mid_arm_weights
+
+    ranked = reciprocal_rank_fusion(
+        (lexical, dense, graph),
+        rrf_k=config.search.rrf_k,
+        weights=(weights.lexical, weights.dense, weights.graph),
+    )
+
+    assert ranked == reciprocal_rank_fusion((lexical, dense, graph), rrf_k=config.search.rrf_k)
+    assert target in {item.node_id for item in ranked[: config.search.mid.max_results]}
 
 
 def test_ordinary_causal_expansion_follows_two_outgoing_edges_only() -> None:
@@ -27,7 +49,6 @@ def test_ordinary_causal_expansion_follows_two_outgoing_edges_only() -> None:
             GraphEdge("effect", "move", 1.0),
             GraphEdge("rent", "move", 1.0),
         ),
-        entity_score_scale=0.5,
     )
 
     assert [item.node_id for item in result] == ["rent", "job"]
@@ -50,12 +71,25 @@ def test_graph_activation_uses_distinct_entities_and_maximum_paths() -> None:
             GraphEdge("other_seed", "via", 0.8),
             GraphEdge("via", "target", 0.75),
         ),
-        entity_score_scale=0.5,
     )
 
     assert [item.node_id for item in result] == ["target", "via"]
-    assert result[0].score == pytest.approx(2.161594155955765)
+    assert result[0].score == pytest.approx(2.2)
     assert result[1].score == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize(("count", "expected"), [(1, 0.5), (2, 0.8), (3, 0.9)])
+def test_graph_entity_score_uses_saturating_square(count: int, expected: float) -> None:
+    from oam.retrieval.algorithms import ordinary_graph_activation
+
+    result = ordinary_graph_activation(
+        ("seed",),
+        entity_matches={"target": tuple(f"entity_{index}" for index in range(count))},
+        semantic_edges=(),
+        causal_edges=(),
+    )
+
+    assert result[0].score == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("weight", [0.0, -0.1, 1.01, float("nan"), float("inf")])

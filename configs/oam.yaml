@@ -31,15 +31,14 @@ search:
   rrf_k: 60
   mid_arm_weights:
     lexical: 1.0
-    dense: 2.0
-    graph: 0.5
+    dense: 1.0
+    graph: 1.0
     temporal: 1.0
   graph_seed_min_similarity: 0.3
   graph_seed_max: 20
   relation_hops: 2
   relation_candidates: 32
   entity_candidates_per_entity: 200
-  entity_score_scale: 0.5
   entities_per_seed: 8
   links_per_seed: 16
   hierarchy_parents_per_seed: 2
@@ -54,17 +53,17 @@ search:
   fast:
     channel_candidates: 32
     fused_candidates: 64
-    max_results: 16
+    max_results: 36
   mid:
-    channel_candidates: 48
-    fused_candidates: 96
+    channel_candidates: 64
+    fused_candidates: 128
     rerank_candidates: 48
-    max_results: 24
+    max_results: 56
   deep:
     channel_candidates: 64
     fused_candidates: 128
     rerank_candidates: 64
-    max_results: 32
+    max_results: 56
 
 index:
   embedding_dimensions: 1024
@@ -81,7 +80,8 @@ recall:
 
 context:
   default_tokens: 2048
-  max_tokens: 8192
+  # OAM token estimates can be low; this conservative cap kept evaluated contexts below 16,000 tokens with the pinned evaluation tokenizer.
+  max_tokens: 12000
   tokenizer: oam-unicode-quarter-v1
 
 chunks:

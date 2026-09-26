@@ -98,7 +98,6 @@ class SearchConfig(FrozenModel):
     relation_hops: Literal[2]
     relation_candidates: PositiveInt
     entity_candidates_per_entity: PositiveInt
-    entity_score_scale: PositiveFloat
     entities_per_seed: PositiveInt
     links_per_seed: PositiveInt
     hierarchy_parents_per_seed: PositiveInt

@@ -412,15 +412,54 @@ class DirectEvidenceService(RecallService):
         yield DirectEvidenceRepository(request)
 
 
-def test_mid_direct_evidence_outweighs_graph_only_candidate_with_empty_lexical_arm():
+def test_mid_equal_arm_weights_use_stable_id_for_dense_graph_tie():
     service = DirectEvidenceService(
         CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
 
     result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))
 
-    assert [item["unit_id"] for item in result["items"]] == ["z_direct", "a_graph"]
+    assert [item["unit_id"] for item in result["items"]] == ["a_graph", "z_direct"]
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
+
+
+class OverlappingGraphRepository(DirectEvidenceRepository):
+    def lexical(self, query, limit):
+        return [{"unit_id": "a_relevant", "score": 1.0}]
+
+    def dense(self, vector, limit):
+        return [
+            {"unit_id": "z_seed", "kind": "fact", "score": 0.9},
+            {"unit_id": "z_unrelated", "kind": "fact", "score": 0.2},
+        ]
+
+    def ordinary(self, seeds, vector):
+        assert seeds == ("z_seed",)
+        return ("z_unrelated",), {}
+
+    def hierarchy(self, seeds, vector):
+        return (), {}
+
+
+class OverlappingGraphService(RecallService):
+    @contextmanager
+    def _repository(self, authority, request, deadline):
+        yield OverlappingGraphRepository(request)
+
+
+@pytest.mark.parametrize("mode", ["mid", "deep"])
+def test_graph_and_dense_each_vote_for_a_shared_candidate(mode):
+    service = OverlappingGraphService(
+        CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
+    )
+
+    result = service.search(object(), SearchRequest(query="apple", recall_level=mode))
+
+    assert [item["unit_id"] for item in result["items"]][:2] == ["z_unrelated", "a_relevant"]
+    expected_arms = ["lexical", "dense", "graph"]
+    if mode == "deep":
+        expected_arms.append("hierarchy")
+    assert result["diagnostics"]["executed_arms"] == expected_arms
 
 
 def test_mid_partial_embedding_failure_keeps_lexical_arm_weight():
@@ -437,3 +476,71 @@ def test_mid_partial_embedding_failure_keeps_lexical_arm_weight():
     assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
     assert result["diagnostics"]["executed_arms"] == ["lexical"]
     assert result["diagnostics"]["degraded"] == ["embedding"]
+
+
+class ConversationRepository(DatedRepository):
+    def lexical(self, query, limit):
+        return [{"unit_id": "z_user"}, {"unit_id": "z_reply"}]
+
+    def dense(self, vector, limit):
+        return [
+            {"unit_id": "a_noise", "kind": "fact", "score": 0.9},
+            {"unit_id": "b_noise", "kind": "fact", "score": 0.8},
+        ]
+
+    def ordinary(self, seeds, vector):
+        return ("a_noise",), {}
+
+    def hydrate(self, unit_ids):
+        locators = {
+            "z_user": {
+                "source_id": "conversation",
+                "source_version": 1,
+                "role": "user",
+                "message_index": 0,
+            },
+            "z_reply": {
+                "source_id": "conversation",
+                "source_version": 1,
+                "role": "assistant",
+                "message_index": 1,
+            },
+        }
+        return [
+            {
+                "unit_id": unit_id,
+                "kind": "passage" if unit_id.startswith("z_") else "fact",
+                "origin": "memory",
+                "text": unit_id,
+                "citations": [],
+                "time_evidence": [],
+                "locator": locators.get(unit_id, {}),
+            }
+            for unit_id in unit_ids
+        ]
+
+
+class ConversationService(RecallService):
+    @contextmanager
+    def _repository(self, authority, request, deadline):
+        yield ConversationRepository(request)
+
+
+def test_mid_context_respects_fused_relevance_under_item_cap():
+    config = CONFIG.model_copy(
+        update={
+            "search": CONFIG.search.model_copy(
+                update={"mid": CONFIG.search.mid.model_copy(update={"max_results": 2})}
+            )
+        }
+    )
+    service = ConversationService(
+        config, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
+    )
+
+    result = service.search(
+        object(), SearchRequest(query="recommend something", recall_level="mid")
+    )
+
+    assert [item["unit_id"] for item in result["items"]] == ["a_noise", "z_user"]
+    assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]

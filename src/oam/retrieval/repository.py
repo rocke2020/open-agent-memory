@@ -20,10 +20,57 @@ from oam.retrieval.algorithms import (
     TemporalEdge,
     TemporalNode,
     ordinary_graph_activation,
+    reciprocal_rank_fusion,
 )
 
 _LEXICAL_TOKEN = re.compile(r"[\u3400-\u9fff]|[^\W_\u3400-\u9fff]+", re.UNICODE)
 _ANCHOR = re.compile(r'"([^"\n]+)"|\b([\w]+[-_][\w-]+)\b')
+_MATCHED_TERMS_SQL = (
+    "cardinality(ARRAY(SELECT unnest(tsvector_to_array(u.lexical)) "
+    "INTERSECT SELECT unnest(%(terms)s::text[])))"
+)
+_QUERY_FUNCTION_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "at",
+        "be",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "have",
+        "how",
+        "i",
+        "in",
+        "is",
+        "it",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "please",
+        "the",
+        "to",
+        "was",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "with",
+        "would",
+        "you",
+        "your",
+    }
+)
 
 
 def lexicalize(text: str) -> str:
@@ -138,13 +185,63 @@ class RecallRepository:
         return rows[0]
 
     def lexical(self, query: str, limit: int) -> list[dict]:
-        return self._execute(
-            self._eligible()
-            + "SELECT unit_id, ts_rank_cd(lexical, plainto_tsquery('simple',%(query)s)) AS score "
-            "FROM filtered WHERE lexical @@ plainto_tsquery('simple',%(query)s) "
-            "ORDER BY score DESC,unit_id LIMIT %(limit)s",
-            {"query": lexicalize(query), "limit": limit},
+        # Ranked exact search handles protected phrases and numbered identifiers.
+        if any(
+            quoted or any(char.isdigit() for char in identifier)
+            for quoted, identifier in _ANCHOR.findall(query)
+        ):
+            return []
+        normalized = lexicalize(query)
+        terms = tuple(
+            term for term in dict.fromkeys(normalized.split()) if term not in _QUERY_FUNCTION_WORDS
         )
+        if not normalized:
+            return []
+        if not terms:
+            return self._execute(
+                self._eligible()
+                + "SELECT u.unit_id,ts_rank_cd(u.lexical,plainto_tsquery('simple',%(query)s)) "
+                "AS score FROM filtered u WHERE "
+                "u.lexical @@ plainto_tsquery('simple',%(query)s) "
+                "ORDER BY score DESC,u.mentioned_at DESC NULLS LAST,u.unit_id "
+                "LIMIT %(limit)s",
+                {"query": normalized, "limit": limit},
+            )
+        rows = self._execute(
+            "WITH hits AS MATERIALIZED (SELECT u.unit_id,u.lexical,u.mentioned_at "
+            "FROM search_units u WHERE "
+            "u.tenant_id=current_setting('oam.tenant_id',true) "
+            "AND u.user_id=current_setting('oam.user_id',true) "
+            "AND u.lexical @@ to_tsquery('simple',%(partial)s) "
+            "AND EXISTS (SELECT 1 FROM ("
+            + ELIGIBLE_UNITS
+            + ") eligible WHERE (eligible.tenant_id,eligible.user_id,eligible.unit_id)="
+            "(u.tenant_id,u.user_id,u.unit_id))) "
+            "SELECT t.term_order,hit.unit_id,hit.mentioned_at FROM "
+            "unnest(%(terms)s::text[]) WITH ORDINALITY AS t(term,term_order) "
+            "CROSS JOIN LATERAL (SELECT u.unit_id,u.mentioned_at,"
+            "ts_rank_cd(u.lexical,plainto_tsquery('simple',t.term)) AS score "
+            "FROM hits u WHERE u.lexical @@ plainto_tsquery('simple',t.term) "
+            "ORDER BY score DESC,u.mentioned_at DESC NULLS LAST,u.unit_id "
+            "LIMIT %(limit)s) hit "
+            "ORDER BY t.term_order,hit.score DESC,hit.mentioned_at DESC NULLS LAST,hit.unit_id",
+            {"terms": list(terms), "partial": " | ".join(terms), "limit": limit},
+        )
+        arms = [[] for _ in terms]
+        dates = {}
+        for row in rows:
+            arms[row["term_order"] - 1].append(row["unit_id"])
+            dates[row["unit_id"]] = row["mentioned_at"]
+        ranked = reciprocal_rank_fusion(arms, rrf_k=self.config.search.rrf_k)
+        ranked = sorted(
+            ranked,
+            key=lambda item: (
+                -item.score,
+                -(dates[item.node_id].timestamp() if dates[item.node_id] else float("-inf")),
+                item.node_id,
+            ),
+        )
+        return [{"unit_id": item.node_id, "score": item.score} for item in ranked[:limit]]
 
     def anchors(self, query: str, limit: int) -> list[dict]:
         matches = _ANCHOR.findall(query)
@@ -156,14 +253,43 @@ class RecallRepository:
         ]
         if not phrases and not identifiers:
             return []
+        remainder = _ANCHOR.sub(
+            lambda match: (
+                ""
+                if match.group(1) or any(char.isdigit() for char in (match.group(2) or ""))
+                else match.group(0)
+            ),
+            query,
+        )
+        terms = tuple(
+            term
+            for term in dict.fromkeys(lexicalize(remainder).split())
+            if term not in _QUERY_FUNCTION_WORDS
+        )
+        relevance_order = (
+            "(u.lexical @@ to_tsquery('simple',%(complete)s)) DESC, "
+            + _MATCHED_TERMS_SQL
+            + " DESC, ts_rank_cd(u.lexical,to_tsquery('simple',%(partial)s)) DESC, "
+            if terms
+            else ""
+        )
         return self._execute(
             self._eligible() + "SELECT unit_id,1.0 AS score FROM filtered u WHERE EXISTS ("
             "SELECT 1 FROM unnest(%(phrases)s::text[]) p "
             "WHERE strpos(lower(u.content_text),p)>0) OR EXISTS ("
             "SELECT 1 FROM unnest(%(identifiers)s::text[]) i "
             "WHERE u.content_text ~* i) "
-            "ORDER BY unit_id LIMIT %(limit)s",
-            {"phrases": phrases, "identifiers": identifiers, "limit": limit},
+            "ORDER BY "
+            + relevance_order
+            + "u.mentioned_at DESC NULLS LAST,u.unit_id LIMIT %(limit)s",
+            {
+                "phrases": phrases,
+                "identifiers": identifiers,
+                "complete": " & ".join(terms),
+                "partial": " | ".join(terms),
+                "terms": list(terms),
+                "limit": limit,
+            },
         )
 
     def dense(self, vector: Sequence[float], limit: int) -> list[dict]:
@@ -321,7 +447,6 @@ class RecallRepository:
             causal_edges=tuple(
                 GraphEdge(r["source_id"], r["target_id"], r["weight"]) for r in causal
             ),
-            entity_score_scale=config.entity_score_scale,
         )[: config.relation_candidates]
         return tuple(item.node_id for item in ranked), {
             item.node_id: paths[item.node_id] for item in ranked
