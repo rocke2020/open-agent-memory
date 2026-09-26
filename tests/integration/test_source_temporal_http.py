@@ -233,8 +233,8 @@ async def test_caller_annotation_rejects_conflicting_generated_time(
     correct = await client.post("/v1/recall", json=timed_query(2025))
 
     assert wrong.status_code == correct.status_code == 200
-    assert [item["kind"] for item in wrong.json()["items"]] == ["passage"]
-    passage = wrong.json()["items"][0]
+    assert {item["kind"] for item in wrong.json()["items"]} == {"passage", "fact"}
+    passage = next(item for item in wrong.json()["items"] if item["kind"] == "passage")
     assert passage["text"] == "Apple harvest was in 2025."
     event = next(value for value in passage["time_evidence"] if value["role"] == "event")
     assert event["detail"]["origin"] == "caller"
