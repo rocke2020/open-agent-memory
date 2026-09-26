@@ -13,6 +13,8 @@ from psycopg.types.range import Range
 from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.contracts.search import SearchRequest
+from oam.db.context import bind_user
+from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.models.runtime import EmbeddingResult, Usage
 from oam.retrieval.fts import index_streams
 
@@ -331,6 +333,41 @@ def add_insight(connection, authority, unit_id, support_ids):
         "'Shared plan','{}',%s::vector,'shared plan')",
         (*values, unit_id, str([-1.0] + [0.0] * (dimensions - 1))),
     )
+
+
+def test_a_fact_with_withdrawn_support_does_not_survive_on_its_other_support(recall_database):
+    connection, authority = recall_database
+    bind_user(connection.cursor(), authority)
+    add_fact(connection, authority, "shared", "Shared wording")
+    add_fact(connection, authority, "withdrawn", "Withdrawn wording")
+    add_fact(connection, authority, "independent", "Independent wording")
+    connection.execute(
+        "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
+        "support_kind,span) VALUES (%s,%s,'shared','withdrawn','withdrawn','quote','{}')",
+        (authority.tenant_id, authority.user_id),
+    )
+
+    before = connection.execute(
+        f"WITH eligible AS ({ELIGIBLE_UNITS}) SELECT unit_id FROM eligible "
+        "WHERE kind='fact' ORDER BY unit_id"
+    ).fetchall()
+    assert [row[0] for row in before] == ["independent", "shared", "withdrawn"]
+    connection.execute(
+        "UPDATE sources SET status='deleting',active_version=NULL WHERE tenant_id=%s "
+        "AND user_id=%s AND source_id='withdrawn'",
+        (authority.tenant_id, authority.user_id),
+    )
+    connection.execute(
+        "UPDATE source_versions SET status='excluded' WHERE tenant_id=%s AND user_id=%s "
+        "AND source_id='withdrawn'",
+        (authority.tenant_id, authority.user_id),
+    )
+
+    after = connection.execute(
+        f"WITH eligible AS ({ELIGIBLE_UNITS}) SELECT unit_id FROM eligible "
+        "WHERE kind='fact' ORDER BY unit_id"
+    ).fetchall()
+    assert [row[0] for row in after] == ["independent"]
 
 
 def test_insight_requires_current_immutable_support_revision(recall_database):

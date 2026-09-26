@@ -320,6 +320,13 @@ async def test_html_upload_is_searchable_evidence_without_learned_facts(core_dat
     with psycopg.connect(dsn) as connection:
         assert (
             connection.execute(
+                "SELECT projection_epoch FROM users WHERE tenant_id=%s AND user_id='scope'",
+                (tenant,),
+            ).fetchone()[0]
+            > 0
+        )
+        assert (
+            connection.execute(
                 "SELECT count(*) FROM memories WHERE tenant_id=%s", (tenant,)
             ).fetchone()[0]
             == 0

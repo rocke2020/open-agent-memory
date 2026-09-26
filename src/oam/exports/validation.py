@@ -1,0 +1,130 @@
+"""Validate a downloaded portable export directory."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections import Counter
+from pathlib import Path
+
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+
+
+class ExportValidationError(ValueError):
+    """An export member or manifest is invalid."""
+
+
+def _member(root: Path, path: str) -> bytes:
+    member = root / path
+    if not member.resolve().is_relative_to(root.resolve()) or not member.is_file():
+        raise ExportValidationError("export member path is unavailable or unsafe")
+    return member.read_bytes()
+
+
+def _verified_member(root: Path, descriptor: dict, expected_path: str, label: str) -> bytes:
+    if descriptor.get("path") != expected_path:
+        raise ExportValidationError(f"export {label} path does not match its index")
+    content = _member(root, expected_path)
+    if len(content) != descriptor.get("byte_length"):
+        raise ExportValidationError(f"export {label} length mismatch")
+    if hashlib.sha256(content).hexdigest() != descriptor.get("sha256"):
+        raise ExportValidationError(f"export {label} checksum mismatch")
+    return content
+
+
+def validate_directory(path: str | Path) -> dict[str, int]:
+    root = Path(path)
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file() or manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise ExportValidationError("export manifest is missing or too large")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest["format_version"] != 1:
+            raise ExportValidationError("unsupported export format version")
+        parts = manifest["parts"]
+        originals = manifest["originals"]
+        all_records = []
+        records_hash = hashlib.sha256()
+        for index, descriptor in enumerate(parts):
+            if descriptor["index"] != index:
+                raise ExportValidationError("export part indexes are not contiguous")
+            content = _verified_member(root, descriptor, f"records/{index:06d}.jsonl", "part")
+            if content and not content.endswith(b"\n"):
+                raise ExportValidationError("export JSONL part is incomplete")
+            records_hash.update(content)
+            all_records.extend(json.loads(line) for line in content.splitlines())
+        if records_hash.hexdigest() != manifest["records_sha256"]:
+            raise ExportValidationError("export record checksum mismatch")
+        for index, descriptor in enumerate(originals):
+            if descriptor["index"] != index:
+                raise ExportValidationError("export original indexes are not contiguous")
+            _verified_member(root, descriptor, f"originals/{index:06d}.bin", "original")
+        counts = dict(sorted(Counter(record["kind"] for record in all_records).items()))
+        if counts != manifest["counts"]:
+            raise ExportValidationError("export record counts do not match manifest")
+        source_ids = {
+            (record["source_id"], record["source_version"])
+            for record in all_records
+            if record["kind"] == "source"
+        }
+        evidence_ids = {
+            record["evidence_id"] for record in all_records if record["kind"] == "evidence"
+        }
+        passage_evidence = {
+            record["passage_id"]: record["evidence_id"]
+            for record in all_records
+            if record["kind"] == "passage"
+        }
+        memory_ids = {record["memory_id"] for record in all_records if record["kind"] == "memory"}
+        insight_ids = {
+            (record["insight_id"], record["revision"])
+            for record in all_records
+            if record["kind"] == "insight"
+        }
+        memory_support = Counter()
+        insight_support = {}
+        for record in all_records:
+            if record["kind"] == "source":
+                index = record["original_index"]
+                if not isinstance(index, int) or index < 0 or index >= len(originals):
+                    raise ExportValidationError("source has no original member")
+                original = originals[index]
+                if (record["source_id"], record["source_version"]) != (
+                    original["source_id"],
+                    original["source_version"],
+                ):
+                    raise ExportValidationError("source original identity mismatch")
+            elif record["kind"] == "evidence":
+                if (record["source_id"], record["source_version"]) not in source_ids:
+                    raise ExportValidationError("evidence source reference is missing")
+            elif record["kind"] == "passage":
+                if record["evidence_id"] not in evidence_ids:
+                    raise ExportValidationError("passage evidence reference is missing")
+            elif record["kind"] == "support":
+                if (
+                    record["memory_id"] not in memory_ids
+                    or record["evidence_id"] not in evidence_ids
+                    or passage_evidence.get(record["passage_id"]) != record["evidence_id"]
+                ):
+                    raise ExportValidationError("support reference is missing")
+                memory_support[record["memory_id"]] += 1
+            elif record["kind"] == "insight_support":
+                if (record["insight_id"], record["insight_revision"]) not in insight_ids or record[
+                    "memory_id"
+                ] not in memory_ids:
+                    raise ExportValidationError("Insight support reference is missing")
+                insight_support.setdefault(
+                    (record["insight_id"], record["insight_revision"]), set()
+                ).add(record["memory_id"])
+            elif record["kind"] == "resource_abstract":
+                if (record["source_id"], record["source_version"]) not in source_ids:
+                    raise ExportValidationError("Resource abstract source reference is missing")
+            elif record["kind"] not in {"memory", "insight"}:
+                raise ExportValidationError("unsupported export record kind")
+        if any(memory_support[memory_id] == 0 for memory_id in memory_ids):
+            raise ExportValidationError("memory support is missing")
+        if any(len(insight_support.get(insight_id, ())) < 2 for insight_id in insight_ids):
+            raise ExportValidationError("Insight support is incomplete")
+        return counts
+    except (KeyError, TypeError, UnicodeError, json.JSONDecodeError, OSError) as exc:
+        raise ExportValidationError("export manifest or records are invalid") from exc

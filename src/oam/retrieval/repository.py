@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
@@ -114,9 +115,29 @@ class RecallRepository:
     def user_generation(self) -> str | None:
         return self.user_state()["index_generation_id"]
 
+    def record_trace(self, trace_id: str, policy_epoch: int, decisions: dict, result: dict) -> bool:
+        row = self.connection.execute(
+            "INSERT INTO traces(tenant_id,user_id,trace_id,read_seq,generation_id,"
+            "policy_epoch,decisions,content,expires_at) "
+            "SELECT tenant_id,user_id,%s,published_seq,index_generation_id,policy_epoch,"
+            "%s,%s,clock_timestamp()+(%s*interval '1 day') FROM users "
+            "WHERE tenant_id=%s AND user_id=%s AND state='active' AND policy_epoch=%s "
+            "FOR SHARE RETURNING trace_id",
+            (
+                trace_id,
+                Jsonb(decisions),
+                Jsonb(result),
+                self.config.trace.metadata_retention_days,
+                self.authority.tenant_id,
+                self.authority.user_id,
+                policy_epoch,
+            ),
+        ).fetchone()
+        return row is not None
+
     def user_state(self) -> dict:
         rows = self._execute(
-            "SELECT sc.index_generation_id,"
+            "SELECT sc.index_generation_id,sc.policy_epoch,"
             "COALESCE(bool_or(base.stage_state->>'parse_coverage'='partial'),false) "
             "AS parse_partial,CASE "
             "WHEN bool_or(base.status IN ('partial_failed','failed_terminal','cancelled') "
@@ -136,7 +157,7 @@ class RecallRepository:
             "(o.tenant_id,o.user_id,o.operation_id,sc.index_generation_id)) "
             "ORDER BY o.created_at DESC,o.operation_id DESC LIMIT 1) base ON true "
             "WHERE sc.tenant_id=%s AND sc.user_id=%s AND sc.state='active' "
-            "GROUP BY sc.index_generation_id",
+            "GROUP BY sc.index_generation_id,sc.policy_epoch",
             (self.authority.tenant_id, self.authority.user_id),
         )
         if not rows:

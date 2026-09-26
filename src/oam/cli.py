@@ -45,6 +45,10 @@ def _parser() -> argparse.ArgumentParser:
         "recover-bootstrap", help="issue a replacement bootstrap administrator credential"
     )
     recovery.add_argument("--config", type=Path, default=selected_config_path)
+    export_validation = commands.add_parser(
+        "validate-export", help="validate a downloaded portable export directory"
+    )
+    export_validation.add_argument("directory", type=Path)
     return parser
 
 
@@ -126,6 +130,16 @@ def main(argv: list[str] | None = None) -> int:
         from oam.auth.bootstrap import recover_bootstrap_from_environment
 
         return recover_bootstrap_from_environment(args.config)
+    if args.command == "validate-export":
+        from oam.exports.validation import ExportValidationError, validate_directory
+
+        try:
+            counts = validate_directory(args.directory)
+        except ExportValidationError:
+            print("invalid export", file=sys.stderr)
+            return 2
+        print(f"valid export: {sum(counts.values())} records")
+        return 0
     parser.print_help()
     return 0
 

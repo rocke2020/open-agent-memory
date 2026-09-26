@@ -49,7 +49,7 @@ def _authority() -> AuthorizedUser:
     return AuthorizedUser.from_database_grant(
         principal,
         user_id="scope-1",
-        capabilities={"memory:append", "memory:read"},
+        capabilities={"memory:append", "memory:read", "resource:write"},
     )
 
 
@@ -121,6 +121,17 @@ def test_same_idempotency_key_with_different_payload_is_a_conflict() -> None:
         sources.SourceRepository().accept(connection, _authority(), _command())
 
 
+def test_resource_accept_requires_resource_write_grant() -> None:
+    connection = RecordingConnection([(4,), None, ("source-1",)])
+    authority = AuthorizedUser(
+        "key-1", "tenant-1", "writer-1", "scope-1", frozenset({"memory:append"})
+    )
+
+    with pytest.raises(PermissionError, match="resource:write"):
+        sources.SourceRepository().accept(connection, authority, _command())
+    assert connection.transaction_events == []
+
+
 def test_read_original_is_explicitly_scoped_and_returns_immutable_bytes() -> None:
     received = datetime(2026, 9, 21, tzinfo=UTC)
     connection = RecordingConnection(
@@ -146,3 +157,70 @@ def test_read_original_is_explicitly_scoped_and_returns_immutable_bytes() -> Non
     assert "tenant_id = %s" in query
     assert "user_id = %s" in query
     assert parameters == ("tenant-1", "scope-1", "source-1", 2)
+
+
+def test_resource_revision_rejects_stale_expected_version_before_admission() -> None:
+    cursor = RecordingCursor([(2, "text/plain", b"current")])
+    command = _command(
+        source_version=None,
+        resource_type="evidence",
+        media_type="text/plain",
+        expected_active_version=1,
+    )
+
+    with pytest.raises(sources.SourceVersionConflict):
+        sources.SourceRepository._assign_revision(cursor, _authority(), command)
+
+
+def test_revision_advances_policy_epoch_with_source_activation() -> None:
+    connection = RecordingConnection([(4,), None, (1, "text/plain", b"first"), ("source-1",)])
+    command = _command(
+        source_version=None,
+        expected_active_version=1,
+        resource_type="evidence",
+        media_type="text/plain",
+    )
+
+    sources.SourceRepository().accept(connection, _authority(), command)
+
+    updates = [
+        (query, parameters)
+        for query, parameters in connection.cursor_value.calls
+        if query.startswith("UPDATE users SET")
+    ]
+    assert len(updates) == 1
+    assert "policy_epoch" in updates[0][0]
+    assert updates[0][1][1] == 1
+
+
+def test_delete_source_returns_distinct_cleanup_receipt_for_all_versions() -> None:
+    connection = RecordingConnection(
+        [
+            (8, 3),
+            ("interaction", None, 2, "active"),
+            ([1, 2],),
+        ]
+    )
+    authority = AuthorizedUser(
+        "key-1",
+        "tenant-1",
+        "writer-1",
+        "scope-1",
+        frozenset({"source:delete"}),
+    )
+
+    receipt = sources.SourceRepository().delete(
+        connection,
+        authority,
+        source_id="source-1",
+        resource_only=False,
+        operation_id="cleanup-1",
+        work_unit_id="cleanup-work-1",
+        attempts_remaining=2,
+    )
+
+    assert receipt.source_id == "source-1"
+    assert receipt.excluded_versions == (1, 2)
+    assert receipt.policy_epoch == 4
+    assert receipt.cleanup_operation_id == "cleanup-1"
+    assert connection.transaction_events == ["begin", "end"]

@@ -4,7 +4,7 @@
 
 Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for agent developers. It preserves eligible interaction evidence, derives source-backed memory, keeps HTML/PDF/image Resources separate, retrieves both origins together with citations, and builds read-only Profiles only when explicitly requested.
 
-The repository is implementing v0.0.1. The user-qualified retain/recall API, server-managed text/document updates, source-backed facts, typed Insights and non-generative fast/mid/deep retrieval have PostgreSQL-backed functional coverage. Separate API/worker processes with configured real models have produced and recalled supported L2 plus HTML Evidence through the current API, including query-date resolution and explicit partial-index diagnostics. No complete LongMemEval stage is available. Profiles, full Resource integration and release-level recovery remain later gates, so this is not a release candidate.
+The repository is implementing v0.0.1. The user-qualified retain/recall API, source-backed facts, typed Insights, joint fast/mid/deep retrieval, Resource revision/deletion, recorded inspection, portable export and browser Inspector have isolated PostgreSQL or browser functional coverage. Separate API/worker processes with configured real models have produced and recalled supported L2 plus HTML Evidence through the current API. No complete LongMemEval stage is available. Profiles, live document-vision quality and release-level recovery remain later gates, so this is not a release candidate.
 
 ## Product Model
 
@@ -58,7 +58,7 @@ uv run oam api --config configs/oam.yaml --host 127.0.0.1 --port 8080
 uv run oam worker --config configs/oam.yaml
 ```
 
-`GET /health/live`, `GET /health/ready`, `GET /v1/capabilities`, `/openapi.json`, and `/ui/` are available. Full-release readiness remains `503 core_only`. Configure distinct API, queue and worker-content DSNs plus extraction, Insight, embedding and abstract model roles before using the core; delegated search also needs an optional planner binding. On a fresh database, `oam migrate` selects rootless local `dev` when no root secret or handoff destination is supplied; set `OAM_ROOT_API_KEY` or `OAM_BOOTSTRAP_OUTPUT` to initialize a keyed deployment. See [operations](docs/operations.md). Batch search and optional one-call delegated search use the existing recall path. Profiles, source lifecycle and full Inspector integration remain unavailable. See [architecture](docs/architecture.md) for the current pipeline and [acceptance](docs/acceptance.md) for its remaining gates.
+`GET /health/live`, `GET /health/ready`, `GET /v1/capabilities`, `/openapi.json`, and `/ui/` are available. Full-release readiness remains `503 core_only`. Configure distinct API, queue and worker-content DSNs plus extraction, Insight, embedding and abstract model roles before using the core; delegated search also needs an optional planner binding. On a fresh database, `oam migrate` selects rootless local `dev` when no root secret or handoff destination is supplied; set `OAM_ROOT_API_KEY` or `OAM_BOOTSTRAP_OUTPUT` to initialize a keyed deployment. See [operations](docs/operations.md). Batch search and optional one-call delegated search use the existing recall path; Resource/source controls, recorded debug, export validation and the browser Inspector are documented in the [HTTP API](docs/api.md). Profile generation and Profile Resource controls remain unavailable until Step 7.
 
 ## Release Boundary
 

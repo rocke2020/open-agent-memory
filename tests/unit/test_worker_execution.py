@@ -5,7 +5,7 @@ from threading import Event, Lock
 
 import pytest
 
-from oam.workers import runner
+from oam.workers import index_source, runner
 
 CONFIG_PATH = Path(__file__).parents[2] / "configs" / "oam.yaml"
 LIMITS = (
@@ -15,6 +15,36 @@ LIMITS = (
     ("database", "worker_pool_max"),
     ("user", "concurrency"),
 )
+
+
+def test_cleanup_claim_runs_without_loading_deleted_original(monkeypatch):
+    class QueueConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return object()
+
+    claim = type("Claim", (), {"stage": "cleanup_source"})()
+    calls = []
+    monkeypatch.setattr(index_source.psycopg, "connect", lambda _: QueueConnection())
+    monkeypatch.setattr(index_source, "claim_one", lambda *args, **kwargs: claim)
+    monkeypatch.setattr(
+        index_source, "IndexStore", lambda *args, **kwargs: pytest.fail("loaded deleted original")
+    )
+    monkeypatch.setattr(
+        index_source,
+        "cleanup_claim",
+        lambda dsn, active_claim, worker: calls.append((dsn, active_claim, worker)),
+        raising=False,
+    )
+
+    config = runner.load_config(CONFIG_PATH).config
+    assert index_source.process_one(config, "queue", "content", models=object(), worker_id="worker")
+    assert calls == [("content", claim, "worker")]
 
 
 def configure_worker(monkeypatch, *, limiting_field):

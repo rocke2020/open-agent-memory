@@ -83,6 +83,11 @@ class IndexStore:
         with psycopg.connect(self.dsn) as connection:
             bind_user(connection.cursor(), self.authority)
             yield connection
+            connection.execute(
+                "UPDATE users SET projection_epoch=projection_epoch+1 "
+                "WHERE tenant_id=%s AND user_id=%s",
+                self.key,
+            )
 
     def guard(self, connection):
         user = connection.execute(
@@ -103,7 +108,9 @@ class IndexStore:
         ).fetchone()
         if (
             user is None
-            or user != ("active", self.source["policy_epoch"], self.generation_id)
+            or user[0] != "active"
+            or user[2] != self.generation_id
+            or (self.claim.stage == "consolidate" and user[1] != self.source["policy_epoch"])
             or row is None
             or row[:5] != (self.worker_id, self.claim.fence, "running", True, 0)
             or row[5] not in {"accepted", "running"}

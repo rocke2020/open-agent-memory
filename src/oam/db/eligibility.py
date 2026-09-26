@@ -26,6 +26,20 @@ _ELIGIBLE_MEMORIES = f"""
       AND EXISTS (SELECT 1 FROM ({ELIGIBLE_SUPPORT}) sp
                   WHERE (sp.tenant_id,sp.user_id,sp.memory_id,sp.generation_id) =
                         (m.tenant_id,m.user_id,m.memory_id,m.generation_id))
+      AND NOT EXISTS (
+          SELECT 1 FROM support all_support
+          WHERE (all_support.tenant_id,all_support.user_id,all_support.memory_id) =
+                (m.tenant_id,m.user_id,m.memory_id)
+            AND NOT EXISTS (
+                SELECT 1 FROM ({ELIGIBLE_SUPPORT}) active_support
+                WHERE (active_support.tenant_id,active_support.user_id,
+                       active_support.memory_id,active_support.evidence_id,
+                       active_support.passage_id,active_support.generation_id) =
+                      (all_support.tenant_id,all_support.user_id,
+                       all_support.memory_id,all_support.evidence_id,
+                       all_support.passage_id,m.generation_id)
+            )
+      )
 """.strip()
 
 ELIGIBLE_UNITS = f"""

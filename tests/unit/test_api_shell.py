@@ -28,6 +28,17 @@ async def test_liveness_only_claims_process_health(client) -> None:
     assert response.headers["x-request-id"]
 
 
+async def test_inspector_serves_a_same_origin_script_under_its_csp(client) -> None:
+    page = await client.get("/ui/")
+    script = await client.get("/ui/app.js")
+
+    assert page.status_code == 200
+    assert '<script src="/ui/app.js" defer></script>' in page.text
+    assert "script-src 'self'" in page.headers["content-security-policy"]
+    assert script.status_code == 200
+    assert script.headers["content-type"].startswith("text/javascript")
+
+
 async def test_readiness_fails_when_required_model_roles_are_unbound(client) -> None:
     response = await client.get("/health/ready")
 
@@ -178,6 +189,11 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["contract_version"] == "0.0.1"
     assert payload["limits"]["resource"]["max_bytes"] == 20 * 1024 * 1024
     assert payload["limits"]["chunk"]["max_estimated_tokens"] == 4096
+    assert payload["features"]["source_lifecycle"] is True
+    assert payload["features"]["recorded_debug"] is True
+    assert payload["features"]["portable_export"] is True
+    assert payload["features"]["profiles"] is False
+    assert payload["export_format_versions"] == [1]
     assert payload["limits"]["model"]["attempt_timeout_seconds"] == 60
     assert payload["limits"]["user"]["max_chats"] == 1000
     assert payload["features"]["python_sdk"] is False
@@ -290,6 +306,9 @@ async def test_openapi_reserves_public_step_four_routes(client) -> None:
         "/v1/credentials/{credential_id}",
         "/v1/retain",
         "/v1/users/{user_id}/resources",
+        "/v1/users/{user_id}/resources/{resource_id}",
+        "/v1/users/{user_id}/resources/{resource_id}/original",
+        "/v1/users/{user_id}/evidence/{source_id}",
         "/v1/users/{user_id}/memories",
         "/v1/recall",
         "/v1/users/{user_id}/search-many",
@@ -301,9 +320,13 @@ async def test_openapi_reserves_public_step_four_routes(client) -> None:
         "/v1/users/{user_id}/operations/{operation_id}/retry",
         "/v1/users/{user_id}/operations/{operation_id}/reconcile-attempt",
         "/v1/users/{user_id}/debug/traces/{trace_id}",
+        "/v1/users/{user_id}/debug/diff",
         "/v1/users/{user_id}/profile/diff",
         "/v1/users/{user_id}/replays",
         "/v1/users/{user_id}/exports",
+        "/v1/users/{user_id}/exports/{export_id}",
+        "/v1/users/{user_id}/exports/{export_id}/records/{index}",
+        "/v1/users/{user_id}/exports/{export_id}/originals/{index}",
     } <= set(paths)
 
 

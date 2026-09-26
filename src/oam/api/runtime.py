@@ -35,6 +35,7 @@ from oam.contracts.credentials import (
     CredentialListResponse,
     CredentialRevokedResponse,
 )
+from oam.contracts.debug import ReplayRequest
 from oam.contracts.evidence import EvidenceAppendRequest
 from oam.contracts.operations import ReconcileAttemptRequest
 from oam.contracts.resources import EvidenceResourceCreate, ResourceMediaType
@@ -46,7 +47,10 @@ from oam.contracts.retain import (
 )
 from oam.contracts.search import SearchManyRequest, SearchRequest
 from oam.db.context import bind_user
-from oam.db.sources import AcceptanceReceipt, AcceptSource, SourceRepository
+from oam.db.inspection import SourceInspector
+from oam.db.sources import AcceptanceReceipt, AcceptSource, SourceNotFound, SourceRepository
+from oam.debug.traces import TraceRepository
+from oam.exports.repository import ExportRepository
 from oam.indexing.identity import index_generation
 from oam.models.runtime import RuntimeModels
 from oam.operations.repository import OperationNotFound, OperationRecord, OperationRepository
@@ -63,6 +67,60 @@ class AuthorizationFailed(PermissionError):
 
 class APIRuntime(Protocol):
     def authenticate(self, actor: RequestActor) -> None: ...
+
+    def preflight_revision(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        resource_id: str,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> None: ...
+
+    def list_resources(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict: ...
+
+    def get_resource(self, actor: RequestActor, user_id: str, resource_id: str) -> dict: ...
+
+    def get_resource_original(
+        self, actor: RequestActor, user_id: str, resource_id: str
+    ) -> tuple[bytes, str]: ...
+
+    def list_memories(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict: ...
+
+    def get_evidence(self, actor: RequestActor, user_id: str, source_id: str) -> dict: ...
+
+    def get_trace(self, actor: RequestActor, user_id: str, trace_id: str) -> dict: ...
+
+    def replay(self, actor: RequestActor, user_id: str, body: ReplayRequest) -> dict: ...
+
+    def diff_traces(self, actor: RequestActor, user_id: str, before: str, after: str) -> dict: ...
+
+    def create_export(self, actor: RequestActor, user_id: str) -> dict: ...
+
+    def get_export(self, actor: RequestActor, user_id: str, export_id: str) -> dict: ...
+
+    def get_export_part(
+        self, actor: RequestActor, user_id: str, export_id: str, index: int
+    ) -> bytes: ...
+
+    def get_export_original(
+        self, actor: RequestActor, user_id: str, export_id: str, index: int
+    ) -> tuple[bytes, str]: ...
+
+    def revise_resource(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        resource_id: str,
+        body: RetainTextDocument | RetainURLDocument | RetainFileDocument,
+        idempotency_key: str,
+        expected_version: int,
+        **upload,
+    ) -> dict: ...
+
+    def delete_source(
+        self, actor: RequestActor, user_id: str, source_id: str, *, resource_only: bool
+    ) -> dict: ...
 
     def search_many(
         self, actor: RequestActor, user_id: str, request: SearchManyRequest
@@ -170,10 +228,110 @@ class DatabaseRuntime:
         with self.pool.connection() as connection:
             self._authenticate(connection, actor)
 
+    def preflight_revision(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        resource_id: str,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> None:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "resource:write")
+            SourceRepository().require_active_resource_version(
+                connection, authority, resource_id, expected_version, idempotency_key
+            )
+
     def search(self, actor: RequestActor, user_id: str, request: SearchRequest) -> dict:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
         return self._recall_service().search(authority, request, deadline_at=request.deadline_at)
+
+    def list_resources(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            return SourceInspector().list_resources(connection, authority, after=after)
+
+    def get_resource(self, actor: RequestActor, user_id: str, resource_id: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            result = SourceInspector().get_resource(connection, authority, resource_id)
+        if result is None:
+            raise SourceNotFound(resource_id)
+        return result
+
+    def get_resource_original(
+        self, actor: RequestActor, user_id: str, resource_id: str
+    ) -> tuple[bytes, str]:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            result = SourceInspector().get_original(connection, authority, resource_id)
+        if result is None:
+            raise SourceNotFound(resource_id)
+        return result
+
+    def list_memories(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            return SourceInspector().list_memories(connection, authority, after=after)
+
+    def get_evidence(self, actor: RequestActor, user_id: str, source_id: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            result = SourceInspector().get_interaction(connection, authority, source_id)
+        if result is None:
+            raise SourceNotFound(source_id)
+        return result
+
+    def get_trace(self, actor: RequestActor, user_id: str, trace_id: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "debug:read")
+            return TraceRepository(
+                content_retention_days=self.config.trace.content_retention_days
+            ).get(connection, authority, trace_id)
+
+    def replay(self, actor: RequestActor, user_id: str, body: ReplayRequest) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "debug:read")
+            return TraceRepository(
+                content_retention_days=self.config.trace.content_retention_days
+            ).replay(connection, authority, body.trace_id, body.mode)
+
+    def diff_traces(self, actor: RequestActor, user_id: str, before: str, after: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "debug:read")
+            return TraceRepository(
+                content_retention_days=self.config.trace.content_retention_days
+            ).diff(connection, authority, before, after)
+
+    def create_export(self, actor: RequestActor, user_id: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "export:read")
+            return ExportRepository().create(
+                connection,
+                authority,
+                export_id=f"export_{secrets.token_hex(16)}",
+                retention_hours=self.config.export.retention_hours,
+            )
+
+    def get_export(self, actor: RequestActor, user_id: str, export_id: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "export:read")
+            return ExportRepository().get_manifest(connection, authority, export_id)
+
+    def get_export_part(
+        self, actor: RequestActor, user_id: str, export_id: str, index: int
+    ) -> bytes:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "export:read")
+            return ExportRepository().get_part(connection, authority, export_id, index)
+
+    def get_export_original(
+        self, actor: RequestActor, user_id: str, export_id: str, index: int
+    ) -> tuple[bytes, str]:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "export:read")
+            return ExportRepository().get_original(connection, authority, export_id, index)
 
     def search_many(self, actor: RequestActor, user_id: str, request: SearchManyRequest) -> dict:
         from oam.api.search import search_many
@@ -239,9 +397,12 @@ class DatabaseRuntime:
         content: bytes | None = None,
         media_type: str | None = None,
         filename: str | None = None,
+        expected_active_version: int | None = None,
     ) -> dict:
         """Freeze the caller payload, then let admission assign immutable source revisions."""
         caller = body.model_dump(mode="json")
+        if expected_active_version is not None:
+            caller = {**caller, "expected_active_version": expected_active_version}
         identifier = secrets.token_hex(16)
         metadata_fields = {
             name: caller.get(name)
@@ -255,7 +416,7 @@ class DatabaseRuntime:
             ).encode()
             request_hash = hashlib.sha256(url_request_bytes).digest()
             with self.pool.connection() as connection:
-                authority = self._authorize(connection, actor, body.user_id, "memory:append")
+                authority = self._authorize(connection, actor, body.user_id, "resource:write")
                 prior = SourceRepository().find_idempotent(
                     connection,
                     authority,
@@ -341,7 +502,10 @@ class DatabaseRuntime:
             )
             max_bytes = self.config.resource.max_bytes
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, actor, body.user_id, "memory:append")
+            capability = (
+                "memory:append" if isinstance(body, RetainInteraction) else "resource:write"
+            )
+            authority = self._authorize(connection, actor, body.user_id, capability)
             receipt = SourceRepository().accept(
                 connection,
                 authority,
@@ -364,11 +528,55 @@ class DatabaseRuntime:
                     stage="index_source",
                     generation_id=index_generation(self.config, os.environ),
                     attempts_remaining=self.config.retry.max_attempts,
+                    expected_active_version=expected_active_version,
                     update_mode=update_mode,
                     max_bytes=max_bytes,
                 ),
             )
             return self._retain_response(connection, authority, receipt)
+
+    def revise_resource(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        resource_id: str,
+        body: RetainTextDocument | RetainURLDocument | RetainFileDocument,
+        idempotency_key: str,
+        expected_version: int,
+        **upload,
+    ) -> dict:
+        if body.user_id != user_id or body.document_id != resource_id:
+            raise PermissionError("resource identity does not match the authorized path")
+        if body.update_mode != "replace":
+            raise ValueError("Resource revision requires replace")
+        return self.retain(
+            actor, body, idempotency_key, expected_active_version=expected_version, **upload
+        )
+
+    def delete_source(
+        self, actor: RequestActor, user_id: str, source_id: str, *, resource_only: bool
+    ) -> dict:
+        from oam.db.sources import SourceRepository
+
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "source:delete")
+            receipt = SourceRepository().delete(
+                connection,
+                authority,
+                source_id=source_id,
+                resource_only=resource_only,
+                operation_id=f"op_{secrets.token_hex(16)}",
+                work_unit_id=f"work_{secrets.token_hex(16)}",
+                attempts_remaining=self.config.retry.max_attempts,
+            )
+        return {
+            "source_id": receipt.source_id,
+            "status": "excluded",
+            "excluded_versions": list(receipt.excluded_versions),
+            "policy_epoch": receipt.policy_epoch,
+            "cleanup_operation_id": receipt.cleanup_operation_id,
+            "cleanup_status": receipt.cleanup_status,
+        }
 
     def _retain_response(self, connection, authority, receipt: AcceptanceReceipt) -> dict:
         with connection.transaction():

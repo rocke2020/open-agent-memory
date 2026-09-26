@@ -20,6 +20,10 @@ class SourceVersionConflict(RuntimeError):
     """The requested immutable source version cannot become active."""
 
 
+class SourceNotFound(LookupError):
+    """The source is not visible with the requested role."""
+
+
 @dataclass(frozen=True, slots=True)
 class AcceptSource:
     source_id: str
@@ -65,6 +69,15 @@ class AcceptanceReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class DeletionReceipt:
+    source_id: str
+    excluded_versions: tuple[int, ...]
+    policy_epoch: int
+    cleanup_operation_id: str
+    cleanup_status: str
+
+
+@dataclass(frozen=True, slots=True)
 class StoredOriginal:
     content: bytes
     media_type: str
@@ -104,16 +117,188 @@ FOR UPDATE
 """.strip()
 
 READ_ORIGINAL_SQL = """
-SELECT original_bytes, media_type, content_sha256, byte_length, status, received_at
-FROM source_versions
-WHERE tenant_id = %s
-  AND user_id = %s
-  AND source_id = %s
-  AND source_version = %s
+SELECT v.original_bytes, v.media_type, v.content_sha256, v.byte_length,
+       v.status, v.received_at
+FROM source_versions v
+JOIN sources s USING (tenant_id,user_id,source_id)
+WHERE v.tenant_id = %s
+  AND v.user_id = %s
+  AND v.source_id = %s
+  AND v.source_version = %s
+  AND s.status = 'active'
+  AND s.active_version = v.source_version
+  AND v.status = 'active'
 """.strip()
 
 
 class SourceRepository:
+    @staticmethod
+    def _withdraw_prior_operations(
+        cursor: Cursor, key: tuple[str, str], source_id: str, reason: str
+    ) -> None:
+        cursor.execute(
+            "UPDATE operations SET status=CASE WHEN status IN ('accepted','running') "
+            "THEN 'cancelled' ELSE status END,cancellation_revision="
+            "cancellation_revision+CASE WHEN status IN ('accepted','running') "
+            "THEN 1 ELSE 0 END,stage_state=jsonb_build_object(%s::text,true),"
+            "updated_at=clock_timestamp() "
+            "WHERE tenant_id=%s AND user_id=%s AND source_id=%s",
+            (reason, *key, source_id),
+        )
+        cursor.execute(
+            "UPDATE work_units SET status='cancelled',fence=fence+1,owner_id=NULL,"
+            "lease_expires_at=NULL,updated_at=clock_timestamp() WHERE tenant_id=%s "
+            "AND user_id=%s AND operation_id IN (SELECT operation_id FROM operations "
+            "WHERE tenant_id=%s AND user_id=%s AND source_id=%s AND status='cancelled') "
+            "AND status IN ('queued','running','retry_wait')",
+            (*key, *key, source_id),
+        )
+
+    def require_active_resource_version(
+        self,
+        connection: Connection,
+        authority: AuthorizedUser,
+        source_id: str,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> None:
+        if not authority.allows("resource:write"):
+            raise PermissionError("resource:write is required")
+        with connection.transaction():
+            cursor = connection.cursor()
+            bind_user(cursor, authority)
+            cursor.execute(
+                "SELECT source_id FROM operations WHERE tenant_id=%s AND user_id=%s "
+                "AND principal_id=%s AND kind='index_resource' AND dedup_key=%s",
+                (
+                    authority.tenant_id,
+                    authority.user_id,
+                    authority.principal_id,
+                    idempotency_key,
+                ),
+            )
+            reused = cursor.fetchone()
+            if reused is not None:
+                if reused[0] != source_id:
+                    raise IdempotencyConflict(idempotency_key)
+                return
+            cursor.execute(
+                "SELECT active_version FROM sources WHERE tenant_id=%s AND user_id=%s "
+                "AND source_id=%s AND input_role='evidence_resource' AND status='active'",
+                (authority.tenant_id, authority.user_id, source_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise SourceNotFound(source_id)
+            if row[0] != expected_version:
+                raise SourceVersionConflict(source_id)
+
+    def delete(
+        self,
+        connection: Connection,
+        authority: AuthorizedUser,
+        *,
+        source_id: str,
+        resource_only: bool,
+        operation_id: str,
+        work_unit_id: str,
+        attempts_remaining: int,
+    ) -> DeletionReceipt:
+        if not authority.allows("source:delete"):
+            raise PermissionError("source:delete is required")
+        if attempts_remaining <= 0:
+            raise ValueError("cleanup attempts must be positive")
+        key = (authority.tenant_id, authority.user_id)
+        required_role = "evidence_resource" if resource_only else "interaction"
+        with connection.transaction():
+            cursor = connection.cursor()
+            bind_user(cursor, authority)
+            cursor.execute(
+                "SELECT accepted_seq,policy_epoch FROM users WHERE tenant_id=%s AND user_id=%s "
+                "AND state='active' FOR UPDATE",
+                key,
+            )
+            owner = cursor.fetchone()
+            if owner is None:
+                raise SourceNotFound(source_id)
+            cursor.execute(
+                "SELECT input_role,resource_type,active_version,status FROM sources "
+                "WHERE tenant_id=%s AND user_id=%s AND source_id=%s FOR UPDATE",
+                (*key, source_id),
+            )
+            source = cursor.fetchone()
+            if source is None or source[0] != required_role:
+                raise SourceNotFound(source_id)
+            cursor.execute(
+                "SELECT array_agg(source_version ORDER BY source_version) FROM source_versions "
+                "WHERE tenant_id=%s AND user_id=%s AND source_id=%s",
+                (*key, source_id),
+            )
+            versions = tuple(cursor.fetchone()[0] or ())
+            if source[3] != "active":
+                cursor.execute(
+                    "SELECT operation_id,stage_state->>'policy_epoch',status FROM operations "
+                    "WHERE tenant_id=%s AND user_id=%s AND source_id=%s "
+                    "AND kind='cleanup_source' ORDER BY created_at DESC LIMIT 1",
+                    (*key, source_id),
+                )
+                prior = cursor.fetchone()
+                if prior is None:
+                    raise RuntimeError("deleted source has no cleanup receipt")
+                return DeletionReceipt(
+                    source_id, versions, int(prior[1]), str(prior[0]), str(prior[2])
+                )
+            accepted_seq, policy_epoch = int(owner[0]) + 1, int(owner[1]) + 1
+            cursor.execute(
+                "UPDATE users SET accepted_seq=%s,policy_epoch=%s "
+                "WHERE tenant_id=%s AND user_id=%s",
+                (accepted_seq, policy_epoch, *key),
+            )
+            cursor.execute(
+                "UPDATE sources SET status='deleting',active_version=NULL "
+                "WHERE tenant_id=%s AND user_id=%s AND source_id=%s",
+                (*key, source_id),
+            )
+            cursor.execute(
+                "UPDATE source_versions SET status='excluded' "
+                "WHERE tenant_id=%s AND user_id=%s AND source_id=%s",
+                (*key, source_id),
+            )
+            cursor.execute(
+                "UPDATE evidence SET status='excluded' "
+                "WHERE tenant_id=%s AND user_id=%s AND source_id=%s",
+                (*key, source_id),
+            )
+            self._withdraw_prior_operations(cursor, key, source_id, "source_excluded")
+            cursor.execute(
+                "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,source_id,"
+                "accepted_seq,kind,schema_version,status,plan_sealed,stage_state) "
+                "VALUES (%s,%s,%s,%s,%s,%s,'cleanup_source',1,'accepted',true,"
+                "jsonb_build_object('policy_epoch',%s,'excluded_versions',%s::int[]))",
+                (
+                    *key,
+                    operation_id,
+                    authority.principal_id,
+                    source_id,
+                    accepted_seq,
+                    policy_epoch,
+                    list(versions),
+                ),
+            )
+            cursor.execute(
+                "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,"
+                "input_digest,generation_id,status,attempts_remaining) "
+                "VALUES (%s,%s,%s,%s,'cleanup_source',%s,'source-cleanup-v1','queued',%s)",
+                (
+                    *key,
+                    work_unit_id,
+                    operation_id,
+                    hashlib.sha256(source_id.encode()).digest(),
+                    attempts_remaining,
+                ),
+            )
+            return DeletionReceipt(source_id, versions, policy_epoch, operation_id, "accepted")
+
     def find_idempotent(
         self,
         connection: Connection,
@@ -124,8 +309,9 @@ class SourceRepository:
         request_hash: bytes,
     ) -> AcceptanceReceipt | None:
         """Avoid refetching a URL whose exact caller request was already accepted."""
-        if not authority.allows("memory:append"):
-            raise PermissionError("user does not grant memory:append")
+        capability = "resource:write" if operation_kind == "index_resource" else "memory:append"
+        if not authority.allows(capability):
+            raise PermissionError(f"user does not grant {capability}")
         with connection.transaction():
             cursor = connection.cursor()
             bind_user(cursor, authority)
@@ -154,8 +340,11 @@ class SourceRepository:
         authority: AuthorizedUser,
         command: AcceptSource,
     ) -> AcceptanceReceipt:
-        if not authority.allows("memory:append"):
-            raise PermissionError("user does not grant memory:append")
+        capability = (
+            "resource:write" if command.input_role == "evidence_resource" else "memory:append"
+        )
+        if not authority.allows(capability):
+            raise PermissionError(f"user does not grant {capability}")
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
             bind_user(cursor, authority)
@@ -190,8 +379,14 @@ class SourceRepository:
 
             accepted_seq = int(user_row[0]) + 1
             cursor.execute(
-                "UPDATE users SET accepted_seq = %s WHERE tenant_id = %s AND user_id = %s",
-                (accepted_seq, authority.tenant_id, authority.user_id),
+                "UPDATE users SET accepted_seq = %s, policy_epoch = policy_epoch + %s "
+                "WHERE tenant_id = %s AND user_id = %s",
+                (
+                    accepted_seq,
+                    int(command.expected_active_version is not None),
+                    authority.tenant_id,
+                    authority.user_id,
+                ),
             )
             cursor.execute(
                 "INSERT INTO sources "
@@ -232,6 +427,13 @@ class SourceRepository:
                 "AND status = 'active'",
                 (authority.tenant_id, authority.user_id, command.source_id),
             )
+            if command.expected_active_version is not None:
+                self._withdraw_prior_operations(
+                    cursor,
+                    (authority.tenant_id, authority.user_id),
+                    command.source_id,
+                    "source_superseded",
+                )
             content_sha256 = hashlib.sha256(command.original_bytes).digest()
             cursor.execute(
                 "INSERT INTO source_versions "
@@ -319,6 +521,11 @@ class SourceRepository:
         )
         active = cursor.fetchone()
         previous = int(active[0]) if active and active[0] is not None else None
+        if (
+            command.expected_active_version is not None
+            and previous != command.expected_active_version
+        ):
+            raise SourceVersionConflict(command.source_id)
         content = command.original_bytes
         if command.update_mode == "append":
             if not active or active[1] != "text/plain" or command.media_type != "text/plain":

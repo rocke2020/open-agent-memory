@@ -6,18 +6,77 @@
   <meta name="color-scheme" content="light dark">
   <title>Open Agent Memory Inspector</title>
   <link rel="stylesheet" href="/ui/styles.css">
+  <script src="/ui/app.js" defer></script>
 </head>
 <body>
+  <header class="site-header">
+    <div class="site-heading">
+      <span class="eyebrow">Open Agent Memory</span>
+      <h1>Memory Inspector</h1>
+      <p>Inspect supported memories, typed Resources, originals, and source operations.</p>
+    </div>
+    <span class="version">v0.0.1</span>
+  </header>
+
   <main>
-    <h1>Open Agent Memory Inspector</h1>
-    <p>Enter a credential and authorized user to inspect the public API.</p>
-    <form aria-describedby="credential-note">
-      <label>API credential <input type="password" autocomplete="off" required></label>
-      <p id="credential-note">The credential remains in page memory and is cleared on reload.</p>
-      <label>User <input autocomplete="off" required></label>
-      <button type="submit">Connect</button>
-    </form>
-    <section aria-live="polite"></section>
+    <section id="connection" class="card connection-card" aria-labelledby="connection-title">
+      <h2 id="connection-title">Connect to a personal memory</h2>
+      <p>Use a user credential and the user ID it belongs to. Trusted and local development hosts may provide identity without a credential.</p>
+      <form id="connect-form">
+        <label>Tenant <input id="tenant" autocomplete="off" value="default" required></label>
+        <label>User ID <input id="user" autocomplete="off" required></label>
+        <label>API credential <input id="credential" type="password" autocomplete="off"></label>
+        <p class="form-note">The credential stays in page memory and clears on sign-out or reload.</p>
+        <button type="submit">Connect</button>
+      </form>
+    </section>
+
+    <section id="workspace" hidden aria-label="Memory workspace">
+      <div class="workspace-header card">
+        <div>
+          <span class="eyebrow">Current user</span>
+          <h2 id="scope-label"></h2>
+        </div>
+        <div class="actions">
+          <button id="export-button" type="button" class="secondary">Create export</button>
+          <button id="sign-out" type="button" class="secondary">Sign out</button>
+        </div>
+      </div>
+
+      <nav class="tabs" aria-label="Inspector views">
+        <button type="button" data-view="memories" aria-pressed="true">Memories</button>
+        <button type="button" data-view="resources" aria-pressed="false">Resources</button>
+        <button type="button" data-view="profiles" aria-pressed="false">Profiles</button>
+      </nav>
+
+      <div class="workspace-grid">
+        <section class="card list-panel" aria-labelledby="list-title">
+          <div class="panel-heading">
+            <h2 id="list-title">Memories</h2>
+            <button id="refresh-list" type="button" class="secondary">Refresh</button>
+          </div>
+          <form id="search-form" class="search-form">
+            <label for="query">Search current memory</label>
+            <div class="inline-fields">
+              <input id="query" autocomplete="off" placeholder="Ask for supporting evidence">
+              <button type="submit">Search</button>
+            </div>
+          </form>
+          <button id="new-resource" type="button" class="secondary" hidden>Add Evidence Resource</button>
+          <ul id="item-list" class="item-list" aria-label="Current items"></ul>
+          <button id="load-more" type="button" class="secondary" hidden>Load more</button>
+        </section>
+
+        <section class="card detail-panel" aria-labelledby="detail-title">
+          <div class="panel-heading">
+            <h2 id="detail-title">Details</h2>
+          </div>
+          <div id="detail" class="detail-content"><p>Select an item to inspect its source and readiness.</p></div>
+        </section>
+      </div>
+    </section>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
   </main>
 </body>
 </html>

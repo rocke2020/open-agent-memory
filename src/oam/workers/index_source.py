@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from oam.config import OAMConfig
 from oam.contracts.evidence import EvidenceAppendRequest
+from oam.governance.cleanup import cleanup_claim
 from oam.indexing.chunker import chunk_text
 from oam.indexing.extraction import (
     FactExtraction,
@@ -49,6 +50,9 @@ def process_one(
         )
     if claim is None:
         return False
+    if claim.stage == "cleanup_source":
+        cleanup_claim(content_dsn, claim, worker_id)
+        return True
     store = IndexStore(content_dsn, config, claim, worker_id, index_generation(config, os.environ))
     try:
         if claim.stage == "consolidate":

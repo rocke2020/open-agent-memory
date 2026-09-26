@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import httpx
 import psycopg
@@ -335,6 +337,7 @@ class RecallService:
         hydrated = read("hydrate", final_ids)
         budget = request.max_context_tokens or self.config.context.default_tokens
         items, blocks = [], []
+        budget_omissions = []
         used_units = 0
         for row in hydrated:
             item = {key: value for key, value in row.items() if key != "locator"}
@@ -349,6 +352,7 @@ class RecallService:
             )
             next_units = used_units + (2 if blocks else 0) + estimate_units(block)
             if estimated_tokens(next_units) > budget:
+                budget_omissions.append(item["unit_id"])
                 continue
             items.append(item)
             blocks.append(block)
@@ -356,8 +360,10 @@ class RecallService:
             if len(items) == tier.max_results:
                 break
         _remaining(deadline)
+        if read("user_state")["policy_epoch"] != initial_index_state["policy_epoch"]:
+            raise RecallUnavailable("source policy changed during recall")
         context = "\n\n".join(blocks)
-        return {
+        result = {
             "items": items,
             "context": context,
             "context_tokens": estimated_tokens(used_units),
@@ -402,6 +408,63 @@ class RecallService:
                 "timing_ms": {**timing, "total": (time.monotonic() - started) * 1000},
             },
         }
+        weights = (
+            tuple(getattr(self.config.search.mid_arm_weights, name) for name in arms)
+            if mode == "mid"
+            else (1.0,) * len(arms)
+        )
+        arm_positions = {
+            name: {node_id: rank for rank, node_id in enumerate(dict.fromkeys(ids), 1)}
+            for name, ids in arms.items()
+        }
+        fused = reciprocal_rank_fusion(
+            tuple(arms.values()), rrf_k=self.config.search.rrf_k, weights=weights
+        )[: tier.fused_candidates]
+        fusion = [
+            {
+                "unit_id": candidate.node_id,
+                "score": candidate.score,
+                "contributions": [
+                    {
+                        "arm": name,
+                        "rank": arm_positions[name][candidate.node_id],
+                        "weight": weight,
+                        "score": weight
+                        / (self.config.search.rrf_k + arm_positions[name][candidate.node_id]),
+                    }
+                    for name, weight in zip(arms, weights, strict=True)
+                    if candidate.node_id in arm_positions[name]
+                ],
+            }
+            for candidate in fused
+        ]
+        trace_id = f"trace_{uuid4().hex}"
+        decisions = {
+            "query_hash": hashlib.sha256(request.query.encode()).hexdigest(),
+            "options": request.model_dump(mode="json", exclude={"query"}),
+            "generation_id": self.generation_id,
+            "arms": {name: list(ids) for name, ids in arms.items()},
+            "fusion": fusion,
+            "rerank_scores": rerank_scores,
+            "result_ids": [item["unit_id"] for item in items],
+            "packing": {
+                "token_limit": budget,
+                "selected_ids": [item["unit_id"] for item in items],
+                "budget_omissions": budget_omissions,
+                "hydration_omissions": [
+                    node_id
+                    for node_id in final_ids
+                    if node_id not in {row["unit_id"] for row in hydrated}
+                ],
+            },
+            "diagnostics": result["diagnostics"],
+        }
+        if not read(
+            "record_trace", trace_id, initial_index_state["policy_epoch"], decisions, result
+        ):
+            raise RecallUnavailable("source policy changed before trace publication")
+        result["trace_id"] = trace_id
+        return result
 
 
 def _remaining(deadline: float) -> float:

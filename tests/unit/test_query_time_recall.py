@@ -29,7 +29,12 @@ class DatedRepository:
         }
 
     def user_state(self):
-        return {"index_generation_id": "generation", "readiness": "ready", "parse_partial": False}
+        return {
+            "index_generation_id": "generation",
+            "readiness": "ready",
+            "parse_partial": False,
+            "policy_epoch": 0,
+        }
 
     def temporal_matches(self, unit_ids):
         window = self.request.time_window
@@ -76,11 +81,44 @@ class DatedRepository:
             for name in unit_ids
         ]
 
+    def record_trace(self, trace_id, policy_epoch, decisions, result):
+        assert policy_epoch == 0
+        assert decisions["query_hash"]
+        assert decisions["fusion"][0]["contributions"]
+        assert decisions["packing"]["selected_ids"] == [item["unit_id"] for item in result["items"]]
+        assert result["items"]
+        return trace_id
+
 
 class DatedService(RecallService):
     @contextmanager
     def _repository(self, authority, request, deadline):
         yield DatedRepository(request)
+
+
+def test_recall_rejects_policy_change_after_hydration():
+    class ChangedRepository(DatedRepository):
+        def user_state(self):
+            state = super().user_state()
+            state["policy_epoch"] = service.epoch
+            return state
+
+        def hydrate(self, unit_ids):
+            result = super().hydrate(unit_ids)
+            service.epoch = 1
+            return result
+
+    class ChangedService(RecallService):
+        epoch = 0
+
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield ChangedRepository(request)
+
+    service = ChangedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
+
+    with pytest.raises(RecallUnavailable, match="policy"):
+        service.search(object(), SearchRequest(query="apple", recall_level="fast"))
 
 
 class EmbeddingOnly:
@@ -111,6 +149,14 @@ def test_fast_recall_ranks_date_match_without_excluding_ordinary_candidates(quer
     assert [item["unit_id"] for item in result["items"]] == ["new", "old"]
     assert result["items"][0]["paths"][0]["arm"] == "temporal"
     assert result["diagnostics"]["generative_calls"] == 0
+
+
+def test_recall_returns_a_recorded_trace_identity():
+    service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
+
+    result = service.search(object(), SearchRequest(query="apple", recall_level="fast"))
+
+    assert result["trace_id"].startswith("trace_")
 
 
 def test_explicit_window_overrides_date_in_query():

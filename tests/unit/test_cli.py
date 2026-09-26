@@ -43,6 +43,25 @@ def test_version_command_reports_the_product_release(capsys) -> None:
     assert capsys.readouterr().out.strip() == "open-agent-memory 0.0.1"
 
 
+def test_validate_export_command_checks_downloaded_members(tmp_path, capsys) -> None:
+    import hashlib
+
+    manifest = {
+        "format_version": 1,
+        "counts": {},
+        "records_sha256": hashlib.sha256(b"").hexdigest(),
+        "parts": [],
+        "originals": [],
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert main(["validate-export", str(tmp_path)]) == 0
+    assert "valid export" in capsys.readouterr().out
+
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+    assert main(["validate-export", str(tmp_path)]) == 2
+
+
 def test_preflight_fails_closed_and_names_every_missing_required_role(capsys) -> None:
     exit_code = main(
         ["preflight", "--config", str(REPOSITORY_ROOT / "configs" / "oam.yaml"), "--json"]

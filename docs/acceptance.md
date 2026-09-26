@@ -38,11 +38,17 @@ The agent-integration scenario starts with host-run fast recall before the agent
 
 LongMemEval performance acceptance covers fast and mid only, in order LME-6, LME-30 and LME-60. Both modes must meet the declared four-metric gates on the same indexed histories. Deep's functional conformance stays in the core gate, while its performance evaluation is deferred to a harder dataset.
 
-## 5. Complete Release Gate
+## 5. Step 8 Source and Inspector Gate
+
+Step 8.2 source lifecycle is independent of L3 Profile implementation. Through public HTTP on an isolated user collection, retain two independent sources, revise text and uploaded/URL Evidence with `If-Match`, reject a stale version before expensive input work, delete a chat source and a revised Resource, and prove all versions disappear immediately from L0/L1/L2, Evidence passages/abstracts, recall, inspection, traces and export while the independent source remains available. Repeat deletion must return the existing cleanup receipt; a worker with a stale fence or old source version must not republish content. Run the cleanup claim and inspect its terminal operation, active-store originals/derivatives and held export parts separately from the immediate exclusion receipt. Profile propagation is checked only after Step 7 in the serial integration gate.
+
+Step 8.3 inspection requires authorized L1/L2 support and Resource original/locator views, recorded trace explanation, current-policy recorded replay and output diff, plus a downloaded export whose manifest and every declared member pass the offline validator. Challenge a deleted candidate, changed export policy, tampered checksum, missing support, root key, other user key and in-flight policy change. Browser acceptance covers the same public routes, inert rendering of source HTML, exact-target deletion confirmation, operation readiness, page-memory-only credentials, sign-out, focus/navigation, narrow screens and light/dark system preferences. A working shell or local deterministic probe does not establish real-model quality or release readiness.
+
+## 6. Complete Release Gate
 
 v0.0.1 extends the completed core, Evidence and L3 gates to batch/planner integration over the fast/mid/deep core, source revision/deletion, explain/diff/recorded replay, portable export, browser/API parity, multi-API/multi-worker recovery, and external OAMB screening. The final candidate image is built for Linux AMD64 and ARM64 and the complete matrix reruns against its immutable digest before source/image publication.
 
-## 6. Evidence Rules
+## 7. Evidence Rules
 
 LLM probes expecting visible content allow at least 1,024 output tokens and reject length termination, empty/malformed content, and reasoning-only output. Embeddings must be finite and dimensionally consistent. Browser/static presence, health, nonempty output, schema compatibility, and passing legacy tests prove only their named boundaries.
 

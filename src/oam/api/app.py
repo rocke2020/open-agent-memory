@@ -39,6 +39,7 @@ from oam.contracts.credentials import (
     CredentialListResponse,
     CredentialRevokedResponse,
 )
+from oam.contracts.debug import ReplayRequest
 from oam.contracts.operations import (
     OperationReadiness,
     OperationResponse,
@@ -46,9 +47,19 @@ from oam.contracts.operations import (
     ReconcileAttemptRequest,
 )
 from oam.contracts.profile import ProfileRefreshRequest
-from oam.contracts.retain import RETAIN_JSON, RecallRequest, RetainFileDocument, UserRequest
+from oam.contracts.retain import (
+    RETAIN_JSON,
+    RecallRequest,
+    RetainFileDocument,
+    RetainTextDocument,
+    RetainURLDocument,
+    UserRequest,
+)
 from oam.contracts.search import SearchManyRequest, SearchRequest
-from oam.db.sources import IdempotencyConflict, SourceVersionConflict
+from oam.db.inspection import SourcePolicyChanged
+from oam.db.sources import IdempotencyConflict, SourceNotFound, SourceVersionConflict
+from oam.debug.traces import TraceNotFound
+from oam.exports.repository import ExportNotFound, ExportPolicyChanged
 from oam.indexing.identity import index_generation
 from oam.operations.repository import (
     AttemptOwnershipMismatch,
@@ -276,6 +287,7 @@ def create_app(
             "config_sha256": resolved.sha256,
             "index_generation_id": index_generation(config, os.environ),
             "limits": limits,
+            "export_format_versions": [1],
             "features": {
                 "python_sdk": False,
                 "fast_recall": True,
@@ -285,6 +297,9 @@ def create_app(
                 "planner": config.models.roles.planner is not None,
                 "profiles": False,
                 "inspector": True,
+                "source_lifecycle": True,
+                "recorded_debug": True,
+                "portable_export": True,
             },
         }
 
@@ -300,6 +315,14 @@ def create_app(
         return Response(
             files("oam.web").joinpath("styles.css").read_text(encoding="utf-8"),
             media_type="text/css",
+            headers={"Content-Security-Policy": CSP},
+        )
+
+    @app.get("/ui/app.js", include_in_schema=False)
+    async def inspector_script() -> Response:
+        return Response(
+            files("oam.web").joinpath("app.js").read_text(encoding="utf-8"),
+            media_type="text/javascript",
             headers={"Content-Security-Policy": CSP},
         )
 
@@ -417,55 +440,7 @@ def _register_reserved_routes(
                 lambda: _require_runtime(runtime).authenticate(request.state.actor)
             )
         )
-        limit = config.api.max_request_bytes
-        declared = request.headers.get("content-length")
-        if declared is not None:
-            try:
-                length = int(declared)
-                if length < 0:
-                    raise ValueError
-            except ValueError as exc:
-                raise HTTPException(400, detail={"code": "InvalidContentLength"}) from exc
-            if length > limit:
-                raise HTTPException(413, detail={"code": "RequestTooLarge"})
-        consumed = 0
-
-        async def limited_receive():
-            nonlocal consumed
-            message = await request.receive()
-            consumed += len(message.get("body", b""))
-            if consumed > limit:
-                # The multipart parser closes its partial upload files on this
-                # exception; JSON body reads propagate it to the same 413 below.
-                raise MultiPartException("retain request exceeds byte limit")
-            return message
-
-        bounded = Request(request.scope, receive=limited_receive)
-        upload = {}
-        try:
-            if bounded.headers.get("content-type", "").startswith("multipart/form-data"):
-                async with bounded.form(max_files=1, max_fields=1) as form:
-                    body = RetainFileDocument.model_validate_json(form.get("metadata", ""))
-                    original = form.get("original")
-                    if original is None or not hasattr(original, "read"):
-                        raise ValueError("original file is required")
-                    content = await original.read(config.resource.max_bytes + 1)
-                    if not content or len(content) > config.resource.max_bytes:
-                        raise ValueError("original exceeds byte limit or is empty")
-                    upload = {
-                        "content": content,
-                        "media_type": original.content_type,
-                        "filename": original.filename,
-                    }
-            else:
-                body = RETAIN_JSON.validate_json(await bounded.body())
-                _validate_limits(body, config)
-        except (MultiPartException, StarletteHTTPException) as exc:
-            if consumed > limit:
-                raise HTTPException(413, detail={"code": "RequestTooLarge"}) from exc
-            raise
-        except ValueError as exc:
-            raise HTTPException(422, detail={"code": "InvalidRetainRequest"}) from exc
+        body, upload = await _parse_retain_request(request, config)
         return await run_in_threadpool(
             lambda: _content_call(
                 lambda: _require_runtime(runtime).retain(
@@ -475,12 +450,98 @@ def _register_reserved_routes(
         )
 
     @app.get("/v1/users/{user_id}/resources", tags=["Resources"])
-    async def list_resources(user_id: str) -> None:
-        _unavailable()
+    def list_resources(request: Request, user_id: str, after: str | None = None) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).list_resources(
+                request.state.actor, user_id, after=after
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/resources/{resource_id}", tags=["Resources"])
+    def get_resource(request: Request, user_id: str, resource_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).get_resource(
+                request.state.actor, user_id, resource_id
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/resources/{resource_id}/original", tags=["Resources"])
+    def get_resource_original(request: Request, user_id: str, resource_id: str) -> Response:
+        content, media_type = _content_call(
+            lambda: _require_runtime(runtime).get_resource_original(
+                request.state.actor, user_id, resource_id
+            )
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": 'attachment; filename="original"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.put("/v1/users/{user_id}/resources/{resource_id}", status_code=202, tags=["Resources"])
+    async def revise_resource(
+        request: Request,
+        user_id: str,
+        resource_id: str,
+        idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+        if_match: int = Header(alias="If-Match", ge=1),
+    ) -> dict:
+        await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).preflight_revision(
+                    request.state.actor, user_id, resource_id, if_match, idempotency_key
+                )
+            )
+        )
+        body, upload = await _parse_retain_request(request, config)
+        if not isinstance(body, (RetainTextDocument, RetainURLDocument, RetainFileDocument)):
+            raise HTTPException(422, detail={"code": "InvalidResourceRevision"})
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).revise_resource(
+                    request.state.actor,
+                    user_id,
+                    resource_id,
+                    body,
+                    idempotency_key,
+                    if_match,
+                    **upload,
+                )
+            )
+        )
+
+    @app.delete("/v1/users/{user_id}/resources/{resource_id}", status_code=202, tags=["Resources"])
+    def delete_resource(request: Request, user_id: str, resource_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).delete_source(
+                request.state.actor, user_id, resource_id, resource_only=True
+            )
+        )
+
+    @app.delete("/v1/users/{user_id}/evidence/{source_id}", status_code=202, tags=["Retain"])
+    def delete_evidence(request: Request, user_id: str, source_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).delete_source(
+                request.state.actor, user_id, source_id, resource_only=False
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/evidence/{source_id}", tags=["Retain"])
+    def get_evidence(request: Request, user_id: str, source_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).get_evidence(request.state.actor, user_id, source_id)
+        )
 
     @app.get("/v1/users/{user_id}/memories", tags=["Memory"])
-    async def list_memories(user_id: str) -> None:
-        _unavailable()
+    def list_memories(request: Request, user_id: str, after: str | None = None) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).list_memories(
+                request.state.actor, user_id, after=after
+            )
+        )
 
     @app.post("/v1/recall", tags=["Recall"])
     def search(request: Request, body: RecallRequest) -> dict:
@@ -591,20 +652,123 @@ def _register_reserved_routes(
         )
 
     @app.get("/v1/users/{user_id}/debug/traces/{trace_id}", tags=["Debug"])
-    async def get_trace(user_id: str, trace_id: str) -> None:
-        _unavailable()
+    def get_trace(request: Request, user_id: str, trace_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).get_trace(request.state.actor, user_id, trace_id)
+        )
+
+    @app.get("/v1/users/{user_id}/debug/diff", tags=["Debug"])
+    def trace_diff(request: Request, user_id: str, before: str, after: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).diff_traces(
+                request.state.actor, user_id, before, after
+            )
+        )
 
     @app.get("/v1/users/{user_id}/profile/diff", tags=["Debug"])
     async def profile_diff(user_id: str, from_revision: str, to_revision: str) -> None:
         _unavailable()
 
-    @app.post("/v1/users/{user_id}/replays", status_code=202, tags=["Debug"])
-    async def create_replay(user_id: str, body: dict[str, Any]) -> None:
-        _unavailable()
+    @app.post("/v1/users/{user_id}/replays", tags=["Debug"])
+    def create_replay(request: Request, user_id: str, body: ReplayRequest) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).replay(request.state.actor, user_id, body)
+        )
 
     @app.post("/v1/users/{user_id}/exports", status_code=202, tags=["Exports"])
-    async def create_export(user_id: str, body: dict[str, Any]) -> None:
-        _unavailable()
+    def create_export(request: Request, user_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).create_export(request.state.actor, user_id)
+        )
+
+    @app.get("/v1/users/{user_id}/exports/{export_id}", tags=["Exports"])
+    def get_export(request: Request, user_id: str, export_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).get_export(request.state.actor, user_id, export_id)
+        )
+
+    @app.get("/v1/users/{user_id}/exports/{export_id}/records/{index}", tags=["Exports"])
+    def get_export_part(request: Request, user_id: str, export_id: str, index: int) -> Response:
+        content = _content_call(
+            lambda: _require_runtime(runtime).get_export_part(
+                request.state.actor, user_id, export_id, index
+            )
+        )
+        return Response(
+            content=content,
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": f'attachment; filename="records-{index:06d}.jsonl"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/v1/users/{user_id}/exports/{export_id}/originals/{index}", tags=["Exports"])
+    def get_export_original(request: Request, user_id: str, export_id: str, index: int) -> Response:
+        content, media_type = _content_call(
+            lambda: _require_runtime(runtime).get_export_original(
+                request.state.actor, user_id, export_id, index
+            )
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="original-{index:06d}.bin"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+
+async def _parse_retain_request(request: Request, config: OAMConfig):
+    limit = config.api.max_request_bytes
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+            if length < 0:
+                raise ValueError
+        except ValueError as exc:
+            raise HTTPException(400, detail={"code": "InvalidContentLength"}) from exc
+        if length > limit:
+            raise HTTPException(413, detail={"code": "RequestTooLarge"})
+    consumed = 0
+
+    async def limited_receive():
+        nonlocal consumed
+        message = await request.receive()
+        consumed += len(message.get("body", b""))
+        if consumed > limit:
+            raise MultiPartException("retain request exceeds byte limit")
+        return message
+
+    bounded = Request(request.scope, receive=limited_receive)
+    upload = {}
+    try:
+        if bounded.headers.get("content-type", "").startswith("multipart/form-data"):
+            async with bounded.form(max_files=1, max_fields=1) as form:
+                body = RetainFileDocument.model_validate_json(form.get("metadata", ""))
+                original = form.get("original")
+                if original is None or not hasattr(original, "read"):
+                    raise ValueError("original file is required")
+                content = await original.read(config.resource.max_bytes + 1)
+                if not content or len(content) > config.resource.max_bytes:
+                    raise ValueError("original exceeds byte limit or is empty")
+                upload = {
+                    "content": content,
+                    "media_type": original.content_type,
+                    "filename": original.filename,
+                }
+        else:
+            body = RETAIN_JSON.validate_json(await bounded.body())
+            _validate_limits(body, config)
+    except (MultiPartException, StarletteHTTPException) as exc:
+        if consumed > limit:
+            raise HTTPException(413, detail={"code": "RequestTooLarge"}) from exc
+        raise
+    except ValueError as exc:
+        raise HTTPException(422, detail={"code": "InvalidRetainRequest"}) from exc
+    return body, upload
 
 
 def _validate_limits(body, config: OAMConfig) -> None:
@@ -628,12 +792,22 @@ def _content_call(call):
         raise HTTPException(503, detail={"code": "CapabilityUnavailable"}) from exc
     except RecallUnavailable as exc:
         raise HTTPException(503, detail={"code": "RecallUnavailable"}) from exc
+    except SourcePolicyChanged as exc:
+        raise HTTPException(503, detail={"code": "SourcePolicyChanged"}) from exc
     except ResourceFetchUnavailable as exc:
         raise HTTPException(502, detail={"code": "ResourceFetchUnavailable"}) from exc
     except TimeoutError as exc:
         raise HTTPException(504, detail={"code": "RecallDeadlineExceeded"}) from exc
     except (IdempotencyConflict, SourceVersionConflict) as exc:
         raise HTTPException(409, detail={"code": type(exc).__name__}) from exc
+    except SourceNotFound as exc:
+        raise HTTPException(404, detail={"code": "SourceUnavailable"}) from exc
+    except TraceNotFound as exc:
+        raise HTTPException(404, detail={"code": "TraceUnavailable"}) from exc
+    except ExportNotFound as exc:
+        raise HTTPException(404, detail={"code": "ExportUnavailable"}) from exc
+    except ExportPolicyChanged as exc:
+        raise HTTPException(409, detail={"code": "ExportPolicyChanged"}) from exc
     except ValueError as exc:
         raise HTTPException(422, detail={"code": "InvalidRequest", "message": str(exc)}) from exc
 
