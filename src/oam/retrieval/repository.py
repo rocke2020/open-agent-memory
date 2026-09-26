@@ -21,14 +21,18 @@ from oam.retrieval.algorithms import (
     TemporalNode,
     ordinary_graph_activation,
 )
+from oam.retrieval.fts import query_terms
 
-_LEXICAL_TOKEN = re.compile(r"[\u3400-\u9fff]|[^\W_\u3400-\u9fff]+", re.UNICODE)
-_ANCHOR = re.compile(r'"([^"\n]+)"|\b([\w]+[-_][\w-]+)\b')
+_ANCHOR = re.compile(r'"([^"\n]+)"|\b([A-Za-z][A-Za-z0-9]*-\d+[A-Za-z0-9-]*|[\w]+_[\w-]+)\b')
 
 
-def lexicalize(text: str) -> str:
-    """Share lowercase Unicode words and individual CJK terms with indexing."""
-    return " ".join(_LEXICAL_TOKEN.findall(text.casefold()))
+def _tsquery(terms: tuple[tuple[str, str], ...], operator: str, parameters: dict, name: str):
+    parts = []
+    for index, (configuration, word) in enumerate(terms):
+        key = f"{name}_{index}"
+        parameters[key] = word
+        parts.append(f"plainto_tsquery('{configuration}',%({key})s)")
+    return f"({f' {operator} '.join(parts)})" if parts else "''::tsquery"
 
 
 class RecallRepository:
@@ -140,12 +144,22 @@ class RecallRepository:
         return rows[0]
 
     def lexical(self, query: str, limit: int) -> list[dict]:
+        terms = query_terms(_ANCHOR.sub(" ", query))
+        if not terms.candidates:
+            return []
+        parameters = {"limit": limit, "weights": list(self.config.search.fts_rank_weights)}
+        candidate = _tsquery(terms.candidates, "||", parameters, "candidate")
+        primary = _tsquery(terms.primary, "&&", parameters, "primary")
+        full = _tsquery((*terms.primary, *terms.modifiers), "&&", parameters, "full")
         return self._execute(
-            self._eligible()
-            + "SELECT unit_id, ts_rank_cd(lexical, plainto_tsquery('simple',%(query)s)) AS score "
-            "FROM filtered WHERE lexical @@ plainto_tsquery('simple',%(query)s) "
-            "ORDER BY score DESC,unit_id LIMIT %(limit)s",
-            {"query": lexicalize(query), "limit": limit},
+            self._eligible() + f", terms AS (SELECT {candidate} AS candidate,{primary} AS primary,"
+            f"{full} AS full) "
+            "SELECT unit_id,ts_rank_cd(%(weights)s::float4[],lexical_bilingual,terms.candidate) "
+            "AS score FROM filtered,terms WHERE lexical_bilingual @@ terms.candidate "
+            "ORDER BY (lexical_bilingual @@ terms.full) DESC,"
+            "(lexical_bilingual @@ terms.primary) DESC,"
+            "score DESC,unit_id LIMIT %(limit)s",
+            parameters,
         )
 
     def anchors(self, query: str, limit: int) -> list[dict]:

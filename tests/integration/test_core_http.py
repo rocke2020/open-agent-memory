@@ -278,7 +278,11 @@ async def test_html_upload_is_searchable_evidence_without_learned_facts(core_dat
     config = load_config(ROOT / "configs/oam.yaml").config
     app = create_app(ROOT / "configs/oam.yaml")
     models = SyntheticIndexModels()
-    original = b"<table><tr><td>Glucose</td><td>5.2 mmol/L</td></tr></table>"
+    original = (
+        b"<html><head><title>Allergy report</title></head><body><h1>Lab results</h1>"
+        b"<table><caption>Electrolytes</caption><tr><td>Glucose</td>"
+        b"<td>5.2 mmol/L</td></tr></table></body></html>"
+    )
     metadata = {
         "user_id": "scope",
         "input_type": "document",
@@ -330,6 +334,17 @@ async def test_html_upload_is_searchable_evidence_without_learned_facts(core_dat
             "SELECT original_bytes FROM source_versions WHERE tenant_id=%s", (tenant,)
         ).fetchone()[0]
         assert bytes(stored) == original
+        weighted = connection.execute(
+            "SELECT ts_rank_cd(ARRAY[0,0,0,1]::float4[],lexical_bilingual,"
+            "plainto_tsquery('english','allergy'))>0,"
+            "ts_rank_cd(ARRAY[0,0,1,0]::float4[],lexical_bilingual,"
+            "plainto_tsquery('english','lab'))>0,"
+            "ts_rank_cd(ARRAY[0,1,0,0]::float4[],lexical_bilingual,"
+            "plainto_tsquery('english','electrolytes'))>0 "
+            "FROM search_units WHERE tenant_id=%s AND content_text='Glucose 5.2 mmol/L'",
+            (tenant,),
+        ).fetchone()
+        assert weighted == (True, True, True)
     assert models.generation_calls == ["abstract"]
 
 

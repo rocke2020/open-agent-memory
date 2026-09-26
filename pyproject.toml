@@ -14,6 +14,7 @@ dependencies = [
     "dateparser>=1.4.3,<2",
     "fastapi>=0.119",
     "httpx>=0.28",
+    "jieba==0.42.1",
     "pillow>=11.3",
     "psycopg[binary,pool]>=3.2",
     "pydantic>=2.11",

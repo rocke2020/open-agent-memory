@@ -11,6 +11,19 @@ from oam.config import ConfigurationError, load_config
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def test_fts_rank_weights_reject_values_outside_postgres_range() -> None:
+    from pydantic import ValidationError
+
+    from oam.config import SearchConfig
+
+    search = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config.search
+    for invalid in (-0.1, 1.01, float("inf"), float("nan")):
+        values = search.model_dump()
+        values["fts_rank_weights"] = [invalid, *values["fts_rank_weights"][1:]]
+        with pytest.raises(ValidationError):
+            SearchConfig.model_validate(values)
+
+
 def test_canonical_config_freezes_v001_trial_limits_without_provider_defaults() -> None:
     resolved = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml")
 

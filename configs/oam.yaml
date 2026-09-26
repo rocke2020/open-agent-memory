@@ -29,6 +29,7 @@ search:
   max_queries: 4
   query_concurrency: 2
   rrf_k: 60
+  fts_rank_weights: [0.1, 0.2, 0.4, 1.0]
   mid_arm_weights:
     lexical: 1.0
     dense: 2.0

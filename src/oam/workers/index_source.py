@@ -476,6 +476,9 @@ def _resource(store, models):
                 source_created_at=metadata.source_created_at,
                 source_updated_at=metadata.source_updated_at,
                 ordinal=ordinal,
+                title=block.title,
+                heading=block.heading,
+                caption=block.caption,
             )
             for index, annotation in enumerate(metadata.temporal_annotations):
                 if annotation.locator == block.locator:
