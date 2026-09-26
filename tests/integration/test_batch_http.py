@@ -64,6 +64,7 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
     )
     runtime = DatabaseRuntime(config, pool, models=LocalModels(config.index.embedding_dimensions))
     monkeypatch.setattr("oam.api.runtime.index_generation", lambda config, env: "generation")
+    monkeypatch.setattr("oam.profiles.service.index_generation", lambda config, env: "generation")
     runtime.open()
     try:
         app = create_app(config_path, runtime=runtime)
@@ -74,6 +75,21 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
         ) as client:
             created = await client.post("/v1/users", json={"user_id": "lin"})
             assert created.status_code == 201, created.text
+            user_key = created.json()["secret"]
+            profile_resource = await client.post(
+                "/v1/users/lin/resources",
+                json={
+                    "resource_id": "profile-basic",
+                    "resource_type": "profile",
+                    "subtype": "basic-profile/v1",
+                    "content": {"date_of_birth": "1990-05-10"},
+                },
+                headers={
+                    "Authorization": f"Bearer {user_key}",
+                    "Idempotency-Key": "profile-basic-v1",
+                },
+            )
+            assert profile_resource.status_code == 202, profile_resource.text
             with psycopg.connect(dsn) as connection:
                 connection.execute(
                     "UPDATE users SET index_generation_id='generation' "
@@ -86,20 +102,20 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
                 add_fact(connection, authority, "apple", "Lin grows apple trees in an orchard.")
                 add_fact(connection, authority, "pear", "Lin grows pear trees in an orchard.")
 
-            client.headers["Authorization"] = f"Bearer {created.json()['secret']}"
+            client.headers["Authorization"] = f"Bearer {user_key}"
             if delegated:
                 path = "/v1/users/lin/decompose-and-search"
                 body = {
                     "query": "What fruit does Lin grow?",
                     "recall_level": "fast",
-                    "profile_sections": [],
+                    "profile_sections": ["main"],
                 }
             else:
                 path = "/v1/users/lin/search-many"
                 body = {
                     "queries": ["apple orchard", "pear orchard"],
                     "recall_level": "fast",
-                    "profile_sections": [],
+                    "profile_sections": ["main"],
                 }
             root_response = await client.post(path, json=body, headers=root_headers)
             assert root_response.status_code == 404
@@ -117,6 +133,13 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
         assert payload["context_tokens"] <= config.context.default_tokens
         assert all(
             row["result"]["diagnostics"]["generative_calls"] == 0 for row in payload["results"]
+        )
+        assert all(
+            any(
+                field["value"] == "1990-05-10"
+                for field in row["result"]["profile"]["sections"]["main"]
+            )
+            for row in payload["results"]
         )
         assert payload["diagnostics"]["planner_calls"] == int(delegated)
         if delegated:

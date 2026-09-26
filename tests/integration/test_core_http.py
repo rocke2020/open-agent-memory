@@ -1153,8 +1153,11 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
     assert models.generation_calls == ["extraction", "extraction", "insights"]
 
 
-async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(core_database):
+async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
+    core_database, tmp_path
+):
     from oam.config import load_config
+    from oam.exports.validation import validate_directory
     from oam.models.runtime import ModelResult, Usage
     from oam.workers.index_source import process_one
 
@@ -1294,6 +1297,33 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(core
         assert payload["freshness"] == "current"
         assert any(field["value"] == "1990-05-10" for field in payload["sections"]["main"])
         assert any(field["value"] == "brief" for field in payload["sections"]["preferences"])
+        exported_profile = await client.post("/v1/users/scope/exports")
+        assert exported_profile.status_code == 202, exported_profile.text
+        export_id = exported_profile.json()["export_id"]
+        profile_manifest = (await client.get(f"/v1/users/scope/exports/{export_id}")).json()
+        assert profile_manifest["counts"]["profile"] == 1
+        (tmp_path / "manifest.json").write_text(json.dumps(profile_manifest), encoding="utf-8")
+        exported_records = []
+        for part in profile_manifest["parts"]:
+            response = await client.get(
+                f"/v1/users/scope/exports/{export_id}/records/{part['index']}"
+            )
+            assert response.status_code == 200, response.text
+            destination = tmp_path / part["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(response.content)
+            exported_records.extend(json.loads(line) for line in response.content.splitlines())
+        for original in profile_manifest["originals"]:
+            response = await client.get(
+                f"/v1/users/scope/exports/{export_id}/originals/{original['index']}"
+            )
+            assert response.status_code == 200, response.text
+            destination = tmp_path / original["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(response.content)
+        assert validate_directory(tmp_path)["profile"] == 1
+        l3_record = next(record for record in exported_records if record["kind"] == "profile")
+        assert any(field["value"] == "brief" for field in l3_record["sections"]["preferences"])
         calls = len(models.generation_calls)
         unchanged = await client.post("/v1/users/scope/profile/refresh", json={})
         assert unchanged.status_code == 200, unchanged.text
@@ -1399,11 +1429,11 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(core
         after_l2 = await client.get("/v1/users/scope/profile")
         assert after_l2.json()["freshness"] == "dirty"
         assert models.generation_calls.count("profile") == profile_calls_before_new_chat
-        with psycopg.connect(dsn) as connection:
-            connection.execute(
-                "UPDATE sources SET status='deleted' WHERE source_id=%s",
-                (chat.json()["source_id"],),
-            )
+        deleted_chat = await client.delete(f"/v1/users/scope/evidence/{chat.json()['source_id']}")
+        assert deleted_chat.status_code == 202, deleted_chat.text
+        assert deleted_chat.json()["status"] == "excluded"
+        assert (await client.get(f"/v1/users/scope/exports/{export_id}")).status_code == 409
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="chat-cleanup")
         withdrawn = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
         assert withdrawn.status_code == 200
         assert withdrawn.json()["freshness"] == "stale"
@@ -1411,6 +1441,29 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(core
             field["value"] != "brief" for field in withdrawn.json()["sections"]["preferences"]
         )
         assert any(field["value"] == "1991-05-10" for field in withdrawn.json()["sections"]["main"])
+        after_delete_export = await client.post("/v1/users/scope/exports")
+        assert after_delete_export.status_code == 202, after_delete_export.text
+        new_export_id = after_delete_export.json()["export_id"]
+        new_manifest = (await client.get(f"/v1/users/scope/exports/{new_export_id}")).json()
+        new_profiles = [
+            record
+            for part in new_manifest["parts"]
+            for record in (
+                json.loads(line)
+                for line in (
+                    await client.get(
+                        f"/v1/users/scope/exports/{new_export_id}/records/{part['index']}"
+                    )
+                ).content.splitlines()
+            )
+            if record["kind"] == "profile"
+        ]
+        assert len(new_profiles) == 1
+        assert all(
+            field["value"] != "brief"
+            for fields in new_profiles[0]["sections"].values()
+            for field in fields
+        )
         timeout_resource = await client.post(
             "/v1/users/scope/resources",
             json={

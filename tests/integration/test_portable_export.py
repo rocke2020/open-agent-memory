@@ -3,7 +3,10 @@
 import hashlib
 import json
 
+import httpx
 import pytest
+from test_core_http import ROOT, use_created_user_key
+from test_core_http import core_database as core_database
 from test_recall_repository import (
     add_fact,
     add_insight,
@@ -14,11 +17,76 @@ from test_recall_repository import (
 from test_source_version_admission import command
 from test_source_version_admission import source_database as source_database
 
+from oam.api.app import create_app
 from oam.auth.credentials import AuthorizedUser
+from oam.config import load_config
 from oam.db.sources import SourceRepository
 from oam.exports.repository import ExportPolicyChanged, ExportRepository
+from oam.exports.validation import validate_directory
 
 pytestmark = pytest.mark.integration
+
+
+async def test_public_export_includes_eligible_profile_fields(core_database, tmp_path):
+    _, _, root_headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=root_headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "lin")
+        created = await client.post(
+            "/v1/users/lin/resources",
+            json={
+                "resource_id": "basic",
+                "resource_type": "profile",
+                "subtype": "basic-profile/v1",
+                "content": {"date_of_birth": "1990-05-10"},
+            },
+            headers={"Idempotency-Key": "basic-v1"},
+        )
+        assert created.status_code == 202, created.text
+        profile = await client.get("/v1/users/lin/profile")
+        assert any(field["value"] == "1990-05-10" for field in profile.json()["sections"]["main"])
+
+        receipt = await client.post("/v1/users/lin/exports")
+        assert receipt.status_code == 202, receipt.text
+        export_id = receipt.json()["export_id"]
+        manifest = (await client.get(f"/v1/users/lin/exports/{export_id}")).json()
+        assert manifest["profiles"]
+        assert manifest["counts"]["profile"] == 1
+        (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        records = []
+        for part in manifest["parts"]:
+            response = await client.get(
+                f"/v1/users/lin/exports/{export_id}/records/{part['index']}"
+            )
+            assert response.status_code == 200, response.text
+            destination = tmp_path / part["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(response.content)
+            records.extend(json.loads(line) for line in response.content.splitlines())
+        for original in manifest["originals"]:
+            response = await client.get(
+                f"/v1/users/lin/exports/{export_id}/originals/{original['index']}"
+            )
+            assert response.status_code == 200, response.text
+            destination = tmp_path / original["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(response.content)
+        exported_profile = next(record for record in records if record["kind"] == "profile")
+        assert exported_profile["sections"]["main"][0]["value"] == "1990-05-10"
+        assert exported_profile["sections"]["main"][0]["supports"][0]["resource_id"] == "basic"
+        assert validate_directory(tmp_path)["profile"] == 1
+
+        deleted = await client.delete("/v1/users/lin/resources/basic")
+        assert deleted.status_code == 202, deleted.text
+        assert deleted.json()["excluded_versions"] == [1]
+        assert (await client.get(f"/v1/users/lin/exports/{export_id}")).status_code == 409
+        current = await client.get("/v1/users/lin/profile")
+        assert all(field["value"] != "1990-05-10" for field in current.json()["sections"]["main"])
 
 
 def test_export_manifest_parts_and_original_expire_on_deletion(source_database):
@@ -49,7 +117,7 @@ def test_export_manifest_parts_and_original_expire_on_deletion(source_database):
         authority.user_id,
         frozenset({"export:read"}),
     )
-    repository = ExportRepository()
+    repository = ExportRepository(load_config(ROOT / "configs/oam.yaml").config)
 
     receipt = repository.create(
         connection, export_authority, export_id="export", retention_hours=24
@@ -98,7 +166,7 @@ def test_export_keeps_layer_kinds_and_support_links(recall_database):
         frozenset({"export:read"}),
     )
 
-    repository = ExportRepository()
+    repository = ExportRepository(load_config(ROOT / "configs/oam.yaml").config)
     repository.create(connection, export_authority, export_id="export", retention_hours=24)
     manifest = repository.get_manifest(connection, export_authority, "export")
     records = [
@@ -157,7 +225,7 @@ def test_export_expires_when_older_source_publishes_after_newer_source(source_da
         authority.user_id,
         frozenset({"export:read"}),
     )
-    exporter = ExportRepository()
+    exporter = ExportRepository(load_config(ROOT / "configs/oam.yaml").config)
     exporter.create(connection, export_authority, export_id="snapshot", retention_hours=24)
     connection.execute(
         "UPDATE operations SET status='succeeded' WHERE tenant_id=%s AND user_id=%s "
@@ -189,7 +257,7 @@ def test_export_expires_on_projection_change_before_operation_finishes(source_da
         authority.user_id,
         frozenset({"export:read"}),
     )
-    exporter = ExportRepository()
+    exporter = ExportRepository(load_config(ROOT / "configs/oam.yaml").config)
     exporter.create(connection, export_authority, export_id="pending", retention_hours=24)
     connection.execute(
         "UPDATE users SET projection_epoch=projection_epoch+1 WHERE tenant_id=%s AND user_id=%s",

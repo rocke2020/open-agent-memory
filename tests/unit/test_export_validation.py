@@ -133,3 +133,42 @@ def test_validator_rejects_insight_without_two_supported_memories(tmp_path):
     _write_records(tmp_path, [{"kind": "insight", "insight_id": "i", "revision": 1}])
     with pytest.raises(ExportValidationError, match="Insight support"):
         validate_directory(tmp_path)
+
+
+def test_validator_rejects_profile_field_with_missing_resource_support(tmp_path):
+    _write_records(
+        tmp_path,
+        [
+            {
+                "kind": "profile",
+                "profile_revision": None,
+                "freshness": "missing",
+                "policy_epoch": 1,
+                "sections": {
+                    "main": [
+                        {
+                            "field_id": "pf_test",
+                            "supports": [
+                                {
+                                    "kind": "profile_resource",
+                                    "resource_id": "missing",
+                                    "resource_version": 1,
+                                }
+                            ],
+                        }
+                    ],
+                    "preferences": [],
+                    "experiences": [],
+                },
+            }
+        ],
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["policy_epoch"] = 1
+    manifest["profiles"] = [
+        {"profile_id": "user", "profile_revision": None, "freshness": "missing"}
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ExportValidationError, match="Profile support"):
+        validate_directory(tmp_path)

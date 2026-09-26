@@ -67,6 +67,11 @@ def validate_directory(path: str | Path) -> dict[str, int]:
             for record in all_records
             if record["kind"] == "source"
         }
+        source_roles = {
+            (record["source_id"], record["source_version"]): record.get("input_role")
+            for record in all_records
+            if record["kind"] == "source"
+        }
         evidence_ids = {
             record["evidence_id"] for record in all_records if record["kind"] == "evidence"
         }
@@ -81,6 +86,16 @@ def validate_directory(path: str | Path) -> dict[str, int]:
             for record in all_records
             if record["kind"] == "insight"
         }
+        profiles = [record for record in all_records if record["kind"] == "profile"]
+        profile_manifest = manifest.get("profiles", [])
+        if len(profiles) != len(profile_manifest) or len(profiles) > 1:
+            raise ExportValidationError("Profile manifest does not match records")
+        if profiles and profile_manifest[0] != {
+            "profile_id": "user",
+            "profile_revision": profiles[0]["profile_revision"],
+            "freshness": profiles[0]["freshness"],
+        }:
+            raise ExportValidationError("Profile manifest does not match records")
         memory_support = Counter()
         insight_support = {}
         for record in all_records:
@@ -119,6 +134,41 @@ def validate_directory(path: str | Path) -> dict[str, int]:
             elif record["kind"] == "resource_abstract":
                 if (record["source_id"], record["source_version"]) not in source_ids:
                     raise ExportValidationError("Resource abstract source reference is missing")
+            elif record["kind"] == "profile":
+                if record["policy_epoch"] != manifest["policy_epoch"] or set(
+                    record["sections"]
+                ) != {"main", "preferences", "experiences"}:
+                    raise ExportValidationError("Profile state does not match manifest")
+                for fields in record["sections"].values():
+                    if not isinstance(fields, list):
+                        raise ExportValidationError("Profile fields are invalid")
+                    for field in fields:
+                        supports = field.get("supports")
+                        if not supports:
+                            raise ExportValidationError("Profile support is missing")
+                        for support in supports:
+                            kind = support.get("kind")
+                            if kind == "profile_resource":
+                                valid = (
+                                    source_roles.get(
+                                        (
+                                            support.get("resource_id"),
+                                            support.get("resource_version"),
+                                        )
+                                    )
+                                    == "profile_resource"
+                                )
+                            elif kind == "fact":
+                                valid = support.get("memory_id") in memory_ids
+                            elif kind == "insight":
+                                valid = (
+                                    support.get("insight_id"),
+                                    support.get("revision"),
+                                ) in insight_ids
+                            else:
+                                valid = False
+                            if not valid:
+                                raise ExportValidationError("Profile support is missing")
             elif record["kind"] not in {"memory", "insight"}:
                 raise ExportValidationError("unsupported export record kind")
         if any(memory_support[memory_id] == 0 for memory_id in memory_ids):

@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
 from collections import Counter
+from dataclasses import replace
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
+from oam.config import OAMConfig
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
+from oam.indexing.identity import index_generation
+from oam.profiles.inputs import load_profile_inputs
+from oam.profiles.projection import SECTIONS
+from oam.profiles.service import _current_snapshot, _view
 
 EXPORT_PART_BYTES = 1024 * 1024
 EXPORT_FORMAT_VERSION = 1
@@ -31,6 +39,9 @@ class ExportNotFound(LookupError):
 
 
 class ExportRepository:
+    def __init__(self, config: OAMConfig):
+        self.config = config
+
     @staticmethod
     def _admit(connection, authority: AuthorizedUser):
         if not authority.allows("export:read"):
@@ -97,6 +108,9 @@ class ExportRepository:
                     }
                 )
             records.extend(self._projection_records(connection, key))
+            profile_record = self._profile_record(connection, authority, owner[3])
+            if profile_record is not None:
+                records.append(profile_record)
             pending_sources = [
                 row[0]
                 for row in connection.execute(
@@ -104,7 +118,7 @@ class ExportRepository:
                     "(SELECT status,stage_state FROM operations o WHERE o.tenant_id=s.tenant_id "
                     "AND o.user_id=s.user_id AND o.source_id=s.source_id "
                     "AND o.source_version=s.active_version "
-                    "AND o.kind IN ('index_interaction','index_resource') "
+                    "AND o.kind IN ('index_interaction','index_resource','index_profile_resource') "
                     "ORDER BY o.created_at DESC,o.operation_id DESC LIMIT 1) latest ON true "
                     "WHERE s.tenant_id=%s AND s.user_id=%s AND s.status='active' "
                     "AND (latest.status IS DISTINCT FROM 'succeeded' OR "
@@ -134,7 +148,15 @@ class ExportRepository:
                 "records_sha256": records_sha,
                 "parts": part_descriptors,
                 "originals": originals,
-                "profiles": [],
+                "profiles": [
+                    {
+                        "profile_id": "user",
+                        "profile_revision": profile_record["profile_revision"],
+                        "freshness": profile_record["freshness"],
+                    }
+                ]
+                if profile_record is not None
+                else [],
             }
             connection.execute(
                 "INSERT INTO exports(tenant_id,user_id,export_id,policy_epoch,state,manifest,"
@@ -168,6 +190,35 @@ class ExportRepository:
                 ),
             )
             return {"export_id": export_id, "operation_id": export_id, "state": "ready"}
+
+    def _profile_record(
+        self, connection, authority: AuthorizedUser, generation_id: str | None
+    ) -> dict | None:
+        has_profile = connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM profiles WHERE tenant_id=%s AND user_id=%s "
+            "AND profile_id='user' AND visible_to IS NULL) OR "
+            "EXISTS(SELECT 1 FROM sources WHERE tenant_id=%s AND user_id=%s "
+            "AND input_role='profile_resource' AND status='active')",
+            (authority.tenant_id, authority.user_id) * 2,
+        ).fetchone()[0]
+        if not has_profile:
+            return None
+        generation = generation_id or index_generation(self.config, os.environ)
+        profile_authority = replace(
+            authority, capabilities=authority.capabilities | {"memory:read"}
+        )
+        inputs = load_profile_inputs(connection, profile_authority, generation)
+        snapshot = _current_snapshot(connection, authority)
+        view = _view(self.config, inputs, snapshot, list(SECTIONS), sys.maxsize)
+        return {
+            "kind": "profile",
+            "profile_revision": view["profile_revision"],
+            "input_identity": view["input_identity"],
+            "policy_epoch": view["policy_epoch"],
+            "freshness": view["freshness"],
+            "pending_inputs": view["pending_inputs"],
+            "sections": view["sections"],
+        }
 
     @staticmethod
     def _projection_records(connection, key: tuple[str, str]) -> list[dict]:

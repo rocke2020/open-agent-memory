@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 
 from psycopg.rows import dict_row
 
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
+from oam.profiles.resources import map_profile_resource
 
 INSPECTION_PAGE_SIZE = 50
 RESOURCE_PASSAGE_LIMIT = 200
@@ -55,10 +57,12 @@ class SourceInspector:
                     "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
                     "LEFT JOIN LATERAL (SELECT operation_id,status,stage_state FROM operations "
                     "WHERE tenant_id=s.tenant_id AND user_id=s.user_id AND source_id=s.source_id "
-                    "AND source_version=s.active_version AND kind='index_resource' "
+                    "AND source_version=s.active_version "
+                    "AND kind IN ('index_resource','index_profile_resource') "
                     "ORDER BY created_at DESC,operation_id DESC LIMIT 1) o ON true "
                     "WHERE s.tenant_id=%s AND s.user_id=%s AND s.status='active' "
-                    "AND s.input_role='evidence_resource' AND v.status='active' "
+                    "AND s.input_role IN ('evidence_resource','profile_resource') "
+                    "AND v.status='active' "
                     "AND s.source_id>%s ORDER BY s.source_id LIMIT %s",
                     (
                         authority.tenant_id,
@@ -91,10 +95,12 @@ class SourceInspector:
                     "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
                     "LEFT JOIN LATERAL (SELECT operation_id,status,stage_state FROM operations "
                     "WHERE tenant_id=s.tenant_id AND user_id=s.user_id AND source_id=s.source_id "
-                    "AND source_version=s.active_version AND kind='index_resource' "
+                    "AND source_version=s.active_version "
+                    "AND kind IN ('index_resource','index_profile_resource') "
                     "ORDER BY created_at DESC,operation_id DESC LIMIT 1) o ON true "
                     "WHERE s.tenant_id=%s AND s.user_id=%s AND s.source_id=%s "
-                    "AND s.status='active' AND s.input_role='evidence_resource' "
+                    "AND s.status='active' "
+                    "AND s.input_role IN ('evidence_resource','profile_resource') "
                     "AND v.status='active'",
                     (authority.tenant_id, authority.user_id, resource_id),
                 )
@@ -104,6 +110,23 @@ class SourceInspector:
                 return None
             details = self._resource_row(row)
             version = details["active_version"]
+            if details["resource_type"] == "profile":
+                original = connection.execute(
+                    "SELECT original_bytes FROM source_versions WHERE tenant_id=%s "
+                    "AND user_id=%s AND source_id=%s AND source_version=%s "
+                    "AND status='active'",
+                    (authority.tenant_id, authority.user_id, resource_id, version),
+                ).fetchone()
+                if original is None:
+                    raise SourcePolicyChanged("Profile Resource changed during inspection")
+                profile_resource = json.loads(bytes(original[0]))
+                details["subtype"] = profile_resource["subtype"]
+                details["mapped_fields"] = [
+                    asdict(field)
+                    for field in map_profile_resource(profile_resource, resource_version=version)
+                ]
+                self._check_policy(connection, authority, epoch)
+                return details
             with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     "SELECT p.passage_id,p.locator,p.normalized_text AS text "
@@ -148,7 +171,8 @@ class SourceInspector:
                 "ON (v.tenant_id,v.user_id,v.source_id,v.source_version)="
                 "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
                 "WHERE s.tenant_id=%s AND s.user_id=%s AND s.source_id=%s "
-                "AND s.status='active' AND s.input_role='evidence_resource' "
+                "AND s.status='active' "
+                "AND s.input_role IN ('evidence_resource','profile_resource') "
                 "AND v.status='active'",
                 (authority.tenant_id, authority.user_id, resource_id),
             ).fetchone()

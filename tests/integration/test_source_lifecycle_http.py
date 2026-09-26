@@ -17,6 +17,142 @@ from oam.workers.index_source import process_one
 pytestmark = pytest.mark.integration
 
 
+async def test_profile_resource_is_inspectable_through_public_resource_routes(core_database):
+    _, _, root_headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=root_headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "lin")
+        original = {
+            "resource_id": "basic",
+            "resource_type": "profile",
+            "subtype": "basic-profile/v1",
+            "content": {"date_of_birth": "1990-05-10"},
+        }
+        created = await client.post(
+            "/v1/users/lin/resources", json=original, headers={"Idempotency-Key": "basic-v1"}
+        )
+        assert created.status_code == 202, created.text
+
+        listing = await client.get("/v1/users/lin/resources")
+        assert listing.status_code == 200, listing.text
+        assert [
+            (item["resource_id"], item["resource_type"]) for item in listing.json()["items"]
+        ] == [("basic", "profile")]
+        detail = await client.get("/v1/users/lin/resources/basic")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["subtype"] == "basic-profile/v1"
+        assert detail.json()["mapped_fields"][0]["value"] == "1990-05-10"
+        response = await client.get("/v1/users/lin/resources/basic/original")
+        assert response.status_code == 200, response.text
+        assert response.json() == original
+
+
+async def test_profile_resource_delete_excludes_exact_field_and_reuses_cleanup_receipt(
+    core_database,
+):
+    dsn, tenant, root_headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=root_headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "lin")
+        created = await client.post(
+            "/v1/users/lin/resources",
+            json={
+                "resource_id": "basic",
+                "resource_type": "profile",
+                "subtype": "basic-profile/v1",
+                "content": {"date_of_birth": "1990-05-10"},
+            },
+            headers={"Idempotency-Key": "basic-v1"},
+        )
+        assert created.status_code == 202, created.text
+        before = await client.get("/v1/users/lin/profile")
+        assert any(field["value"] == "1990-05-10" for field in before.json()["sections"]["main"])
+
+        deleted = await client.delete("/v1/users/lin/resources/basic")
+        assert deleted.status_code == 202, deleted.text
+        assert deleted.json()["status"] == "excluded"
+        assert deleted.json()["excluded_versions"] == [1]
+        repeated = await client.delete("/v1/users/lin/resources/basic")
+        assert repeated.status_code == 202, repeated.text
+        assert repeated.json()["cleanup_operation_id"] == deleted.json()["cleanup_operation_id"]
+        after = await client.get("/v1/users/lin/profile")
+        assert all(field["value"] != "1990-05-10" for field in after.json()["sections"]["main"])
+        assert (await client.get("/v1/users/lin/resources/basic")).status_code == 404
+        config = load_config(ROOT / "configs/oam.yaml").config
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=object(),
+            worker_id="profile-cleanup",
+        )
+        operation = await client.get(
+            f"/v1/users/lin/operations/{deleted.json()['cleanup_operation_id']}"
+        )
+        assert operation.status_code == 200, operation.text
+        assert operation.json()["status"] == "succeeded"
+    with psycopg.connect(dsn) as connection:
+        assert (
+            connection.execute(
+                "SELECT byte_length FROM source_versions WHERE tenant_id=%s "
+                "AND user_id='lin' AND source_id='basic'",
+                (tenant,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+async def test_profile_resource_write_requires_resource_grant(core_database):
+    dsn, tenant, root_headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=root_headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "lin")
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE grants SET capabilities=ARRAY['resource:write'] "
+                "WHERE tenant_id=%s AND user_id='lin'",
+                (tenant,),
+            )
+        body = {
+            "resource_id": "basic",
+            "resource_type": "profile",
+            "subtype": "basic-profile/v1",
+            "content": {"date_of_birth": "1990-05-10"},
+        }
+        allowed = await client.post(
+            "/v1/users/lin/resources", json=body, headers={"Idempotency-Key": "grant-allowed"}
+        )
+        assert allowed.status_code == 202, allowed.text
+
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE grants SET capabilities=ARRAY['memory:append'] "
+                "WHERE tenant_id=%s AND user_id='lin'",
+                (tenant,),
+            )
+        denied = await client.post(
+            "/v1/users/lin/resources",
+            json={**body, "resource_id": "other"},
+            headers={"Idempotency-Key": "grant-denied"},
+        )
+        assert denied.status_code == 404, denied.text
+
+
 async def test_public_resource_delete_cleans_export_and_keeps_new_independent_source(core_database):
     dsn, tenant, headers = core_database
     app = create_app(ROOT / "configs/oam.yaml")

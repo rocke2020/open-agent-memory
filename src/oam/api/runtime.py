@@ -355,7 +355,7 @@ class DatabaseRuntime:
     def create_export(self, actor: RequestActor, user_id: str) -> dict:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "export:read")
-            return ExportRepository().create(
+            return ExportRepository(self.config).create(
                 connection,
                 authority,
                 export_id=f"export_{secrets.token_hex(16)}",
@@ -365,21 +365,23 @@ class DatabaseRuntime:
     def get_export(self, actor: RequestActor, user_id: str, export_id: str) -> dict:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "export:read")
-            return ExportRepository().get_manifest(connection, authority, export_id)
+            return ExportRepository(self.config).get_manifest(connection, authority, export_id)
 
     def get_export_part(
         self, actor: RequestActor, user_id: str, export_id: str, index: int
     ) -> bytes:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "export:read")
-            return ExportRepository().get_part(connection, authority, export_id, index)
+            return ExportRepository(self.config).get_part(connection, authority, export_id, index)
 
     def get_export_original(
         self, actor: RequestActor, user_id: str, export_id: str, index: int
     ) -> tuple[bytes, str]:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "export:read")
-            return ExportRepository().get_original(connection, authority, export_id, index)
+            return ExportRepository(self.config).get_original(
+                connection, authority, export_id, index
+            )
 
     def search_many(self, actor: RequestActor, user_id: str, request: SearchManyRequest) -> dict:
         from oam.api.search import search_many
@@ -655,7 +657,7 @@ class DatabaseRuntime:
         expected_version: int | None,
     ) -> dict:
         with self.pool.connection() as connection:
-            authority = self._authorize(connection, actor, user_id, "memory:append")
+            authority = self._authorize(connection, actor, user_id, "resource:write")
             resource = body.model_dump(mode="json", exclude_none=True)
             # Exact fields are a deterministic read view of the active original.
             # Validate all mappings before atomic source-version activation.

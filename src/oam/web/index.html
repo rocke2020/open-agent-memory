@@ -62,7 +62,20 @@
               <button type="submit">Search</button>
             </div>
           </form>
-          <button id="new-resource" type="button" class="secondary" hidden>Add Evidence Resource</button>
+          <form id="profile-form" class="profile-form" hidden>
+            <fieldset>
+              <legend>Profile sections</legend>
+              <label><input type="checkbox" name="section" value="main" checked>Main</label>
+              <label><input type="checkbox" name="section" value="preferences">Preferences</label>
+              <label><input type="checkbox" name="section" value="experiences">Experiences</label>
+            </fieldset>
+            <label>Preview token budget <input id="profile-budget" type="number" min="0" placeholder="Server default"></label>
+            <div class="actions">
+              <button type="submit">View Profile</button>
+              <button id="refresh-profile" type="button" class="secondary">Refresh Profile</button>
+            </div>
+          </form>
+          <button id="new-resource" type="button" class="secondary" hidden>Add Resource</button>
           <ul id="item-list" class="item-list" aria-label="Current items"></ul>
           <button id="load-more" type="button" class="secondary" hidden>Load more</button>
         </section>

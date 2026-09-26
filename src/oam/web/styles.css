@@ -140,7 +140,15 @@ main {
   margin: 0;
 }
 
-#connect-form, .resource-form {
+.workspace-header > div:first-child {
+  min-width: 0;
+}
+
+#scope-label {
+  overflow-wrap: anywhere;
+}
+
+#connect-form, .resource-form, .resource-inputs {
   display: grid;
   gap: 0.9rem;
   margin-top: 1.25rem;
@@ -202,6 +210,30 @@ label {
 
 .search-form {
   margin: 1rem 0;
+}
+
+.profile-form {
+  display: grid;
+  gap: 0.9rem;
+  margin: 1rem 0;
+}
+
+.profile-form fieldset {
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+}
+
+.profile-form fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.profile-form input[type="checkbox"] {
+  width: auto;
+  min-height: auto;
 }
 
 .inline-fields {

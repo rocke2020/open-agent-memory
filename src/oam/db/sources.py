@@ -209,7 +209,9 @@ class SourceRepository:
         if attempts_remaining <= 0:
             raise ValueError("cleanup attempts must be positive")
         key = (authority.tenant_id, authority.user_id)
-        required_role = "evidence_resource" if resource_only else "interaction"
+        allowed_roles = (
+            {"evidence_resource", "profile_resource"} if resource_only else {"interaction"}
+        )
         with connection.transaction():
             cursor = connection.cursor()
             bind_user(cursor, authority)
@@ -227,7 +229,7 @@ class SourceRepository:
                 (*key, source_id),
             )
             source = cursor.fetchone()
-            if source is None or source[0] != required_role:
+            if source is None or source[0] not in allowed_roles:
                 raise SourceNotFound(source_id)
             cursor.execute(
                 "SELECT array_agg(source_version ORDER BY source_version) FROM source_versions "
@@ -341,7 +343,9 @@ class SourceRepository:
         command: AcceptSource,
     ) -> AcceptanceReceipt:
         capability = (
-            "resource:write" if command.input_role == "evidence_resource" else "memory:append"
+            "resource:write"
+            if command.input_role in {"evidence_resource", "profile_resource"}
+            else "memory:append"
         )
         if not authority.allows(capability):
             raise PermissionError(f"user does not grant {capability}")

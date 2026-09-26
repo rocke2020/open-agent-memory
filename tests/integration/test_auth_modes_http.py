@@ -52,6 +52,56 @@ def auth_database(isolated_auth_database, monkeypatch):
     return dsn, tenant, root_secret
 
 
+@pytest.mark.parametrize("mode", ["dev", "trusted"])
+async def test_asserted_user_can_manage_profile_resource(auth_database, tmp_path: Path, mode):
+    _, tenant, _ = auth_database
+    selected = tmp_path / "auth.yaml"
+    selected.write_text(f"auth:\n  mode: {mode}\n", encoding="utf-8")
+    app = create_app(selected)
+    headers = {"X-OAM-Tenant": tenant, "X-OAM-User": "alice"}
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        created = await client.post(
+            "/v1/users/alice/resources",
+            headers={**headers, "Idempotency-Key": "asserted-profile"},
+            json={
+                "resource_id": "basic",
+                "resource_type": "profile",
+                "subtype": "basic-profile/v1",
+                "content": {"date_of_birth": "1990-05-10"},
+            },
+        )
+        assert created.status_code == 202, created.text
+        assert (
+            await client.get("/v1/users/alice/resources/basic", headers=headers)
+        ).status_code == 200
+        deleted = await client.delete("/v1/users/alice/resources/basic", headers=headers)
+        assert deleted.status_code == 202, deleted.text
+
+
+def test_asserted_grant_migration_preserves_existing_restricted_grant(auth_database):
+    dsn, tenant, _ = auth_database
+    restricted = ["memory:read", "memory:append", "operation:reconcile"]
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT oam_register_asserted_user(%s, 'restricted')", (tenant,)
+        ).fetchone() == (True,)
+        connection.execute(
+            "UPDATE grants SET capabilities = %s WHERE tenant_id = %s AND user_id = 'restricted'",
+            (restricted, tenant),
+        )
+        connection.execute(
+            (ROOT / "migrations" / "0012_asserted_resource_grants.sql").read_text(encoding="utf-8")
+        )
+        capabilities = connection.execute(
+            "SELECT capabilities FROM grants WHERE tenant_id = %s AND user_id = 'restricted'",
+            (tenant,),
+        ).fetchone()[0]
+    assert capabilities == restricted
+
+
 @pytest.fixture
 def fresh_rootless_database(isolated_auth_database, monkeypatch):
     rootless_dsn = isolated_auth_database
