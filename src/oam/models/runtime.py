@@ -26,6 +26,10 @@ class ModelOutputError(ValueError):
         self.usage = usage
 
 
+class ModelDispatchUnavailable(httpx.ConnectTimeout):
+    """Local model capacity expired before an HTTP request was sent."""
+
+
 class FrozenResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -213,11 +217,11 @@ class RuntimeModels:
             payload = {**payload, "reasoning_effort": binding.reasoning_effort}
         waiting_since = time.monotonic()
         if not self._model_slots.acquire(timeout=timeout_seconds):
-            raise httpx.ConnectTimeout("model capacity wait expired before dispatch")
+            raise ModelDispatchUnavailable("model capacity wait expired before dispatch")
         try:
             remaining = timeout_seconds - (time.monotonic() - waiting_since)
             if remaining <= 0:
-                raise httpx.ConnectTimeout("model capacity wait expired before dispatch")
+                raise ModelDispatchUnavailable("model capacity wait expired before dispatch")
             response = self._http.post(
                 f"{binding.endpoint}{path}",
                 headers=headers,

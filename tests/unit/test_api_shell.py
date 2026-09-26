@@ -102,7 +102,7 @@ async def test_binding_names_alone_cannot_make_the_foundation_ready(tmp_path) ->
             422,
         ),
         ("search:\n  max_queries: 1\n", "search-many", {"queries": ["one", "two"]}, 422),
-        ("search:\n  max_queries: 5\n", "search-many", {"queries": ["q"] * 5}, 503),
+        ("search:\n  max_queries: 5\n", "search-many", {"queries": ["q"] * 5}, 200),
         (
             "context:\n  default_tokens: 16\n  max_tokens: 32\n",
             "search",
@@ -129,6 +129,9 @@ async def test_http_admission_uses_selected_config_limits(
     class AuthenticatedRuntime:
         def authenticate(self, secret):
             pass
+
+        def search_many(self, actor, user_id, body):
+            return {"queries": body.queries}
 
     config = tmp_path / "oam.yaml"
     config.write_text(config_text, encoding="utf-8")
@@ -179,6 +182,8 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["limits"]["user"]["max_chats"] == 1000
     assert payload["features"]["python_sdk"] is False
     assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "mid", "deep"))
+    assert payload["features"]["batch_recall"] is True
+    assert payload["features"]["planner"] is False
     assert "api_key" not in response.text.lower()
 
 
@@ -210,6 +215,69 @@ async def test_search_reports_unavailable_deadline_and_authority_without_interna
     assert response.status_code == expected_status
     assert response.json()["detail"]["code"] == code
     assert str(error) not in response.text
+
+
+async def test_search_many_http_returns_ordered_query_outcomes() -> None:
+    class Runtime:
+        def search_many(self, actor, user_id, body):
+            assert user_id == "lin"
+            assert body.queries == ["current city", "preferred style"]
+            return {
+                "status": "ok",
+                "results": [
+                    {"index": 0, "query": "current city", "status": "ok", "result": {"items": []}},
+                    {
+                        "index": 1,
+                        "query": "preferred style",
+                        "status": "ok",
+                        "result": {"items": []},
+                    },
+                ],
+            }
+
+    app = create_app(REPOSITORY_ROOT / "configs/oam.yaml", runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/users/lin/search-many",
+            json={"queries": ["current city", "preferred style"]},
+            headers={"Authorization": "Bearer synthetic"},
+        )
+
+    assert response.status_code == 200
+    assert [row["query"] for row in response.json()["results"]] == [
+        "current city",
+        "preferred style",
+    ]
+
+
+async def test_decompose_http_returns_plan_and_fallback_state() -> None:
+    class Runtime:
+        def decompose_and_search(self, actor, user_id, body):
+            assert user_id == "lin"
+            assert body.query == "city and style"
+            return {
+                "status": "ok",
+                "plan": {"queries": ["city", "style"]},
+                "planner": {"calls": 1, "status": "used"},
+                "fallback": None,
+                "results": [],
+            }
+
+    app = create_app(REPOSITORY_ROOT / "configs/oam.yaml", runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/users/lin/decompose-and-search",
+            json={"query": "city and style"},
+            headers={"Authorization": "Bearer synthetic"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["plan"] == {"queries": ["city", "style"]}
+    assert response.json()["planner"]["calls"] == 1
 
 
 async def test_openapi_reserves_public_step_four_routes(client) -> None:

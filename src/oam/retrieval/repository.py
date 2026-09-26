@@ -331,24 +331,68 @@ class RecallRepository:
 
     def hierarchy(self, seed_ids: Sequence[str], vector: Sequence[float]):
         rows = self._execute(
-            self._eligible() + "SELECT seed.unit_id AS seed_id,parent.unit_id AS parent_id,"
-            "parent.parent_rank,sibling.unit_id,sibling.score FROM filtered seed "
-            "CROSS JOIN LATERAL (SELECT p.unit_id,p.insight_id,p.insight_revision,"
-            "row_number() OVER(ORDER BY p.embedding <=> %(vector)s::vector,p.unit_id) "
-            "AS parent_rank "
-            "FROM filtered p JOIN insight_support sp ON "
-            "(sp.tenant_id,sp.user_id,sp.insight_id,sp.insight_revision)="
-            "(p.tenant_id,p.user_id,p.insight_id,p.insight_revision) "
-            "WHERE p.kind='insight' AND sp.memory_id=seed.memory_id "
-            "ORDER BY p.embedding <=> %(vector)s::vector,p.unit_id LIMIT %(parents)s) parent "
-            "CROSS JOIN LATERAL (SELECT c.unit_id,1-(c.embedding <=> %(vector)s::vector) AS score "
-            "FROM filtered c JOIN insight_support sp ON "
-            "(sp.tenant_id,sp.user_id,sp.memory_id)=(c.tenant_id,c.user_id,c.memory_id) "
-            "WHERE c.kind='fact' AND sp.insight_id=parent.insight_id "
-            "AND sp.insight_revision=parent.insight_revision AND c.unit_id<>seed.unit_id "
-            "ORDER BY c.embedding <=> %(vector)s::vector,c.unit_id LIMIT %(children)s) sibling "
-            "WHERE seed.kind='fact' AND seed.unit_id=ANY(%(seeds)s) "
-            "ORDER BY parent.parent_rank,sibling.score DESC,sibling.unit_id,seed.unit_id",
+            self._eligible().rstrip()
+            + """,
+            seeds AS MATERIALIZED (
+                SELECT s.tenant_id,s.user_id,s.unit_id,s.memory_id,s.generation_id
+                FROM search_units s
+                WHERE s.tenant_id=current_setting('oam.tenant_id',true)
+                  AND s.user_id=current_setting('oam.user_id',true)
+                  AND s.kind='fact' AND s.unit_id=ANY(%(seeds)s)
+                  AND (SELECT true FROM filtered f WHERE (f.tenant_id,f.user_id,f.unit_id)=
+                      (s.tenant_id,s.user_id,s.unit_id)) IS TRUE
+            ),
+            parent_edges AS MATERIALIZED (
+                SELECT seed.unit_id AS seed_id,seed.generation_id,
+                       sp.tenant_id,sp.user_id,sp.insight_id,sp.insight_revision
+                FROM seeds seed JOIN insight_support sp ON
+                    (sp.tenant_id,sp.user_id,sp.memory_id)=
+                    (seed.tenant_id,seed.user_id,seed.memory_id)
+            ),
+            parent_candidates AS MATERIALIZED (
+                SELECT e.seed_id,p.tenant_id,p.user_id,p.unit_id,p.insight_id,
+                       p.insight_revision,p.generation_id,
+                       p.embedding <=> %(vector)s::vector AS distance
+                FROM parent_edges e JOIN search_units p ON
+                    (p.tenant_id,p.user_id,p.insight_id,p.insight_revision,p.generation_id)=
+                    (e.tenant_id,e.user_id,e.insight_id,e.insight_revision,e.generation_id)
+                WHERE p.kind='insight' AND
+                    (SELECT true FROM filtered f WHERE (f.tenant_id,f.user_id,f.unit_id)=
+                        (p.tenant_id,p.user_id,p.unit_id)) IS TRUE
+            ),
+            ranked_parents AS MATERIALIZED (
+                SELECT pc.*,row_number() OVER (
+                    PARTITION BY seed_id ORDER BY distance,unit_id) AS parent_rank
+                FROM parent_candidates pc
+            ),
+            selected_parents AS MATERIALIZED (
+                SELECT * FROM ranked_parents WHERE parent_rank<=%(parents)s
+            ),
+            child_edges AS MATERIALIZED (
+                SELECT p.seed_id,p.unit_id AS parent_id,p.parent_rank,p.generation_id,
+                       sp.tenant_id,sp.user_id,sp.memory_id
+                FROM selected_parents p JOIN insight_support sp ON
+                    (sp.tenant_id,sp.user_id,sp.insight_id,sp.insight_revision)=
+                    (p.tenant_id,p.user_id,p.insight_id,p.insight_revision)
+            ),
+            child_candidates AS MATERIALIZED (
+                SELECT e.seed_id,e.parent_id,e.parent_rank,c.unit_id,
+                       c.embedding <=> %(vector)s::vector AS distance
+                FROM child_edges e JOIN search_units c ON
+                    (c.tenant_id,c.user_id,c.memory_id,c.generation_id)=
+                    (e.tenant_id,e.user_id,e.memory_id,e.generation_id)
+                WHERE c.kind='fact' AND c.unit_id<>e.seed_id AND
+                    (SELECT true FROM filtered f WHERE (f.tenant_id,f.user_id,f.unit_id)=
+                        (c.tenant_id,c.user_id,c.unit_id)) IS TRUE
+            ),
+            ranked_children AS (
+                SELECT c.*,row_number() OVER (
+                    PARTITION BY seed_id,parent_id ORDER BY distance,unit_id) AS child_rank
+                FROM child_candidates c
+            )
+            SELECT seed_id,parent_id,parent_rank,unit_id,1-distance AS score
+            FROM ranked_children WHERE child_rank<=%(children)s
+            ORDER BY parent_rank,score DESC,unit_id,seed_id""",
             {
                 "seeds": list(seed_ids),
                 "vector": json.dumps(tuple(vector)),

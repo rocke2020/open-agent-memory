@@ -44,7 +44,7 @@ from oam.contracts.retain import (
     RetainTextDocument,
     RetainURLDocument,
 )
-from oam.contracts.search import SearchRequest
+from oam.contracts.search import SearchManyRequest, SearchRequest
 from oam.db.context import bind_user
 from oam.db.sources import AcceptanceReceipt, AcceptSource, SourceRepository
 from oam.indexing.identity import index_generation
@@ -63,6 +63,14 @@ class AuthorizationFailed(PermissionError):
 
 class APIRuntime(Protocol):
     def authenticate(self, actor: RequestActor) -> None: ...
+
+    def search_many(
+        self, actor: RequestActor, user_id: str, request: SearchManyRequest
+    ) -> dict: ...
+
+    def decompose_and_search(
+        self, actor: RequestActor, user_id: str, request: SearchRequest
+    ) -> dict: ...
 
     def list_credentials(
         self, actor: str, *, limit: int, after: str | None
@@ -163,16 +171,46 @@ class DatabaseRuntime:
             self._authenticate(connection, actor)
 
     def search(self, actor: RequestActor, user_id: str, request: SearchRequest) -> dict:
-        from oam.retrieval.service import RecallService
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+        return self._recall_service().search(authority, request, deadline_at=request.deadline_at)
+
+    def search_many(self, actor: RequestActor, user_id: str, request: SearchManyRequest) -> dict:
+        from oam.api.search import search_many
 
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
+        service = self._recall_service()
+        return search_many(
+            self.config,
+            request,
+            lambda child, deadline: service.search(authority, child, deadline_at=deadline),
+        )
+
+    def decompose_and_search(
+        self, actor: RequestActor, user_id: str, request: SearchRequest
+    ) -> dict:
+        from oam.api.search import decompose_and_search
+
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+        service = self._recall_service()
+        return decompose_and_search(
+            self.config,
+            request,
+            lambda child, deadline: service.search(authority, child, deadline_at=deadline),
+            self.models,
+        )
+
+    def _recall_service(self):
+        from oam.retrieval.service import RecallService
+
         return RecallService(
             self.config,
             self.pool,
             self.models,
             generation_id=index_generation(self.config, os.environ),
-        ).search(authority, request, deadline_at=request.deadline_at)
+        )
 
     def create_user(self, actor: str, user_id: str) -> dict:
         """Create a personal collection and return its first user key after commit."""

@@ -88,8 +88,7 @@ class SearchOutputOptions(FrozenContract):
             raise ValueError(f"include.chunks.max_tokens exceeds {config.chunks.max_tokens}")
 
 
-class SearchRequest(SearchOutputOptions):
-    query: NonBlank
+class SearchQueryOptions(SearchOutputOptions):
     time_basis: TimeBasis | None = None
     time_window: TimeWindow | None = None
     reference_time: datetime | None = None
@@ -113,13 +112,17 @@ class SearchRequest(SearchOutputOptions):
         return value
 
     @model_validator(mode="after")
-    def require_complete_ranking_window(self) -> "SearchRequest":
+    def require_complete_ranking_window(self) -> "SearchQueryOptions":
         if (self.time_basis is None) != (self.time_window is None):
             raise ValueError("time_basis and time_window must be supplied together")
         return self
 
 
-class SearchManyRequest(SearchOutputOptions):
+class SearchRequest(SearchQueryOptions):
+    query: NonBlank
+
+
+class SearchManyRequest(SearchQueryOptions):
     queries: list[NonBlank] = Field(min_length=1)
 
     def validate_limits(self, config: OAMConfig) -> None:
