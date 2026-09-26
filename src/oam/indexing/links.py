@@ -190,11 +190,30 @@ def build_links(
         cursor.execute(_SEMANTIC, parameters)
         result["semantic_links"] = cursor.fetchone()[0]
         temporal_count = 0
-        for basis, role in (("event", "event"), ("referenced", "date_reference")):
-            cursor.execute(_INTERVAL, {**parameters, "basis": basis, "role": role})
-            temporal_count += cursor.fetchone()[0]
-        for basis, column in _POINT_COLUMNS.items():
-            cursor.execute(_point_query(column), {**parameters, "basis": basis})
-            temporal_count += cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT coalesce(bool_or(t.role='event'),false),"
+            "coalesce(bool_or(t.role='date_reference'),false),"
+            "coalesce(bool_or(u.mentioned_at IS NOT NULL),false),"
+            "coalesce(bool_or(u.source_created_at IS NOT NULL),false),"
+            "coalesce(bool_or(u.source_updated_at IS NOT NULL),false) "
+            "FROM search_units u LEFT JOIN unit_times t ON "
+            "(t.tenant_id,t.user_id,t.unit_id)=(u.tenant_id,u.user_id,u.unit_id) "
+            "WHERE u.tenant_id=%(tenant)s AND u.user_id=%(user)s "
+            "AND u.unit_id=ANY(%(ids)s)",
+            parameters,
+        )
+        available = cursor.fetchone()
+        for enabled, (basis, role) in zip(
+            available[:2],
+            (("event", "event"), ("referenced", "date_reference")),
+            strict=True,
+        ):
+            if enabled:
+                cursor.execute(_INTERVAL, {**parameters, "basis": basis, "role": role})
+                temporal_count += cursor.fetchone()[0]
+        for enabled, (basis, column) in zip(available[2:], _POINT_COLUMNS.items(), strict=True):
+            if enabled:
+                cursor.execute(_point_query(column), {**parameters, "basis": basis})
+                temporal_count += cursor.fetchone()[0]
         result["temporal_links"] = temporal_count
     return result

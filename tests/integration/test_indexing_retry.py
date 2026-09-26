@@ -1,6 +1,7 @@
 """Known invalid model output uses the existing bounded work-claim budget."""
 
 import json
+from threading import Barrier
 
 import httpx
 import psycopg
@@ -132,6 +133,86 @@ def run_source(dsn, config, models):
     )
 
 
+async def test_two_extractions_overlap_and_keep_distinct_source_support(accepted_source):
+    client, dsn, tenant, config, operation_id = accepted_source
+
+    class OverlapModels(SyntheticIndexModels):
+        def __init__(self):
+            super().__init__()
+            self.barrier = Barrier(2, timeout=3)
+
+        def generate(self, role, **kwargs):
+            if role == "extraction":
+                self.barrier.wait()
+            return super().generate(role, **kwargs)
+
+    assert run_source(dsn, config, OverlapModels()) is True
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == "succeeded"
+    assert operation["usage"]["total_tokens"] == 60
+    assert operation["usage"]["coverage"] == "complete"
+    with psycopg.connect(dsn) as connection:
+        rows = connection.execute(
+            "SELECT m.canonical_claim,p.normalized_text FROM memories m "
+            "JOIN support s USING(tenant_id,user_id,memory_id) "
+            "JOIN passages p USING(tenant_id,user_id,passage_id) "
+            "WHERE m.tenant_id=%s ORDER BY m.canonical_claim",
+            (tenant,),
+        ).fetchall()
+    assert rows == [
+        ("Lin prefers concise updates.", "Lin prefers concise updates."),
+        ("Lin prefers morning updates.", "Lin prefers morning updates."),
+    ]
+
+
+async def test_failed_consolidation_keeps_completed_l1(accepted_source):
+    client, dsn, tenant, config, operation_id = accepted_source
+    assert run_source(dsn, config, SyntheticIndexModels()) is True
+    source = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    consolidate_id = source["stage_state"]["consolidation_operation_id"]
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "UPDATE work_units SET available_at=clock_timestamp() WHERE tenant_id=%s "
+            "AND operation_id=%s",
+            (tenant, consolidate_id),
+        )
+
+    class FailedInsightModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            if role == "insights":
+                raise ModelOutputError("invalid synthesis", usage=Usage(coverage="complete"))
+            return super().generate(role, **kwargs)
+
+    with pytest.raises(ModelOutputError):
+        run_source(dsn, config, FailedInsightModels())
+    source = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    consolidation = (await client.get(f"/v1/users/lin/operations/{consolidate_id}")).json()
+    assert source["status"] == "succeeded"
+    assert source["readiness"]["memory_ready"] is True
+    assert source["readiness"]["insights_ready"] is False
+    assert source["stage_state"]["consolidation_status"] == "failed"
+    assert consolidation["status"] == "partial"
+    with psycopg.connect(dsn) as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM memories WHERE tenant_id=%s", (tenant,)
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM search_units WHERE tenant_id=%s AND kind='fact'", (tenant,)
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM insights WHERE tenant_id=%s", (tenant,)
+            ).fetchone()[0]
+            == 0
+        )
+
+
 @pytest.mark.parametrize("overbound", [False, True])
 async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_attempt(
     accepted_source, overbound
@@ -149,9 +230,9 @@ async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_at
     assert run_source(dsn, config, models) is False
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "succeeded"
-    assert operation["usage"]["total_tokens"] == 150
+    assert operation["usage"]["total_tokens"] == 120
     assert operation["usage"]["coverage"] == "complete"
-    assert operation["embedding_usage"]["total_tokens"] == 5
+    assert operation["embedding_usage"]["total_tokens"] == 4
     assert operation["stage_state"]["index_attempts"] == 3
     assert "error" not in operation["stage_state"]
     assert models.first_calls == 1
@@ -211,7 +292,7 @@ async def test_pre_dispatch_connect_timeout_reuses_completed_stages(accepted_sou
     assert operation["status"] == "succeeded"
     assert operation["stage_state"]["index_attempts"] == 2
     assert operation["usage"]["coverage"] == "complete"
-    assert operation["usage"]["total_tokens"] == 90
+    assert operation["usage"]["total_tokens"] == 60
     assert models.first_calls == 1
 
 
@@ -257,6 +338,57 @@ async def test_unknown_timeout_is_not_automatically_requeued(accepted_source, ti
         )
 
 
+async def test_mixed_extraction_timeout_stops_before_fact_embedding(accepted_source):
+    client, dsn, tenant, config, operation_id = accepted_source
+
+    class MixedTimeoutModels(SyntheticIndexModels):
+        def __init__(self):
+            super().__init__()
+            self.embedding_calls = 0
+
+        def embed(self, texts, **kwargs):
+            self.embedding_calls += 1
+            if self.embedding_calls == 2:
+                raise httpx.ConnectTimeout("fact embedding was dispatched")
+            return super().embed(texts, **kwargs)
+
+        def generate(self, role, **kwargs):
+            if role == "extraction":
+                text = json.loads(kwargs["user"])["center"]["text"]
+                if text == "Lin prefers morning updates.":
+                    raise httpx.ReadTimeout("extraction outcome is unknown")
+            return super().generate(role, **kwargs)
+
+    models = MixedTimeoutModels()
+    with pytest.raises(httpx.ReadTimeout):
+        run_source(dsn, config, models)
+    assert models.embedding_calls == 1
+    assert run_source(dsn, config, models) is False
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == "partial"
+    assert operation["usage"]["coverage"] == "partial"
+    with psycopg.connect(dsn) as connection:
+        assert (
+            connection.execute(
+                "SELECT status FROM work_units WHERE tenant_id=%s", (tenant,)
+            ).fetchone()[0]
+            == "failed_terminal"
+        )
+        disposition, request_ref = connection.execute(
+            "SELECT disposition,request_ref FROM attempts WHERE tenant_id=%s", (tenant,)
+        ).fetchone()
+        assert disposition == "unknown_external_outcome"
+        assert request_ref.startswith("extract:")
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM index_stage_results WHERE tenant_id=%s "
+                "AND stage_key LIKE 'extract:%%'",
+                (tenant,),
+            ).fetchone()[0]
+            == 1
+        )
+
+
 @pytest.mark.parametrize(
     ("failed_role", "usage", "generation_total", "embedding_total", "generation_coverage"),
     [
@@ -264,17 +396,17 @@ async def test_unknown_timeout_is_not_automatically_requeued(accepted_source, ti
             "generation",
             Usage(input_tokens=100, output_tokens=40, total_tokens=140, coverage="complete"),
             170,
-            3,
+            2,
             "complete",
         ),
         (
             "embedding",
             Usage(input_tokens=9, output_tokens=0, total_tokens=9, coverage="complete"),
-            30,
-            10,
+            60,
+            11,
             "complete",
         ),
-        ("generation", Usage(), None, 3, "partial"),
+        ("generation", Usage(), None, 2, "partial"),
     ],
 )
 async def test_completed_invalid_outputs_record_known_usage_once_without_retrying(

@@ -21,6 +21,8 @@ class OperationReadiness(FrozenContract):
     accepted: bool = False
     source_searchable: bool = False
     memory_ready: bool = False
+    links_ready: bool = False
+    temporal_links_ready: bool = False
     insights_ready: bool = False
     profile_current: bool = False
 

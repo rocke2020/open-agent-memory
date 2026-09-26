@@ -50,7 +50,14 @@ def test_worker_overlaps_sources_within_each_configured_limit_and_drains(
 
     def process(config, queue, content, *, models, worker_id):
         with lock:
-            started.append((queue, content, worker_id))
+            started.append(
+                (
+                    queue,
+                    content,
+                    worker_id,
+                    config.worker.max_model_calls,
+                )
+            )
             clients.append(models._http)
             if len(started) == 2:
                 overlapped.set()
@@ -79,6 +86,14 @@ def test_worker_overlaps_sources_within_each_configured_limit_and_drains(
     assert len(started) == len(completed) == 2
     assert all(item[:2] == ("synthetic-queue", "synthetic-content") for item in started)
     assert all(item[2].startswith("worker_") for item in started)
+    assert all(
+        item[3]
+        <= min(
+            2 if limiting_field == ("worker", "max_model_calls") else 4,
+            2 if limiting_field == ("provider", "global_concurrency") else 4,
+        )
+        for item in started
+    )
     assert not any(closed_early)
     assert all(client.is_closed for client in clients)
 
@@ -121,3 +136,24 @@ def test_failed_claim_releases_capacity_and_does_not_log_private_error(monkeypat
     error_output = capsys.readouterr().err
     assert "RuntimeError" in error_output
     assert "private-provider-response" not in error_output
+
+
+def test_idle_worker_checks_for_new_work_within_half_second(monkeypatch):
+    configure_worker(monkeypatch, limiting_field=("worker", "max_tasks"))
+
+    class StopAfterWait(Event):
+        def __init__(self):
+            super().__init__()
+            self.waits = []
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            self.set()
+            return True
+
+    stopped = StopAfterWait()
+    monkeypatch.setattr(runner, "Event", lambda: stopped)
+    monkeypatch.setattr(runner, "process_one", lambda *args, **kwargs: False)
+    assert runner.run_worker_from_environment(CONFIG_PATH) == 0
+    assert stopped.waits
+    assert max(stopped.waits) <= 0.5

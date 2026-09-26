@@ -111,7 +111,7 @@ retry:
 
 worker:
   max_tasks: 4
-  max_model_calls: 2
+  max_model_calls: 4
 
 lease:
   seconds: 90

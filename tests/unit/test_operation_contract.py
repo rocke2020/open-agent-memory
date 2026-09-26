@@ -10,6 +10,8 @@ def test_operation_keeps_memory_and_insight_readiness_separate() -> None:
             "accepted": True,
             "source_searchable": True,
             "memory_ready": True,
+            "links_ready": True,
+            "temporal_links_ready": True,
             "insights_ready": False,
             "profile_current": False,
         },
@@ -20,6 +22,8 @@ def test_operation_keeps_memory_and_insight_readiness_separate() -> None:
         accepted=True,
         source_searchable=True,
         memory_ready=True,
+        links_ready=True,
+        temporal_links_ready=True,
         insights_ready=False,
         profile_current=False,
     )

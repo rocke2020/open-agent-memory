@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import math
+import time
 from collections.abc import Mapping
+from threading import BoundedSemaphore
 from typing import Any, Literal
 
 import httpx
@@ -60,6 +62,9 @@ class RuntimeModels:
         self.config = config
         self._environment = dict(environment)
         self._http = http
+        self._model_slots = BoundedSemaphore(
+            min(config.worker.max_model_calls, config.provider.global_concurrency)
+        )
 
     def generate(
         self,
@@ -206,12 +211,21 @@ class RuntimeModels:
             headers["authorization"] = f"Bearer {binding._api_key}"
         if path == "/chat/completions" and binding.reasoning_effort is not None:
             payload = {**payload, "reasoning_effort": binding.reasoning_effort}
-        response = self._http.post(
-            f"{binding.endpoint}{path}",
-            headers=headers,
-            json=payload,
-            timeout=timeout_seconds,
-        )
+        waiting_since = time.monotonic()
+        if not self._model_slots.acquire(timeout=timeout_seconds):
+            raise httpx.ConnectTimeout("model capacity wait expired before dispatch")
+        try:
+            remaining = timeout_seconds - (time.monotonic() - waiting_since)
+            if remaining <= 0:
+                raise httpx.ConnectTimeout("model capacity wait expired before dispatch")
+            response = self._http.post(
+                f"{binding.endpoint}{path}",
+                headers=headers,
+                json=payload,
+                timeout=remaining,
+            )
+        finally:
+            self._model_slots.release()
         response.raise_for_status()
         try:
             body = response.json()

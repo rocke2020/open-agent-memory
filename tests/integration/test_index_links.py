@@ -185,6 +185,24 @@ def test_semantic_neighbors_exclude_stale_foreign_and_wrong_generation_before_ca
     assert repeated["semantic_links"] == 0
 
 
+def test_undated_facts_skip_temporal_link_queries(database, monkeypatch):
+    from oam.indexing import links
+
+    connection, authority, config = database
+    add_fact(connection, authority, "first")
+    add_fact(connection, authority, "second")
+    connection.execute("SET LOCAL ROLE oam_content")
+    monkeypatch.setattr(links, "_INTERVAL", "SELECT 1/0")
+
+    def absent_point_query(_column):
+        raise AssertionError("undated facts must not run a point-time link query")
+
+    monkeypatch.setattr(links, "_point_query", absent_point_query)
+    result = build_links(connection, authority, config, "generation", ["first"])
+    assert result["semantic_links"] == 1
+    assert result["temporal_links"] == 0
+
+
 def test_temporal_within_batch_and_existing_proposals_have_same_canonical_witnesses(database):
     connection, authority, config = database
     incremental = other_scope(authority, "incremental")

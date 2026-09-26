@@ -72,7 +72,7 @@ class MemoryStore:
             sha256=hashlib.sha256(content).hexdigest(),
         )
 
-    def finish(self):
+    def finish(self, *, schedule_consolidation=False):
         self.finished = True
 
     def fail(self, error):
@@ -443,11 +443,13 @@ def test_interaction_locator_keeps_original_message_order_and_internal_id(monkey
         yield connection
 
     monkeypatch.setattr(index_source.psycopg, "connect", connect)
-    monkeypatch.setattr(index_source, "claim_one", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        index_source, "claim_one", lambda *args, **kwargs: SimpleNamespace(stage="index_source")
+    )
     monkeypatch.setattr(index_source, "IndexStore", lambda *args, **kwargs: store)
     from oam.indexing import links
 
-    monkeypatch.setattr(links, "build_links", lambda *args: {})
+    monkeypatch.setattr(links, "build_links", lambda *args, **kwargs: {})
 
     assert index_source.process_one(
         store.config, "queue", "content", models=LocalModels(), worker_id="worker"
