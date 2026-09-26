@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -22,6 +21,7 @@ from oam.retrieval.algorithms import (
     select_temporal_seeds,
     temporal_spread,
 )
+from oam.retrieval.context import render_context, render_item
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.repository import RecallRepository
 from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
@@ -340,14 +340,7 @@ class RecallService:
         for row in hydrated:
             item = {key: value for key, value in row.items() if key != "locator"}
             item["paths"] = paths.get(item["unit_id"], [])
-            citations = json.dumps(item["citations"], ensure_ascii=False, separators=(",", ":"))
-            time_evidence = json.dumps(
-                item["time_evidence"], ensure_ascii=False, separators=(",", ":")
-            )
-            block = (
-                f"[{item['unit_id']}] {item['kind']} {item['origin']}\n{item['text']}\n"
-                f"Citations: {citations}\nTime: {time_evidence}"
-            )
+            block = render_item(item)
             next_units = used_units + (2 if blocks else 0) + estimate_units(block)
             if estimated_tokens(next_units) > budget:
                 budget_omissions.append(item["unit_id"])
@@ -357,11 +350,7 @@ class RecallService:
             used_units = next_units
             if len(items) == tier.max_results:
                 break
-        admitted_blocks = {
-            item["unit_id"]: block for item, block in zip(items, blocks, strict=True)
-        }
-        items = _group_source_items(items)
-        context = "\n\n".join(admitted_blocks[item["unit_id"]] for item in items)
+        context = render_context(items)
         context_tokens = estimated_tokens(estimate_units(context))
         _remaining(deadline)
         if read("user_state")["policy_epoch"] != initial_index_state["policy_epoch"]:
@@ -468,57 +457,6 @@ class RecallService:
             raise RecallUnavailable("source policy changed before trace publication")
         result["trace_id"] = trace_id
         return result
-
-
-def _group_source_items(items: list[dict]) -> list[dict]:
-    """Show selected source text once; retain facts with distinct path or time evidence."""
-    passages = {item["unit_id"]: item for item in items if item["kind"] == "passage"}
-    replacements = {}
-    identity = ("source_id", "source_version", "message_id", "message_index", "role")
-    for item in items:
-        if item["kind"] != "fact" or item["paths"] or not item["citations"]:
-            continue
-        passage_ids = {citation.get("passage_id") for citation in item["citations"]}
-        if len(passage_ids) != 1:
-            continue
-        passage = passages.get(next(iter(passage_ids)))
-        if passage is None or len(passage["citations"]) != 1:
-            continue
-        if any(value not in passage["time_evidence"] for value in item["time_evidence"]):
-            continue
-        locator = passage["citations"][0]
-        if any(locator.get(key) is None for key in identity):
-            continue
-        start, end = locator.get("start"), locator.get("end")
-        if type(start) is not int or type(end) is not int:
-            continue
-        if start < 0 or end - start != len(passage["text"]):
-            continue
-        for citation in item["citations"]:
-            span = citation.get("span", {})
-            if any(citation.get(key) != locator[key] for key in ("source_id", "source_version")):
-                break
-            if any(span.get(key) != locator[key] for key in identity):
-                break
-            first, last, quote = span.get("start"), span.get("end"), span.get("quote")
-            if type(first) is not int or type(last) is not int or not isinstance(quote, str):
-                break
-            if (
-                not start <= first < last <= end
-                or passage["text"][first - start : last - start] != quote
-            ):
-                break
-        else:
-            replacements[item["unit_id"]] = passage["unit_id"]
-    grouped, seen = [], set()
-    for item in items:
-        selected = (
-            passages[replacements[item["unit_id"]]] if item["unit_id"] in replacements else item
-        )
-        if selected["unit_id"] not in seen:
-            grouped.append(selected)
-            seen.add(selected["unit_id"])
-    return grouped
 
 
 def _remaining(deadline: float) -> float:
