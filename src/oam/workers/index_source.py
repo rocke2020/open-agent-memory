@@ -49,6 +49,17 @@ def process_one(
         )
     if claim is None:
         return False
+    if claim.stage == "refresh_profile":
+        from oam.profiles.worker import process_profile_claim
+
+        process_profile_claim(
+            config,
+            content_dsn,
+            models=models,
+            claim=claim,
+            worker_id=worker_id,
+        )
+        return True
     store = IndexStore(content_dsn, config, claim, worker_id, index_generation(config, os.environ))
     try:
         if claim.stage == "consolidate":
@@ -69,6 +80,9 @@ def process_one(
             return True
         if store.source["input_role"] == "evidence_resource":
             _resource(store, models)
+            store.finish()
+            return True
+        if store.source["input_role"] == "profile_resource":
             store.finish()
             return True
         if store.source["input_role"] != "interaction":

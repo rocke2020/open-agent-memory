@@ -49,7 +49,15 @@ async def test_retain_accepts_the_minimal_developer_request(body):
         base_url="http://test",
         headers={"Authorization": "Bearer synthetic", "Idempotency-Key": "logical-request"},
     ) as client:
-        response = await client.post("/v1/retain", json=body)
+        if body["input_type"] == "interaction":
+            path, payload = "/v1/retain", body
+        else:
+            path = "/v1/users/lin/resources"
+            payload = {
+                "resource_type": "evidence",
+                **{k: v for k, v in body.items() if k != "user_id"},
+            }
+        response = await client.post(path, json=payload)
     assert response.status_code == 202, response.text
     assert response.json()["source_id"] == "src-assigned"
 
@@ -66,9 +74,9 @@ async def test_retain_rejects_caller_storage_and_tenant_selectors(field, value):
         headers={"Authorization": "Bearer synthetic", "Idempotency-Key": "logical-request"},
     ) as client:
         response = await client.post(
-            "/v1/retain",
+            "/v1/users/lin/resources",
             json={
-                "user_id": "lin",
+                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "checkup",
                 "update_mode": "replace",
@@ -101,10 +109,10 @@ async def test_retain_requires_explicit_learning_eligibility_and_rejects_file_ap
             },
         )
         append = await client.post(
-            "/v1/retain",
+            "/v1/users/lin/resources",
             data={
                 "metadata": (
-                    '{"user_id":"lin","input_type":"document",'
+                    '{"resource_type":"evidence","input_type":"document",'
                     '"document_id":"scan","update_mode":"append"}'
                 )
             },

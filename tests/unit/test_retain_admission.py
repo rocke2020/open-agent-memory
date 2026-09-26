@@ -39,7 +39,7 @@ class IncomingBody(httpx.AsyncByteStream):
 
 def payload(kind, size):
     body = {
-        "user_id": "lin",
+        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "doc",
         "update_mode": "replace",
@@ -48,7 +48,7 @@ def payload(kind, size):
         return json.dumps({**body, "text": "x" * size}).encode(), "application/json"
     request = httpx.Request(
         "POST",
-        "http://synthetic/v1/retain",
+        "http://synthetic/v1/users/lin/resources",
         data={"metadata": json.dumps(body)},
         files={"original": ("doc.html", b"x" * size, "text/html")},
     )
@@ -76,7 +76,7 @@ async def test_invalid_credential_does_not_consume_retain_body(client, kind):
     raw, content_type = payload(kind, 4096)
     stream = IncomingBody(raw)
     response = await client.post(
-        "/v1/retain",
+        "/v1/users/lin/resources",
         content=stream,
         headers={
             "Authorization": "Bearer invalid",
@@ -100,7 +100,7 @@ async def test_retain_rejects_before_consuming_oversized_body(client, kind, decl
     }
     if declared_length is not None:
         headers["Content-Length"] = declared_length
-    response = await client.post("/v1/retain", content=stream, headers=headers)
+    response = await client.post("/v1/users/lin/resources", content=stream, headers=headers)
     assert response.status_code == 413
     assert response.json()["detail"]["code"] == "RequestTooLarge"
     assert stream.consumed < len(raw)
@@ -121,7 +121,7 @@ async def test_limit_rejection_closes_partial_multipart_upload(client, monkeypat
     monkeypatch.setattr(starlette.formparsers, "SpooledTemporaryFile", tracked_file)
     raw, content_type = payload("multipart", 4096)
     response = await client.post(
-        "/v1/retain",
+        "/v1/users/lin/resources",
         content=IncomingBody(raw),
         headers={
             "Authorization": "Bearer valid",
@@ -137,7 +137,7 @@ async def test_limit_rejection_closes_partial_multipart_upload(client, monkeypat
 async def test_bounded_retain_still_accepts_valid_content(client, kind):
     raw, content_type = payload(kind, 20)
     response = await client.post(
-        "/v1/retain",
+        "/v1/users/lin/resources",
         content=IncomingBody(raw),
         headers={
             "Authorization": "Bearer valid",

@@ -7,7 +7,7 @@ import json
 import os
 import secrets
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -37,6 +37,7 @@ from oam.contracts.credentials import (
 )
 from oam.contracts.evidence import EvidenceAppendRequest
 from oam.contracts.operations import ReconcileAttemptRequest
+from oam.contracts.profile import ProfileResourceRequest
 from oam.contracts.resources import EvidenceResourceCreate, ResourceMediaType
 from oam.contracts.retain import (
     RetainFileDocument,
@@ -50,6 +51,7 @@ from oam.db.sources import AcceptanceReceipt, AcceptSource, SourceRepository
 from oam.indexing.identity import index_generation
 from oam.models.runtime import RuntimeModels
 from oam.operations.repository import OperationNotFound, OperationRecord, OperationRepository
+from oam.profiles.resources import map_profile_resource
 from oam.resources.url_fetch import fetch_resource_url, safe_source_url
 
 
@@ -63,6 +65,22 @@ class AuthorizationFailed(PermissionError):
 
 class APIRuntime(Protocol):
     def authenticate(self, actor: RequestActor) -> None: ...
+
+    def retain_profile_resource(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        body: ProfileResourceRequest,
+        idempotency_key: str,
+        *,
+        expected_version: int | None,
+    ) -> dict: ...
+
+    def get_profile(
+        self, actor: RequestActor, user_id: str, sections: list[str], max_tokens: int
+    ) -> dict: ...
+
+    def refresh_profile(self, actor: RequestActor, user_id: str, sections: list[str]) -> dict: ...
 
     def search_many(
         self, actor: RequestActor, user_id: str, request: SearchManyRequest
@@ -173,18 +191,47 @@ class DatabaseRuntime:
     def search(self, actor: RequestActor, user_id: str, request: SearchRequest) -> dict:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
-        return self._recall_service().search(authority, request, deadline_at=request.deadline_at)
+        return self._search_authorized(authority, request, deadline_at=request.deadline_at)
+
+    def _search_authorized(self, authority, request, *, deadline_at=None) -> dict:
+        from oam.profiles.assembly import search_with_profile
+
+        return search_with_profile(
+            self.config,
+            self.pool,
+            self._recall_service(),
+            authority,
+            request,
+            deadline_at=deadline_at,
+        )
+
+    def get_profile(
+        self, actor: RequestActor, user_id: str, sections: list[str], max_tokens: int
+    ) -> dict:
+        from oam.profiles.service import ProfileService
+
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+        return ProfileService(self.config, self.pool).get(authority, sections, max_tokens)
+
+    def refresh_profile(self, actor: RequestActor, user_id: str, sections: list[str]) -> dict:
+        from oam.profiles.service import ProfileService
+
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:append")
+            self._authorize(connection, actor, user_id, "memory:read")
+            authority = replace(authority, capabilities=frozenset({"memory:append", "memory:read"}))
+        return ProfileService(self.config, self.pool).refresh(authority, sections)
 
     def search_many(self, actor: RequestActor, user_id: str, request: SearchManyRequest) -> dict:
         from oam.api.search import search_many
 
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
-        service = self._recall_service()
         return search_many(
             self.config,
             request,
-            lambda child, deadline: service.search(authority, child, deadline_at=deadline),
+            lambda child, deadline: self._search_authorized(authority, child, deadline_at=deadline),
         )
 
     def decompose_and_search(
@@ -194,11 +241,10 @@ class DatabaseRuntime:
 
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
-        service = self._recall_service()
         return decompose_and_search(
             self.config,
             request,
-            lambda child, deadline: service.search(authority, child, deadline_at=deadline),
+            lambda child, deadline: self._search_authorized(authority, child, deadline_at=deadline),
             self.models,
         )
 
@@ -390,6 +436,63 @@ class DatabaseRuntime:
             "reused": receipt.reused,
             "readiness": {"accepted": True},
         }
+
+    def retain_profile_resource(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        body: ProfileResourceRequest,
+        idempotency_key: str,
+        *,
+        expected_version: int | None,
+    ) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:append")
+            resource = body.model_dump(mode="json", exclude_none=True)
+            # Exact fields are a deterministic read view of the active original.
+            # Validate all mappings before atomic source-version activation.
+            map_profile_resource(resource, resource_version=1)
+            original = json.dumps(
+                resource, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+            ).encode()
+            if len(original) > self.config.resource.max_bytes:
+                raise ValueError("Profile Resource exceeds byte limit")
+            request_hash = hashlib.sha256(
+                json.dumps(
+                    {"resource": resource, "expected_version": expected_version},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode()
+            ).digest()
+            identifier = secrets.token_hex(16)
+            receipt = SourceRepository().accept(
+                connection,
+                authority,
+                AcceptSource(
+                    source_id=body.resource_id,
+                    source_version=None,
+                    input_role="profile_resource",
+                    resource_type="profile",
+                    media_type="application/json",
+                    original_bytes=original,
+                    evidence_id=f"envelope_{identifier}",
+                    content_text=None,
+                    learning_eligible=False,
+                    operation_id=f"op_{identifier}",
+                    operation_kind="index_profile_resource",
+                    schema_version=1,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    work_unit_id=f"work_{identifier}",
+                    stage="index_source",
+                    generation_id=index_generation(self.config, os.environ),
+                    attempts_remaining=self.config.retry.max_attempts,
+                    expected_active_version=expected_version,
+                    max_bytes=self.config.resource.max_bytes,
+                ),
+            )
+            return self._retain_response(connection, authority, receipt)
 
     def list_credentials(
         self, actor: str, *, limit: int, after: str | None

@@ -54,8 +54,6 @@ class RecallService:
         deadline_at: datetime | None = None,
     ) -> dict:
         request.validate_limits(self.config)
-        if request.profile_sections:
-            raise NotImplementedError("stored Profile inclusion is unavailable")
         if request.include.chunks is not None:
             raise NotImplementedError("separate recalled chunks are unavailable")
         if estimated_tokens(estimate_units(request.query)) > self.config.search.max_query_tokens:

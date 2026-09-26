@@ -75,10 +75,10 @@ async def test_local_trusted_identity_registers_user_without_key_and_cannot_swit
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
     ):
         retained = await client.post(
-            "/v1/retain",
+            "/v1/users/alice/resources",
             headers={**alice_headers, "Idempotency-Key": "trusted-alice"},
             json={
-                "user_id": "alice",
+                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "private",
                 "update_mode": "replace",
@@ -93,10 +93,10 @@ async def test_local_trusted_identity_registers_user_without_key_and_cannot_swit
         ).status_code == 404
         assert (
             await client.post(
-                "/v1/retain",
+                "/v1/users/bob/resources",
                 headers={**alice_headers, "Idempotency-Key": "user-mismatch"},
                 json={
-                    "user_id": "bob",
+                    "resource_type": "evidence",
                     "input_type": "document",
                     "document_id": "wrong-user",
                     "update_mode": "replace",
@@ -199,10 +199,10 @@ async def test_dev_mode_accepts_local_identity_without_key_and_disables_admin(
     ):
         assert (await client.post("/v1/users", json={"user_id": "bob"})).status_code == 503
         retained = await client.post(
-            "/v1/retain",
+            "/v1/users/alice/resources",
             headers={**headers, "Idempotency-Key": "dev-alice"},
             json={
-                "user_id": "alice",
+                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "private",
                 "update_mode": "replace",
@@ -256,7 +256,7 @@ async def test_nonlocal_trusted_data_requires_root_key_for_asserted_tenant(
     app = create_app(config, bind_host="0.0.0.0")
     headers = {"X-OAM-Tenant": tenant, "X-OAM-User": "alice"}
     body = {
-        "user_id": "alice",
+        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "private",
         "update_mode": "replace",
@@ -268,12 +268,14 @@ async def test_nonlocal_trusted_data_requires_root_key_for_asserted_tenant(
     ):
         assert (
             await client.post(
-                "/v1/retain", headers={**headers, "Idempotency-Key": "missing"}, json=body
+                "/v1/users/alice/resources",
+                headers={**headers, "Idempotency-Key": "missing"},
+                json=body,
             )
         ).status_code == 401
         assert (
             await client.post(
-                "/v1/retain",
+                "/v1/users/alice/resources",
                 headers={
                     **headers,
                     "Authorization": "Bearer invalid",
@@ -283,7 +285,7 @@ async def test_nonlocal_trusted_data_requires_root_key_for_asserted_tenant(
             )
         ).status_code == 401
         retained = await client.post(
-            "/v1/retain",
+            "/v1/users/alice/resources",
             headers={
                 **headers,
                 "Authorization": f"Bearer {root_secret}",
@@ -294,7 +296,7 @@ async def test_nonlocal_trusted_data_requires_root_key_for_asserted_tenant(
         assert retained.status_code == 202, retained.text
         assert (
             await client.post(
-                "/v1/retain",
+                "/v1/users/alice/resources",
                 headers={
                     **headers,
                     "X-OAM-Tenant": foreign_tenant,

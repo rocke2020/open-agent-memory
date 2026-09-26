@@ -319,6 +319,8 @@ class SourceRepository:
         )
         active = cursor.fetchone()
         previous = int(active[0]) if active and active[0] is not None else None
+        if command.input_role == "profile_resource" and command.expected_active_version != previous:
+            raise SourceVersionConflict(command.source_id)
         content = command.original_bytes
         if command.update_mode == "append":
             if not active or active[1] != "text/plain" or command.media_type != "text/plain":
