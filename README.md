@@ -35,7 +35,7 @@ explicit Profile refresh -> unchanged: zero calls
                          -> changed: durable operation -> L3
 ```
 
-See [architecture](docs/architecture.md), [HTTP API](docs/api.md), [operations](docs/operations.md), [acceptance](docs/acceptance.md), and the current [Steps 1–4 foundation evidence](docs/foundation-evidence.md).
+See [architecture](docs/architecture.md), [HTTP API](docs/api.md), [operations](docs/operations.md), the [Memory web UI guide](docs/memory-web-ui.md), [acceptance](docs/acceptance.md), and the current [Steps 1–4 foundation evidence](docs/foundation-evidence.md).
 
 ## Development Setup
 
@@ -54,7 +54,7 @@ The canonical configuration intentionally has no model bindings, so preflight ex
 Run the API and a separate durable worker with the same operator configuration:
 
 ```bash
-uv run oam api --config configs/oam.yaml --host 127.0.0.1 --port 8080
+uv run oam api --config configs/oam.yaml --host 127.0.0.1
 uv run oam worker --config configs/oam.yaml
 ```
 

@@ -16,6 +16,8 @@ from oam.models.client import OpenAICompatibleProbeClient
 from oam.models.preflight import CapabilityProbeClient, run_model_preflight
 from oam.paths import default_config_path
 
+DEFAULT_API_PORT = 17333
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="oam", description="Open Agent Memory")
@@ -33,7 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     api = commands.add_parser("api", help="run the HTTP API")
     api.add_argument("--config", type=Path, default=selected_config_path)
     api.add_argument("--host", default="127.0.0.1")
-    api.add_argument("--port", type=int, default=8080)
+    api.add_argument("--port", type=int, default=DEFAULT_API_PORT)
 
     worker = commands.add_parser("worker", help="run a durable worker")
     worker.add_argument("--config", type=Path, default=selected_config_path)

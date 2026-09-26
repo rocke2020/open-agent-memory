@@ -97,6 +97,23 @@ def test_command_help_exposes_required_step_two_entrypoints(capsys) -> None:
     )
 
 
+def test_api_command_uses_memory_ui_default_port(monkeypatch) -> None:
+    import uvicorn
+
+    launched = {}
+    monkeypatch.delenv("OAM_API_DSN", raising=False)
+    monkeypatch.delenv("OAM_ROOT_API_KEY", raising=False)
+
+    def capture_run(app, *, host, port):
+        assert app.title == "Open Agent Memory"
+        launched.update(host=host, port=port)
+
+    monkeypatch.setattr(uvicorn, "run", capture_run)
+
+    assert main(["api", "--config", str(REPOSITORY_ROOT / "configs" / "oam.yaml")]) == 0
+    assert launched == {"host": "127.0.0.1", "port": 17333}
+
+
 class PassingProbeClient:
     def __init__(self) -> None:
         self.roles_probed = 0
