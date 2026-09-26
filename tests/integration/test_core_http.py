@@ -201,6 +201,7 @@ def test_index_schema_initializes_dimension_and_rejects_cross_scope_graph_endpoi
 class SyntheticIndexModels:
     def __init__(self, *, invalid_fact=False, vision_text="Glucose 92 mg/dL", vision_blocks=None):
         self.generation_calls = []
+        self.embedding_batches = []
         self.invalid_fact = invalid_fact
         self.vision_text = vision_text
         self.vision_blocks = vision_blocks
@@ -247,6 +248,7 @@ class SyntheticIndexModels:
     def embed(self, texts, **kwargs):
         from oam.models.runtime import EmbeddingResult, Usage
 
+        self.embedding_batches.append(tuple(texts))
         return EmbeddingResult(
             vectors=tuple((1.0,) + (0.0,) * 1023 for _ in texts),
             usage=Usage(
@@ -944,7 +946,7 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
             {
                 "role": "user",
                 "content": "Lin prefers short explanations.",
-                "event_time": "2026-09-01T09:00:00Z",
+                "event_time": "2026-09-01T16:00:00Z",
                 "learning_eligible": True,
             },
             {
@@ -986,25 +988,118 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
             json={"user_id": "scope", "query": "Lin morning explanations", "profile_sections": []},
         )
         assert recalled.status_code == 200, recalled.text
-        assert any(item["kind"] == "insight" for item in recalled.json()["items"])
+        assert recalled.json()["diagnostics"]["readiness"] == (
+            "partial" if invalid_fact else "ready"
+        )
+        assert any(
+            item["kind"] == "fact" and "prefers" in item["text"]
+            for item in recalled.json()["items"]
+        )
+        assert not any(item["kind"] == "insight" for item in recalled.json()["items"])
         assert "glucose" not in recalled.json()["context"]
         assert recalled.json()["context_tokens"] > 0
+        dated = await client.post(
+            "/v1/recall",
+            json={
+                "user_id": "scope",
+                "query": "Lin morning preference",
+                "recall_level": "fast",
+                "profile_sections": [],
+                "time_basis": "mentioned",
+                "time_window": {
+                    "start": "2026-09-02T00:00:00Z",
+                    "end": "2026-09-03T00:00:00Z",
+                },
+            },
+        )
+        assert dated.status_code == 200, dated.text
+        assert any(
+            item["kind"] == "fact" and "morning" in item["text"] for item in dated.json()["items"]
+        )
         finished = await client.get(f"/v1/users/scope/operations/{receipt.json()['operation_id']}")
-        assert finished.json()["readiness"]["insights_ready"] is True
-        assert finished.json()["usage"]["total_tokens"] == 90
-        assert finished.json()["usage"]["coverage"] == "complete"
-        assert finished.json()["embedding_usage"]["total_tokens"] == 5
+        assert finished.json()["status"] == "succeeded"
+        assert finished.json()["readiness"]["memory_ready"] is True
+        assert finished.json()["readiness"]["insights_ready"] is False
+        assert finished.json()["readiness"]["links_ready"] is True
+        assert finished.json()["readiness"]["temporal_links_ready"] is True
         assert finished.json()["stage_state"]["links_ready"] is True
+        assert finished.json()["stage_state"]["temporal_links_ready"] is True
+        assert [len(batch) for batch in models.embedding_batches[:2]] == [2, 2]
+        with psycopg.connect(dsn) as connection:
+            semantic_before = connection.execute(
+                "SELECT count(*) FROM unit_links WHERE tenant_id=%s AND kind='semantic'",
+                (tenant,),
+            ).fetchone()[0]
+            temporal_before = connection.execute(
+                "SELECT count(*) FROM temporal_links WHERE tenant_id=%s", (tenant,)
+            ).fetchone()[0]
+            assert semantic_before == 2
+            assert temporal_before >= 1
+        consolidation_id = finished.json()["stage_state"]["consolidation_operation_id"]
+        with psycopg.connect(dsn) as connection:
+            due = connection.execute(
+                "SELECT w.available_at>clock_timestamp(),w.status FROM work_units w "
+                "WHERE w.tenant_id=%s AND w.operation_id=%s",
+                (tenant, consolidation_id),
+            ).fetchone()
+            assert due == (True, "queued")
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp() WHERE tenant_id=%s "
+                "AND operation_id=%s",
+                (tenant, consolidation_id),
+            )
+        assert (
+            process_one(
+                config,
+                make_conninfo(dsn, options="-c role=oam_queue"),
+                make_conninfo(dsn, options="-c role=oam_content"),
+                models=models,
+                worker_id="synthetic-worker",
+            )
+            is True
+        )
+        recalled = await client.post(
+            "/v1/recall",
+            json={"user_id": "scope", "query": "Lin morning explanations", "profile_sections": []},
+        )
+        assert any(item["kind"] == "insight" for item in recalled.json()["items"])
+        assert recalled.json()["diagnostics"]["readiness"] == (
+            "partial" if invalid_fact else "ready"
+        )
+        completed = await client.get(f"/v1/users/scope/operations/{receipt.json()['operation_id']}")
+        assert completed.json()["readiness"]["insights_ready"] is True
+        consolidation = await client.get(f"/v1/users/scope/operations/{consolidation_id}")
+        assert consolidation.json()["status"] == "succeeded"
+        assert consolidation.json()["usage"]["total_tokens"] == 30
+        assert consolidation.json()["embedding_usage"]["total_tokens"] == 1
+        assert "link_coverage" not in consolidation.json()["stage_state"]
+        assert finished.json()["usage"]["total_tokens"] == 60
+        assert finished.json()["usage"]["coverage"] == "complete"
+        assert finished.json()["embedding_usage"]["total_tokens"] == 4
+        with psycopg.connect(dsn) as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM unit_links WHERE tenant_id=%s AND kind='semantic'",
+                    (tenant,),
+                ).fetchone()[0]
+                == semantic_before
+            )
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM temporal_links WHERE tenant_id=%s", (tenant,)
+                ).fetchone()[0]
+                == temporal_before
+            )
         assert finished.json()["stage_state"]["extraction_coverage"] == (
             "partial" if invalid_fact else "complete"
         )
     with psycopg.connect(dsn) as connection:
         facts = connection.execute(
-            "SELECT canonical_claim FROM memories WHERE tenant_id=%s", (tenant,)
+            "SELECT canonical_claim,category FROM memories WHERE tenant_id=%s", (tenant,)
         ).fetchall()
-        assert {row[0] for row in facts} == {
-            "Lin prefers short explanations.",
-            "Lin prefers updates in the morning.",
+        assert set(facts) == {
+            ("Lin prefers short explanations.", "preference"),
+            ("Lin prefers updates in the morning.", "preference"),
         }
         insight = connection.execute(
             "SELECT synthesis_text FROM insights WHERE tenant_id=%s", (tenant,)

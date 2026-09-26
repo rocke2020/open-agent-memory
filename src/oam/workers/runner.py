@@ -14,7 +14,9 @@ import httpx
 
 from oam.config import ConfigurationError, load_config
 from oam.models.runtime import RuntimeModels
-from oam.workers.index_source import process_one
+from oam.workers.index_source import MAX_SOURCE_EXTRACTIONS, process_one
+
+IDLE_POLL_SECONDS = 0.5
 
 
 def run_worker_from_environment(config_path: str | Path, *, once: bool = False) -> int:
@@ -44,12 +46,28 @@ def run_worker_from_environment(config_path: str | Path, *, once: bool = False) 
     try:
         with httpx.Client(trust_env=False) as http:
             models = RuntimeModels(config, os.environ, http)
+            model_cap = min(config.worker.max_model_calls, config.provider.global_concurrency)
+            concurrency = min(
+                config.worker.max_tasks,
+                model_cap,
+                config.database.worker_pool_max,
+                config.user.concurrency,
+            )
+            # Shared runtime slots bound actual calls while one active source can use the full cap.
+            source_parallelism = min(MAX_SOURCE_EXTRACTIONS, model_cap)
+            source_config = config.model_copy(
+                update={
+                    "worker": config.worker.model_copy(
+                        update={"max_model_calls": source_parallelism}
+                    )
+                }
+            )
 
             def process_claims() -> int:
                 while not stopped.is_set():
                     try:
                         processed = process_one(
-                            config,
+                            source_config,
                             os.environ[config.database.worker_queue_dsn_env],
                             os.environ[config.database.worker_content_dsn_env],
                             models=models,
@@ -68,20 +86,11 @@ def run_worker_from_environment(config_path: str | Path, *, once: bool = False) 
                     if once:
                         return 0
                     if not processed:
-                        stopped.wait(1)
+                        stopped.wait(IDLE_POLL_SECONDS)
                 return 0
 
             if once:
                 return process_claims()
-            # Each source uses at most one connection or model call at a time.
-            # The per-user limit also bounds the shared worker pool.
-            concurrency = min(
-                config.worker.max_tasks,
-                config.worker.max_model_calls,
-                config.provider.global_concurrency,
-                config.database.worker_pool_max,
-                config.user.concurrency,
-            )
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
                 try:
                     pending = [executor.submit(process_claims) for _ in range(concurrency)]

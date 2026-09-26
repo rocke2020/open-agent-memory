@@ -730,6 +730,8 @@ def _operation_response(record: OperationRecord) -> OperationResponse:
                 for name in (
                     "source_searchable",
                     "memory_ready",
+                    "links_ready",
+                    "temporal_links_ready",
                     "insights_ready",
                     "profile_current",
                 )

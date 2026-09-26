@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -18,6 +19,7 @@ from oam.db.context import bind_user
 from oam.workers.claims import RENEW_LEASE_SQL, ClaimedWork
 
 MEMORY_REVISION = 1
+CONSOLIDATION_DELAY_SECONDS = 8 * 60 * 60
 
 
 class StaleIndexWork(RuntimeError):
@@ -169,6 +171,105 @@ class IndexStore:
             )
         return output
 
+    def checkpoints(self, stages):
+        """Run independent model stages together and persist each completed result."""
+        if len(stages) == 1:
+            stage, inputs, produce = stages[0]
+            return [self.checkpoint(stage, inputs, produce)]
+        if not stages:
+            return []
+        outputs = [None] * len(stages)
+        pending = []
+        with self.transaction() as connection:
+            self.guard(connection)
+            for index, (stage, inputs, produce) in enumerate(stages):
+                digest = hashlib.sha256(
+                    json.dumps(inputs, sort_keys=True, default=str).encode()
+                ).digest()
+                identity = (
+                    *self.key,
+                    self.source["source_id"],
+                    self.source["source_version"],
+                    self.generation_id,
+                    stage,
+                    digest,
+                )
+                existing = connection.execute(
+                    "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
+                    "AND source_id=%s AND source_version=%s AND generation_id=%s "
+                    "AND stage_key=%s AND input_digest=%s",
+                    identity,
+                ).fetchone()
+                if existing:
+                    outputs[index] = existing[0]
+                else:
+                    pending.append((index, stage, identity, produce))
+            if pending:
+                connection.execute(
+                    RENEW_LEASE_SQL,
+                    (
+                        self.config.lease.seconds,
+                        *self.key,
+                        self.claim.work_unit_id,
+                        self.worker_id,
+                        self.claim.fence,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE attempts SET disposition='unknown_external_outcome',request_ref=%s "
+                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                    (pending[0][1], *self.key, self.claim.work_unit_id, self.claim.attempt_id),
+                )
+        if not pending:
+            return outputs
+        failures = []
+        with ThreadPoolExecutor(max_workers=len(pending)) as executor:
+            futures = {
+                executor.submit(produce): (index, stage, identity)
+                for index, stage, identity, produce in pending
+            }
+            for future in as_completed(futures):
+                index, stage, identity = futures[future]
+                try:
+                    output = future.result()
+                except Exception as error:
+                    failures.append((stage, error))
+                    outputs[index] = error
+                    continue
+                if hasattr(output, "model_dump"):
+                    output = output.model_dump(mode="json")
+                with self.transaction() as connection:
+                    self.guard(connection)
+                    connection.execute(
+                        "INSERT INTO index_stage_results(tenant_id,user_id,source_id,"
+                        "source_version,generation_id,stage_key,input_digest,output,usage,"
+                        "work_unit_id,attempt_id) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                        (
+                            *identity,
+                            Jsonb(output),
+                            Jsonb(output.get("usage", {})),
+                            self.claim.work_unit_id,
+                            self.claim.attempt_id,
+                        ),
+                    )
+                outputs[index] = output
+        with self.transaction() as connection:
+            self.guard(connection)
+            connection.execute(
+                "UPDATE attempts SET disposition=%s,request_ref=%s,response_ref=%s "
+                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                (
+                    "unknown_external_outcome" if failures else "claimed",
+                    failures[0][0] if failures else pending[-1][1],
+                    None if failures else pending[-1][1],
+                    *self.key,
+                    self.claim.work_unit_id,
+                    self.claim.attempt_id,
+                ),
+            )
+        return outputs
+
     def readiness(self, connection, **stages):
         connection.execute(
             "UPDATE operations SET stage_state=stage_state||%s::jsonb,updated_at=clock_timestamp() "
@@ -177,7 +278,7 @@ class IndexStore:
         )
 
     def mark_deferred_failure_stage(self, stage: str) -> None:
-        """Restore an unresolved model call after earlier PDF passages are published."""
+        """Restore an unresolved model call after other passages are published."""
         with self.transaction() as connection:
             self.guard(connection)
             connection.execute(
@@ -233,10 +334,50 @@ class IndexStore:
             ),
         )
 
-    def finish(self):
+    def finish(self, *, schedule_consolidation: bool = False):
         with self.transaction() as connection:
             self.guard(connection)
             self.summarize_usage(connection)
+            if schedule_consolidation:
+                consolidation_id = stable_id(
+                    "op_consolidate", self.claim.operation_id, self.generation_id
+                )
+                work_id = stable_id("work_consolidate", consolidation_id)
+                connection.execute(
+                    "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,"
+                    "source_id,source_version,accepted_seq,kind,schema_version,status,"
+                    "plan_sealed,stage_state) SELECT tenant_id,user_id,%s,principal_id,"
+                    "source_id,source_version,accepted_seq,'consolidate',schema_version,"
+                    "'accepted',true,%s::jsonb FROM operations WHERE tenant_id=%s "
+                    "AND user_id=%s AND operation_id=%s ON CONFLICT DO NOTHING",
+                    (
+                        consolidation_id,
+                        Jsonb({"source_operation_id": self.claim.operation_id}),
+                        *self.key,
+                        self.claim.operation_id,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,"
+                    "stage,input_digest,generation_id,status,available_at,attempts_remaining) "
+                    "VALUES (%s,%s,%s,%s,'consolidate',%s,%s,'queued',"
+                    "clock_timestamp()+(%s*interval '1 second'),%s) ON CONFLICT DO NOTHING",
+                    (
+                        *self.key,
+                        work_id,
+                        consolidation_id,
+                        self.source["input_digest"],
+                        self.generation_id,
+                        CONSOLIDATION_DELAY_SECONDS,
+                        self.config.retry.max_attempts,
+                    ),
+                )
+                self.readiness(
+                    connection,
+                    insights_ready=False,
+                    consolidation_operation_id=consolidation_id,
+                    consolidation_status="pending",
+                )
             connection.execute(
                 "UPDATE work_units SET status='succeeded',updated_at=clock_timestamp() "
                 "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
@@ -253,6 +394,24 @@ class IndexStore:
                 "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
                 (*self.key, self.claim.operation_id),
             )
+            if self.claim.stage == "consolidate":
+                connection.execute(
+                    "UPDATE operations SET stage_state=stage_state||%s::jsonb,"
+                    "updated_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
+                    "AND operation_id=(SELECT stage_state->>'source_operation_id' "
+                    "FROM operations WHERE tenant_id=%s AND user_id=%s AND operation_id=%s)",
+                    (
+                        Jsonb(
+                            {
+                                "insights_ready": True,
+                                "consolidation_status": "succeeded",
+                            }
+                        ),
+                        *self.key,
+                        *self.key,
+                        self.claim.operation_id,
+                    ),
+                )
             connection.execute(
                 "UPDATE users SET published_seq=greatest(published_seq,%s) "
                 "WHERE tenant_id=%s AND user_id=%s",
@@ -317,30 +476,40 @@ class IndexStore:
                         self.claim.operation_id,
                     ),
                 )
+                if self.claim.stage == "consolidate":
+                    connection.execute(
+                        "UPDATE operations SET stage_state=stage_state||%s::jsonb,"
+                        "updated_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
+                        "AND operation_id=(SELECT stage_state->>'source_operation_id' "
+                        "FROM operations WHERE tenant_id=%s AND user_id=%s AND operation_id=%s)",
+                        (
+                            Jsonb({"consolidation_status": "pending" if retrying else "failed"}),
+                            *self.key,
+                            *self.key,
+                            self.claim.operation_id,
+                        ),
+                    )
 
     def summarize_usage(self, connection):
+        work_filter = " AND work_unit_id=%s" if self.claim.stage == "consolidate" else ""
+        parameters = (
+            *self.key,
+            self.source["source_id"],
+            self.source["source_version"],
+            self.generation_id,
+        )
         rows = connection.execute(
             "SELECT stage_key,usage FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
-            "AND source_id=%s AND source_version=%s AND generation_id=%s",
-            (
-                *self.key,
-                self.source["source_id"],
-                self.source["source_version"],
-                self.generation_id,
-            ),
+            "AND source_id=%s AND source_version=%s AND generation_id=%s" + work_filter,
+            (*parameters, self.claim.work_unit_id) if work_filter else parameters,
         ).fetchall()
         attempts = connection.execute(
             "SELECT a.disposition,a.request_ref,a.usage FROM attempts a "
             "JOIN work_units w USING(tenant_id,user_id,work_unit_id) "
             "JOIN operations o USING(tenant_id,user_id,operation_id) "
             "WHERE o.tenant_id=%s AND o.user_id=%s AND o.source_id=%s AND o.source_version=%s "
-            "AND w.generation_id=%s",
-            (
-                *self.key,
-                self.source["source_id"],
-                self.source["source_version"],
-                self.generation_id,
-            ),
+            "AND w.generation_id=%s" + (" AND w.work_unit_id=%s" if work_filter else ""),
+            (*parameters, self.claim.work_unit_id) if work_filter else parameters,
         ).fetchall()
         uncertain = any(disposition == "unknown_external_outcome" for disposition, _, _ in attempts)
         generation = []

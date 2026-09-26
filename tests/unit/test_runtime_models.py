@@ -1,7 +1,9 @@
 import base64
 import json
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
+from threading import Event, Lock
 
 import httpx
 import pytest
@@ -46,6 +48,56 @@ def runtime_config():
             "index": config.index.model_copy(update={"embedding_dimensions": 2}),
         }
     )
+
+
+def test_shared_runtime_caps_overlapping_model_requests():
+    base = runtime_config()
+    config = base.model_copy(
+        update={"provider": base.provider.model_copy(update={"global_concurrency": 2})}
+    )
+    release = Event()
+    two_active = Event()
+    lock = Lock()
+    active = 0
+    maximum = 0
+
+    def respond(request):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            if active == 2:
+                two_active.set()
+        release.wait(2)
+        with lock:
+            active -= 1
+        return httpx.Response(
+            200, json={"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]}
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        models = RuntimeModels(
+            config, {"MODEL_URL": "https://models.example.test/v1", "MODEL_KEY": "synthetic"}, http
+        )
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(
+                    models.generate,
+                    "extraction",
+                    system="Extract.",
+                    user="Fact.",
+                    max_output_tokens=1024,
+                    timeout_seconds=3,
+                )
+                for _ in range(4)
+            ]
+            try:
+                assert two_active.wait(1), "model calls did not overlap"
+                assert maximum == 2
+            finally:
+                release.set()
+            assert all(future.result(timeout=2).content == "{}" for future in futures)
+    assert maximum == 2
 
 
 @pytest.mark.parametrize("effort", ["low", "none"])
@@ -128,7 +180,7 @@ def test_runtime_generation_preserves_visible_content_and_does_not_add_reasoning
     ]
     assert payload["model"] == "synthetic-chat"
     assert payload["max_tokens"] == 1024
-    assert requests[0].extensions["timeout"]["read"] == 4.5
+    assert 0 < requests[0].extensions["timeout"]["read"] <= 4.5
     assert requests[0].headers["authorization"] == "Bearer synthetic-secret"
 
 
