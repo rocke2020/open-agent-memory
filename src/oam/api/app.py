@@ -281,6 +281,8 @@ def create_app(
                 "fast_recall": True,
                 "mid_recall": True,
                 "deep_recall": True,
+                "batch_recall": True,
+                "planner": config.models.roles.planner is not None,
                 "profiles": False,
                 "inspector": True,
             },
@@ -488,14 +490,24 @@ def _register_reserved_routes(
         )
 
     @app.post("/v1/users/{user_id}/search-many", tags=["Recall"])
-    async def search_many(user_id: str, body: SearchManyRequest) -> None:
+    async def search_many(request: Request, user_id: str, body: SearchManyRequest) -> dict:
         _validate_limits(body, config)
-        _unavailable()
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).search_many(request.state.actor, user_id, body)
+            )
+        )
 
     @app.post("/v1/users/{user_id}/decompose-and-search", tags=["Recall"])
-    async def decompose_and_search(user_id: str, body: SearchRequest) -> None:
+    async def decompose_and_search(request: Request, user_id: str, body: SearchRequest) -> dict:
         _validate_limits(body, config)
-        _unavailable()
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).decompose_and_search(
+                    request.state.actor, user_id, body
+                )
+            )
+        )
 
     @app.get("/v1/users/{user_id}/profile", tags=["Profiles"])
     async def get_profile(user_id: str) -> None:
