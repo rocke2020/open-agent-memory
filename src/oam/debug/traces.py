@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
+from oam.retrieval.context import render_context
 from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 
@@ -88,19 +88,8 @@ class TraceRepository:
             return {"trace_id": trace_id, "status": "exact", "result": result}
         if mode != "reassemble_recorded":
             raise ValueError("unsupported recorded replay mode")
-        blocks = []
-        for item in result["items"]:
-            citations = json.dumps(item["citations"], ensure_ascii=False, separators=(",", ":"))
-            time_evidence = json.dumps(
-                item["time_evidence"], ensure_ascii=False, separators=(",", ":")
-            )
-            blocks.append(
-                f"[{item['unit_id']}] {item['kind']} {item['origin']}\n{item['text']}\n"
-                f"Citations: {citations}\nTime: {time_evidence}"
-            )
-        context = "\n\n".join(blocks)
-        units = sum(estimate_units(block) for block in blocks) + max(0, len(blocks) - 1) * 2
-        tokens = estimated_tokens(units)
+        context = render_context(result["items"])
+        tokens = estimated_tokens(estimate_units(context))
         exact = (
             context == result["context"]
             and tokens == result["context_tokens"]

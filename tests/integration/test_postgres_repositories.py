@@ -45,7 +45,9 @@ def database():
         )
         principal = AuthenticatedPrincipal("key", tenant, "writer", "writer", None)
         authority = AuthorizedUser.from_database_grant(
-            principal, user_id="scope", capabilities={"memory:append", "memory:read"}
+            principal,
+            user_id="scope",
+            capabilities={"memory:append", "memory:read", "resource:write"},
         )
         yield connection, authority
 
@@ -159,7 +161,7 @@ def test_overlapping_identical_accepts_reuse_one_receipt(database):
     tenant = f"race-{uuid4().hex}"
     principal = AuthenticatedPrincipal("key", tenant, "writer", "writer", None)
     authority = AuthorizedUser.from_database_grant(
-        principal, user_id="scope", capabilities={"memory:append"}
+        principal, user_id="scope", capabilities={"memory:append", "resource:write"}
     )
     with psycopg.connect(dsn) as setup:
         setup.execute("INSERT INTO tenants (tenant_id, state) VALUES (%s, 'active')", (tenant,))

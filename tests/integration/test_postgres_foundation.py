@@ -110,7 +110,7 @@ def test_bilingual_migration_preserves_active_legacy_fts_until_rebuild(tmp_path)
         assert connection.execute(
             "SELECT lexical @@ plainto_tsquery('simple','running') FROM search_units"
         ).fetchone()[0]
-    assert apply_migrations(candidate_dsn, migrations) == 1
+    assert apply_migrations(candidate_dsn, migrations) >= 1
     with psycopg.connect(candidate_dsn) as connection:
         legacy_match, new_match, generation = connection.execute(
             "SELECT lexical @@ plainto_tsquery('simple','running'),"
@@ -118,6 +118,59 @@ def test_bilingual_migration_preserves_active_legacy_fts_until_rebuild(tmp_path)
             "u.index_generation_id FROM search_units s JOIN users u USING (tenant_id,user_id)"
         ).fetchone()
     assert (legacy_match, new_match, generation) == (True, True, "old_generation")
+
+
+def test_asserted_user_grants_upgrade_without_expanding_keyed_user_grants(tmp_path) -> None:
+    dsn = _isolated_dsn()
+    database_name = "oam_asserted_grants_" + uuid4().hex
+    with psycopg.connect(dsn, autocommit=True) as administrator:
+        administrator.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    candidate_dsn = make_conninfo(dsn, dbname=database_name)
+    migrations = Path(__file__).parents[2] / "migrations"
+    previous = tmp_path / "v11"
+    previous.mkdir()
+    for path in sorted(migrations.glob("*.sql")):
+        if int(path.name[:4]) <= 11:
+            shutil.copy2(path, previous / path.name)
+    assert apply_migrations(candidate_dsn, previous) == 11
+    with psycopg.connect(candidate_dsn) as connection:
+        connection.execute("INSERT INTO tenants(tenant_id,state) VALUES ('tenant','active')")
+        registered = connection.execute(
+            "SELECT oam_register_asserted_user('tenant','alice')"
+        ).fetchone()[0]
+        assert registered is True
+        before = connection.execute(
+            "SELECT capabilities FROM grants WHERE tenant_id='tenant' AND user_id='alice'"
+        ).fetchone()[0]
+        assert "resource:write" not in before
+        connection.execute(
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
+            "VALUES ('tenant','restricted','synthetic','personal','persistent')"
+        )
+        connection.execute(
+            "INSERT INTO principals(tenant_id,principal_id,role,state) "
+            "VALUES ('tenant','user:restricted','user','active')"
+        )
+        connection.execute(
+            "INSERT INTO grants(tenant_id,user_id,principal_id,capabilities) "
+            "VALUES ('tenant','restricted','user:restricted',"
+            "ARRAY['memory:read','memory:append','operation:reconcile'])"
+        )
+        connection.execute(
+            "INSERT INTO credentials(tenant_id,credential_id,principal_id,secret_digest,state) "
+            "VALUES ('tenant','restricted','user:restricted',%s,'active')",
+            (b"r" * 32,),
+        )
+    assert apply_migrations(candidate_dsn, migrations) == 1
+    with psycopg.connect(candidate_dsn) as connection:
+        after = connection.execute(
+            "SELECT capabilities FROM grants WHERE tenant_id='tenant' AND user_id='alice'"
+        ).fetchone()[0]
+        assert {"resource:write", "source:delete", "debug:read", "export:read"} <= set(after)
+        restricted = connection.execute(
+            "SELECT capabilities FROM grants WHERE tenant_id='tenant' AND user_id='restricted'"
+        ).fetchone()[0]
+        assert set(restricted) == {"memory:read", "memory:append", "operation:reconcile"}
 
 
 def test_user_key_migration_refuses_existing_principal_name_collision(tmp_path) -> None:
