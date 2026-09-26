@@ -117,6 +117,27 @@ def test_bilingual_fts_keeps_partial_candidates_and_ranks_primary_and_modifiers(
     assert [row["unit_id"] for row in repository.lexical("apples orchard", 3)] == ["c_english"]
 
 
+def add_user_passage(connection, authority, node_id, text, mentioned_at):
+    add_fact(connection, authority, node_id, text)
+    connection.execute(
+        "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
+        "source_version,evidence_id,passage_id,generation_id,content_text,locator,"
+        "embedding,lexical_text,lexical_english,lexical_simple,mentioned_at) "
+        "SELECT tenant_id,user_id,unit_id || '_passage','passage',origin,source_id,"
+        "source_version,evidence_id,%s,generation_id,content_text,%s,embedding,"
+        "lexical_text,lexical_english,lexical_simple,%s FROM search_units "
+        "WHERE tenant_id=%s AND user_id=%s AND unit_id=%s",
+        (
+            node_id,
+            Jsonb({"role": "user", "source_id": node_id}),
+            mentioned_at,
+            authority.tenant_id,
+            authority.user_id,
+            node_id,
+        ),
+    )
+
+
 def test_direct_retrieval_filters_ineligible_rows_before_its_limit(recall_database):
     from oam.retrieval.repository import RecallRepository
 
@@ -137,6 +158,71 @@ def test_direct_retrieval_filters_ineligible_rows_before_its_limit(recall_databa
     assert hydrated[0]["citations"][0]["source_id"] == "b_visible"
 
 
+def test_lexical_recall_falls_back_for_conversational_recommendation(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "old_book", "Recommend a book to read.")
+    add_fact(
+        connection,
+        authority,
+        "recent_special",
+        "Recommend Netflix stand-up comedy specials.",
+    )
+    connection.execute(
+        "UPDATE search_units SET mentioned_at='2023-05-20T00:00:00Z' WHERE unit_id='old_book'"
+    )
+    connection.execute(
+        "UPDATE search_units SET mentioned_at='2023-05-29T00:00:00Z' WHERE unit_id='recent_special'"
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert {
+        row["unit_id"]
+        for row in repository.lexical(
+            "Can you recommend a show or movie for me to watch tonight?", 2
+        )
+    } == {"old_book", "recent_special"}
+
+
+def test_imperative_show_does_not_promote_movie_preferences(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_user_passage(
+        connection,
+        authority,
+        "old_movie",
+        "I prefer Netflix comedy specials on my laptop.",
+        "2023-05-20T00:00:00Z",
+    )
+    add_user_passage(
+        connection,
+        authority,
+        "recent_laptop",
+        "I want a laptop with 16 GB of RAM.",
+        "2023-05-30T00:00:00Z",
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert (
+        repository.lexical("Show me your recommendations for a laptop.", 1)[0]["unit_id"]
+        == "recent_laptop_passage"
+    )
+    assert (
+        repository.lexical("Recommend a laptop. Show me more.", 1)[0]["unit_id"]
+        == "recent_laptop_passage"
+    )
+    assert (
+        repository.lexical("Recommend a laptop and show me more.", 1)[0]["unit_id"]
+        == "recent_laptop_passage"
+    )
+
+
 def test_literal_identifier_does_not_match_a_longer_identifier(recall_database):
     from oam.retrieval.repository import RecallRepository
 
@@ -149,6 +235,138 @@ def test_literal_identifier_does_not_match_a_longer_identifier(recall_database):
 
     assert repository.lexical("LAB-204", 10) == []
     assert [row["unit_id"] for row in repository.anchors("LAB-204", 10)] == ["exact"]
+    assert "longer" not in {row["unit_id"] for row in repository.lexical("LAB-204", 10)}
+
+
+def test_mixed_identifier_query_ranks_remaining_words_before_literal_cap(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "a_unrelated", "LAB-204 catering is ready.")
+    add_fact(connection, authority, "z_target", "LAB-204 deployment status is green.")
+    add_fact(connection, authority, "near_identifier", "LAB-2045 deployment status is green.")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert [row["unit_id"] for row in repository.anchors("LAB-204 deployment status", 1)] == [
+        "z_target"
+    ]
+
+
+def test_function_word_only_query_keeps_strict_lexical_match(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "band", "The Who will perform.")
+    add_fact(connection, authority, "the_only", "The rehearsal starts now.")
+    add_fact(connection, authority, "who_only", "Who will perform next?")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert [row["unit_id"] for row in repository.lexical("The Who", 3)] == ["band"]
+
+
+@pytest.mark.parametrize(
+    ("query", "target", "other"),
+    [
+        ("LAB-204 apples", "LAB-204 apple tree", "LAB-204 orchard"),
+        ("LAB-204 我不喜欢苹果", "LAB-204 我不喜欢苹果", "LAB-204 我喜欢苹果"),
+    ],
+)
+def test_anchor_remainder_preserves_bilingual_ranking(recall_database, query, target, other):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "a_other", other)
+    add_fact(connection, authority, "z_target", target)
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert repository.lexical(query, 1) == []
+    assert [row["unit_id"] for row in repository.anchors(query, 1)] == ["z_target"]
+
+
+def test_common_query_term_cannot_exhaust_partial_match_cap(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "a_target", "Zephyr Zephyr initiative.")
+    add_fact(connection, authority, "b_other", "Outcome of another effort.")
+    for index in range(8):
+        add_fact(connection, authority, f"filler_{index}", "Good good good good good.")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert [row["unit_id"] for row in repository.lexical("Zephyr good outcome", 1)] == ["a_target"]
+
+
+def test_common_term_remains_a_bounded_candidate_source(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "only_first", "Orchid project update.")
+    for index in range(7):
+        add_fact(connection, authority, f"first_{index}", "Orchid initiative.")
+    add_fact(connection, authority, "second", "Quality checks passed.")
+    add_fact(connection, authority, "third", "Status was reported.")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert "only_first" in {
+        row["unit_id"] for row in repository.lexical("Orchid quality status", 10)
+    }
+
+
+def test_quoted_phrase_does_not_admit_separated_words_through_fts(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "exact", "The morning shift starts at eight.")
+    add_fact(connection, authority, "separated", "Morning planning follows the night shift.")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert [row["unit_id"] for row in repository.anchors('"morning shift"', 10)] == ["exact"]
+    assert "separated" not in {row["unit_id"] for row in repository.lexical('"morning shift"', 10)}
+
+
+def test_quoted_phrase_ranks_remaining_words_before_literal_cap(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "a_unrelated", "The morning shift coffee rota changed.")
+    add_fact(connection, authority, "z_target", "The morning shift staffing is short.")
+    add_fact(
+        connection,
+        authority,
+        "separated",
+        "Morning planning follows the night shift staffing review.",
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert [row["unit_id"] for row in repository.anchors('"morning shift" staffing', 1)] == [
+        "z_target"
+    ]
+
+
+def test_natural_hyphenated_query_keeps_partial_fts(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "balance", "I seek work and life balance.")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert [row["unit_id"] for row in repository.lexical("work-life balance", 10)] == ["balance"]
 
 
 def test_underscore_identifier_uses_exact_anchor_instead_of_partial_fts(recall_database):

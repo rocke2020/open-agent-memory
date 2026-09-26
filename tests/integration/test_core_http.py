@@ -1006,10 +1006,11 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
         assert recalled.json()["diagnostics"]["readiness"] == (
             "partial" if invalid_fact else "ready"
         )
-        assert any(
-            item["kind"] == "fact" and "prefers" in item["text"]
-            for item in recalled.json()["items"]
-        )
+        assert {(item["kind"], item["text"]) for item in recalled.json()["items"]} == {
+            ("passage", "Lin prefers short explanations."),
+            ("passage", "Lin prefers updates in the morning."),
+        }
+        assert all(item["citations"][0]["role"] == "user" for item in recalled.json()["items"])
         assert not any(item["kind"] == "insight" for item in recalled.json()["items"])
         assert "glucose" not in recalled.json()["context"]
         assert recalled.json()["context_tokens"] > 0

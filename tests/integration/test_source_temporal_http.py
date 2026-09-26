@@ -232,9 +232,19 @@ async def test_caller_annotation_rejects_conflicting_generated_time(
     wrong = await client.post("/v1/recall", json=timed_query(2024))
     correct = await client.post("/v1/recall", json=timed_query(2025))
 
-    assert {item["kind"] for item in wrong.json()["items"]} == {"passage", "fact"}
+    assert wrong.status_code == correct.status_code == 200
+    assert [item["kind"] for item in wrong.json()["items"]] == ["passage"]
+    passage = wrong.json()["items"][0]
+    assert passage["text"] == "Apple harvest was in 2025."
+    event = next(value for value in passage["time_evidence"] if value["role"] == "event")
+    assert event["detail"]["origin"] == "caller"
+    assert event["detail"]["start"] == "2025-01-01T00:00:00Z"
+    assert event["detail"]["end"] == "2026-01-01T00:00:00Z"
     assert all(not item["paths"] for item in wrong.json()["items"])
     assert {item["kind"] for item in correct.json()["items"]} == {"passage", "fact"}
+    assert all(
+        any(path["arm"] == "temporal" for path in item["paths"]) for item in correct.json()["items"]
+    )
     operation = await client.get(f"/v1/users/scope/operations/{receipt.json()['operation_id']}")
     expected_coverage = "partial" if generated_year == 2024 else "complete"
     assert operation.json()["stage_state"]["extraction_coverage"] == expected_coverage

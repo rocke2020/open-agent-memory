@@ -53,14 +53,13 @@ def ordinary_graph_activation(
     entity_matches: Mapping[str, Iterable[str]],
     semantic_edges: Sequence[GraphEdge],
     causal_edges: Sequence[GraphEdge],
-    entity_score_scale: float,
 ) -> tuple[RankedCandidate, ...]:
     """Score already bounded eligible joins from the original seed set."""
     seeds = set(seed_ids)
-    entity = {
-        node_id: math.tanh(len(set(entities)) * entity_score_scale)
-        for node_id, entities in entity_matches.items()
-    }
+    entity = {}
+    for node_id, entities in entity_matches.items():
+        count = len(set(entities))
+        entity[node_id] = (count * count) / (count * count + 1)
     semantic: dict[str, float] = {}
     for edge in semantic_edges:
         for source, target in (
