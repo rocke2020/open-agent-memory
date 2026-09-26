@@ -92,6 +92,26 @@ def test_html_parser_returns_stable_ordered_block_locators_and_plain_text() -> N
     assert "ignore" not in parsed.text
 
 
+def test_html_parser_preserves_available_fields_for_passage_discovery() -> None:
+    original = OriginalDescriptor.from_bytes(
+        ResourceMediaType.HTML,
+        b"<html><head><title>Allergy report</title></head><body><h1>Results</h1>"
+        b"<p>Peanut allergy absent</p><table><caption>Allergens</caption>"
+        b"<tr><td>Peanut</td><td>none</td></tr></table></body></html>",
+    )
+
+    blocks = parse_html(original, _limits()).blocks
+
+    assert blocks[1].text == "Peanut allergy absent"
+    assert (blocks[1].title, blocks[1].heading, blocks[1].caption) == (
+        "Allergy report",
+        "Results",
+        None,
+    )
+    assert blocks[3].text == "Peanut none"
+    assert blocks[3].caption == "Allergens"
+
+
 def test_html_parser_rejects_oversize_bytes_before_parsing() -> None:
     original = OriginalDescriptor.from_bytes(ResourceMediaType.HTML, b"<" * 11)
 

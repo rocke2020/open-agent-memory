@@ -10,7 +10,7 @@ from oam.resources.limits import enforce_byte_limit
 from oam.resources.originals import OriginalDescriptor
 from oam.resources.types import HtmlParseResult, ParsedBlock, ResourceParseError
 
-_BLOCK_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "tr")
+_BLOCK_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "caption", "tr")
 
 
 def parse_html(original: OriginalDescriptor, limits: ResourceConfig) -> HtmlParseResult:
@@ -20,23 +20,37 @@ def parse_html(original: OriginalDescriptor, limits: ResourceConfig) -> HtmlPars
     soup = BeautifulSoup(original.content, "html.parser")
     for hidden in soup.find_all(("script", "style", "noscript", "template")):
         hidden.decompose()
-    text_blocks = []
+    title = _normalize_text(soup.title.get_text(" ", strip=True)) if soup.title else None
+    heading = None
+    blocks = []
     for element in soup.find_all(_BLOCK_TAGS):
         text = _normalize_text(element.get_text(" ", strip=True))
         if text:
-            text_blocks.append(text)
-    if not text_blocks:
+            if element.name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                heading = text
+            table = element.find_parent("table")
+            caption_element = table.find("caption") if table else None
+            caption = (
+                _normalize_text(caption_element.get_text(" ", strip=True))
+                if caption_element
+                else None
+            )
+            blocks.append(
+                ParsedBlock(
+                    locator=f"html:block:{len(blocks) + 1:04d}",
+                    text=text,
+                    title=title,
+                    heading=heading,
+                    caption=caption,
+                )
+            )
+    if not blocks:
         fallback = _normalize_text(soup.get_text(" ", strip=True))
         if fallback:
-            text_blocks.append(fallback)
-    if not text_blocks:
+            blocks.append(ParsedBlock(locator="html:block:0001", text=fallback, title=title))
+    if not blocks:
         raise ResourceParseError("HTML Resource contains no extractable text")
-    return HtmlParseResult(
-        blocks=tuple(
-            ParsedBlock(locator=f"html:block:{index:04d}", text=text)
-            for index, text in enumerate(text_blocks, start=1)
-        )
-    )
+    return HtmlParseResult(blocks=tuple(blocks))
 
 
 def _normalize_text(value: str) -> str:

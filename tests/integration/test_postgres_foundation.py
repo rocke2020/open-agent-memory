@@ -76,6 +76,50 @@ def test_current_content_schema_uses_tenant_and_user_identity() -> None:
     ]
 
 
+def test_bilingual_migration_preserves_active_legacy_fts_until_rebuild(tmp_path) -> None:
+    dsn = _isolated_dsn()
+    database_name = "oam_fts_upgrade_" + uuid4().hex
+    with psycopg.connect(dsn, autocommit=True) as administrator:
+        administrator.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    candidate_dsn = make_conninfo(dsn, dbname=database_name)
+    migrations = Path(__file__).parents[2] / "migrations"
+    previous = tmp_path / "v7"
+    previous.mkdir()
+    for path in sorted(migrations.glob("*.sql")):
+        if int(path.name[:4]) <= 7:
+            shutil.copy2(path, previous / path.name)
+    assert apply_migrations(candidate_dsn, previous) == 7
+    with psycopg.connect(candidate_dsn) as connection:
+        connection.execute("INSERT INTO tenants(tenant_id,state) VALUES ('t','active')")
+        connection.execute(
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime,index_generation_id) "
+            "VALUES ('t','u','synthetic','test','persistent','old_generation')"
+        )
+        connection.execute(
+            "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,assertion_kind,"
+            "generation_id,visible_from) "
+            "VALUES ('t','u','fact','running','stated','old_generation',1)"
+        )
+        connection.execute(
+            "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,memory_id,"
+            "generation_id,content_text,locator,embedding,lexical_text) "
+            "VALUES ('t','u','fact','fact','memory','fact','old_generation','running','{}',"
+            "%s::vector,'running')",
+            (str([1.0] + [0.0] * 1023),),
+        )
+        assert connection.execute(
+            "SELECT lexical @@ plainto_tsquery('simple','running') FROM search_units"
+        ).fetchone()[0]
+    assert apply_migrations(candidate_dsn, migrations) == 1
+    with psycopg.connect(candidate_dsn) as connection:
+        legacy_match, new_match, generation = connection.execute(
+            "SELECT lexical @@ plainto_tsquery('simple','running'),"
+            "lexical_bilingual @@ plainto_tsquery('english','running'),"
+            "u.index_generation_id FROM search_units s JOIN users u USING (tenant_id,user_id)"
+        ).fetchone()
+    assert (legacy_match, new_match, generation) == (True, True, "old_generation")
+
+
 def test_user_key_migration_refuses_existing_principal_name_collision(tmp_path) -> None:
     dsn = _isolated_dsn()
     database_name = "oam_auth_collision_" + uuid4().hex

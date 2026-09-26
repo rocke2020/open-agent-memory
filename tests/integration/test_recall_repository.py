@@ -14,6 +14,7 @@ from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.contracts.search import SearchRequest
 from oam.models.runtime import EmbeddingResult, Usage
+from oam.retrieval.fts import index_streams
 
 pytestmark = pytest.mark.integration
 
@@ -75,10 +76,12 @@ def add_fact(connection, authority, node_id, text, *, eligible=True, direction=1
     )
     dimensions = connection.execute("SELECT embedding_dimensions FROM index_settings").fetchone()[0]
     vector = str([direction, math.sqrt(1 - direction * direction)] + [0.0] * (dimensions - 2))
+    streams = index_streams(text)
     connection.execute(
         "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,source_version,"
-        "evidence_id,memory_id,generation_id,content_text,locator,embedding,lexical_text) "
-        "VALUES (%s,%s,%s,'fact','memory',%s,1,%s,%s,'generation',%s,%s,%s::vector,%s)",
+        "evidence_id,memory_id,generation_id,content_text,locator,embedding,lexical_text,"
+        "lexical_english,lexical_simple) "
+        "VALUES (%s,%s,%s,'fact','memory',%s,1,%s,%s,'generation',%s,%s,%s::vector,%s,%s,%s)",
         (
             tenant,
             scope,
@@ -90,8 +93,28 @@ def add_fact(connection, authority, node_id, text, *, eligible=True, direction=1
             Jsonb({"source_id": node_id, "start": 0, "end": len(text)}),
             vector,
             text.lower(),
+            streams.english,
+            streams.simple,
         ),
     )
+
+
+def test_bilingual_fts_keeps_partial_candidates_and_ranks_primary_and_modifiers(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "a_partial", "我喜欢苹果")
+    add_fact(connection, authority, "b_full", "我不喜欢苹果")
+    add_fact(connection, authority, "c_english", "She planted apple trees")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert [row["unit_id"] for row in repository.lexical("我不喜欢苹果", 3)][:2] == [
+        "b_full",
+        "a_partial",
+    ]
+    assert [row["unit_id"] for row in repository.lexical("apples orchard", 3)] == ["c_english"]
 
 
 def test_direct_retrieval_filters_ineligible_rows_before_its_limit(recall_database):
@@ -124,7 +147,23 @@ def test_literal_identifier_does_not_match_a_longer_identifier(recall_database):
     connection.execute("SET LOCAL ROLE oam_api")
     repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
 
+    assert repository.lexical("LAB-204", 10) == []
     assert [row["unit_id"] for row in repository.anchors("LAB-204", 10)] == ["exact"]
+
+
+def test_underscore_identifier_uses_exact_anchor_instead_of_partial_fts(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "exact", "The patient_42 record is current.")
+    add_fact(connection, authority, "split", "The patient 42 record is current.")
+    add_fact(connection, authority, "longer", "The patient_420 record is current.")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert repository.lexical("patient_42", 10) == []
+    assert [row["unit_id"] for row in repository.anchors("patient_42", 10)] == ["exact"]
 
 
 def test_fast_service_returns_cited_context_with_estimated_budget(recall_database):

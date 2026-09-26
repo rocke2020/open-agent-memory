@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -17,6 +18,7 @@ from pydantic import (
     PositiveInt,
     ValidationError,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -92,6 +94,7 @@ class SearchConfig(FrozenModel):
     max_queries: PositiveInt
     query_concurrency: PositiveInt
     rrf_k: PositiveInt
+    fts_rank_weights: tuple[float, float, float, float]
     mid_arm_weights: MidArmWeights
     graph_seed_min_similarity: float = Field(ge=0, le=1)
     graph_seed_max: PositiveInt
@@ -113,6 +116,13 @@ class SearchConfig(FrozenModel):
     fast: SearchTier
     mid: SearchTier
     deep: SearchTier
+
+    @field_validator("fts_rank_weights")
+    @classmethod
+    def validate_fts_rank_weights(cls, weights: tuple[float, float, float, float]):
+        if any(not math.isfinite(weight) or not 0 <= weight <= 1 for weight in weights):
+            raise ValueError("FTS rank weights must be finite values between 0 and 1")
+        return weights
 
 
 class RecallConfig(FrozenModel):

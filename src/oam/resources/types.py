@@ -15,6 +15,9 @@ class ResourceLimitError(ResourceParseError):
 class ParsedBlock:
     locator: str
     text: str
+    title: str | None = None
+    heading: str | None = None
+    caption: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

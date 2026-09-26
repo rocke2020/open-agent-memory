@@ -563,15 +563,27 @@ class IndexStore:
         source_created_at=None,
         source_updated_at=None,
         ordinal=0,
+        title=None,
+        heading=None,
+        caption=None,
     ):
-        from oam.retrieval.repository import lexicalize
+        from oam.retrieval.fts import index_streams
+
+        streams = index_streams(text)
+        caption_streams = index_streams(caption or "")
+        heading_streams = index_streams(heading or "")
+        title_streams = index_streams(title or "")
 
         connection.execute(
             "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
             "source_version,evidence_id,passage_id,memory_id,insight_id,insight_revision,"
-            "generation_id,content_text,locator,embedding,lexical_text,mentioned_at,"
+            "generation_id,content_text,locator,embedding,lexical_text,lexical_english,"
+            "lexical_simple,lexical_caption_english,lexical_caption_simple,"
+            "lexical_heading_english,lexical_heading_simple,lexical_title_english,"
+            "lexical_title_simple,mentioned_at,"
             "source_created_at,source_updated_at,ordinal) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s,%s,%s,%s,%s) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s,%s,%s,"
+            "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT DO NOTHING",
             (
                 *self.key,
@@ -589,7 +601,15 @@ class IndexStore:
                 text,
                 Jsonb(locator),
                 json.dumps(vector),
-                lexicalize(text),
+                text,
+                streams.english,
+                streams.simple,
+                caption_streams.english,
+                caption_streams.simple,
+                heading_streams.english,
+                heading_streams.simple,
+                title_streams.english,
+                title_streams.simple,
                 mentioned_at,
                 source_created_at,
                 source_updated_at,
