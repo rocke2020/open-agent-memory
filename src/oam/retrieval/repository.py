@@ -13,9 +13,15 @@ from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
-from oam.contracts.search import SearchRequest
+from oam.contracts.search import RecallLevel, SearchRequest
 from oam.db.context import bind_user
-from oam.db.eligibility import ELIGIBLE_SUPPORT, ELIGIBLE_UNITS
+from oam.db.eligibility import (
+    ELIGIBLE_PASSAGE_UNITS,
+    ELIGIBLE_SUPPORT,
+    ELIGIBLE_UNITS,
+    ELIGIBLE_UNITS_CANDIDATE,
+    ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS,
+)
 from oam.retrieval.algorithms import (
     GraphEdge,
     TemporalEdge,
@@ -26,6 +32,7 @@ from oam.retrieval.algorithms import (
 from oam.retrieval.fts import QueryTerms, query_terms
 
 _ANCHOR = re.compile(r'"([^"\n]+)"|\b([A-Za-z][A-Za-z0-9]*-\d+[A-Za-z0-9-]*|[\w]+_[\w-]+)\b')
+EXACT_USER_ORDER_MIN_CANDIDATES = 64
 _QUERY_FUNCTION_WORDS = frozenset(
     {
         "a",
@@ -120,8 +127,16 @@ class RecallRepository:
         self.time_parameters = {}
         bind_user(connection.cursor(), authority)
         connection.execute("SELECT set_config('jit','off',true)")
+        has_insights = connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM insights WHERE tenant_id=%s AND user_id=%s)",
+            (authority.tenant_id, authority.user_id),
+        ).fetchone()[0]
+        self.has_insights = has_insights
+        self.candidate_units_sql = (
+            ELIGIBLE_UNITS_CANDIDATE if has_insights else ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
+        )
 
-    def _eligible(self, *, temporal: bool = False) -> str:
+    def _eligible(self, *, temporal: bool = False, candidate_facts: bool = False) -> str:
         predicate = "true"
         request = self.request
         if temporal and request is not None and request.time_window:
@@ -159,7 +174,8 @@ class RecallRepository:
                 f"(isp.tenant_id,isp.user_id,isp.memory_id) AND {direct('child')}))))"
             )
         return (
-            f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}), "
+            f"WITH eligible AS NOT MATERIALIZED "
+            f"({self.candidate_units_sql if candidate_facts else ELIGIBLE_UNITS}), "
             f"filtered AS NOT MATERIALIZED (SELECT u.* FROM eligible u WHERE {predicate}) "
         )
 
@@ -239,7 +255,7 @@ class RecallRepository:
             if not terms.candidates:
                 return []
             return self._execute(
-                self._eligible()
+                self._eligible(candidate_facts=True)
                 + "SELECT u.unit_id,ts_rank_cd(u.lexical,plainto_tsquery('simple',%(query)s)) "
                 "AS score FROM filtered u WHERE "
                 "u.lexical @@ plainto_tsquery('simple',%(query)s) "
@@ -259,7 +275,7 @@ class RecallRepository:
             "AND u.user_id=current_setting('oam.user_id',true) "
             "AND u.lexical_bilingual @@ q.candidate "
             "AND EXISTS (SELECT 1 FROM ("
-            + ELIGIBLE_UNITS
+            + self.candidate_units_sql
             + ") eligible WHERE (eligible.tenant_id,eligible.user_id,eligible.unit_id)="
             "(u.tenant_id,u.user_id,u.unit_id))) "
             "SELECT t.term_order,hit.unit_id,hit.mentioned_at,hit.full_match,hit.primary_match "
@@ -341,23 +357,51 @@ class RecallRepository:
             "set_config('hnsw.max_scan_tuples',%s,true)",
             (self.config.search.ann_iterative_scan, str(self.config.search.ann_scan_max_tuples)),
         )
-        # Keep the distance-ordered unit scan outside the support joins. The
-        # unique scalar lookup still applies all eligibility before admission.
-        return self._execute(
-            self._eligible()
-            + "SELECT u.unit_id,u.kind,1-(u.embedding <=> %(vector)s::vector) AS score "
-            "FROM search_units u WHERE u.tenant_id=current_setting('oam.tenant_id',true) "
+        scope = (
+            "u.tenant_id=current_setting('oam.tenant_id',true) "
             "AND u.user_id=current_setting('oam.user_id',true) "
-            "AND (SELECT true FROM filtered f WHERE "
+        )
+        if self.request is not None and (
+            self.request.recall_level != RecallLevel.FAST
+            or limit >= EXACT_USER_ORDER_MIN_CANDIDATES
+        ):
+            # For larger pools, rank this user's vectors before the support
+            # check. The outer limit still admits eligible units only.
+            source = (
+                "(SELECT u.*,u.embedding <=> %(vector)s::vector AS distance "
+                "FROM search_units u WHERE " + scope + "ORDER BY distance OFFSET 0) u "
+            )
+            distance = "u.distance"
+            predicate = ""
+        else:
+            source = "search_units u "
+            distance = "u.embedding <=> %(vector)s::vector"
+            predicate = scope + "AND "
+        return self._execute(
+            self._eligible(candidate_facts=True)
+            + f"SELECT u.unit_id,u.kind,1-({distance}) AS score FROM {source} WHERE "
+            + predicate
+            + "(SELECT true FROM filtered f WHERE "
             "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
-            "ORDER BY u.embedding <=> %(vector)s::vector LIMIT %(limit)s",
+            f"ORDER BY {distance} LIMIT %(limit)s",
             {"vector": json.dumps(tuple(vector)), "limit": limit},
         )
 
     def hydrate(self, unit_ids: Sequence[str]) -> list[dict]:
         rows = self._execute(
-            self._eligible().rstrip() + ", "
-            f"valid_support AS NOT MATERIALIZED ({ELIGIBLE_SUPPORT}) "
+            self._eligible(candidate_facts=True).rstrip() + ", "
+            f"valid_support AS MATERIALIZED (SELECT sp.* FROM ({ELIGIBLE_SUPPORT}) sp "
+            "WHERE sp.memory_id IN ("
+            "SELECT u.memory_id FROM search_units u WHERE "
+            "u.tenant_id=current_setting('oam.tenant_id',true) "
+            "AND u.user_id=current_setting('oam.user_id',true) "
+            "AND u.unit_id=ANY(%(ids)s) AND u.memory_id IS NOT NULL "
+            "UNION SELECT isp.memory_id FROM insight_support isp JOIN search_units u ON "
+            "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision)="
+            "(isp.tenant_id,isp.user_id,isp.insight_id,isp.insight_revision) "
+            "WHERE u.tenant_id=current_setting('oam.tenant_id',true) "
+            "AND u.user_id=current_setting('oam.user_id',true) "
+            "AND u.unit_id=ANY(%(ids)s) AND u.kind='insight')) "
             "SELECT u.unit_id,u.kind,u.origin,u.content_text AS text,u.locator, "
             "u.mentioned_at,u.source_created_at,u.source_updated_at, "
             "(SELECT i.subtype FROM insights i WHERE "
@@ -400,6 +444,19 @@ class RecallRepository:
                     row["time_evidence"].append({"role": role, "at": instant.isoformat()})
         return rows
 
+    def source_passage_locators(self, source_ids: Sequence[str]) -> list[dict]:
+        if not source_ids:
+            return []
+        return self._execute(
+            "WITH filtered AS NOT MATERIALIZED ("
+            + ELIGIBLE_PASSAGE_UNITS
+            + ") SELECT u.unit_id,u.source_id,u.source_version,u.locator "
+            "FROM filtered u WHERE u.kind='passage' "
+            "AND u.source_id=ANY(%(source_ids)s) "
+            "ORDER BY u.source_id,u.source_version,u.ordinal,u.unit_id",
+            {"source_ids": list(source_ids)},
+        )
+
     def ordinary(self, seed_ids: Sequence[str], vector: Sequence[float]):
         config = self.config.search
         parameters = {
@@ -409,20 +466,12 @@ class RecallRepository:
             "per_entity": config.entity_candidates_per_entity,
             "links": config.links_per_seed,
         }
+        eligible = self._eligible(candidate_facts=not self.has_insights)
+        if self.has_insights:
+            eligible = eligible.replace("filtered AS NOT MATERIALIZED", "filtered AS MATERIALIZED")
         prefix = (
-            self._eligible()
-            + ", seeds AS (SELECT * FROM filtered WHERE kind='fact' AND unit_id=ANY(%(seeds)s)) "
-        )
-        entities = self._execute(
-            prefix + "SELECT s.unit_id AS seed_id,e.entity_key,c.unit_id FROM seeds s "
-            "CROSS JOIN LATERAL (SELECT entity_key FROM unit_entities ue WHERE "
-            "(ue.tenant_id,ue.user_id,ue.unit_id)=(s.tenant_id,s.user_id,s.unit_id) "
-            "ORDER BY entity_key LIMIT %(entities)s) e CROSS JOIN LATERAL ("
-            "SELECT u.unit_id FROM filtered u JOIN unit_entities ue "
-            "USING(tenant_id,user_id,unit_id) "
-            "WHERE u.kind='fact' AND ue.entity_key=e.entity_key AND u.unit_id<>s.unit_id "
-            "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id LIMIT %(per_entity)s) c",
-            parameters,
+            eligible + ", seeds AS MATERIALIZED (SELECT * FROM filtered WHERE kind='fact' "
+            "AND unit_id=ANY(%(seeds)s)) "
         )
         directions = []
         for source, target in (("source_id", "target_id"), ("target_id", "source_id")):
@@ -433,31 +482,55 @@ class RecallRepository:
                 f"AND l.kind='semantic' AND u.kind='fact' ORDER BY l.weight DESC,l.{target} "
                 "LIMIT %(links)s)"
             )
-        semantic = self._execute(
-            prefix
-            + "SELECT e.* FROM seeds s CROSS JOIN LATERAL ("
-            + " UNION ALL ".join(directions)
-            + ") e",
-            parameters,
-        )
-        causal = self._execute(
+        graph = self._execute(
             prefix.rstrip() + ", first_edges AS (SELECT s.unit_id AS seed_id,l.* FROM seeds s "
             "CROSS JOIN LATERAL (SELECT l.* FROM unit_links l JOIN filtered u ON "
             "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
             "WHERE (l.tenant_id,l.user_id,l.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
             "AND l.kind='caused_by' AND u.kind='fact' "
-            "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) l) "
-            "SELECT source_id,target_id,weight,ARRAY[source_id,target_id] AS nodes "
-            "FROM first_edges UNION ALL SELECT e.source_id,e.target_id,e.weight,"
+            "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) l), "
+            "seed_entities AS MATERIALIZED (SELECT s.unit_id AS seed_id,e.entity_key FROM seeds s "
+            "CROSS JOIN LATERAL (SELECT entity_key FROM unit_entities ue WHERE "
+            "(ue.tenant_id,ue.user_id,ue.unit_id)=(s.tenant_id,s.user_id,s.unit_id) "
+            "ORDER BY entity_key LIMIT %(entities)s) e), "
+            "entity_candidates AS MATERIALIZED ("
+            "SELECT e.entity_key,c.unit_id,c.distance "
+            "FROM (SELECT DISTINCT entity_key FROM seed_entities) e "
+            "CROSS JOIN LATERAL (SELECT u.unit_id,u.embedding <=> %(vector)s::vector "
+            "AS distance FROM filtered u JOIN unit_entities ue "
+            "USING(tenant_id,user_id,unit_id) WHERE u.kind='fact' "
+            "AND ue.entity_key=e.entity_key "
+            "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id "
+            "LIMIT %(per_entity)s+1) c), "
+            "entity_rows AS (SELECT s.seed_id,s.entity_key,c.unit_id FROM seed_entities s "
+            "CROSS JOIN LATERAL (SELECT unit_id FROM entity_candidates c "
+            "WHERE c.entity_key=s.entity_key AND c.unit_id<>s.seed_id "
+            "ORDER BY c.distance,c.unit_id LIMIT %(per_entity)s) c), "
+            "semantic_rows AS (SELECT e.* FROM seeds s CROSS JOIN LATERAL ("
+            + " UNION ALL ".join(directions)
+            + ") e), "
+            "causal_rows AS (SELECT source_id,target_id,weight,"
+            "ARRAY[source_id,target_id] AS nodes FROM first_edges "
+            "UNION ALL SELECT e.source_id,e.target_id,e.weight,"
             "ARRAY[f.seed_id,e.source_id,e.target_id] "
             "FROM first_edges f CROSS JOIN LATERAL (SELECT l.* FROM unit_links l "
             "JOIN filtered u ON "
             "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
             "WHERE (l.tenant_id,l.user_id,l.source_id)=(f.tenant_id,f.user_id,f.target_id) "
             "AND l.kind='caused_by' AND u.kind='fact' AND l.target_id<>f.seed_id "
-            "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) e",
+            "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) e) "
+            "SELECT 'entity' AS source,seed_id,entity_key,unit_id,NULL::text AS source_id,"
+            "NULL::text AS target_id,NULL::double precision AS weight,NULL::text[] AS nodes "
+            "FROM entity_rows UNION ALL SELECT 'semantic',NULL::text,NULL::text,NULL::text,"
+            "source_id,target_id,weight,NULL::text[] FROM semantic_rows "
+            "UNION ALL SELECT 'causal',NULL::text,NULL::text,NULL::text,"
+            "source_id,target_id,weight,nodes FROM causal_rows "
+            "ORDER BY source,source_id,target_id,seed_id,unit_id",
             parameters,
         )
+        entities = [row for row in graph if row["source"] == "entity"]
+        semantic = [row for row in graph if row["source"] == "semantic"]
+        causal = [row for row in graph if row["source"] == "causal"]
         matches = defaultdict(set)
         paths = defaultdict(list)
         for row in entities:
@@ -696,7 +769,8 @@ class RecallRepository:
             {node for group in paths.values() for path in group for node in path["nodes"]}
         )
         rows = self._execute(
-            self._eligible() + "SELECT unit_id FROM filtered WHERE unit_id=ANY(%(ids)s)",
+            self._eligible(candidate_facts=True)
+            + "SELECT unit_id FROM filtered WHERE unit_id=ANY(%(ids)s)",
             {"ids": node_ids},
         )
         eligible = {row["unit_id"] for row in rows}

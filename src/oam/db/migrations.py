@@ -15,6 +15,12 @@ from oam.config import ConfigurationError, load_config
 from oam.paths import default_config_path, default_migration_directory
 
 _MIGRATION_NAME = re.compile(r"^(?P<version>\d{4})_(?P<name>[a-z0-9][a-z0-9_-]*)\.sql$")
+_LEGACY_ASSERTED_USER_V12_SHA256 = (
+    "faa9644764132e555bfb2af50dd72f59e3ef187b451ebe34e2885bf5ac6bc93f"
+)
+_CANONICAL_ASSERTED_RESOURCE_V12_SHA256 = (
+    "5e80a5aab6f9309f5df201357d30df1a6cd75af0ceda6a5e1f678fcb9bbba31c"
+)
 
 
 class MigrationError(ValueError):
@@ -79,7 +85,26 @@ def apply_migrations(
             recorded = applied.get(migration.version)
             if recorded is not None:
                 if recorded != migration.sha256:
-                    raise MigrationError(f"applied migration {migration.version} checksum changed")
+                    legacy_v12 = (
+                        migration.version == 12
+                        and migration.name == "asserted_resource_grants"
+                        and migration.sha256 == _CANONICAL_ASSERTED_RESOURCE_V12_SHA256
+                        and recorded == _LEGACY_ASSERTED_USER_V12_SHA256
+                        and any(
+                            item.version == 13
+                            and item.name == "asserted_user_resource_grants"
+                            and item.sha256 == _LEGACY_ASSERTED_USER_V12_SHA256
+                            for item in planned
+                        )
+                        and any(
+                            item.version == 14 and item.name == "asserted_user_function_permissions"
+                            for item in planned
+                        )
+                    )
+                    if not legacy_v12:
+                        raise MigrationError(
+                            f"applied migration {migration.version} checksum changed"
+                        )
                 continue
             cursor.execute(
                 migration.path.read_text(encoding="utf-8").replace(

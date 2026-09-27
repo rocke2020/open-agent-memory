@@ -186,7 +186,7 @@ def build_links(
     }
     with connection.cursor() as cursor:
         bind_user(cursor, authority)
-        cursor.execute("SET LOCAL enable_nestloop = off")
+        cursor.execute("SET LOCAL jit = off")
         cursor.execute(_SEMANTIC, parameters)
         result["semantic_links"] = cursor.fetchone()[0]
         temporal_count = 0

@@ -9,7 +9,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from oam.auth.credentials import digest_secret
-from oam.db.migrations import apply_migrations
+from oam.db.migrations import MigrationError, apply_migrations
 
 pytestmark = pytest.mark.integration
 
@@ -161,7 +161,7 @@ def test_asserted_user_grants_upgrade_without_expanding_keyed_user_grants(tmp_pa
             "VALUES ('tenant','restricted','user:restricted',%s,'active')",
             (b"r" * 32,),
         )
-    assert apply_migrations(candidate_dsn, migrations) == 1
+    assert apply_migrations(candidate_dsn, migrations) == 3
     with psycopg.connect(candidate_dsn) as connection:
         after = connection.execute(
             "SELECT capabilities FROM grants WHERE tenant_id='tenant' AND user_id='alice'"
@@ -171,6 +171,52 @@ def test_asserted_user_grants_upgrade_without_expanding_keyed_user_grants(tmp_pa
             "SELECT capabilities FROM grants WHERE tenant_id='tenant' AND user_id='restricted'"
         ).fetchone()[0]
         assert set(restricted) == {"memory:read", "memory:append", "operation:reconcile"}
+
+
+def test_legacy_asserted_v12_upgrades_and_restricts_function(tmp_path) -> None:
+    dsn = _isolated_dsn()
+    database_name = "oam_asserted_legacy_" + uuid4().hex
+    with psycopg.connect(dsn, autocommit=True) as administrator:
+        administrator.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    candidate_dsn = make_conninfo(dsn, dbname=database_name)
+    migrations = Path(__file__).parents[2] / "migrations"
+    previous = tmp_path / "legacy_v12"
+    previous.mkdir()
+    for path in sorted(migrations.glob("*.sql")):
+        if int(path.name[:4]) <= 11:
+            shutil.copy2(path, previous / path.name)
+    shutil.copy2(
+        migrations / "0013_asserted_user_resource_grants.sql",
+        previous / "0012_asserted_user_resource_grants.sql",
+    )
+    assert apply_migrations(candidate_dsn, previous) == 12
+
+    assert apply_migrations(candidate_dsn, migrations) == 2
+    assert apply_migrations(candidate_dsn, migrations) == 0
+    with psycopg.connect(candidate_dsn) as connection:
+        versions = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert versions == [(version,) for version in range(1, 15)]
+        owner, api_can_execute, public_can_execute = connection.execute(
+            "SELECT pg_get_userbyid(p.proowner),"
+            "has_function_privilege('oam_api',p.oid,'EXECUTE'),"
+            "EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,"
+            "acldefault('f',p.proowner))) acl WHERE acl.grantee=0 "
+            "AND acl.privilege_type='EXECUTE') "
+            "FROM pg_proc p WHERE p.oid="
+            "'public.oam_register_asserted_user(text,text)'::regprocedure"
+        ).fetchone()
+        assert (owner, api_can_execute, public_can_execute) == ("oam_auth_owner", True, False)
+
+    tampered = tmp_path / "tampered_v12"
+    tampered.mkdir()
+    for path in migrations.glob("*.sql"):
+        shutil.copy2(path, tampered / path.name)
+    canonical_v12 = tampered / "0012_asserted_resource_grants.sql"
+    canonical_v12.write_text(canonical_v12.read_text() + "-- checksum drift\n")
+    with pytest.raises(MigrationError, match="applied migration 12 checksum changed"):
+        apply_migrations(candidate_dsn, tampered)
 
 
 def test_user_key_migration_refuses_existing_principal_name_collision(tmp_path) -> None:

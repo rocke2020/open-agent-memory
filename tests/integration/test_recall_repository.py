@@ -160,6 +160,40 @@ def test_direct_retrieval_filters_ineligible_rows_before_its_limit(recall_databa
     assert hydrated[0]["citations"][0]["source_id"] == "b_visible"
 
 
+def test_candidate_eligibility_matches_full_source_and_support_policy(recall_database):
+    from oam.db.eligibility import (
+        ELIGIBLE_UNITS_CANDIDATE,
+        ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS,
+    )
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "visible", "Visible source")
+    add_fact(connection, authority, "hidden", "Hidden source", eligible=False)
+    add_fact(connection, authority, "mixed", "One active and one inactive support")
+    add_fact(connection, authority, "superseded", "Superseded source")
+    connection.execute(
+        "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
+        "support_kind,span) VALUES (%s,%s,'mixed','hidden','hidden','quote',%s)",
+        (authority.tenant_id, authority.user_id, Jsonb({"start": 0, "end": 6})),
+    )
+    connection.execute(
+        "UPDATE source_versions SET status='superseded' WHERE tenant_id=%s AND user_id=%s "
+        "AND source_id='superseded'",
+        (authority.tenant_id, authority.user_id),
+    )
+    connection.execute("SET LOCAL ROLE oam_api")
+    bind_user(connection.cursor(), authority)
+    full = connection.execute("SELECT unit_id FROM (" + ELIGIBLE_UNITS + ") u").fetchall()
+    candidate = connection.execute(
+        "SELECT unit_id FROM (" + ELIGIBLE_UNITS_CANDIDATE + ") u"
+    ).fetchall()
+    no_insights = connection.execute(
+        "SELECT unit_id FROM (" + ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS + ") u"
+    ).fetchall()
+
+    assert full == candidate == no_insights == [("visible",)]
+
+
 def test_lexical_recall_falls_back_for_conversational_recommendation(recall_database):
     from oam.retrieval.repository import RecallRepository
 
@@ -1051,9 +1085,18 @@ def test_graph_sql_filters_hidden_neighbors_before_each_direction_cap(recall_dat
     )
     repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
     vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
+    statements = []
+    execute = repository._execute
+
+    def record_statement(sql, parameters=()):
+        statements.append(sql)
+        return execute(sql, parameters)
+
+    repository._execute = record_statement
 
     ranks, paths = repository.ordinary(("seed",), vector)
 
+    assert len(statements) == 1
     assert set(ranks) == {"incoming", "z_visible"}
     assert paths["incoming"][0]["relation"] == "semantic"
     assert paths["z_visible"][0]["entity"] == "garden"

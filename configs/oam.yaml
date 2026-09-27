@@ -52,19 +52,22 @@ search:
   ann_iterative_scan: strict_order
   ann_scan_max_tuples: 20000
   fast:
-    channel_candidates: 32
-    fused_candidates: 64
-    max_results: 36
+    channel_candidates: 64
+    fused_candidates: 128
+    source_seed_results: 36
+    max_results: 96
   mid:
     channel_candidates: 64
     fused_candidates: 128
     rerank_candidates: 48
-    max_results: 56
+    source_seed_results: 56
+    max_results: 96
   deep:
     channel_candidates: 64
     fused_candidates: 128
     rerank_candidates: 64
-    max_results: 56
+    source_seed_results: 56
+    max_results: 96
 
 index:
   embedding_dimensions: 1024
@@ -81,8 +84,9 @@ recall:
 
 context:
   default_tokens: 2048
-  # OAM token estimates can be low; this conservative cap kept evaluated contexts below 16,000 tokens with the pinned evaluation tokenizer.
-  max_tokens: 12000
+  max_tokens: 15000
+  source_seed_tokens: 8192
+  source_detail_budget_fraction: 0.4
   tokenizer: oam-unicode-quarter-v1
 
 chunks:

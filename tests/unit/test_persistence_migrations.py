@@ -177,3 +177,10 @@ def test_migration_loader_rejects_duplicate_versions(tmp_path: Path) -> None:
 
     with pytest.raises(migrations.MigrationError, match="duplicate migration version 1"):
         migrations.load_migrations(tmp_path)
+
+
+def test_repository_migrations_can_be_loaded_for_a_fresh_database() -> None:
+    directory = Path(__file__).parents[2] / "migrations"
+    loaded = migrations.load_migrations(directory)
+    assert loaded[0].version == 1
+    assert loaded[-1].version == len(loaded)

@@ -176,7 +176,9 @@ def test_semantic_neighbors_exclude_stale_foreign_and_wrong_generation_before_ca
     add_fact(connection, authority, "good", vector=(0.8, 0.6))
     add_fact(connection, authority, "opposite", vector=(-1.0, 0.0))
     connection.execute("SET LOCAL ROLE oam_content")
+    connection.execute("SET LOCAL jit = on")
     first = build_links(connection, authority, config, "generation", ["seed", "b_stale"])
+    assert connection.execute("SHOW jit").fetchone()[0] == "off"
     assert first == {"semantic_links": 1, "temporal_links": 0, "coverage": "complete"}
     rows = connection.execute("SELECT source_id,target_id,weight FROM unit_links").fetchall()
     assert [(row[0], row[1]) for row in rows] == [("seed", "good")]

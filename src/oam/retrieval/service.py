@@ -21,7 +21,12 @@ from oam.retrieval.algorithms import (
     select_temporal_seeds,
     temporal_spread,
 )
-from oam.retrieval.context import render_context, render_item
+from oam.retrieval.context import (
+    assemble_context,
+    pack_ranked,
+    render_context,
+    source_window_ids,
+)
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.repository import RecallRepository
 from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
@@ -334,24 +339,46 @@ class RecallService:
             raise RecallUnavailable("PDF parse became incomplete during recall")
         hydrated = read("hydrate", final_ids)
         budget = request.max_context_tokens or self.config.context.default_tokens
-        items, blocks = [], []
-        budget_omissions = []
-        used_units = 0
+        candidates = []
         for row in hydrated:
             item = {key: value for key, value in row.items() if key != "locator"}
             item["paths"] = paths.get(item["unit_id"], [])
-            block = render_item(item)
-            next_units = used_units + (2 if blocks else 0) + estimate_units(block)
-            if estimated_tokens(next_units) > budget:
-                budget_omissions.append(item["unit_id"])
-                continue
-            items.append(item)
-            blocks.append(block)
-            used_units = next_units
-            if len(items) == tier.max_results:
-                break
+            candidates.append(item)
+        seed_budget = min(budget, self.config.context.source_seed_tokens)
+        seed_items = pack_ranked(
+            candidates, seed_budget, min(tier.source_seed_results, tier.max_results)
+        )
+        source_ids = tuple(
+            dict.fromkeys(
+                citation["source_id"]
+                for item in seed_items
+                if item["kind"] == "fact"
+                for citation in item["citations"]
+                if isinstance(citation.get("source_id"), str)
+            )
+        )
+        source_passages = []
+        if source_ids:
+            locators = read("source_passage_locators", source_ids)
+            detail_ids = source_window_ids(seed_items, locators)
+            if detail_ids:
+                for row in read("hydrate", detail_ids):
+                    item = {key: value for key, value in row.items() if key != "locator"}
+                    item["paths"] = paths.get(item["unit_id"], [])
+                    source_passages.append(item)
+        items, budget_omissions = assemble_context(
+            candidates,
+            seed_items,
+            source_passages,
+            budget=budget,
+            seed_budget=seed_budget,
+            detail_fraction=self.config.context.source_detail_budget_fraction,
+            max_results=tier.max_results,
+        )
         context = render_context(items)
         context_tokens = estimated_tokens(estimate_units(context))
+        if context_tokens > budget:
+            raise RecallUnavailable("rendered context exceeds requested token estimate")
         _remaining(deadline)
         if read("user_state")["policy_epoch"] != initial_index_state["policy_epoch"]:
             raise RecallUnavailable("source policy changed during recall")

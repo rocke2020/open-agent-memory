@@ -70,6 +70,7 @@ class ExtractionConfig(FrozenModel):
 class SearchTier(FrozenModel):
     channel_candidates: PositiveInt
     fused_candidates: PositiveInt
+    source_seed_results: PositiveInt
     max_results: PositiveInt
     rerank_candidates: PositiveInt | None = None
 
@@ -134,6 +135,8 @@ class RecallConfig(FrozenModel):
 class ContextConfig(FrozenModel):
     default_tokens: PositiveInt
     max_tokens: PositiveInt
+    source_seed_tokens: PositiveInt
+    source_detail_budget_fraction: float = Field(gt=0, lt=1)
     tokenizer: Literal["oam-unicode-quarter-v1"]
 
     @model_validator(mode="after")

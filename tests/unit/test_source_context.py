@@ -77,6 +77,20 @@ class SourceRepository(DatedRepository):
     def hydrate(self, unit_ids):
         return [deepcopy(self.rows[unit_id]) for unit_id in unit_ids]
 
+    def source_passage_locators(self, source_ids):
+        return [
+            {
+                "unit_id": row["unit_id"],
+                "source_id": row["citations"][0]["source_id"],
+                "source_version": row["citations"][0]["source_version"],
+                "locator": row["citations"][0],
+            }
+            for row in self.rows.values()
+            if row["kind"] == "passage"
+            and row["citations"]
+            and row["citations"][0].get("source_id") in source_ids
+        ]
+
 
 class SourceService(RecallService):
     def __init__(self, rows, *, config=CONFIG, graph_paths=None):
@@ -228,6 +242,54 @@ def test_multiple_facts_share_one_source_without_losing_metadata(evidence_rows):
     shift = next(row for row in result["items"] if row["unit_id"] == "shift")
     assert shift["paths"] == [path]
     assert shift["time_evidence"] == second_fact["time_evidence"]
+
+
+def test_recall_recovers_adjacent_user_source_before_tail_candidates(evidence_rows):
+    class WindowRepository(SourceRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": "fact"}]
+
+        def source_passage_locators(self, source_ids):
+            assert source_ids == ("conversation",)
+            return [
+                {
+                    "unit_id": row["unit_id"],
+                    "source_id": "conversation",
+                    "source_version": 1,
+                    "locator": row["citations"][0],
+                }
+                for row in (self.rows["original"], self.rows["second_event"])
+            ]
+
+    class WindowService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield WindowRepository(request, self.rows, self.graph_paths)
+
+    result = WindowService(evidence_rows).search(
+        object(), SearchRequest(query="missed workshops", max_context_tokens=2048)
+    )
+
+    assert "The user missed the workshop on June 3." in result["context"]
+    assert "On June 10, I missed another workshop" in result["context"]
+    assert result["context_tokens"] <= 2048
+
+
+def test_incremental_context_cost_matches_grouped_rendering(evidence_rows):
+    from oam.retrieval.context import ContextUnits, render_context
+
+    evidence_rows[0]["text"] = "用户在 June 3 错过 workshop 👋。"
+    for order in (
+        evidence_rows,
+        [evidence_rows[2], evidence_rows[0], evidence_rows[3], evidence_rows[1]],
+    ):
+        counter = ContextUnits([], order)
+        selected = []
+        for item in order:
+            selected.append(item)
+            assert counter.candidate_units(item) == estimate_units(render_context(selected))
+            counter.add(item)
+            assert counter.units == estimate_units(render_context(selected))
 
 
 def test_recorded_replay_reassembles_the_same_grouped_context(evidence_rows):

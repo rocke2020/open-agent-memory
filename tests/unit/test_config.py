@@ -163,9 +163,12 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert (
         config.search.mid.channel_candidates,
         config.search.mid.fused_candidates,
+        config.search.mid.source_seed_results,
         config.search.mid.max_results,
-    ) == (64, 128, 56)
-    assert (config.context.default_tokens, config.context.max_tokens) == (2048, 12000)
+    ) == (64, 128, 56, 96)
+    assert (config.context.default_tokens, config.context.max_tokens) == (2048, 15000)
+    assert config.context.source_seed_tokens == 8192
+    assert config.context.source_detail_budget_fraction == 0.4
     assert config.context.tokenizer == "oam-unicode-quarter-v1"
     assert (config.chunks.default_tokens, config.chunks.max_tokens) == (8192, 8192)
     assert (
@@ -230,7 +233,7 @@ models:
 def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Path) -> None:
     base = yaml.safe_load((REPOSITORY_ROOT / "configs" / "oam.yaml").read_text())
     base["resource"]["max_bytes"] = 12345
-    base["search"]["fast"]["fused_candidates"] = 80
+    base["search"]["fast"]["fused_candidates"] = 128
     config_directory = tmp_path / "configs"
     config_directory.mkdir()
     (config_directory / "oam.yaml").write_text(yaml.safe_dump(base))
@@ -251,7 +254,7 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
         text=True,
     )
 
-    assert output.strip() == "12345 80 19"
+    assert output.strip() == "12345 128 19"
 
 
 def test_missing_canonical_numeric_limit_is_not_filled_by_python(
