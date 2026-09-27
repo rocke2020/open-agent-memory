@@ -13,6 +13,7 @@ from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.db.context import bind_user
 from oam.db.inspection import SourceInspector
+from oam.db.queue_admission import require_queue_capacity
 from oam.indexing.identity import index_generation
 from oam.profiles.inputs import ProfileInputs, load_profile_inputs
 from oam.profiles.projection import SECTIONS, build_sections, select_sections
@@ -162,6 +163,9 @@ class ProfileService:
             ).fetchone()
             if row:
                 return {"status": "accepted", "operation_id": row[0]}
+            require_queue_capacity(
+                connection.cursor(), authority, self.config.queue.max_pending_per_user
+            )
             operation_id = "op_profile_" + secrets.token_hex(12)
             work_id = "work_profile_" + secrets.token_hex(12)
             connection.execute(

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
+import psycopg
 from fastapi import (
     FastAPI,
     Header,
@@ -22,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
 
+from oam.api.admission import RequestAdmissionMiddleware
 from oam.api.runtime import (
     APIRuntime,
     AuthenticationFailed,
@@ -64,6 +67,7 @@ from oam.contracts.retain import (
 )
 from oam.contracts.search import SearchManyRequest, SearchRequest
 from oam.db.inspection import SourcePolicyChanged
+from oam.db.queue_admission import QueueAdmissionFull
 from oam.db.sources import IdempotencyConflict, SourceNotFound, SourceVersionConflict
 from oam.debug.traces import TraceNotFound
 from oam.exports.repository import ExportNotFound, ExportPolicyChanged
@@ -81,6 +85,7 @@ from oam.operations.state import OperationStatus as StoredOperationStatus
 from oam.profiles.service import ProfileRefreshUnresolved
 from oam.resources.url_fetch import ResourceFetchUnavailable
 from oam.retrieval.service import RecallUnavailable
+from oam.workers.runner import WorkerRunner
 
 CSP = "; ".join(
     [
@@ -175,8 +180,13 @@ def create_app(
                     or (app.state.auth_mode == "trusted" and not loopback)
                 ) and not owned_runtime.has_active_root():
                     raise ConfigurationError("authentication mode requires an active root key")
+            if resolved.config.worker.embedded_enabled:
+                app.state.worker = WorkerRunner.from_environment(resolved.config)
+                app.state.worker.start()
             yield
         finally:
+            if app.state.worker is not None:
+                await asyncio.to_thread(app.state.worker.shutdown)
             if owned_runtime is not None:
                 owned_runtime.close()
 
@@ -188,6 +198,8 @@ def create_app(
     app.state.resolved_config = resolved
     app.state.runtime = runtime
     app.state.auth_mode = resolved.config.auth.mode or "api_key"
+    app.state.worker = None
+    app.add_middleware(RequestAdmissionMiddleware, runtime=runtime)
 
     @app.middleware("http")
     async def request_boundary(request: Request, call_next):
@@ -272,11 +284,34 @@ def create_app(
     async def readiness(response: Response) -> dict[str, Any]:
         missing = sorted(resolved.config.models.required_unbound_roles())
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return {
+        worker = app.state.worker
+        worker_running = worker is not None and worker.healthy
+        payload = {
             "ready": False,
             "missing_required_roles": missing,
-            "reason": "core_only",
+            "embedded_worker_running": (
+                worker_running if resolved.config.worker.embedded_enabled else None
+            ),
+            "reason": (
+                "embedded_worker_unavailable"
+                if resolved.config.worker.embedded_enabled and not worker_running
+                else "core_only"
+            ),
         }
+        capacity = getattr(runtime, "capacity", None)
+        if capacity is not None:
+            try:
+                state = await run_in_threadpool(capacity.status)
+            except psycopg.Error:
+                payload["reason"] = "capacity_unavailable"
+            else:
+                payload["capacity"] = state
+                if (
+                    state["llm_unknown"] >= resolved.config.provider.llm_concurrency
+                    or state["embedding_unknown"] >= resolved.config.provider.embedding_concurrency
+                ):
+                    payload["reason"] = "model_capacity_blocked"
+        return payload
 
     @app.get("/v1/capabilities", tags=["Capabilities"])
     async def capabilities() -> dict[str, Any]:
@@ -970,6 +1005,8 @@ def _validate_limits(body, config: OAMConfig) -> None:
 def _content_call(call):
     try:
         return call()
+    except QueueAdmissionFull as exc:
+        raise _queue_capacity_error() from exc
     except AuthenticationFailed as exc:
         raise HTTPException(401, detail={"code": "AuthenticationFailed"}) from exc
     except PermissionError as exc:
@@ -1059,6 +1096,8 @@ def _require_runtime(runtime: APIRuntime | None) -> APIRuntime:
 def _operation_call(call) -> OperationResponse:
     try:
         return _operation_response(call())
+    except QueueAdmissionFull as exc:
+        raise _queue_capacity_error() from exc
     except AuthenticationFailed as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1080,6 +1119,14 @@ def _operation_call(call) -> OperationResponse:
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": type(exc).__name__, "retryable": False},
         ) from exc
+
+
+def _queue_capacity_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={"code": "QueueAdmissionFull", "retryable": True},
+        headers={"Retry-After": "1"},
+    )
 
 
 def _operation_response(record: OperationRecord) -> OperationResponse:

@@ -10,6 +10,7 @@ from typing import Protocol
 
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
+from oam.db.queue_admission import require_queue_capacity
 
 
 class IdempotencyConflict(RuntimeError):
@@ -309,6 +310,7 @@ class SourceRepository:
         operation_kind: str,
         idempotency_key: str,
         request_hash: bytes,
+        max_pending_per_user: int | None = None,
     ) -> AcceptanceReceipt | None:
         """Avoid refetching a URL whose exact caller request was already accepted."""
         capability = "resource:write" if operation_kind == "index_resource" else "memory:append"
@@ -328,6 +330,8 @@ class SourceRepository:
                 ),
             )
             existing = cursor.fetchone()
+            if existing is None and max_pending_per_user is not None:
+                require_queue_capacity(cursor, authority, max_pending_per_user)
         if existing is None:
             return None
         if bytes(existing[1]) != request_hash:
@@ -341,6 +345,8 @@ class SourceRepository:
         connection: Connection,
         authority: AuthorizedUser,
         command: AcceptSource,
+        *,
+        max_pending_per_user: int | None = None,
     ) -> AcceptanceReceipt:
         capability = (
             "resource:write"
@@ -377,6 +383,9 @@ class SourceRepository:
                     accepted_seq=int(existing[2]),
                     reused=True,
                 )
+
+            if max_pending_per_user is not None:
+                require_queue_capacity(cursor, authority, max_pending_per_user)
 
             if command.source_version is None:
                 command = self._assign_revision(cursor, authority, command)

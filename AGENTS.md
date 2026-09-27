@@ -48,6 +48,9 @@ uv sync --locked
 uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
+uv run mypy src tests
 ```
+
+Mypy checks modules outside the declared legacy baseline in `pyproject.toml`; remove baseline entries as those modules are corrected.
 
 Passing these commands does not prove live providers, PostgreSQL recovery, browser behavior, multi-node operation, or release readiness; run the named integration and release gates before making those claims.

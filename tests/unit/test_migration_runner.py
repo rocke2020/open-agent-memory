@@ -6,6 +6,11 @@ from pathlib import Path
 from oam.db import migrations
 
 
+def test_repository_migrations_have_unique_versions() -> None:
+    repository_migrations = migrations.load_migrations(Path(__file__).parents[2] / "migrations")
+    assert [migration.version for migration in repository_migrations] == list(range(1, 17))
+
+
 class MigrationCursor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []

@@ -5,6 +5,7 @@ import json
 
 import httpx
 import pytest
+from api_test_app import create_api_only_app as create_app
 from test_core_http import ROOT, use_created_user_key
 from test_core_http import core_database as core_database
 from test_recall_repository import (
@@ -17,7 +18,6 @@ from test_recall_repository import (
 from test_source_version_admission import command
 from test_source_version_admission import source_database as source_database
 
-from oam.api.app import create_app
 from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.db.sources import SourceRepository

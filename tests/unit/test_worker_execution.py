@@ -10,11 +10,23 @@ from oam.workers import index_source, runner
 CONFIG_PATH = Path(__file__).parents[2] / "configs" / "oam.yaml"
 LIMITS = (
     ("worker", "max_tasks"),
-    ("worker", "max_model_calls"),
-    ("provider", "global_concurrency"),
     ("database", "worker_pool_max"),
-    ("user", "concurrency"),
 )
+
+
+@pytest.fixture(autouse=True)
+def local_worker_capacity(monkeypatch):
+    class Capacity:
+        def __init__(self, config, dsn):
+            pass
+
+        def configure(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runner, "PostgresCapacity", Capacity)
 
 
 def test_cleanup_claim_runs_without_loading_deleted_original(monkeypatch):
@@ -116,14 +128,6 @@ def test_worker_overlaps_sources_within_each_configured_limit_and_drains(
     assert len(started) == len(completed) == 2
     assert all(item[:2] == ("synthetic-queue", "synthetic-content") for item in started)
     assert all(item[2].startswith("worker_") for item in started)
-    assert all(
-        item[3]
-        <= min(
-            2 if limiting_field == ("worker", "max_model_calls") else 4,
-            2 if limiting_field == ("provider", "global_concurrency") else 4,
-        )
-        for item in started
-    )
     assert not any(closed_early)
     assert all(client.is_closed for client in clients)
 
@@ -177,9 +181,10 @@ def test_idle_worker_checks_for_new_work_within_half_second(monkeypatch):
             self.waits = []
 
         def wait(self, timeout=None):
-            self.waits.append(timeout)
-            self.set()
-            return True
+            if timeout is not None:
+                self.waits.append(timeout)
+                self.set()
+            return super().wait(timeout)
 
     stopped = StopAfterWait()
     monkeypatch.setattr(runner, "Event", lambda: stopped)
@@ -187,3 +192,30 @@ def test_idle_worker_checks_for_new_work_within_half_second(monkeypatch):
     assert runner.run_worker_from_environment(CONFIG_PATH) == 0
     assert stopped.waits
     assert max(stopped.waits) <= 0.5
+
+
+def test_source_claim_uses_the_configured_user_concurrency(monkeypatch):
+    class QueueConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def cursor(self):
+            return object()
+
+    limits = []
+
+    def claim(cursor, *, worker_id, attempt_id, lease_seconds, user_concurrency):
+        limits.append(user_concurrency)
+        return None
+
+    config = runner.load_config(CONFIG_PATH).config
+    config = config.model_copy(update={"user": config.user.model_copy(update={"concurrency": 3})})
+    monkeypatch.setattr(index_source.psycopg, "connect", lambda _: QueueConnection())
+    monkeypatch.setattr(index_source, "claim_one", claim)
+    assert not index_source.process_one(
+        config, "queue", "content", models=object(), worker_id="worker"
+    )
+    assert limits == [3]

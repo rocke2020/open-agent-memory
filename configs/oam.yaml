@@ -11,6 +11,7 @@ resource:
 
 api:
   max_concurrent_requests: 10
+  max_concurrent_writes: 6
   max_request_bytes: 25165824
 
 chunk:
@@ -115,8 +116,9 @@ retry:
   max_attempts: 3
 
 worker:
+  embedded_enabled: true
   max_tasks: 4
-  max_model_calls: 4
+  max_model_calls: 8
 
 lease:
   seconds: 90
@@ -146,7 +148,10 @@ queue:
   max_pending_per_user: 1000
 
 provider:
-  global_concurrency: 4
+  llm_concurrency: 32
+  embedding_concurrency: 8
+  embedding_search_reserved: 4
+  rerank_concurrency: 4
 
 user:
   max_reports: 100

@@ -5,12 +5,12 @@ from pathlib import Path
 import httpx
 import psycopg
 import pytest
+from api_test_app import create_api_only_app as create_app
 from psycopg.conninfo import make_conninfo
 from psycopg_pool import ConnectionPool
 from test_core_http import core_database as core_database
 from test_recall_repository import FixedModels, add_fact
 
-from oam.api.app import create_app
 from oam.api.runtime import DatabaseRuntime
 from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config

@@ -6,11 +6,11 @@ from threading import Barrier
 import httpx
 import psycopg
 import pytest
+from api_test_app import create_api_only_app as create_app
 from psycopg.conninfo import make_conninfo
 from test_core_http import ROOT, SyntheticIndexModels, use_created_user_key
 from test_core_http import core_database as core_database
 
-from oam.api.app import create_app
 from oam.config import load_config
 from oam.indexing.extraction import ExtractionError
 from oam.indexing.identity import index_generation
@@ -445,6 +445,7 @@ async def test_stale_owner_cannot_record_usage_or_requeue_work(accepted_source):
             worker_id="old",
             attempt_id="old-attempt",
             lease_seconds=config.lease.seconds,
+            user_concurrency=config.user.concurrency,
         )
     store = IndexStore(
         make_conninfo(dsn, options="-c role=oam_content"),

@@ -10,6 +10,7 @@ from typing import Protocol
 
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
+from oam.db.queue_admission import require_queue_capacity
 from oam.operations.state import OperationStatus
 
 
@@ -131,6 +132,7 @@ class OperationRepository:
         idempotency_key: str,
         request_hash: bytes,
         attempts_remaining: int,
+        max_pending_per_user: int | None = None,
     ) -> OperationRecord:
         self._require(authority, "memory:append")
         if len(request_hash) != hashlib.sha256().digest_size:
@@ -140,6 +142,14 @@ class OperationRepository:
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
             bind_user(cursor, authority)
+            if max_pending_per_user is not None:
+                cursor.execute(
+                    "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s "
+                    "AND state='active' FOR UPDATE",
+                    (authority.tenant_id, authority.user_id),
+                )
+                if cursor.fetchone() is None:
+                    raise PermissionError("user is unavailable")
             cursor.execute(
                 f"SELECT {_FIELDS} FROM operations "  # noqa: S608
                 "WHERE tenant_id = %s AND user_id = %s AND operation_id = %s FOR UPDATE",
@@ -169,6 +179,8 @@ class OperationRepository:
                 if bytes(existing_retry[12]) != request_hash:
                     raise OperationIdempotencyConflict(idempotency_key)
                 return self._record(existing_retry)
+            if max_pending_per_user is not None and original_row[1] != "cleanup_source":
+                require_queue_capacity(cursor, authority, max_pending_per_user)
             cursor.execute(
                 "SELECT count(*) FROM work_units WHERE tenant_id = %s AND user_id = %s "
                 "AND operation_id = %s AND status IN ('failed_terminal', 'cancelled') "

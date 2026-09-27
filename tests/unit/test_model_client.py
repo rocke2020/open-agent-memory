@@ -107,9 +107,9 @@ def test_openai_compatible_vision_probe_sends_a_real_image_part() -> None:
         assert prefix == "data:image/png;base64"
         with Image.open(BytesIO(base64.b64decode(encoded))) as image:
             pixels = image.convert("RGB")
-            assert pixels.size == (64, 64)
-            assert pixels.getpixel((16, 32)) == (255, 0, 0)
-            assert pixels.getpixel((48, 32)) == (0, 0, 255)
+            assert pixels.size == (512, 512)
+            assert pixels.getpixel((128, 256)) == (255, 0, 0)
+            assert pixels.getpixel((384, 256)) == (0, 0, 255)
         assert "left" in content[0]["text"]
         assert "right" in content[0]["text"]
         assert "red" not in content[0]["text"].lower()

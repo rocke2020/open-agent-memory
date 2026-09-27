@@ -85,7 +85,11 @@ def test_queue_role_claims_work_without_permission_to_modify_operations(database
     assert receipt.accepted_seq == 1
     connection.execute("SET LOCAL ROLE oam_queue")
     claimed = claim_one(
-        connection.cursor(), worker_id="worker", attempt_id="attempt", lease_seconds=90
+        connection.cursor(),
+        worker_id="worker",
+        attempt_id="attempt",
+        lease_seconds=90,
+        user_concurrency=2,
     )
     assert claimed is not None
     assert (claimed.tenant_id, claimed.work_unit_id, claimed.fence) == (
@@ -99,7 +103,13 @@ def test_uncertain_attempt_cannot_be_reclaimed_until_reconciled(database):
     connection, authority = database
     SourceRepository().accept(connection, authority, command())
     connection.execute("SET LOCAL ROLE oam_queue")
-    claim_one(connection.cursor(), worker_id="worker", attempt_id="attempt", lease_seconds=90)
+    claim_one(
+        connection.cursor(),
+        worker_id="worker",
+        attempt_id="attempt",
+        lease_seconds=90,
+        user_concurrency=2,
+    )
     connection.execute("RESET ROLE")
     connection.execute(
         "UPDATE work_units SET lease_expires_at = clock_timestamp() - interval '1 second' "
@@ -113,7 +123,11 @@ def test_uncertain_attempt_cannot_be_reclaimed_until_reconciled(database):
     connection.execute("SET LOCAL ROLE oam_queue")
     assert (
         claim_one(
-            connection.cursor(), worker_id="replacement", attempt_id="second", lease_seconds=90
+            connection.cursor(),
+            worker_id="replacement",
+            attempt_id="second",
+            lease_seconds=90,
+            user_concurrency=2,
         )
         is None
     )

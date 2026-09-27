@@ -5,10 +5,9 @@ import asyncio
 import httpx
 import psycopg
 import pytest
+from api_test_app import create_api_only_app as create_app
 from test_core_http import ROOT, use_created_user_key
 from test_core_http import core_database as core_database
-
-from oam.api.app import create_app
 
 pytestmark = pytest.mark.integration
 

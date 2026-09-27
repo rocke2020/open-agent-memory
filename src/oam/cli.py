@@ -6,6 +6,7 @@ import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 from dotenv import load_dotenv
@@ -47,6 +48,32 @@ def _parser() -> argparse.ArgumentParser:
         "recover-bootstrap", help="issue a replacement bootstrap administrator credential"
     )
     recovery.add_argument("--config", type=Path, default=selected_config_path)
+    permits = commands.add_parser(
+        "model-permits", help="inspect and reconcile model permits with operator database authority"
+    )
+    permits.add_argument("--config", type=Path, default=selected_config_path)
+    permit_actions = permits.add_subparsers(dest="permit_action", required=True)
+    permit_actions.add_parser(
+        "list", help="list active or forcibly released permit metadata as JSON"
+    )
+    reconcile = permit_actions.add_parser("reconcile", help="record an operator-confirmed outcome")
+    reconcile.add_argument("permit_id", type=UUID)
+    reconcile.add_argument("--reason", required=True)
+    outcome = reconcile.add_mutually_exclusive_group(required=True)
+    outcome.add_argument("--known-completed", action="store_true")
+    outcome.add_argument(
+        "--force-unknown",
+        action="store_true",
+        help="release capacity while retaining unknown remote concurrency",
+    )
+    permit_actions.add_parser(
+        "configure",
+        help="replace stored limits after stopping every API and worker process",
+        description=(
+            "Stop every API and worker process before replacing deployment limits from YAML. "
+            "Active model permits and HTTP requests prevent this operation."
+        ),
+    )
     export_validation = commands.add_parser(
         "validate-export", help="validate a downloaded portable export directory"
     )
@@ -132,6 +159,16 @@ def main(argv: list[str] | None = None) -> int:
         from oam.auth.bootstrap import recover_bootstrap_from_environment
 
         return recover_bootstrap_from_environment(args.config)
+    if args.command == "model-permits":
+        from oam.models.permits import model_permits_from_environment
+
+        return model_permits_from_environment(
+            args.config,
+            args.permit_action,
+            permit_id=getattr(args, "permit_id", None),
+            known_completed=getattr(args, "known_completed", False),
+            reason=getattr(args, "reason", ""),
+        )
     if args.command == "validate-export":
         from oam.exports.validation import ExportValidationError, validate_directory
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
+from io import BytesIO
 from typing import Any
 
 import httpx
+from PIL import Image
 
 from oam.models.bindings import ResolvedModelBinding
 from oam.models.preflight import (
@@ -12,12 +15,18 @@ from oam.models.preflight import (
     VisionProbeOutput,
 )
 
-_VISION_PROBE_PNG_DATA_URL = (
-    "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAf0lEQVR4nNXOAQ0AIBCAQJ7+nTWE+zmuAMxh"
-    "17BbkDiJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJ"
-    "kziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJ8/fAqwsyVwJ/S+vergAAAABJRU5ErkJggg=="
-)
+_VISION_PROBE_SIZE = 512
+
+
+def _vision_probe_png_data_url() -> str:
+    image = Image.new("RGB", (_VISION_PROBE_SIZE, _VISION_PROBE_SIZE), (255, 0, 0))
+    image.paste((0, 0, 255), (_VISION_PROBE_SIZE // 2, 0, _VISION_PROBE_SIZE, _VISION_PROBE_SIZE))
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+
+
+_VISION_PROBE_PNG_DATA_URL = _vision_probe_png_data_url()
 
 
 class ModelProtocolError(ValueError):

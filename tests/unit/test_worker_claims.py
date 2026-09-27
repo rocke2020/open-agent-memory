@@ -35,12 +35,13 @@ def test_claim_one_calls_the_allowlisted_database_function() -> None:
         worker_id="worker-1",
         attempt_id="attempt-2",
         lease_seconds=90,
+        user_concurrency=2,
     )
 
     assert cursor.executed == (
         "SELECT tenant_id, user_id, work_unit_id, operation_id, stage, attempt_id, "
-        "fence, lease_expires_at FROM oam_claim_work(%s, %s, %s)",
-        ("worker-1", "attempt-2", 90),
+        "fence, lease_expires_at FROM oam_claim_work(%s, %s, %s, %s)",
+        ("worker-1", "attempt-2", 90, 2),
     )
     assert claimed == claims.ClaimedWork(
         tenant_id="tenant-1",
@@ -63,6 +64,7 @@ def test_claim_one_returns_none_when_no_work_is_ready() -> None:
             worker_id="worker-1",
             attempt_id="attempt-1",
             lease_seconds=90,
+            user_concurrency=2,
         )
         is None
     )

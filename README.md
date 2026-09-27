@@ -51,12 +51,13 @@ uv run oam preflight --config configs/oam.yaml --json
 
 The canonical configuration intentionally has no model bindings, so preflight exits `2` and lists every missing required role. When bindings are present, preflight makes one role-appropriate request per enabled role and rejects empty, malformed, reasoning-only, truncated, non-finite, or dimensionally inconsistent results. Supply endpoints and secrets through an explicit operator configuration before expecting readiness. Default tests never read a private `.env` or contact external providers.
 
-Run the API and a separate durable worker with the same operator configuration:
+Run the API with its embedded durable worker using the operator configuration:
 
 ```bash
 uv run oam api --config configs/oam.yaml --host 127.0.0.1
-uv run oam worker --config configs/oam.yaml
 ```
+
+The default `worker.embedded_enabled: true` requires the API, queue and worker-content DSNs. For separate worker processes, set `worker.embedded_enabled: false` in the operator YAML and run `oam api` and `oam worker` with that file. Each runner has four task slots; deployment tooling controls process count. Shared PostgreSQL admission bounds generation, embeddings and HTTP traffic independently of replica count; see [operations](docs/operations.md#4-limits-and-failure-ownership).
 
 `GET /health/live`, `GET /health/ready`, `GET /v1/capabilities`, `/openapi.json`, and `/ui/` are available. Full-release readiness remains `503 core_only`. Configure distinct API, queue and worker-content DSNs plus extraction, Insight, embedding and abstract model roles before using the core; delegated search also needs an optional planner binding. On a fresh database, `oam migrate` selects rootless local `dev` when no root secret or handoff destination is supplied; set `OAM_ROOT_API_KEY` or `OAM_BOOTSTRAP_OUTPUT` to initialize a keyed deployment. See [operations](docs/operations.md). Batch search and optional one-call delegated search use the existing recall path; Resource/source controls, recorded debug, export validation and the browser Inspector are documented in the [HTTP API](docs/api.md). Stored Profiles and typed Evidence/Profile Resource admission are available through the Profile and Resource routes; Profile generation requires its configured model role.
 

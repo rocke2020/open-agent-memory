@@ -121,7 +121,9 @@ def test_canonical_config_has_one_owner_for_database_auth_and_work_limits() -> N
     assert config.ingest.max_bytes == 128 * 1024
     assert config.ingest.max_messages == 128
     assert config.queue.max_pending_per_user == 1000
-    assert config.provider.global_concurrency == 4
+    assert config.provider.llm_concurrency == 32
+    assert config.provider.embedding_concurrency == 8
+    assert config.provider.embedding_search_reserved == 4
     assert config.user.concurrency == 2
 
 

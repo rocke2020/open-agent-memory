@@ -45,7 +45,14 @@ class ResourceConfig(FrozenModel):
 
 class APIConfig(FrozenModel):
     max_concurrent_requests: PositiveInt
+    max_concurrent_writes: PositiveInt
     max_request_bytes: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_write_capacity(self) -> APIConfig:
+        if self.max_concurrent_writes >= self.max_concurrent_requests:
+            raise ValueError("write capacity must leave capacity for reads")
+        return self
 
 
 class ChunkConfig(FrozenModel):
@@ -184,6 +191,7 @@ class RetryConfig(FrozenModel):
 
 
 class WorkerConfig(FrozenModel):
+    embedded_enabled: bool
     max_tasks: PositiveInt
     max_model_calls: PositiveInt
 
@@ -221,7 +229,16 @@ class QueueConfig(FrozenModel):
 
 
 class ProviderConfig(FrozenModel):
-    global_concurrency: PositiveInt
+    llm_concurrency: PositiveInt
+    embedding_concurrency: PositiveInt
+    embedding_search_reserved: NonNegativeInt
+    rerank_concurrency: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_embedding_capacity(self) -> ProviderConfig:
+        if self.embedding_search_reserved >= self.embedding_concurrency:
+            raise ValueError("embedding reservation must leave capacity for indexing")
+        return self
 
 
 class UserConfig(FrozenModel):

@@ -161,7 +161,7 @@ def test_asserted_user_grants_upgrade_without_expanding_keyed_user_grants(tmp_pa
             "VALUES ('tenant','restricted','user:restricted',%s,'active')",
             (b"r" * 32,),
         )
-    assert apply_migrations(candidate_dsn, migrations) == 3
+    assert apply_migrations(candidate_dsn, migrations) == 5
     with psycopg.connect(candidate_dsn) as connection:
         after = connection.execute(
             "SELECT capabilities FROM grants WHERE tenant_id='tenant' AND user_id='alice'"
@@ -191,13 +191,13 @@ def test_legacy_asserted_v12_upgrades_and_restricts_function(tmp_path) -> None:
     )
     assert apply_migrations(candidate_dsn, previous) == 12
 
-    assert apply_migrations(candidate_dsn, migrations) == 2
+    assert apply_migrations(candidate_dsn, migrations) == 4
     assert apply_migrations(candidate_dsn, migrations) == 0
     with psycopg.connect(candidate_dsn) as connection:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(version,) for version in range(1, 15)]
+        assert versions == [(version,) for version in range(1, 17)]
         owner, api_can_execute, public_can_execute = connection.execute(
             "SELECT pg_get_userbyid(p.proowner),"
             "has_function_privilege('oam_api',p.oid,'EXECUTE'),"

@@ -5,10 +5,10 @@ from uuid import uuid4
 import httpx
 import psycopg
 import pytest
+from api_test_app import create_api_only_app as create_app
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from oam.api.app import create_app
 from oam.auth.credentials import digest_secret
 from oam.config import ConfigurationError
 from oam.db.migrations import apply_migrations, migrate_from_environment

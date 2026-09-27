@@ -1,10 +1,27 @@
 from pathlib import Path
 
+import pytest
+
 from oam.auth import bootstrap
 from oam.db import migrations
 from oam.workers import runner
 
 CONFIG_PATH = Path(__file__).parents[2] / "configs" / "oam.yaml"
+
+
+@pytest.fixture(autouse=True)
+def local_worker_capacity(monkeypatch):
+    class Capacity:
+        def __init__(self, config, dsn):
+            pass
+
+        def configure(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runner, "PostgresCapacity", Capacity)
 
 
 def test_migrate_entrypoint_fails_closed_when_configured_dsn_is_missing(

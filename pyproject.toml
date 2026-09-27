@@ -8,6 +8,7 @@ version = "0.0.1"
 description = "Self-hosted evidence-grounded memory for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY.md", "third_party_licenses/*"]
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "beautifulsoup4>=4.13",
@@ -16,7 +17,7 @@ dependencies = [
     "httpx>=0.28",
     "jieba==0.42.1",
     "pillow>=11.3",
-    "psycopg[binary,pool]>=3.2",
+    "psycopg[pool]>=3.2",
     "pydantic>=2.11",
     "pypdf>=6.1",
     "pypdfium2>=4.30",
@@ -32,10 +33,13 @@ oam = "oam.cli:entrypoint"
 
 [dependency-groups]
 dev = [
+    "mypy>=1.19,<2",
+    "psycopg[binary]>=3.2",
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
     "pytest-cov>=7.0",
     "ruff>=0.14",
+    "types-PyYAML>=6.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -58,6 +62,58 @@ markers = [
     "e2e: exercises the complete local product path",
     "live: requires separately authorized real model endpoints",
 ]
+
+[tool.mypy]
+
+# Existing modules with mypy diagnostics; new modules remain checked.
+# Remove an entry when that module's diagnostics are resolved.
+[[tool.mypy.overrides]]
+module = [
+    "oam.api.app",
+    "oam.api.runtime",
+    "oam.api.search",
+    "oam.auth.administration",
+    "oam.auth.bootstrap",
+    "oam.contracts.retain",
+    "oam.db.migrations",
+    "oam.db.sources",
+    "oam.exports.validation",
+    "oam.indexing.extraction",
+    "oam.indexing.store",
+    "oam.models.preflight",
+    "oam.models.runtime",
+    "oam.operations.repository",
+    "oam.profiles.projection",
+    "oam.profiles.service",
+    "oam.profiles.worker",
+    "oam.resources.html",
+    "oam.resources.pdf",
+    "oam.resources.url_fetch",
+    "oam.retrieval.algorithms",
+    "oam.retrieval.context",
+    "oam.retrieval.fts",
+    "oam.retrieval.query_time",
+    "oam.retrieval.repository",
+    "oam.retrieval.service",
+    "oam.workers.claims",
+    "oam.workers.index_source",
+    "test_public_fixtures",
+    "test_auth_modes_http",
+    "test_postgres_foundation",
+    "test_api_shell",
+    "test_bilingual_medical_fixtures",
+    "test_cli",
+    "test_evidence_contract",
+    "test_operation_contract",
+    "test_operation_foundation",
+    "test_profile_inputs",
+    "test_profile_routes",
+    "test_resource_contract",
+    "test_search_batch",
+    "test_search_contract",
+    "test_source_repository",
+]
+ignore_errors = true
 
 [tool.ruff]
 target-version = "py312"

@@ -28,6 +28,7 @@ from oam.auth.credentials import (
 )
 from oam.auth.modes import AssertedIdentity, RequestActor
 from oam.auth.repository import AuthRepository, UserDenied
+from oam.capacity import PostgresCapacity
 from oam.config import ConfigurationError, OAMConfig
 from oam.contracts.credentials import (
     CredentialIssuedResponse,
@@ -187,6 +188,7 @@ class DatabaseRuntime:
     pool: ConnectionPool
     models: object | None = None
     url_fetcher: Callable[..., bytes] = fetch_resource_url
+    capacity: PostgresCapacity | None = None
     _http: httpx.Client = field(init=False, repr=False)
     _auth: AuthRepository = field(init=False, repr=False)
     _operations: OperationRepository = field(init=False, repr=False)
@@ -196,7 +198,9 @@ class DatabaseRuntime:
     def __post_init__(self) -> None:
         self._http = httpx.Client(trust_env=False)
         if self.models is None:
-            self.models = RuntimeModels(self.config, os.environ, self._http)
+            self.models = RuntimeModels(
+                self.config, os.environ, self._http, admission=self.capacity
+            )
         self._auth = AuthRepository()
         self._operations = OperationRepository()
         self._administration = CredentialAdministration()
@@ -214,14 +218,18 @@ class DatabaseRuntime:
             open=False,
             name="oam-api",
         )
-        return cls(config=config, pool=pool)
+        return cls(config=config, pool=pool, capacity=PostgresCapacity(config, dsn))
 
     def open(self) -> None:
         self.pool.open(wait=True)
+        if self.capacity is not None:
+            self.capacity.configure()
 
     def close(self) -> None:
         self.pool.close()
         self._http.close()
+        if self.capacity is not None:
+            self.capacity.close()
 
     def choose_auto_auth_mode(self) -> str:
         with self.pool.connection() as connection:
@@ -471,6 +479,7 @@ class DatabaseRuntime:
                     operation_kind="index_resource",
                     idempotency_key=idempotency_key,
                     request_hash=request_hash,
+                    max_pending_per_user=self.config.queue.max_pending_per_user,
                 )
                 if prior is not None:
                     return self._retain_response(connection, authority, prior)
@@ -580,6 +589,7 @@ class DatabaseRuntime:
                     update_mode=update_mode,
                     max_bytes=max_bytes,
                 ),
+                max_pending_per_user=self.config.queue.max_pending_per_user,
             )
             return self._retain_response(connection, authority, receipt)
 
@@ -701,6 +711,7 @@ class DatabaseRuntime:
                     expected_active_version=expected_version,
                     max_bytes=self.config.resource.max_bytes,
                 ),
+                max_pending_per_user=self.config.queue.max_pending_per_user,
             )
             return self._retain_response(connection, authority, receipt)
 
@@ -763,6 +774,7 @@ class DatabaseRuntime:
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
                 attempts_remaining=self.config.retry.max_attempts,
+                max_pending_per_user=self.config.queue.max_pending_per_user,
             )
 
     def reconcile(

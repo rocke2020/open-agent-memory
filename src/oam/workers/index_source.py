@@ -47,6 +47,7 @@ def process_one(
             worker_id=worker_id,
             attempt_id="attempt_" + uuid4().hex,
             lease_seconds=config.lease.seconds,
+            user_concurrency=config.user.concurrency,
         )
     if claim is None:
         return False
@@ -277,7 +278,6 @@ def process_one(
                 if len(pending_extractions) == min(
                     MAX_SOURCE_EXTRACTIONS,
                     config.worker.max_model_calls,
-                    config.provider.global_concurrency,
                 ):
                     flush_extractions()
         flush_extractions()

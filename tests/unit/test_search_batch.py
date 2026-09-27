@@ -564,7 +564,7 @@ def test_planner_capacity_timeout_before_dispatch_reports_zero_calls(tmp_path: P
 
     with httpx.Client(transport=httpx.MockTransport(forbidden)) as http:
         models = RuntimeModels(config, {"MODEL_URL": "http://planner.test"}, http)
-        models._model_slots = NoCapacity()
+        models._llm_slots = NoCapacity()
         result = decompose_and_search(
             config, SearchRequest(query="current city"), search_one, models
         )

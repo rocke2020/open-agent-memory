@@ -6,12 +6,14 @@ import base64
 import math
 import time
 from collections.abc import Mapping
-from threading import BoundedSemaphore
+from contextlib import suppress
+from threading import BoundedSemaphore, Event
 from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from oam.capacity import CapacityUnavailable, PostgresCapacity
 from oam.config import OAMConfig
 from oam.models.bindings import ResolvedModelBinding, resolve_model_binding
 
@@ -61,14 +63,28 @@ class RerankResult(FrozenResult):
 
 class RuntimeModels:
     def __init__(
-        self, config: OAMConfig, environment: Mapping[str, str], http: httpx.Client
+        self,
+        config: OAMConfig,
+        environment: Mapping[str, str],
+        http: httpx.Client,
+        *,
+        background: bool = False,
+        admission: PostgresCapacity | None = None,
+        stop_event: Event | None = None,
     ) -> None:
         self.config = config
         self._environment = dict(environment)
         self._http = http
-        self._model_slots = BoundedSemaphore(
-            min(config.worker.max_model_calls, config.provider.global_concurrency)
+        self._background = background
+        self._admission = admission
+        self._stop_event = stop_event
+        self._worker_slots = BoundedSemaphore(config.worker.max_model_calls) if background else None
+        self._llm_slots = BoundedSemaphore(config.provider.llm_concurrency)
+        self._embedding_slots = BoundedSemaphore(
+            config.provider.embedding_concurrency
+            - (config.provider.embedding_search_reserved if background else 0)
         )
+        self._rerank_slots = BoundedSemaphore(config.provider.rerank_concurrency)
 
     def generate(
         self,
@@ -215,21 +231,68 @@ class RuntimeModels:
             headers["authorization"] = f"Bearer {binding._api_key}"
         if path == "/chat/completions" and binding.reasoning_effort is not None:
             payload = {**payload, "reasoning_effort": binding.reasoning_effort}
-        waiting_since = time.monotonic()
-        if not self._model_slots.acquire(timeout=timeout_seconds):
-            raise ModelDispatchUnavailable("model capacity wait expired before dispatch")
+        deadline = time.monotonic() + timeout_seconds
+        kind = "embedding" if path == "/embeddings" else "llm"
+        slots = (
+            self._rerank_slots
+            if path == "/rerank"
+            else self._embedding_slots
+            if kind == "embedding"
+            else self._llm_slots
+        )
+        acquired = []
+        permit = None
+        sent = False
+
+        def remaining_time():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or (self._stop_event is not None and self._stop_event.is_set()):
+                raise ModelDispatchUnavailable("model dispatch deadline expired or worker stopped")
+            return remaining
+
         try:
-            remaining = timeout_seconds - (time.monotonic() - waiting_since)
-            if remaining <= 0:
-                raise ModelDispatchUnavailable("model capacity wait expired before dispatch")
-            response = self._http.post(
-                f"{binding.endpoint}{path}",
-                headers=headers,
-                json=payload,
-                timeout=remaining,
-            )
+            for semaphore in (self._worker_slots, slots):
+                if semaphore is not None:
+                    if not semaphore.acquire(timeout=remaining_time()):
+                        raise ModelDispatchUnavailable(
+                            "model capacity wait expired before dispatch"
+                        )
+                    acquired.append(semaphore)
+            if self._admission is not None and path != "/rerank":
+                permit = self._admission.acquire_model(
+                    kind, background=self._background, timeout=remaining_time()
+                )
+                permit.dispatched()
+                headers["X-Request-ID"] = str(permit.permit_id)
+            remaining = remaining_time()
+            try:
+                sent = True
+                response = self._http.post(
+                    f"{binding.endpoint}{path}", headers=headers, json=payload, timeout=remaining
+                )
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+                if permit is not None:
+                    permit.complete()
+                raise
+            except BaseException:
+                if permit is not None:
+                    permit.uncertain()
+                raise
+            else:
+                if permit is not None:
+                    permit.complete()
+        except CapacityUnavailable as exc:
+            if not sent:
+                raise ModelDispatchUnavailable(str(exc)) from exc
+            raise
         finally:
-            self._model_slots.release()
+            try:
+                if permit is not None and not sent:
+                    with suppress(CapacityUnavailable):
+                        permit.complete()
+            finally:
+                for semaphore in reversed(acquired):
+                    semaphore.release()
         response.raise_for_status()
         try:
             body = response.json()

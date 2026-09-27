@@ -53,7 +53,7 @@ def runtime_config():
 def test_shared_runtime_caps_overlapping_model_requests():
     base = runtime_config()
     config = base.model_copy(
-        update={"provider": base.provider.model_copy(update={"global_concurrency": 2})}
+        update={"provider": base.provider.model_copy(update={"llm_concurrency": 2})}
     )
     release = Event()
     two_active = Event()
