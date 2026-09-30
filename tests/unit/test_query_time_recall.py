@@ -55,6 +55,9 @@ class DatedRepository:
             {"unit_id": name, "kind": "passage", "score": 0.8} for name in tuple(self.rows)[:limit]
         ]
 
+    def related_user_fact(self, unit_ids):
+        return None
+
     def ordinary(self, seeds, vector):
         return (), {}
 
@@ -459,8 +462,12 @@ class DirectEvidenceService(RecallService):
 
 
 def test_mid_equal_arm_weights_use_stable_id_for_dense_graph_tie():
+    equal_search = CONFIG.search.model_copy(
+        update={"mid_arm_weights": CONFIG.search.mid_arm_weights.model_copy(update={"graph": 1.0})}
+    )
+    equal_config = CONFIG.model_copy(update={"search": equal_search})
     service = DirectEvidenceService(
-        CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
+        equal_config, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
 
     result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))

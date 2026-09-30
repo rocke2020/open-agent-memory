@@ -24,7 +24,7 @@ def test_fts_rank_weights_reject_values_outside_postgres_range() -> None:
             SearchConfig.model_validate(values)
 
 
-def test_canonical_config_freezes_v001_trial_limits_without_provider_defaults() -> None:
+def test_canonical_config_freezes_v001_trial_limits_without_active_provider_roles() -> None:
     resolved = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml")
 
     assert resolved.config.contract_version == "0.0.1"
@@ -36,7 +36,9 @@ def test_canonical_config_freezes_v001_trial_limits_without_provider_defaults() 
     assert resolved.config.user.max_reports == 100
     assert resolved.config.user.max_chats == 1_000
     assert resolved.config.api.max_concurrent_requests == 10
-    assert resolved.config.models.bindings == {}
+    assert set(resolved.config.models.bindings) == {"indexing_low", "indexing_high"}
+    assert resolved.config.models.bindings["indexing_low"].reasoning_effort == "low"
+    assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "high"
     assert resolved.config.models.required_unbound_roles() == {
         "abstract",
         "document_vision",
@@ -152,11 +154,12 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert config.search.mid_arm_weights.model_dump() == {
         "lexical": 1.0,
         "dense": 1.0,
-        "graph": 1.0,
+        "graph": 0.1,
         "temporal": 1.0,
     }
     assert config.search.graph_seed_min_similarity == 0.3
-    assert config.search.graph_seed_max == 20
+    assert config.search.graph_seed_max == 12
+    assert config.search.mid.source_seed_results == 36
     assert config.search.relation_hops == 2
     assert config.search.relation_candidates == 32
     assert config.search.entity_candidates_per_entity == 200
@@ -167,7 +170,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
         config.search.mid.fused_candidates,
         config.search.mid.source_seed_results,
         config.search.mid.max_results,
-    ) == (64, 128, 56, 96)
+    ) == (64, 128, 36, 96)
     assert (config.context.default_tokens, config.context.max_tokens) == (2048, 15000)
     assert config.context.source_seed_tokens == 8192
     assert config.context.source_detail_budget_fraction == 0.4

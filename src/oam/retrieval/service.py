@@ -22,14 +22,19 @@ from oam.retrieval.algorithms import (
     temporal_spread,
 )
 from oam.retrieval.context import (
+    ContextUnitCosts,
     assemble_context,
     pack_ranked,
     render_context,
+    source_diverse_seed_order,
     source_window_ids,
 )
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.repository import RecallRepository
 from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
+
+SUPPORT_COMPANION_LIMIT = 16
+RELATED_SOURCE_WINDOW_OFFSETS = (0, 1, -1, 2, -2, 3)
 
 
 class RecallUnavailable(RuntimeError):
@@ -332,6 +337,15 @@ class RecallService:
                     key=lambda node: (-rerank_scores[node], node),
                 )
             )
+        related = (
+            stage("related_user_fact", lambda: read("related_user_fact", final_ids))
+            if vector is not None and final_ids and len(final_ids) < tier.fused_candidates
+            else None
+        )
+        related_tail_id = None
+        if related is not None and related["unit_id"] not in final_ids:
+            related_tail_id = related["unit_id"]
+            final_ids = (*final_ids, related_tail_id)
         index_state = read("user_state")
         if index_state["index_generation_id"] != self.generation_id:
             raise RecallUnavailable("user generation changed during recall")
@@ -345,27 +359,157 @@ class RecallService:
             item["paths"] = paths.get(item["unit_id"], [])
             candidates.append(item)
         seed_budget = min(budget, self.config.context.source_seed_tokens)
+        context_costs = ContextUnitCosts()
+        seed_limit = min(tier.source_seed_results, tier.max_results)
+        ranked_candidates = [item for item in candidates if item["unit_id"] != related_tail_id]
         seed_items = pack_ranked(
-            candidates, seed_budget, min(tier.source_seed_results, tier.max_results)
+            source_diverse_seed_order(ranked_candidates),
+            seed_budget,
+            seed_limit,
+            costs=context_costs,
         )
+        source_seed_items = seed_items
+        if related_tail_id is not None:
+            related_item = next(
+                (item for item in candidates if item["unit_id"] == related_tail_id), None
+            )
+            if related_item is not None:
+                source_seed_items = pack_ranked(
+                    [related_item], seed_budget, seed_limit, source_seed_items, costs=context_costs
+                )
         source_ids = tuple(
             dict.fromkeys(
                 citation["source_id"]
-                for item in seed_items
+                for item in source_seed_items
                 if item["kind"] == "fact"
                 for citation in item["citations"]
                 if isinstance(citation.get("source_id"), str)
             )
         )
         source_passages = []
+        original_detail_ids = []
+        expanded_detail_ids = []
         if source_ids:
             locators = read("source_passage_locators", source_ids)
-            detail_ids = source_window_ids(seed_items, locators)
+            original_detail_ids = source_window_ids(seed_items, locators)
+            detail_ids = original_detail_ids
+            related_seed = next(
+                (
+                    item
+                    for item in source_seed_items
+                    if related and item["unit_id"] == related["unit_id"]
+                ),
+                None,
+            )
+            if related_seed is not None:
+                source_rows = sorted(
+                    (
+                        row
+                        for row in locators
+                        if row["source_id"] == related["source_id"]
+                        and row["source_version"] == related["source_version"]
+                    ),
+                    key=lambda row: (
+                        row["locator"].get("message_index", float("inf")),
+                        row["locator"].get("start", 0),
+                        row["unit_id"],
+                    ),
+                )
+                source_positions = {
+                    row["passage_id"]: index for index, row in enumerate(source_rows)
+                }
+                direct = (
+                    citation.get("passage_id")
+                    for citation in related_seed["citations"]
+                    if citation.get("source_id") == related["source_id"]
+                    and citation.get("source_version") == related["source_version"]
+                )
+                for passage_id in direct:
+                    center = source_positions.get(passage_id)
+                    if center is None:
+                        continue
+                    for offset in RELATED_SOURCE_WINDOW_OFFSETS:
+                        index = center + offset
+                        if 0 <= index < len(source_rows):
+                            unit_id = source_rows[index]["unit_id"]
+                            if unit_id not in expanded_detail_ids:
+                                expanded_detail_ids.append(unit_id)
+                    if len(expanded_detail_ids) >= len(RELATED_SOURCE_WINDOW_OFFSETS):
+                        break
+                expanded_detail_ids = expanded_detail_ids[: len(RELATED_SOURCE_WINDOW_OFFSETS)]
+                detail_ids = list(dict.fromkeys((*expanded_detail_ids, *original_detail_ids)))
             if detail_ids:
                 for row in read("hydrate", detail_ids):
                     item = {key: value for key, value in row.items() if key != "locator"}
                     item["paths"] = paths.get(item["unit_id"], [])
                     source_passages.append(item)
+                if expanded_detail_ids:
+                    by_id = {item["unit_id"]: item for item in source_passages}
+                    detail_cap = min(
+                        self.config.context.default_tokens,
+                        int(seed_budget * self.config.context.source_detail_budget_fraction),
+                    )
+                    expanded = pack_ranked(
+                        [by_id[unit_id] for unit_id in expanded_detail_ids if unit_id in by_id],
+                        detail_cap,
+                        tier.max_results,
+                        costs=context_costs,
+                    )
+                    selected = set(original_detail_ids)
+                    source_passages = [
+                        *(by_id[unit_id] for unit_id in original_detail_ids if unit_id in by_id),
+                        *(item for item in expanded if item["unit_id"] not in selected),
+                    ]
+        if vector is not None:
+            source_by_id = {item["unit_id"]: item for item in source_passages}
+            companion_order = [
+                *(
+                    source_by_id[unit_id]
+                    for unit_id in original_detail_ids
+                    if unit_id in source_by_id
+                ),
+                *source_passages,
+            ]
+            passage_ids = tuple(
+                dict.fromkeys(
+                    item["unit_id"]
+                    for item in (*seed_items, *companion_order)
+                    if item["kind"] == "passage"
+                    and item["citations"]
+                    and item["citations"][0].get("role") == "user"
+                )
+            )[:SUPPORT_COMPANION_LIMIT]
+            if passage_ids:
+                existing = {item["unit_id"] for item in candidates}
+                supported = (
+                    stage(
+                        "supported_facts",
+                        lambda: read(
+                            "supported_fact_ids",
+                            passage_ids,
+                            vector,
+                            len(passage_ids),
+                            tuple(existing),
+                        ),
+                    )
+                    or []
+                )
+                fresh = [row for row in supported if row["unit_id"] not in existing]
+                if fresh:
+                    fact_ids = tuple(dict.fromkeys(row["unit_id"] for row in fresh))
+                    companions = {}
+                    for row in read("hydrate", fact_ids):
+                        item = {key: value for key, value in row.items() if key != "locator"}
+                        item["paths"] = paths.get(item["unit_id"], [])
+                        companions[item["unit_id"]] = item
+                    candidates.extend(companions.values())
+        original_detail_set = set(original_detail_ids)
+        candidates.extend(
+            item for item in source_passages if item["unit_id"] not in original_detail_set
+        )
+        source_passages = [
+            item for item in source_passages if item["unit_id"] in original_detail_set
+        ]
         items, budget_omissions = assemble_context(
             candidates,
             seed_items,
@@ -374,6 +518,7 @@ class RecallService:
             seed_budget=seed_budget,
             detail_fraction=self.config.context.source_detail_budget_fraction,
             max_results=tier.max_results,
+            costs=context_costs,
         )
         context = render_context(items)
         context_tokens = estimated_tokens(estimate_units(context))
@@ -398,6 +543,7 @@ class RecallService:
                         "anchors",
                         "embedding",
                         "dense",
+                        "related_user_fact",
                         "graph",
                         "hierarchy",
                         "temporal",
@@ -465,6 +611,7 @@ class RecallService:
             "arms": {name: list(ids) for name, ids in arms.items()},
             "fusion": fusion,
             "rerank_scores": rerank_scores,
+            "related_user_fact": related,
             "result_ids": [item["unit_id"] for item in items],
             "packing": {
                 "token_limit": budget,

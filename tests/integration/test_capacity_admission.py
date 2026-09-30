@@ -59,6 +59,28 @@ def test_http_write_reservation_is_shared_and_released(capacity_database):
         second.close()
 
 
+def test_api_model_permits_reuse_its_open_connection_pool(capacity_database, monkeypatch):
+    from oam.api.runtime import DatabaseRuntime
+
+    dsn, config = capacity_database
+    runtime = DatabaseRuntime.from_dsn(config, make_conninfo(dsn, options="-c role=oam_api"))
+    runtime.open()
+    try:
+        assert runtime.capacity is not None
+        assert runtime.capacity.pool is runtime.pool
+
+        def unexpected_connect(*args, **kwargs):
+            pytest.fail("model permit opened a fresh PostgreSQL connection")
+
+        monkeypatch.setattr("oam.capacity.psycopg.connect", unexpected_connect)
+        permit = runtime.capacity.acquire_model("embedding", background=False, timeout=1)
+        permit.dispatched()
+        permit.complete()
+        assert runtime.capacity.status()
+    finally:
+        runtime.close()
+
+
 async def test_two_http_replicas_reject_overload_before_application_acceptance(capacity_database):
     import asyncio
     from contextlib import AsyncExitStack

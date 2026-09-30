@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Event
 from typing import Any
@@ -11,10 +12,12 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from oam.config import ConfigurationError, OAMConfig
 
 CAPACITY_POLL_SECONDS = 0.05
+EXPIRED_PERMIT_RELEASE_TIMEOUT_SECONDS = 0.1
 
 
 class CapacityUnavailable(TimeoutError):
@@ -54,9 +57,10 @@ class ModelPermit:
 
 
 class PostgresCapacity:
-    def __init__(self, config: OAMConfig, dsn: str) -> None:
+    def __init__(self, config: OAMConfig, dsn: str, *, pool: ConnectionPool | None = None) -> None:
         self.config = config
         self.dsn = dsn
+        self.pool = pool
         self.owner_id = uuid4()
         self._closed = Event()
         self.limits = {
@@ -71,13 +75,31 @@ class PostgresCapacity:
             "pending_roots": config.queue.max_pending_per_user,
         }
 
-    def _execute(self, query: str, params: tuple = (), *, timeout: float = 5.0):
-        with psycopg.connect(self.dsn, connect_timeout=max(1, math.ceil(timeout))) as connection:
+    def _execute(
+        self,
+        query: str,
+        params: tuple | Callable[[float], tuple] = (),
+        *,
+        timeout: float = 5.0,
+    ):
+        deadline = time.monotonic() + timeout
+        connection_context = (
+            self.pool.connection(timeout=timeout)
+            if self.pool is not None
+            else psycopg.connect(self.dsn, connect_timeout=max(1, math.ceil(timeout)))
+        )
+        with connection_context as connection:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CapacityUnavailable("capacity database wait exhausted the caller deadline")
             connection.execute(
                 "SELECT set_config('statement_timeout',%s,true)",
-                (str(max(1, int(timeout * 1000))),),
+                (str(max(1, int(remaining * 1000))),),
             )
-            row = connection.execute(query, params).fetchone()
+            actual_params = params(remaining) if callable(params) else params
+            row = connection.execute(query, actual_params).fetchone()
+            if time.monotonic() >= deadline:
+                raise CapacityUnavailable("capacity query exceeded the caller deadline")
             if row is None:
                 raise CapacityUnavailable("capacity query returned no result")
             return row[0]
@@ -114,15 +136,38 @@ class PostgresCapacity:
             if remaining <= 0:
                 break
             permit_id = uuid4()
+
+            def permit_parameters(duration: float, current_permit_id: UUID = permit_id) -> tuple:
+                return (
+                    current_permit_id,
+                    self.owner_id,
+                    kind,
+                    background,
+                    duration,
+                    Jsonb(self.limits),
+                )
+
             try:
                 acquired = self._execute(
                     "SELECT oam_model_permit_acquire(%s,%s,%s,%s,%s,%s)",
-                    (permit_id, self.owner_id, kind, background, remaining, Jsonb(self.limits)),
+                    permit_parameters,
                     timeout=remaining,
                 )
             except psycopg.Error as exc:
                 raise CapacityUnavailable("model admission database is unavailable") from exc
             if acquired:
+                if time.monotonic() >= deadline or self._closed.is_set():
+                    try:
+                        self._execute(
+                            "SELECT oam_model_permit_update(%s,%s,%s)",
+                            (permit_id, self.owner_id, "released"),
+                            timeout=EXPIRED_PERMIT_RELEASE_TIMEOUT_SECONDS,
+                        )
+                    except (psycopg.Error, CapacityUnavailable) as exc:
+                        raise CapacityUnavailable(
+                            "model admission expired and reservation cleanup is unavailable"
+                        ) from exc
+                    raise CapacityUnavailable("model capacity wait expired before dispatch")
                 return ModelPermit(self, permit_id)
             self._closed.wait(min(CAPACITY_POLL_SECONDS, max(0, deadline - time.monotonic())))
         raise CapacityUnavailable("model capacity wait expired before dispatch")

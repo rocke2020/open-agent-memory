@@ -14,7 +14,7 @@ def test_rank_fusion_counts_each_arm_once_and_breaks_ties_by_id() -> None:
     assert [item.score for item in result] == pytest.approx([5 / 6, 5 / 6])
 
 
-def test_mid_fusion_can_surface_a_lexical_only_candidate() -> None:
+def test_mid_fusion_keeps_a_lexical_only_candidate_ahead_of_graph_only_results() -> None:
     from oam.config import load_config
     from oam.retrieval.algorithms import reciprocal_rank_fusion
 
@@ -31,7 +31,8 @@ def test_mid_fusion_can_surface_a_lexical_only_candidate() -> None:
         weights=(weights.lexical, weights.dense, weights.graph),
     )
 
-    assert ranked == reciprocal_rank_fusion((lexical, dense, graph), rrf_k=config.search.rrf_k)
+    ids = [item.node_id for item in ranked]
+    assert ids.index(target) < ids.index("graph_0")
     assert target in {item.node_id for item in ranked[: config.search.mid.max_results]}
 
 

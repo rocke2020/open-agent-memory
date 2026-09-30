@@ -218,7 +218,7 @@ class DatabaseRuntime:
             open=False,
             name="oam-api",
         )
-        return cls(config=config, pool=pool, capacity=PostgresCapacity(config, dsn))
+        return cls(config=config, pool=pool, capacity=PostgresCapacity(config, dsn, pool=pool))
 
     def open(self) -> None:
         self.pool.open(wait=True)

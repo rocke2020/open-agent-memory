@@ -1,10 +1,104 @@
+from contextlib import contextmanager
 from threading import Event
+from time import sleep
 
 import httpx
 import pytest
 from test_runtime_models import runtime_config
 
 from oam.models.runtime import ModelDispatchUnavailable, RuntimeModels
+
+
+def test_model_admission_rejects_a_permit_after_pool_checkout_exhausts_deadline():
+    from oam.capacity import CapacityUnavailable, PostgresCapacity
+
+    class Connection:
+        def execute(self, query, parameters=()):
+            return self
+
+        def fetchone(self):
+            return (True,)
+
+    class SlowPool:
+        @contextmanager
+        def connection(self, *, timeout):
+            sleep(0.03)
+            yield Connection()
+
+    capacity = PostgresCapacity(runtime_config(), "unused", pool=SlowPool())
+
+    with pytest.raises(CapacityUnavailable):
+        capacity.acquire_model("embedding", background=False, timeout=0.01)
+
+
+def test_model_admission_rolls_back_if_query_finishes_after_deadline():
+    from oam.capacity import CapacityUnavailable, PostgresCapacity
+
+    statements = []
+    checkout_timeouts = []
+    rolled_back = []
+
+    class Connection:
+        def execute(self, query, parameters=()):
+            statements.append(query)
+            if "oam_model_permit_acquire" in query:
+                sleep(0.03)
+            return self
+
+        def fetchone(self):
+            return (True,)
+
+    class Pool:
+        @contextmanager
+        def connection(self, *, timeout):
+            checkout_timeouts.append(timeout)
+            try:
+                yield Connection()
+            except CapacityUnavailable:
+                rolled_back.append(True)
+                raise
+
+    capacity = PostgresCapacity(runtime_config(), "unused", pool=Pool())
+
+    with pytest.raises(CapacityUnavailable):
+        capacity.acquire_model("embedding", background=False, timeout=0.01)
+    assert rolled_back == [True]
+    assert len(checkout_timeouts) == 1
+    assert not any("oam_model_permit_update" in query for query in statements)
+
+
+def test_model_admission_bounds_cleanup_if_pool_return_finishes_after_deadline():
+    from oam.capacity import CapacityUnavailable, PostgresCapacity
+
+    checkout_timeouts = []
+
+    class Connection:
+        def __init__(self):
+            self.acquired = False
+
+        def execute(self, query, parameters=()):
+            if "oam_model_permit_acquire" in query:
+                self.acquired = True
+            return self
+
+        def fetchone(self):
+            return (True,)
+
+    class Pool:
+        @contextmanager
+        def connection(self, *, timeout):
+            checkout_timeouts.append(timeout)
+            connection = Connection()
+            yield connection
+            if connection.acquired:
+                sleep(0.03)
+
+    capacity = PostgresCapacity(runtime_config(), "unused", pool=Pool())
+
+    with pytest.raises(CapacityUnavailable):
+        capacity.acquire_model("embedding", background=False, timeout=0.01)
+    assert len(checkout_timeouts) == 2
+    assert checkout_timeouts[1] <= 0.1
 
 
 @pytest.mark.parametrize(

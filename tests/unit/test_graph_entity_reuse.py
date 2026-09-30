@@ -14,7 +14,7 @@ def test_graph_reads_each_distinct_entity_candidate_set_once():
     repository.config = config
     repository.request = SearchRequest(query="Where is my book?", recall_level="mid")
     repository.deadline = time.monotonic() + 5
-    repository.has_insights = False
+    repository._has_insights = False
     repository._eligible = lambda **kwargs: "WITH filtered AS (SELECT 1) "
     statements = []
     repository._execute = lambda sql, parameters: statements.append(sql) or []

@@ -9,27 +9,74 @@ def render_context(items: list[dict]) -> str:
     """Render all admitted facts beside their selected originals, retaining metadata ownership."""
     blocks = []
     for group in _source_groups(items):
-        source_id = group[-1]["unit_id"] if len(group) > 1 else None
+        passage = group[-1] if len(group) > 1 and group[-1]["kind"] == "passage" else None
+        source_id = passage["unit_id"] if passage is not None else None
+        ordered = [passage, *group[:-1]] if passage is not None else group
         blocks.extend(
-            render_item(item, source_id if item["kind"] == "fact" else None) for item in group
+            render_item(item, source_id if item["kind"] == "fact" else None) for item in ordered
         )
     return "\n\n".join(blocks)
 
 
 def render_item(item: dict, source_id: str | None = None) -> str:
     reference = (
-        f"Source: [{source_id}]"
-        if source_id is not None
-        else "Citations: "
-        + json.dumps(item["citations"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        f"Source: [{source_id}]" if source_id is not None else _render_citations(item["citations"])
     )
-    time_evidence = json.dumps(
-        item["time_evidence"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    rendered = f"[{item['unit_id']}] {item['kind']} {item['origin']}\n{item['text']}\n{reference}"
+    if item["time_evidence"]:
+        rendered += "\n" + _render_time(item["time_evidence"])
+    return rendered
+
+
+def _render_citations(citations: list[dict]) -> str:
+    chat = []
+    for citation in citations:
+        locator = citation.get("span", citation)
+        if (
+            not isinstance(locator, dict)
+            or not isinstance(citation.get("source_id"), str)
+            or type(citation.get("source_version")) is not int
+            or not isinstance(locator.get("message_id"), str)
+            or not isinstance(locator.get("role"), str)
+            or ("span" in citation and not isinstance(locator.get("quote"), str))
+        ):
+            break
+        reference = (
+            f"{citation['source_id']}@{citation['source_version']} "
+            f"{locator['role']} message:{locator['message_id']}"
+        )
+        if "span" in citation:
+            reference += f" quote:{locator['quote']!r}"
+        chat.append(reference)
+    if len(chat) == len(citations):
+        return "Source: " + "; ".join(chat)
+    return "Citations: " + json.dumps(
+        citations, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
-    return (
-        f"[{item['unit_id']}] {item['kind']} {item['origin']}\n{item['text']}\n"
-        f"{reference}\nTime: {time_evidence}"
+
+
+def _render_time(entries: list[dict]) -> str:
+    if any(
+        not isinstance(entry, dict) or not isinstance(entry.get("role"), str) for entry in entries
+    ):
+        return "Time: " + json.dumps(
+            entries, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+    return "Time: " + "; ".join(
+        " ".join(
+            [
+                entry["role"],
+                *(f"{key}={_time_value(value)}" for key, value in entry.items() if key != "role"),
+            ]
+        )
+        for entry in entries
     )
+
+
+def _time_value(value: object) -> str:
+    if isinstance(value, str) and not any(ch.isspace() or ch == ";" for ch in value):
+        return value
+    return repr(value)
 
 
 def _source_groups(items: list[dict]) -> list[list[dict]]:
@@ -82,10 +129,26 @@ def _supported_passage_id(item: dict, passages: dict[str, dict]) -> str | None:
     return passage["unit_id"]
 
 
+class ContextUnitCosts:
+    """Reuse rendered token costs while one recall assembles its context."""
+
+    def __init__(self):
+        self._costs: dict[tuple[int, str | None], tuple[dict, int]] = {}
+
+    def units(self, item: dict, source_id: str | None = None) -> int:
+        key = (id(item), source_id)
+        if key not in self._costs:
+            self._costs[key] = (item, estimate_units(render_item(item, source_id)))
+        return self._costs[key][1]
+
+
 class ContextUnits:
     """Maintain the exact rendered estimate while ranked items are appended."""
 
-    def __init__(self, initial: list[dict], pool: list[dict]):
+    def __init__(
+        self, initial: list[dict], pool: list[dict], costs: ContextUnitCosts | None = None
+    ):
+        costs = costs or ContextUnitCosts()
         items = {item["unit_id"]: item for item in [*initial, *pool]}
         passages = {
             identifier: item for identifier, item in items.items() if item["kind"] == "passage"
@@ -98,11 +161,9 @@ class ContextUnits:
         self.passage_facts: dict[str, list[str]] = {}
         for fact_id, passage_id in self.fact_sources.items():
             self.passage_facts.setdefault(passage_id, []).append(fact_id)
-        self.raw_units = {
-            identifier: estimate_units(render_item(item)) for identifier, item in items.items()
-        }
+        self.raw_units = {identifier: costs.units(item) for identifier, item in items.items()}
         self.grouped_units = {
-            identifier: estimate_units(render_item(items[identifier], source))
+            identifier: costs.units(items[identifier], source)
             for identifier, source in self.fact_sources.items()
         }
         self.selected_ids: set[str] = set()
@@ -138,17 +199,58 @@ class ContextUnits:
             self.selected_passages.add(identifier)
 
 
-def pack_ranked(items: list[dict], budget: int, limit: int, initial: list[dict] | None = None):
+def source_diverse_seed_order(items: list[dict]) -> list[dict]:
+    """Protect the highest-ranked user fact or original from each source."""
+    groups: dict[tuple, list[dict]] = {}
+    for item in items:
+        sources = {
+            (citation.get("source_id"), citation.get("source_version"))
+            for citation in item.get("citations", ())
+            if isinstance(citation.get("source_id"), str)
+            and type(citation.get("source_version")) is int
+        }
+        key = ("source", *next(iter(sources))) if len(sources) == 1 else ("unit", item["unit_id"])
+        groups.setdefault(key, []).append(item)
+    if len(groups) <= 1:
+        return list(items)
+
+    representatives = []
+    protected = set()
+    for group in groups.values():
+        facts = [item for item in group if item["kind"] == "fact"]
+        user_facts = [
+            item
+            for item in facts
+            if any(
+                isinstance(citation.get("span"), dict) and citation["span"].get("role") == "user"
+                for citation in item["citations"]
+            )
+        ]
+        representative = (user_facts or facts or group)[0]
+        representatives.append(representative)
+        protected.add(representative["unit_id"])
+    return [*representatives, *(item for item in items if item["unit_id"] not in protected)]
+
+
+def pack_ranked(
+    items: list[dict],
+    budget: int,
+    limit: int,
+    initial: list[dict] | None = None,
+    *,
+    costs: ContextUnitCosts | None = None,
+):
     """Admit ranked items against the declared online token estimate."""
+    costs = costs or ContextUnitCosts()
     chosen = list(initial or [])
     seen = {item["unit_id"] for item in chosen}
-    units = sum(estimate_units(render_item(item)) + 2 for item in chosen)
+    units = sum(costs.units(item) + 2 for item in chosen)
     for item in items:
         if len(chosen) >= limit:
             break
         if item["unit_id"] in seen:
             continue
-        additional = estimate_units(render_item(item)) + 2
+        additional = costs.units(item) + 2
         if estimated_tokens(units + additional) > budget:
             continue
         chosen.append(item)
@@ -167,7 +269,7 @@ def source_window_ids(seed_items: list[dict], passage_locators: list[dict]) -> l
             continue
         key = (row["source_id"], row["source_version"])
         by_source.setdefault(key, []).append(row)
-        by_id[row["unit_id"]] = row
+        by_id[row["passage_id"]] = row
     for group in by_source.values():
         group.sort(
             key=lambda row: (
@@ -223,8 +325,10 @@ def assemble_context(
     seed_budget: int,
     detail_fraction: float,
     max_results: int,
+    costs: ContextUnitCosts | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Protect ranked facts and bounded source windows, then fill from ranked evidence."""
+    costs = costs or ContextUnitCosts()
     primary = [
         item
         for item in seed_items
@@ -236,12 +340,12 @@ def assemble_context(
     ]
     primary_budget = int(seed_budget * (1 - detail_fraction))
     detail_budget = int(seed_budget * detail_fraction)
-    primary_selected = pack_ranked(primary, primary_budget, max_results)
-    detail_selected = pack_ranked(source_passages, detail_budget, max_results)
-    chosen = pack_ranked(primary_selected + detail_selected, seed_budget, max_results)
-    chosen = pack_ranked(primary + source_passages, seed_budget, max_results, chosen)
+    primary_selected = pack_ranked(primary, primary_budget, max_results, costs=costs)
+    detail_selected = pack_ranked(source_passages, detail_budget, max_results, costs=costs)
+    chosen = pack_ranked(primary_selected + detail_selected, seed_budget, max_results, costs=costs)
+    chosen = pack_ranked(primary + source_passages, seed_budget, max_results, chosen, costs=costs)
     seen = {item["unit_id"] for item in chosen}
-    counter = ContextUnits(chosen, candidates)
+    counter = ContextUnits(chosen, candidates, costs)
     budget_omissions = []
     for item in candidates:
         if len(chosen) >= max_results:

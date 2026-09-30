@@ -160,6 +160,77 @@ def test_direct_retrieval_filters_ineligible_rows_before_its_limit(recall_databa
     assert hydrated[0]["citations"][0]["source_id"] == "b_visible"
 
 
+def test_related_user_fact_excludes_seed_and_ineligible_neighbors_before_limit(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "seed", "I attended the science fair.", direction=1.0)
+    add_fact(
+        connection, authority, "hidden", "I joined another event.", eligible=False, direction=0.99
+    )
+    add_fact(connection, authority, "related", "I visited the art fair.", direction=0.9)
+    connection.execute(
+        'UPDATE support SET span=span || \'{"role":"user"}\'::jsonb '
+        "WHERE tenant_id=%s AND user_id=%s",
+        (authority.tenant_id, authority.user_id),
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert repository.related_user_fact(("seed",))["unit_id"] == "related"
+    assert repository.related_user_fact(("seed", "related"))["unit_id"] == "related"
+
+
+def test_supported_fact_ids_selects_next_eligible_user_fact(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    source_text = "I went to a local community meeting."
+    add_user_passage(connection, authority, "source", source_text, "2023-05-20T00:00:00Z")
+    add_fact(connection, authority, "excluded", "A closer but excluded fact.", direction=1.0)
+    add_fact(connection, authority, "eligible", "A supported user fact.", direction=0.9)
+    for memory_id in ("excluded", "eligible"):
+        connection.execute(
+            "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
+            "support_kind,span) VALUES (%s,%s,%s,'source','source','quote',%s)",
+            (
+                authority.tenant_id,
+                authority.user_id,
+                memory_id,
+                Jsonb({"role": "user", "start": 0, "end": len(source_text)}),
+            ),
+        )
+    connection.execute(
+        "UPDATE memories SET lifecycle_state='excluded' "
+        "WHERE tenant_id=%s AND user_id=%s AND memory_id='excluded'",
+        (authority.tenant_id, authority.user_id),
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert repository.supported_fact_ids(("source_passage",), vector, 1, ("source",)) == [
+        {"passage_id": "source_passage", "unit_id": "eligible"}
+    ]
+
+
+def test_source_passage_locators_preserves_passage_and_unit_ids(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_user_passage(
+        connection, authority, "source", "The user joined a meeting.", "2023-05-20T00:00:00Z"
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    rows = repository.source_passage_locators(("source",))
+    assert [(row["passage_id"], row["unit_id"]) for row in rows] == [("source", "source_passage")]
+
+
 def test_candidate_eligibility_matches_full_source_and_support_policy(recall_database):
     from oam.db.eligibility import (
         ELIGIBLE_UNITS_CANDIDATE,
@@ -221,6 +292,52 @@ def test_lexical_recall_falls_back_for_conversational_recommendation(recall_data
             "Can you recommend a show or movie for me to watch tonight?", 2
         )
     } == {"old_book", "recent_special"}
+
+
+def test_lexical_eligibility_avoids_second_unit_lookup_for_each_hit(recall_database, monkeypatch):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    for index in range(256):
+        add_fact(
+            connection,
+            authority,
+            f"orchard{index:03d}",
+            f"Shared orchard note {index}.",
+            direction=0.0,
+        )
+    for table in ("search_units", "memories", "support", "passages", "evidence"):
+        connection.execute(f"ANALYZE {table}")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 10)
+    captured = []
+    execute = repository._execute
+
+    def capture(sql, parameters):
+        captured.append((sql, parameters))
+        return execute(sql, parameters)
+
+    monkeypatch.setattr(repository, "_execute", capture)
+    assert len(repository.lexical("shared orchard", 10)) == 10
+    sql, parameters = captured[-1]
+    plan = connection.execute("EXPLAIN (ANALYZE,FORMAT JSON) " + sql, parameters).fetchone()[0][0][
+        "Plan"
+    ]
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", ()):
+            yield from nodes(child)
+
+    assert (
+        sum(
+            node.get("Actual Loops", 0)
+            for node in nodes(plan)
+            if node.get("Index Name") == "search_units_pkey"
+        )
+        == 0
+    )
 
 
 def test_imperative_show_does_not_promote_movie_preferences(recall_database):
@@ -438,7 +555,13 @@ def test_fast_service_returns_cited_context_with_estimated_budget(recall_databas
     assert "apple trees" in result["context"]
     assert "source_id" in result["context"]
     assert 0 < result["context_tokens"] <= 256
-    assert result["diagnostics"]["executed_stages"] == ["fts", "anchors", "embedding", "dense"]
+    assert result["diagnostics"]["executed_stages"] == [
+        "fts",
+        "anchors",
+        "embedding",
+        "dense",
+        "related_user_fact",
+    ]
     assert result["diagnostics"]["generative_calls"] == 0
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
     empty = service.search(authority, SearchRequest(query="apple", max_context_tokens=1))

@@ -45,8 +45,8 @@ def test_recorded_trace_redacts_content_after_source_deletion(source_database):
                 "paths": [],
             }
         ],
-        "context": "[passage] passage memory\nPrivate text\nCitations: []\nTime: []",
-        "context_tokens": 15,
+        "context": "[passage] passage memory\nPrivate text\nSource: ",
+        "context_tokens": 12,
         "tokenizer": "oam-unicode-quarter-v1",
         "diagnostics": {"generative_calls": 0},
     }

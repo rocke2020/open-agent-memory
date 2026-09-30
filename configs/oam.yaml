@@ -17,7 +17,9 @@ api:
 chunk:
   target_estimated_tokens: 2048
   max_estimated_tokens: 4096
+  # Source spans never overlap, so each extracted fact has one owning chunk.
   extractable_overlap_estimated_tokens: 0
+  # The prior chunk's tail helps extraction but is not owned by the new chunk.
   previous_context_estimated_tokens: 128
 
 extraction:
@@ -28,30 +30,55 @@ extraction:
 search:
   max_query_tokens: 512
   max_queries: 4
+  # Parallel searches within one batch request.
   query_concurrency: 2
+  # Rank-fusion denominator offset: each arm contributes weight / (rrf_k + rank).
   rrf_k: 60
+  # PostgreSQL ts_rank_cd expects D, C, B, A: content, caption, heading, title.
+  # D applies to all indexed units; current HTML passages may also supply C/B/A.
+  # Higher weights favor those structural fields when present.
   fts_rank_weights: [0.1, 0.2, 0.4, 1.0]
+  # Only mid uses these arm weights; fast and deep use equal fusion weights.
   mid_arm_weights:
     lexical: 1.0
     dense: 1.0
-    graph: 1.0
+    # Entity, semantic, and causal neighbors are indirect evidence.
+    # A 0.1 vote supports direct matches without letting graph noise lead the ranking.
+    graph: 0.1
     temporal: 1.0
+  # Only sufficiently similar dense fact hits become graph expansion seeds.
   graph_seed_min_similarity: 0.3
-  graph_seed_max: 20
+  graph_seed_max: 12
+  # Ordinary causal expansion currently follows two outward hops.
   relation_hops: 2
+  # Maximum graph-arm results after entity, semantic, and causal expansion.
   relation_candidates: 32
+  # Candidate facts examined for each entity shared with a seed.
   entity_candidates_per_entity: 200
+  # Entity keys examined per graph seed.
   entities_per_seed: 8
+  # Cap each semantic direction and causal hop at this many links.
   links_per_seed: 16
+  # Deep-mode limits for L2 parents of each seed and related child facts.
   hierarchy_parents_per_seed: 2
   hierarchy_children_per_parent: 8
+  # Maximum temporal seeds selected before spreading.
   temporal_seed_max: 10
+  # Spread temporal seeds across the requested time window.
   temporal_coverage_buckets: 8
+  # Maximum neighbors visited from each temporal node.
   temporal_neighbors: 10
+  # Maximum temporal node pool; fast also caps it by max_results.
   temporal_nodes: 300
+  # Minimum query similarity for a fact reached through temporal links.
   temporal_semantic_floor: 0.1
+  # pgvector HNSW settings for dense search; strict_order preserves distance order.
   ann_iterative_scan: strict_order
+  # Upper bound on tuples visited by iterative ANN scans.
   ann_scan_max_tuples: 20000
+  # Per mode: channel_candidates caps each arm; fused_candidates caps rank fusion.
+  # rerank_candidates caps optional reranker input; source_seed_results caps seed items.
+  # max_results caps returned items after source-detail assembly.
   fast:
     channel_candidates: 64
     fused_candidates: 128
@@ -61,7 +88,7 @@ search:
     channel_candidates: 64
     fused_candidates: 128
     rerank_candidates: 48
-    source_seed_results: 56
+    source_seed_results: 36
     max_results: 96
   deep:
     channel_candidates: 64
@@ -72,12 +99,15 @@ search:
 
 index:
   embedding_dimensions: 1024
+  # Create index-time semantic links only above this cosine similarity.
   semantic_link_min_similarity: 0.7
   semantic_link_max_neighbors: 20
   temporal_link_max_neighbors: 20
+  # Only facts within this many seconds can receive temporal links at indexing.
   temporal_link_horizon_seconds: 86400
 
 recall:
+  # Shared trusted-turn deadline; the mode deadline also applies to each request.
   turn_deadline_seconds: 10
   fast_deadline_seconds: 3
   mid_deadline_seconds: 5
@@ -86,10 +116,14 @@ recall:
 context:
   default_tokens: 2048
   max_tokens: 15000
+  # Maximum budget for initial ranked seeds and their source detail.
   source_seed_tokens: 8192
+  # Initial share of the seed budget allocated to source passages.
   source_detail_budget_fraction: 0.4
+  # Local Unicode-based token estimate used for context budgeting.
   tokenizer: oam-unicode-quarter-v1
 
+# Optional include.chunks response budget; chunk above controls ingestion splitting.
 chunks:
   default_tokens: 8192
   max_tokens: 8192
@@ -116,24 +150,30 @@ retry:
   max_attempts: 3
 
 worker:
+  # Run a worker inside the API process when enabled.
   embedded_enabled: true
+  # Limit running work items separately from simultaneous model calls.
   max_tasks: 4
   max_model_calls: 8
 
 lease:
+  # A work claim expires unless renewed at the heartbeat interval.
   seconds: 90
   heartbeat_seconds: 20
+  # Time to wait for in-flight tasks during worker shutdown.
   shutdown_seconds: 90
 
 database:
   migration_dsn_env: OAM_MIGRATION_DSN
   api_dsn_env: OAM_API_DSN
+  # Worker queue admission and content access use separate database roles.
   worker_queue_dsn_env: OAM_WORKER_QUEUE_DSN
   worker_content_dsn_env: OAM_WORKER_CONTENT_DSN
   api_pool_max: 10
   worker_pool_max: 6
 
 auth:
+  # null selects the mode from root-key and database bootstrap state.
   mode: null
   root_key_env: OAM_ROOT_API_KEY
   cache_ttl_seconds: 30
@@ -150,12 +190,14 @@ queue:
 provider:
   llm_concurrency: 32
   embedding_concurrency: 8
+  # Keep this many embedding permits available to foreground search.
   embedding_search_reserved: 4
   rerank_concurrency: 4
 
 user:
   max_reports: 100
   max_chats: 1000
+  # Concurrent worker claims allowed for one user, across replicas.
   concurrency: 2
 
 trace:
@@ -175,6 +217,7 @@ backup:
   retention_days: 30
 
 models:
+  # A role selects a binding below; null leaves that role unbound.
   roles:
     extraction: null
     insights: null
@@ -184,4 +227,19 @@ models:
     profile: null
     reranker: null
     planner: null
-  bindings: {}
+  # Defining a binding alone does not activate it; assign it to a role above.
+  bindings:
+    indexing_low:
+      protocol: openai_compatible
+      model_env: OAM_GENERATIVE_MODEL
+      endpoint_env: OAM_GENERATIVE_ENDPOINT
+      api_key_env: OAM_GENERATIVE_API_KEY
+      capabilities: [chat, vision]
+      reasoning_effort: low
+    indexing_high:
+      protocol: openai_compatible
+      model_env: OAM_GENERATIVE_MODEL
+      endpoint_env: OAM_GENERATIVE_ENDPOINT
+      api_key_env: OAM_GENERATIVE_API_KEY
+      capabilities: [chat]
+      reasoning_effort: high

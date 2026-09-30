@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.contracts.search import RecallLevel, SearchRequest
-from oam.db.context import bind_user
+from oam.db.context import SET_USER_CONTEXT_SQL
 from oam.db.eligibility import (
     ELIGIBLE_PASSAGE_UNITS,
     ELIGIBLE_SUPPORT,
@@ -125,15 +125,27 @@ class RecallRepository:
         self.deadline = deadline
         self.request = request
         self.time_parameters = {}
-        bind_user(connection.cursor(), authority)
-        connection.execute("SELECT set_config('jit','off',true)")
-        has_insights = connection.execute(
-            "SELECT EXISTS(SELECT 1 FROM insights WHERE tenant_id=%s AND user_id=%s)",
+        connection.execute(
+            SET_USER_CONTEXT_SQL + ", set_config('jit','off',true)",
             (authority.tenant_id, authority.user_id),
-        ).fetchone()[0]
-        self.has_insights = has_insights
-        self.candidate_units_sql = (
-            ELIGIBLE_UNITS_CANDIDATE if has_insights else ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
+        )
+        self._has_insights: bool | None = None
+
+    @property
+    def has_insights(self) -> bool:
+        if self._has_insights is None:
+            self._has_insights = bool(
+                self.connection.execute(
+                    "SELECT EXISTS(SELECT 1 FROM insights WHERE tenant_id=%s AND user_id=%s)",
+                    (self.authority.tenant_id, self.authority.user_id),
+                ).fetchone()[0]
+            )
+        return self._has_insights
+
+    @property
+    def candidate_units_sql(self) -> str:
+        return (
+            ELIGIBLE_UNITS_CANDIDATE if self.has_insights else ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
         )
 
     def _eligible(self, *, temporal: bool = False, candidate_facts: bool = False) -> str:
@@ -270,14 +282,9 @@ class RecallRepository:
             "hits AS MATERIALIZED (SELECT u.unit_id,u.lexical_bilingual,u.mentioned_at,"
             "u.lexical_bilingual @@ q.full AS full_match,"
             "u.lexical_bilingual @@ q.primary AS primary_match "
-            "FROM search_units u,queries q WHERE "
-            "u.tenant_id=current_setting('oam.tenant_id',true) "
-            "AND u.user_id=current_setting('oam.user_id',true) "
-            "AND u.lexical_bilingual @@ q.candidate "
-            "AND EXISTS (SELECT 1 FROM ("
+            "FROM ("
             + self.candidate_units_sql
-            + ") eligible WHERE (eligible.tenant_id,eligible.user_id,eligible.unit_id)="
-            "(u.tenant_id,u.user_id,u.unit_id))) "
+            + ") u,queries q WHERE u.lexical_bilingual @@ q.candidate) "
             "SELECT t.term_order,hit.unit_id,hit.mentioned_at,hit.full_match,hit.primary_match "
             f"FROM unnest(ARRAY[{term_queries}]) WITH ORDINALITY AS t(term,term_order) "
             "CROSS JOIN LATERAL (SELECT u.unit_id,u.mentioned_at,u.full_match,u.primary_match,"
@@ -387,6 +394,40 @@ class RecallRepository:
             {"vector": json.dumps(tuple(vector)), "limit": limit},
         )
 
+    def related_user_fact(self, unit_ids: Sequence[str]) -> dict | None:
+        if not unit_ids:
+            return None
+        scope = (
+            "u.tenant_id=current_setting('oam.tenant_id',true) "
+            "AND u.user_id=current_setting('oam.user_id',true) "
+        )
+        user_fact = (
+            "u.kind='fact' AND EXISTS (SELECT 1 FROM support sp WHERE "
+            "(sp.tenant_id,sp.user_id,sp.memory_id)=(u.tenant_id,u.user_id,u.memory_id) "
+            "AND sp.span->>'role'='user') "
+        )
+        rows = self._execute(
+            self._eligible(candidate_facts=True)
+            + ", seed AS MATERIALIZED (SELECT u.unit_id,u.embedding FROM filtered u "
+            "WHERE u.unit_id=ANY(%(ids)s) AND "
+            + user_fact
+            + "ORDER BY array_position(%(ids)s,u.unit_id) LIMIT 1), "
+            "ranked AS MATERIALIZED (SELECT u.tenant_id,u.user_id,u.unit_id,"
+            "u.source_id,u.source_version,u.embedding <=> s.embedding AS distance "
+            "FROM seed s JOIN search_units u ON "
+            + scope
+            + "AND "
+            + user_fact
+            + "AND u.unit_id<>s.unit_id AND u.source_id IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM filtered f WHERE "
+            "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) "
+            "ORDER BY distance,u.unit_id LIMIT 1) "
+            "SELECT s.unit_id AS seed_id,u.unit_id,u.source_id,u.source_version "
+            "FROM seed s JOIN ranked u ON true",
+            {"ids": list(unit_ids)},
+        )
+        return rows[0] if rows else None
+
     def hydrate(self, unit_ids: Sequence[str]) -> list[dict]:
         rows = self._execute(
             self._eligible(candidate_facts=True).rstrip() + ", "
@@ -450,11 +491,45 @@ class RecallRepository:
         return self._execute(
             "WITH filtered AS NOT MATERIALIZED ("
             + ELIGIBLE_PASSAGE_UNITS
-            + ") SELECT u.unit_id,u.source_id,u.source_version,u.locator "
+            + ") SELECT u.unit_id,u.passage_id,u.source_id,u.source_version,u.locator "
             "FROM filtered u WHERE u.kind='passage' "
             "AND u.source_id=ANY(%(source_ids)s) "
             "ORDER BY u.source_id,u.source_version,u.ordinal,u.unit_id",
             {"source_ids": list(source_ids)},
+        )
+
+    def supported_fact_ids(
+        self,
+        passage_ids: Sequence[str],
+        vector: Sequence[float],
+        limit: int,
+        excluded_ids: Sequence[str],
+    ) -> list[dict]:
+        if not passage_ids:
+            return []
+        return self._execute(
+            self._eligible(candidate_facts=True) + ", selected AS MATERIALIZED ("
+            "SELECT u.tenant_id,u.user_id,u.unit_id,u.evidence_id,u.passage_id,u.generation_id "
+            "FROM filtered u WHERE u.kind='passage' AND u.unit_id=ANY(%(ids)s)), "
+            "ranked AS (SELECT selected.unit_id AS passage_id, fact.unit_id, "
+            "row_number() OVER (PARTITION BY selected.unit_id "
+            "ORDER BY fact.embedding <=> %(vector)s::vector, fact.unit_id) AS rank "
+            "FROM selected JOIN support sp ON "
+            "(sp.tenant_id,sp.user_id,sp.evidence_id,sp.passage_id)="
+            "(selected.tenant_id,selected.user_id,selected.evidence_id,selected.passage_id) "
+            "JOIN filtered fact ON "
+            "(fact.tenant_id,fact.user_id,fact.memory_id,fact.generation_id)="
+            "(sp.tenant_id,sp.user_id,sp.memory_id,selected.generation_id) "
+            "WHERE fact.kind='fact' AND sp.span->>'role'='user' "
+            "AND fact.unit_id<>ALL(%(excluded)s::text[])) "
+            "SELECT passage_id,unit_id FROM ranked WHERE rank=1 "
+            "ORDER BY array_position(%(ids)s,passage_id) LIMIT %(limit)s",
+            {
+                "ids": list(passage_ids),
+                "vector": json.dumps(tuple(vector)),
+                "limit": limit,
+                "excluded": list(excluded_ids),
+            },
         )
 
     def ordinary(self, seed_ids: Sequence[str], vector: Sequence[float]):
