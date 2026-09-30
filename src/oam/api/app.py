@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from importlib.resources import files
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 from uuid import uuid4
 
 import psycopg
@@ -54,7 +54,6 @@ from oam.contracts.operations import (
 from oam.contracts.profile import (
     ProfileRefreshRequest,
     ProfileResourceRequest,
-    ProfileSection,
 )
 from oam.contracts.retain import (
     RETAIN_JSON,
@@ -82,7 +81,7 @@ from oam.operations.repository import (
     RetryRequiresPlanning,
 )
 from oam.operations.state import OperationStatus as StoredOperationStatus
-from oam.profiles.service import ProfileRefreshUnresolved
+from oam.profiles.service import ProfileInputsNotReady, ProfileRefreshUnresolved
 from oam.resources.url_fetch import ResourceFetchUnavailable
 from oam.retrieval.service import RecallUnavailable
 from oam.workers.runner import WorkerRunner
@@ -358,6 +357,14 @@ def create_app(
         return Response(
             files("oam.web").joinpath("styles.css").read_text(encoding="utf-8"),
             media_type="text/css",
+            headers={"Content-Security-Policy": CSP},
+        )
+
+    @app.get("/ui/oam-logo.svg", include_in_schema=False)
+    async def inspector_logo() -> Response:
+        return Response(
+            files("oam.web").joinpath("oam-logo.svg").read_text(encoding="utf-8"),
+            media_type="image/svg+xml",
             headers={"Content-Security-Policy": CSP},
         )
 
@@ -769,18 +776,14 @@ def _register_reserved_routes(
     async def get_profile(
         request: Request,
         user_id: str,
-        sections: Annotated[list[ProfileSection] | None, Query()] = None,
         max_tokens: int | None = Query(default=None, ge=0),
     ) -> dict:
-        selected = sections if sections is not None else [ProfileSection.MAIN]
-        budget = max_tokens if max_tokens is not None else config.context.default_tokens
+        budget = max_tokens if max_tokens is not None else config.context.max_tokens
         if budget > config.context.max_tokens:
             raise HTTPException(422, detail={"code": "InputLimitExceeded"})
         return await run_in_threadpool(
             lambda: _content_call(
-                lambda: _require_runtime(runtime).get_profile(
-                    request.state.actor, user_id, selected, budget
-                )
+                lambda: _require_runtime(runtime).get_profile(request.state.actor, user_id, budget)
             )
         )
 
@@ -791,7 +794,7 @@ def _register_reserved_routes(
         outcome = await run_in_threadpool(
             lambda: _content_call(
                 lambda: _require_runtime(runtime).refresh_profile(
-                    request.state.actor, user_id, body.sections
+                    request.state.actor, user_id, body.instruction, body.reset_instruction
                 )
             )
         )
@@ -1033,6 +1036,8 @@ def _content_call(call):
         raise HTTPException(409, detail={"code": "ExportPolicyChanged"}) from exc
     except ProfileRefreshUnresolved as exc:
         raise HTTPException(409, detail={"code": "ProfileRefreshUnresolved"}) from exc
+    except ProfileInputsNotReady as exc:
+        raise HTTPException(409, detail={"code": "ProfileInputsNotReady"}) from exc
     except ValueError as exc:
         raise HTTPException(422, detail={"code": "InvalidRequest", "message": str(exc)}) from exc
 

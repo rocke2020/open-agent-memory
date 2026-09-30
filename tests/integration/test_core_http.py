@@ -1,11 +1,14 @@
 """Public core path against an explicitly isolated PostgreSQL database."""
 
+import asyncio
 import base64
 import hashlib
 import json
 import os
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 import httpx
@@ -232,7 +235,7 @@ class SyntheticIndexModels:
         elif role == "insights":
             output = {
                 "outcome": "insight",
-                "subtype": "general",
+                "subtype": "general_insights",
                 "text": "Lin prefers concise morning updates.",
                 "support_ids": [fact["id"] for fact in envelope["facts"]],
             }
@@ -923,7 +926,7 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
                     "query": "Lin brief glucose 92 mg/dL",
                     "recall_level": mode,
                     "max_context_tokens": 2048,
-                    "profile_sections": [],
+                    "include_profile": False,
                 },
             )
             assert recalled.status_code == 200, recalled.text
@@ -1007,7 +1010,11 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
         app.state.runtime.models = models
         recalled = await client.post(
             "/v1/recall",
-            json={"user_id": "scope", "query": "Lin morning explanations", "profile_sections": []},
+            json={
+                "user_id": "scope",
+                "query": "Lin morning explanations",
+                "include_profile": False,
+            },
         )
         assert recalled.status_code == 200, recalled.text
         assert recalled.json()["diagnostics"]["readiness"] == (
@@ -1033,7 +1040,7 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
                 "user_id": "scope",
                 "query": "Lin morning preference",
                 "recall_level": "fast",
-                "profile_sections": [],
+                "include_profile": False,
                 "time_basis": "mentioned",
                 "time_window": {
                     "start": "2026-09-02T00:00:00Z",
@@ -1089,7 +1096,11 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
         )
         recalled = await client.post(
             "/v1/recall",
-            json={"user_id": "scope", "query": "Lin morning explanations", "profile_sections": []},
+            json={
+                "user_id": "scope",
+                "query": "Lin morning explanations",
+                "include_profile": False,
+            },
         )
         assert any(item["kind"] == "insight" for item in recalled.json()["items"])
         assert recalled.json()["diagnostics"]["readiness"] == (
@@ -1179,23 +1190,33 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         def generate(self, role, **kwargs):
             if role != "profile":
                 return super().generate(role, **kwargs)
+            assert "Use 'the user' for this one person" in kwargs["system"]
             self.generation_calls.append(role)
             if self.timeout_profile:
                 raise httpx.ReadTimeout("synthetic uncertain Profile response")
             prompt = json.loads(kwargs["user"])
             assert "glucose 9" not in json.dumps(prompt).lower()
             assert "report-only" not in json.dumps(prompt).lower()
-            assert "1990-05-10" not in json.dumps(prompt)
+            assert "1990-05-10" not in json.dumps(prompt["inputs"])
+            birth_date = next(
+                field["value"]
+                for field in prompt["exact_fields"]
+                if field["key"] == "date_of_birth"
+            )
             fact = next(item for item in prompt["inputs"] if item["kind"] == "fact")
             support_id = "report-only" if self.fail_profile else fact["id"]
+            body = (
+                json.dumps(
+                    {"summary": "The user prefers brief replies.", "date_of_birth": birth_date}
+                )
+                if prompt["instruction"]
+                else "The user prefers brief replies [1]."
+            )
             return ModelResult(
                 content=json.dumps(
                     {
-                        "main": [],
-                        "preferences": [
-                            {"key": "response_style", "value": "brief", "support_ids": [support_id]}
-                        ],
-                        "experiences": [],
+                        "content": body,
+                        "support_ids": [support_id],
                     }
                 ),
                 usage=Usage(
@@ -1287,22 +1308,21 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         assert process_one(
             config, queue_dsn, content_dsn, models=models, worker_id="profile-resource"
         )
-        before = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
+        before = await client.get("/v1/users/scope/profile")
         assert before.status_code == 200, before.text
         assert before.json()["freshness"] != "current"
-        requested = await client.post(
-            "/v1/users/scope/profile/refresh", json={"sections": ["main", "preferences"]}
-        )
+        requested = await client.post("/v1/users/scope/profile/refresh", json={})
         assert requested.status_code == 202, requested.text
         assert process_one(
             config, queue_dsn, content_dsn, models=models, worker_id="profile-refresh"
         )
-        stored = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
+        stored = await client.get("/v1/users/scope/profile")
         assert stored.status_code == 200, stored.text
         payload = stored.json()
         assert payload["freshness"] == "current"
-        assert any(field["value"] == "1990-05-10" for field in payload["sections"]["main"])
-        assert any(field["value"] == "brief" for field in payload["sections"]["preferences"])
+        assert datetime.fromisoformat(payload["updated_at"]).tzinfo is not None
+        assert "1990-05-10" in payload["content"]
+        assert "brief" in payload["content"]
         exported_profile = await client.post("/v1/users/scope/exports")
         assert exported_profile.status_code == 202, exported_profile.text
         export_id = exported_profile.json()["export_id"]
@@ -1329,7 +1349,7 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
             destination.write_bytes(response.content)
         assert validate_directory(tmp_path)["profile"] == 1
         l3_record = next(record for record in exported_records if record["kind"] == "profile")
-        assert any(field["value"] == "brief" for field in l3_record["sections"]["preferences"])
+        assert "brief" in l3_record["content"]
         calls = len(models.generation_calls)
         unchanged = await client.post("/v1/users/scope/profile/refresh", json={})
         assert unchanged.status_code == 200, unchanged.text
@@ -1341,13 +1361,53 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
             json={
                 "user_id": "scope",
                 "query": "brief explanations",
-                "profile_sections": ["main", "preferences"],
+                "include_profile": True,
             },
         )
         assert recalled.status_code == 200, recalled.text
-        assert recalled.json()["profile"]["sections"]["main"]
+        assert "brief" in recalled.json()["profile"]["content"]
         assert recalled.json()["diagnostics"]["generative_calls"] == 0
         assert len(models.generation_calls) == calls
+
+        superseded = await client.post(
+            "/v1/users/scope/profile/refresh",
+            json={"instruction": "Return one JSON object with summary and date_of_birth."},
+        )
+        assert superseded.status_code == 202, superseded.text
+        reset_before_generation = await client.post(
+            "/v1/users/scope/profile/refresh", json={"reset_instruction": True}
+        )
+        assert reset_before_generation.status_code == 200, reset_before_generation.text
+        cancelled = await client.get(
+            f"/v1/users/scope/operations/{superseded.json()['operation_id']}"
+        )
+        assert cancelled.json()["status"] == "cancelled"
+        custom = await client.post(
+            "/v1/users/scope/profile/refresh",
+            json={"instruction": "Return one JSON object with summary and date_of_birth."},
+        )
+        assert custom.status_code == 202, custom.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-custom"
+        )
+        custom_view = (await client.get("/v1/users/scope/profile")).json()
+        assert json.loads(custom_view["content"])["date_of_birth"] == "1990-05-10"
+        assert (
+            custom_view["instruction"] == "Return one JSON object with summary and date_of_birth."
+        )
+        assert (await client.post("/v1/users/scope/profile/refresh", json={})).status_code == 200
+        reset = await client.post(
+            "/v1/users/scope/profile/refresh", json={"reset_instruction": True}
+        )
+        assert reset.status_code == 202, reset.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-default"
+        )
+        assert (
+            (await client.get("/v1/users/scope/profile"))
+            .json()["content"]
+            .startswith("## Main content")
+        )
 
         revised_body = {
             "resource_id": "basic",
@@ -1370,20 +1430,16 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         assert process_one(
             config, queue_dsn, content_dsn, models=models, worker_id="profile-resource-v2"
         )
-        dirty = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
-        assert dirty.json()["freshness"] == "dirty"
-        assert any(field["value"] == "1991-05-10" for field in dirty.json()["sections"]["main"])
-        assert all(field["value"] != "1990-05-10" for field in dirty.json()["sections"]["main"])
+        dirty = await client.get("/v1/users/scope/profile")
+        assert dirty.json()["freshness"] == "stale"
+        assert dirty.json()["content"] is None
         models.fail_profile = True
         failed = await client.post("/v1/users/scope/profile/refresh", json={})
         assert failed.status_code == 202
         with pytest.raises(ValueError, match="unsupported"):
             process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-failed")
-        preserved = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
-        assert any(
-            field["value"] == "brief" for field in preserved.json()["sections"]["preferences"]
-        )
-        assert any(field["value"] == "1991-05-10" for field in preserved.json()["sections"]["main"])
+        preserved = await client.get("/v1/users/scope/profile")
+        assert preserved.json()["content"] is None
         models.fail_profile = False
         retry = await client.post("/v1/users/scope/profile/refresh", json={})
         assert retry.status_code == 202
@@ -1424,7 +1480,7 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         assert more_chat.status_code == 202
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="more-chat")
         pending = await client.get("/v1/users/scope/profile")
-        assert pending.json()["freshness"] == "partial"
+        assert pending.json()["freshness"] == "dirty"
         assert models.generation_calls.count("profile") == profile_calls_before_new_chat
         with psycopg.connect(dsn) as connection:
             connection.execute(
@@ -1440,13 +1496,10 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         assert deleted_chat.json()["status"] == "excluded"
         assert (await client.get(f"/v1/users/scope/exports/{export_id}")).status_code == 409
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="chat-cleanup")
-        withdrawn = await client.get("/v1/users/scope/profile?sections=main&sections=preferences")
+        withdrawn = await client.get("/v1/users/scope/profile")
         assert withdrawn.status_code == 200
         assert withdrawn.json()["freshness"] == "stale"
-        assert all(
-            field["value"] != "brief" for field in withdrawn.json()["sections"]["preferences"]
-        )
-        assert any(field["value"] == "1991-05-10" for field in withdrawn.json()["sections"]["main"])
+        assert withdrawn.json()["content"] is None
         after_delete_export = await client.post("/v1/users/scope/exports")
         assert after_delete_export.status_code == 202, after_delete_export.text
         new_export_id = after_delete_export.json()["export_id"]
@@ -1465,11 +1518,7 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
             if record["kind"] == "profile"
         ]
         assert len(new_profiles) == 1
-        assert all(
-            field["value"] != "brief"
-            for fields in new_profiles[0]["sections"].values()
-            for field in fields
-        )
+        assert new_profiles[0]["content"] is None
         timeout_resource = await client.post(
             "/v1/users/scope/resources",
             json={
@@ -1516,19 +1565,635 @@ async def test_empty_user_profile_refresh_publishes_without_a_model_call(core_da
         profile = await client.get("/v1/users/new-user/profile")
         assert profile.status_code == 200, profile.text
         assert profile.json()["freshness"] == "current"
-        assert profile.json()["sections"] == {"main": []}
+        assert profile.json()["content"].startswith("## Main content")
         assert models.generation_calls == []
+
+
+@pytest.mark.parametrize("first_running", [False, True])
+async def test_new_interaction_gets_a_new_profile_refresh_while_one_is_active(
+    core_database, first_running
+):
+    from oam.config import load_config
+    from oam.workers.claims import claim_one
+    from oam.workers.index_source import process_one
+
+    dsn, tenant, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+    models = SyntheticIndexModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        original = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I like concise answers.",
+                        "event_time": "2026-09-28T09:00:00Z",
+                        "learning_eligible": True,
+                    }
+                ],
+            },
+            headers={"Idempotency-Key": "original-profile-input"},
+        )
+        assert original.status_code == 202, original.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="original-input"
+        )
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp() WHERE stage='consolidate'"
+            )
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="original-l2")
+        first = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert first.status_code == 202, first.text
+        if first_running:
+            with psycopg.connect(queue_dsn) as connection:
+                claim = claim_one(
+                    connection.cursor(),
+                    worker_id="first-profile",
+                    attempt_id="first-profile-attempt",
+                    lease_seconds=90,
+                    user_concurrency=2,
+                )
+            assert claim is not None and claim.stage == "refresh_profile"
+            with psycopg.connect(dsn) as connection:
+                connection.execute(
+                    "UPDATE attempts SET disposition='unknown_external_outcome' "
+                    "WHERE tenant_id=%s AND user_id='scope' AND attempt_id=%s",
+                    (tenant, claim.attempt_id),
+                )
+                connection.execute(
+                    "UPDATE operations SET status='running' WHERE tenant_id=%s "
+                    "AND user_id='scope' AND operation_id=%s",
+                    (tenant, claim.operation_id),
+                )
+        else:
+            with psycopg.connect(dsn) as connection:
+                connection.execute(
+                    "UPDATE work_units SET available_at=clock_timestamp()+interval '10 minutes' "
+                    "WHERE tenant_id=%s AND user_id='scope' AND operation_id=%s",
+                    (tenant, first.json()["operation_id"]),
+                )
+        retained = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I prefer clear examples.",
+                        "event_time": "2026-09-29T09:00:00Z",
+                        "learning_eligible": True,
+                    }
+                ],
+            },
+            headers={"Idempotency-Key": "new-profile-input"},
+        )
+        assert retained.status_code == 202, retained.text
+        before_indexing = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert before_indexing.status_code == 409, before_indexing.text
+        assert before_indexing.json()["detail"]["code"] == "ProfileInputsNotReady"
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="new-input")
+        second = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert second.status_code == 202, second.text
+        assert second.json()["operation_id"] != first.json()["operation_id"]
+        with psycopg.connect(dsn) as connection:
+            row = connection.execute(
+                "SELECT w.dependency_ids FROM work_units w WHERE w.tenant_id=%s "
+                "AND w.user_id='scope' AND w.operation_id=%s",
+                (tenant, second.json()["operation_id"]),
+            ).fetchone()
+            assert row is not None and len(row[0]) == 1
+
+
+async def test_waiting_profile_refresh_does_not_absorb_a_new_processed_source(core_database):
+    from oam.config import load_config
+    from oam.profiles.worker import StaleProfileWork
+    from oam.workers.index_source import process_one
+
+    dsn, tenant, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+    models = SyntheticIndexModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+
+        async def retain_two(label):
+            response = await client.post(
+                "/v1/retain",
+                json={
+                    "user_id": "scope",
+                    "input_type": "interaction",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"{label} preference {index}.",
+                            "event_time": f"2026-09-29T09:0{index}:00Z",
+                            "learning_eligible": True,
+                        }
+                        for index in range(2)
+                    ],
+                },
+                headers={"Idempotency-Key": f"source-{label}"},
+            )
+            assert response.status_code == 202, response.text
+            return response
+
+        await retain_two("A")
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="source-a")
+        refresh_a = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert refresh_a.status_code == 202, refresh_a.text
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp()+interval '10 minutes' "
+                "WHERE tenant_id=%s AND user_id='scope' AND operation_id=%s",
+                (tenant, refresh_a.json()["operation_id"]),
+            )
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="insight-a")
+
+        await retain_two("B")
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="source-b")
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp() "
+                "WHERE stage='consolidate' AND status='queued'"
+            )
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="insight-b")
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp() "
+                "WHERE tenant_id=%s AND user_id='scope' AND operation_id=%s",
+                (tenant, refresh_a.json()["operation_id"]),
+            )
+        with pytest.raises(StaleProfileWork, match="scope"):
+            process_one(config, queue_dsn, content_dsn, models=models, worker_id="old-profile")
+        assert "profile" not in models.generation_calls
+
+
+async def test_failed_initial_indexing_keeps_profile_dirty_without_partial(core_database):
+    from oam.config import load_config
+    from oam.workers.index_source import process_one
+
+    dsn, tenant, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    models = SyntheticIndexModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        initial = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert initial.status_code == 202, initial.text
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="empty-profile",
+        )
+        retained = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I maintain the community archive.",
+                        "event_time": "2026-09-29T09:00:00Z",
+                        "learning_eligible": True,
+                    }
+                ],
+            },
+            headers={"Idempotency-Key": "failed-first-stage"},
+        )
+        assert retained.status_code == 202, retained.text
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE work_units SET status='failed_terminal' WHERE tenant_id=%s "
+                "AND user_id='scope' AND operation_id=%s",
+                (tenant, retained.json()["operation_id"]),
+            )
+            connection.execute(
+                "UPDATE operations SET status='partial_failed' WHERE tenant_id=%s "
+                "AND user_id='scope' AND operation_id=%s",
+                (tenant, retained.json()["operation_id"]),
+            )
+        profile = await client.get("/v1/users/scope/profile")
+        assert profile.status_code == 200, profile.text
+        assert profile.json()["freshness"] == "dirty"
+        assert profile.json()["pending_inputs"] == 1
+        assert profile.json()["blocked_inputs"] == 1
+        assert profile.json()["failed_inputs"] == 0
+        retry = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert retry.status_code == 409, retry.text
+        assert retry.json()["detail"]["code"] == "ProfileInputsNotReady"
+
+
+@pytest.mark.parametrize("insight_failure", [False, True])
+async def test_profile_refresh_runs_pending_insights_before_building_profile(
+    core_database, insight_failure
+):
+    from oam.config import load_config
+    from oam.indexing.identity import index_generation
+    from oam.models.runtime import ModelResult, Usage
+    from oam.profiles.worker import process_profile_claim
+    from oam.workers.claims import claim_one
+    from oam.workers.index_source import process_one
+
+    dsn, tenant, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+
+    class ProfileModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            if role == "insights" and insight_failure:
+                self.generation_calls.append(role)
+                raise ValueError("synthetic Insight failure")
+            if role != "profile":
+                return super().generate(role, **kwargs)
+            self.generation_calls.append(role)
+            prompt_inputs = json.loads(kwargs["user"])["inputs"]
+            support = next(
+                item
+                for item in prompt_inputs
+                if item["kind"] == ("fact" if insight_failure else "insight")
+            )
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "content": "The user prefers brief replies [1].",
+                        "support_ids": [support["id"]],
+                    }
+                ),
+                usage=Usage(
+                    input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
+                ),
+            )
+
+    models = ProfileModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        retained = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Please keep replies brief.",
+                        "event_time": "2026-09-29T09:00:00Z",
+                        "learning_eligible": True,
+                    },
+                    {
+                        "role": "user",
+                        "content": "I also like clear examples.",
+                        "event_time": "2026-09-29T09:01:00Z",
+                        "learning_eligible": True,
+                    },
+                ],
+            },
+            headers={"Idempotency-Key": "pending-profile-input"},
+        )
+        assert retained.status_code == 202, retained.text
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-input")
+        if insight_failure:
+            with psycopg.connect(dsn) as connection:
+                connection.execute(
+                    "UPDATE work_units SET attempts_remaining=1 WHERE operation_id IN "
+                    "(SELECT operation_id FROM operations WHERE tenant_id=%s "
+                    "AND user_id='scope' AND kind='consolidate')",
+                    (tenant,),
+                )
+        before = await client.get("/v1/users/scope/profile")
+        assert before.status_code == 200, before.text
+        assert before.json()["pending_inputs"] == 1
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "INSERT INTO profiles(tenant_id,user_id,profile_id,profile_revision,"
+                "sections,content,"
+                "input_identity,policy_epoch,generation_id,visible_from) "
+                "VALUES (%s,'scope','user',1,'{}'::jsonb,%s,%s,%s,%s,"
+                "(SELECT published_seq+1 FROM users WHERE tenant_id=%s AND user_id='scope'))",
+                (
+                    tenant,
+                    "## Main content\n\nOld\n\n## References\n\nNo references yet.",
+                    bytes.fromhex(before.json()["input_identity"]),
+                    before.json()["policy_epoch"],
+                    index_generation(config, os.environ),
+                    tenant,
+                ),
+            )
+            connection.execute(
+                "UPDATE users SET published_seq=published_seq+1 "
+                "WHERE tenant_id=%s AND user_id='scope'",
+                (tenant,),
+            )
+        waiting = await client.get("/v1/users/scope/profile")
+        assert waiting.status_code == 200, waiting.text
+        assert waiting.json()["freshness"] == "dirty"
+
+        requested = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert requested.status_code == 202, requested.text
+        again = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert again.json()["operation_id"] == requested.json()["operation_id"]
+        if insight_failure:
+            with pytest.raises(ValueError, match="synthetic Insight failure"):
+                process_one(
+                    config, queue_dsn, content_dsn, models=models, worker_id="profile-l2-first"
+                )
+        else:
+            assert process_one(
+                config, queue_dsn, content_dsn, models=models, worker_id="profile-l2-first"
+            )
+        assert "insights" in models.generation_calls
+        assert "profile" not in models.generation_calls
+        after_insight = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert after_insight.status_code == 202, after_insight.text
+        assert after_insight.json()["operation_id"] == requested.json()["operation_id"]
+        if insight_failure:
+            assert process_one(
+                config, queue_dsn, content_dsn, models=models, worker_id="profile-next"
+            )
+        else:
+            with psycopg.connect(queue_dsn) as connection:
+                claim = claim_one(
+                    connection.cursor(),
+                    worker_id="profile-next",
+                    attempt_id="profile-running-attempt",
+                    lease_seconds=90,
+                    user_concurrency=2,
+                )
+            assert claim is not None and claim.stage == "refresh_profile"
+            current = await client.get("/v1/users/scope/profile")
+            with psycopg.connect(dsn) as connection:
+                connection.execute(
+                    "UPDATE work_units SET input_digest=%s,dependency_ids='{}' "
+                    "WHERE tenant_id=%s AND user_id='scope' AND work_unit_id=%s",
+                    (bytes.fromhex(current.json()["input_identity"]), tenant, claim.work_unit_id),
+                )
+                connection.execute(
+                    "UPDATE attempts SET disposition='unknown_external_outcome' "
+                    "WHERE tenant_id=%s AND user_id='scope' AND attempt_id=%s",
+                    (tenant, claim.attempt_id),
+                )
+                connection.execute(
+                    "UPDATE operations SET status='running' WHERE tenant_id=%s "
+                    "AND user_id='scope' AND operation_id=%s",
+                    (tenant, claim.operation_id),
+                )
+            while_running = await client.post("/v1/users/scope/profile/refresh", json={})
+            assert while_running.status_code == 202, while_running.text
+            assert while_running.json()["operation_id"] == requested.json()["operation_id"]
+            process_profile_claim(
+                config, content_dsn, models=models, claim=claim, worker_id="profile-next"
+            )
+        operation = await client.get(
+            f"/v1/users/scope/operations/{requested.json()['operation_id']}"
+        )
+        assert operation.json()["stage_state"]["pending_inputs"] == (1 if insight_failure else 0)
+        assert operation.json()["status"] == "succeeded"
+        assert operation.json()["readiness"]["profile_current"] is not insight_failure
+        profile = await client.get("/v1/users/scope/profile")
+        assert profile.status_code == 200, profile.text
+        assert profile.json()["freshness"] == ("partial" if insight_failure else "current")
+        assert profile.json()["pending_inputs"] == (1 if insight_failure else 0)
+        assert profile.json()["failed_inputs"] == (1 if insight_failure else 0)
+        assert "brief" in profile.json()["content"]
+        assert profile.json()["references"][0]["kind"] == ("fact" if insight_failure else "insight")
+        unchanged = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert unchanged.status_code == 200, unchanged.text
+        assert unchanged.json()["status"] == "unchanged"
+        assert models.generation_calls.count("profile") == 1
+
+
+@pytest.mark.parametrize(
+    ("subtype", "value", "messages"),
+    [
+        (
+            "projects",
+            "The user maintains the community archive as an ongoing responsibility.",
+            ["I maintain the community archive.", "I coordinate its ongoing work."],
+        ),
+        (
+            "relationships",
+            "Maya is the user's business partner.",
+            ["Maya is my business partner.", "Maya and I run the archive together."],
+        ),
+    ],
+)
+async def test_profile_main_can_use_supported_project_or_relationship_insight(
+    core_database, subtype, value, messages
+):
+    from oam.config import load_config
+    from oam.models.runtime import ModelResult, Usage
+    from oam.workers.index_source import process_one
+
+    dsn, _, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+
+    class MainModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            if role == "insights":
+                facts = json.loads(kwargs["user"])["facts"]
+                self.generation_calls.append(role)
+                content = {
+                    "outcome": "insight",
+                    "subtype": subtype,
+                    "text": value,
+                    "support_ids": [fact["id"] for fact in facts],
+                }
+            elif role == "profile":
+                self.generation_calls.append(role)
+                assert "enduring projects" in kwargs["system"]
+                insight = next(
+                    item
+                    for item in json.loads(kwargs["user"])["inputs"]
+                    if item["kind"] == "insight" and item["subtype"] == subtype
+                )
+                content = {
+                    "content": f"{value} [1].",
+                    "support_ids": [insight["id"]],
+                }
+            else:
+                return super().generate(role, **kwargs)
+            return ModelResult(
+                content=json.dumps(content),
+                usage=Usage(
+                    input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
+                ),
+            )
+
+    models = MainModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        retained = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": message,
+                        "event_time": f"2026-09-29T09:0{index}:00Z",
+                        "learning_eligible": True,
+                    }
+                    for index, message in enumerate(messages)
+                ],
+            },
+            headers={"Idempotency-Key": f"main-{subtype}"},
+        )
+        assert retained.status_code == 202, retained.text
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="main-input")
+        requested = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert requested.status_code == 202, requested.text
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="main-l2")
+        memories = await client.get("/v1/users/scope/memories")
+        assert memories.status_code == 200, memories.text
+        insights = [item for item in memories.json()["items"] if item["kind"] == "insight"]
+        assert len(insights) == 1
+        assert insights[0]["subtype"] == subtype
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="main-profile")
+        profile = await client.get("/v1/users/scope/profile")
+        assert profile.status_code == 200, profile.text
+        assert profile.json()["freshness"] == "current"
+        assert value in profile.json()["content"]
+        assert profile.json()["references"][0]["kind"] == "insight"
+
+
+async def test_profile_main_builds_dated_age_career_and_family_from_user_facts(core_database):
+    from oam.config import load_config
+    from oam.models.runtime import ModelResult, Usage
+    from oam.workers.index_source import process_one
+
+    dsn, _, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+
+    class BasicProfileModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            if role != "profile":
+                return super().generate(role, **kwargs)
+            self.generation_calls.append(role)
+            assert "explicitly stated sex" in kwargs["system"]
+            facts = [
+                item for item in json.loads(kwargs["user"])["inputs"] if item["kind"] == "fact"
+            ]
+            age = next(item for item in facts if "44 years old" in item["text"])
+            career = next(item for item in facts if "engineer" in item["text"])
+            family = next(item for item in facts if "maternal uncles" in item["text"])
+            assert age["source_passages"][0]["event_time"] == "2026-09-29T09:00:00+00:00"
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "content": "The user was 44 years old as of 2026-09-29 [1]. "
+                        "The user is an engineer [2]. The user has four maternal uncles [3].",
+                        "support_ids": [age["id"], career["id"], family["id"]],
+                    }
+                ),
+                usage=Usage(
+                    input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
+                ),
+            )
+
+    models = BasicProfileModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        retained = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "scope",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content,
+                        "event_time": f"2026-09-29T09:0{index}:00Z",
+                        "learning_eligible": True,
+                    }
+                    for index, content in enumerate(
+                        [
+                            "I am 44 years old.",
+                            "I am an engineer.",
+                            "I have four maternal uncles.",
+                        ]
+                    )
+                ],
+            },
+            headers={"Idempotency-Key": "basic-profile-input"},
+        )
+        assert retained.status_code == 202, retained.text
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="basic-input")
+        requested = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert requested.status_code == 202, requested.text
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="basic-l2")
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="basic-profile")
+        profile = await client.get("/v1/users/scope/profile")
+        assert profile.status_code == 200, profile.text
+        content = profile.json()["content"]
+        assert "44 years old as of 2026-09-29" in content
+        assert "The user is an engineer" in content
+        assert "The user has four maternal uncles" in content
+        assert len(profile.json()["references"]) == 3
 
 
 @pytest.mark.parametrize("surface", ["profile", "recall"])
 async def test_profile_response_rejects_resource_revision_during_assembly(
     core_database, monkeypatch, surface
 ):
+    from oam.config import load_config
     from oam.contracts.profile import ProfileResourceRequest
     from oam.profiles import service as profile_service
     from oam.retrieval.service import RecallService
+    from oam.workers.index_source import process_one
 
-    _, _, headers = core_database
+    dsn, _, headers = core_database
     app = create_app(ROOT / "configs/oam.yaml")
     async with (
         app.router.lifespan_context(app),
@@ -1549,6 +2214,21 @@ async def test_profile_response_rejects_resource_revision_during_assembly(
             headers={"Idempotency-Key": "profile-before-revision"},
         )
         assert accepted.status_code == 202, accepted.text
+        config = load_config(ROOT / "configs/oam.yaml").config
+        queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+        content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+        assert process_one(
+            config, queue_dsn, content_dsn, models=object(), worker_id="resource-before-race"
+        )
+        refresh = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert refresh.status_code == 202, refresh.text
+        assert process_one(
+            config,
+            queue_dsn,
+            content_dsn,
+            models=object(),
+            worker_id="profile-before-race",
+        )
         secret = client.headers["Authorization"].removeprefix("Bearer ")
 
         def revise():
@@ -1568,7 +2248,7 @@ async def test_profile_response_rejects_resource_revision_during_assembly(
 
             def view_then_revise(*args, **kwargs):
                 result = original_view(*args, **kwargs)
-                assert result["sections"]["main"][0]["value"] == "1990-05-10"
+                assert "1990-05-10" in result["content"]
                 revise()
                 return result
 
@@ -1587,3 +2267,88 @@ async def test_profile_response_rejects_resource_revision_during_assembly(
         assert response.status_code == 503, response.text
         assert response.json()["detail"]["code"] == "SourcePolicyChanged"
         assert "1990-05-10" not in response.text
+
+
+async def test_new_profile_instruction_cancels_running_generation(core_database):
+    from oam.config import load_config
+    from oam.models.runtime import ModelResult, Usage
+    from oam.profiles.worker import StaleProfileWork
+    from oam.workers.index_source import process_one
+
+    dsn, _, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+    dispatched, release = Event(), Event()
+
+    class Models:
+        def generate(self, role, **kwargs):
+            assert role == "profile"
+            prompt = json.loads(kwargs["user"])
+            if prompt["instruction"] == "First JSON format":
+                dispatched.set()
+                assert release.wait(10), "Cancelled generation was not released"
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "content": json.dumps({"format": prompt["instruction"], "sex": "female"}),
+                        "support_ids": ["profile_resource:basic:1"],
+                    }
+                ),
+                usage=Usage(
+                    input_tokens=10, output_tokens=10, total_tokens=20, coverage="complete"
+                ),
+            )
+
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        accepted = await client.post(
+            "/v1/users/scope/resources",
+            json={
+                "resource_id": "basic",
+                "resource_type": "profile",
+                "subtype": "basic-profile/v1",
+                "content": {"sex": "female"},
+            },
+            headers={"Idempotency-Key": "running-profile-resource"},
+        )
+        assert accepted.status_code == 202, accepted.text
+        assert process_one(config, queue_dsn, content_dsn, models=object(), worker_id="resource")
+        first = await client.post(
+            "/v1/users/scope/profile/refresh", json={"instruction": "First JSON format"}
+        )
+        assert first.status_code == 202, first.text
+        models = Models()
+        running = asyncio.create_task(
+            asyncio.to_thread(
+                process_one, config, queue_dsn, content_dsn, models=models, worker_id="old-profile"
+            )
+        )
+        try:
+            assert await asyncio.to_thread(dispatched.wait, 5)
+            second = await client.post(
+                "/v1/users/scope/profile/refresh", json={"instruction": "Second JSON format"}
+            )
+            assert second.status_code == 202, second.text
+            assert second.json()["operation_id"] != first.json()["operation_id"]
+            old = await client.get(f"/v1/users/scope/operations/{first.json()['operation_id']}")
+            assert old.json()["status"] == "cancelled"
+        finally:
+            release.set()
+            with pytest.raises(StaleProfileWork):
+                await running
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="new-profile")
+        profile = (await client.get("/v1/users/scope/profile")).json()
+        assert profile["instruction"] == "Second JSON format"
+        assert json.loads(profile["content"])["format"] == "Second JSON format"
+        assert profile["profile_revision"] == 1
+        returned = await client.post(
+            "/v1/users/scope/profile/refresh", json={"instruction": "First JSON format"}
+        )
+        assert returned.status_code == 202, returned.text

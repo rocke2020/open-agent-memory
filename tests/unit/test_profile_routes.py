@@ -10,10 +10,10 @@ ROOT = Path(__file__).parents[2]
 
 async def test_profile_read_and_refresh_http_status_contract() -> None:
     class Runtime:
-        def get_profile(self, actor, user_id, sections, max_tokens):
-            return {"sections": {"main": []}, "freshness": "missing", "generation_calls": 0}
+        def get_profile(self, actor, user_id, max_tokens):
+            return {"content": None, "freshness": "missing", "generation_calls": 0}
 
-        def refresh_profile(self, actor, user_id, sections):
+        def refresh_profile(self, actor, user_id, instruction, reset_instruction):
             return {"status": "accepted", "operation_id": "op_profile"}
 
     app = create_app(ROOT / "configs/oam.yaml", runtime=Runtime())
@@ -33,12 +33,12 @@ async def test_profile_read_and_refresh_http_status_contract() -> None:
 
 async def test_unchanged_profile_refresh_returns_200_without_operation() -> None:
     class Runtime:
-        def refresh_profile(self, actor, user_id, sections):
+        def refresh_profile(self, actor, user_id, instruction, reset_instruction):
             return {
                 "status": "unchanged",
                 "profile_revision": 3,
                 "generation_calls": 0,
-                "sections": {"main": []},
+                "content": "## Main content\n\nReady\n\n## References\n\n1. Chat",
             }
 
     app = create_app(ROOT / "configs/oam.yaml", runtime=Runtime())

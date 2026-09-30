@@ -135,11 +135,11 @@ class APIRuntime(Protocol):
         expected_version: int | None,
     ) -> dict: ...
 
-    def get_profile(
-        self, actor: RequestActor, user_id: str, sections: list[str], max_tokens: int
-    ) -> dict: ...
+    def get_profile(self, actor: RequestActor, user_id: str, max_tokens: int) -> dict: ...
 
-    def refresh_profile(self, actor: RequestActor, user_id: str, sections: list[str]) -> dict: ...
+    def refresh_profile(
+        self, actor: RequestActor, user_id: str, instruction: str | None, reset_instruction: bool
+    ) -> dict: ...
 
     def search_many(
         self, actor: RequestActor, user_id: str, request: SearchManyRequest
@@ -285,23 +285,25 @@ class DatabaseRuntime:
             deadline_at=deadline_at,
         )
 
-    def get_profile(
-        self, actor: RequestActor, user_id: str, sections: list[str], max_tokens: int
-    ) -> dict:
+    def get_profile(self, actor: RequestActor, user_id: str, max_tokens: int) -> dict:
         from oam.profiles.service import ProfileService
 
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
-        return ProfileService(self.config, self.pool).get(authority, sections, max_tokens)
+        return ProfileService(self.config, self.pool).get(authority, max_tokens)
 
-    def refresh_profile(self, actor: RequestActor, user_id: str, sections: list[str]) -> dict:
+    def refresh_profile(
+        self, actor: RequestActor, user_id: str, instruction: str | None, reset_instruction: bool
+    ) -> dict:
         from oam.profiles.service import ProfileService
 
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:append")
             self._authorize(connection, actor, user_id, "memory:read")
             authority = replace(authority, capabilities=frozenset({"memory:append", "memory:read"}))
-        return ProfileService(self.config, self.pool).refresh(authority, sections)
+        return ProfileService(self.config, self.pool).refresh(
+            authority, instruction, reset_instruction=reset_instruction
+        )
 
     def list_resources(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict:
         with self.pool.connection() as connection:

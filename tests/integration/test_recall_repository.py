@@ -756,7 +756,7 @@ def test_insight_requires_current_immutable_support_revision(recall_database):
     repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
     hydrated = repository.hydrate(("parent",))
     assert [row["unit_id"] for row in hydrated] == ["parent"]
-    assert hydrated[0]["subtype"] == "general"
+    assert hydrated[0]["subtype"] == "general_insights"
     assert hydrated[0]["supports"] == [
         {"memory_id": "a", "support_revision": 1},
         {"memory_id": "b", "support_revision": 1},

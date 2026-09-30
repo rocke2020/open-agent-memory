@@ -324,7 +324,7 @@ async def test_process_topology_indexes_and_recalls_during_imports(
                             "user_id": "alice",
                             "query": "glucose short explanations",
                             "recall_level": mode,
-                            "profile_sections": [],
+                            "include_profile": False,
                         },
                     )
                     elapsed = time.time() - start

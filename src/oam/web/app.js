@@ -13,8 +13,8 @@
     generation: 0,
     draftKey: null,
     profileRequest: 0,
+    detailRequest: 0,
   };
-
   function element(tag, text, className) {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = String(text);
@@ -34,11 +34,11 @@
     state.nextAfter = null;
     state.draftKey = null;
     state.profileRequest += 1;
+    state.detailRequest += 1;
     byId("query").value = "";
     byId("profile-budget").value = "";
-    for (const input of document.querySelectorAll('#profile-form input[name="section"]')) {
-      input.checked = input.value === "main";
-    }
+    byId("profile-instruction").value = "";
+    byId("profile-reset-instruction").checked = false;
     byId("item-list").replaceChildren();
     byId("detail").replaceChildren(element("p", "Select an item to inspect its source and readiness."));
     byId("load-more").hidden = true;
@@ -132,6 +132,7 @@
 
   function setView(view, initial) {
     state.view = view;
+    state.detailRequest += 1;
     state.items = [];
     state.nextAfter = null;
     byId("item-list").replaceChildren();
@@ -157,27 +158,18 @@
     }
   }
 
-  function selectedProfileSections() {
-    const sections = [...document.querySelectorAll('#profile-form input[name="section"]:checked')]
-      .map((input) => input.value);
-    if (!sections.length) throw new Error("Select at least one Profile section.");
-    return sections;
-  }
-
   async function loadProfile() {
     const generation = state.generation;
     const requestId = ++state.profileRequest;
     try {
-      const sections = selectedProfileSections();
       const params = new URLSearchParams();
-      for (const section of sections) params.append("sections", section);
       const budget = byId("profile-budget").value;
       if (budget !== "") params.set("max_tokens", budget);
       status("Loading Profile…");
-      const profile = await json(route(`profile?${params}`));
+      const profile = await json(route(params.size ? `profile?${params}` : "profile"));
       if (!current(generation) || state.view !== "profiles" || requestId !== state.profileRequest) return false;
-      showProfile(profile, sections);
-      status(`Profile ${profile.freshness}; ${profile.tokens} estimated preview tokens.`);
+      showProfile(profile);
+      status("Profile loaded.");
       return true;
     } catch (error) {
       if (current(generation) && state.view === "profiles" && requestId === state.profileRequest) showError(error);
@@ -185,38 +177,67 @@
     }
   }
 
-  function showProfile(profile, sections) {
-    const detail = byId("detail");
-    detail.replaceChildren(
-      element("span", "L3 Profile", "badge"),
-      element("h3", "Read-only Profile"),
-      labelValue("Freshness", profile.freshness),
-      labelValue("Revision", profile.profile_revision ?? "No stored revision"),
-      labelValue("Estimated preview tokens", profile.tokens),
-      labelValue("Pending inputs", profile.pending_inputs),
-    );
-    for (const section of sections) {
-      const fields = profile.sections?.[section] || [];
-      detail.append(element("h4", `${section} (${fields.length})`));
-      if (!fields.length) detail.append(element("p", "No grounded fields in this section."));
-      for (const field of fields) {
-        const row = element("div", undefined, "citation");
-        row.append(labelValue(field.key, typeof field.value === "string" ? field.value : JSON.stringify(field.value)));
-        if (field.qualifier) row.append(labelValue("Qualifier", field.qualifier));
-        row.append(labelValue("State", field.state));
-        for (const support of field.supports || []) {
-          const id = support.resource_id || support.id || support.memory_id || support.insight_id;
-          const supportRow = labelValue(`Support · ${support.kind}`, id);
-          if (support.kind === "profile_resource") {
-            supportRow.append(button("Inspect Resource", () => openProfileResource(support.resource_id)));
-          }
-          row.append(supportRow);
-        }
-        detail.append(row);
+  function renderProfileContent(content) {
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed !== null && typeof parsed === "object") {
+        return element("pre", JSON.stringify(parsed, null, 2), "source-text");
       }
+    } catch (_) {
+      // The content is Markdown or another text format.
     }
-    for (const omitted of profile.omitted || []) {
-      detail.append(labelValue(`Omitted ${omitted.field_id}`, omitted.reason));
+    if (!content.startsWith("## Main content\n")) return element("pre", content, "source-text");
+    const rendered = element("div", undefined, "profile-content");
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      if (line.startsWith("## ")) rendered.append(element("h4", line.slice(3)));
+      else if (line.startsWith("- ")) rendered.append(element("p", line.slice(2)));
+      else rendered.append(element("p", line));
+    }
+    return rendered;
+  }
+
+  function showProfile(profile) {
+    const detail = byId("detail");
+    const failedInputs = profile.failed_inputs || 0;
+    const blockedInputs = profile.blocked_inputs || 0;
+    const uncoveredInputs = profile.uncovered_inputs || 0;
+    detail.replaceChildren(element("h3", "Read-only Profile"));
+    if (profile.content) detail.append(renderProfileContent(profile.content));
+    if (profile.profile_revision != null) {
+      detail.append(labelValue("Last refreshed", profile.updated_at
+        ? new Date(profile.updated_at).toLocaleString()
+        : "Not recorded for this revision"));
+    }
+    if (profile.instruction) detail.append(labelValue("Saved instruction", profile.instruction));
+    if (failedInputs > 0) detail.append(labelValue("Failed Insight inputs", failedInputs));
+    if (blockedInputs > 0) detail.append(labelValue("Failed initial processing", blockedInputs));
+    if (profile.profile_revision == null) {
+      detail.append(element("p", "No generated Profile yet. Use Create/Refresh Profile to create one from eligible inputs."));
+    } else if (!profile.content) {
+      detail.append(element("p", "The stored Profile is unavailable for these inputs. Refresh it to rebuild from current sources."));
+    }
+    if (failedInputs > 0) detail.append(element("p", `${failedInputs} Insight input${failedInputs === 1 ? "" : "s"} failed. This Profile uses only ready information.`));
+    if (blockedInputs > 0) detail.append(element("p", `${blockedInputs} memory input${blockedInputs === 1 ? "" : "s"} could not be prepared. Check the input operation before refreshing the Profile.`));
+    if (uncoveredInputs > 0) detail.append(element("p", `${uncoveredInputs} eligible memory item${uncoveredInputs === 1 ? " was" : "s were"} beyond this Profile's input limit. The document may miss details.`));
+    const references = profile.references || [];
+    if (references.length) {
+      const referenceDetails = element("details", undefined, "profile-references");
+      referenceDetails.append(element("summary", `Reference details (${references.length})`));
+      for (const reference of references) {
+        const row = element("div", undefined, "citation");
+        if (reference.kind === "profile_resource") {
+          row.append(labelValue("Profile Resource", reference.resource_id));
+          row.append(button("Inspect Resource", () => openProfileResource(reference.resource_id)));
+        } else {
+          for (const passage of reference.passages || [reference]) {
+            row.append(labelValue("Conversation", passage.source_id));
+            row.append(labelValue("Passage", passage.passage_id));
+          }
+        }
+        referenceDetails.append(row);
+      }
+      detail.append(referenceDetails);
     }
   }
 
@@ -230,28 +251,35 @@
   }
 
   async function refreshProfile() {
-    let sections;
-    try { sections = selectedProfileSections(); }
-    catch (error) { showError(error); return; }
     const generation = state.generation;
     const requestId = ++state.profileRequest;
     try {
       status("Checking Profile inputs…");
+      const instruction = byId("profile-instruction").value.trim();
+      const reset = byId("profile-reset-instruction").checked;
+      if (instruction && reset) throw new Error("Clear the custom instruction to use the default format.");
+      const body = reset ? { reset_instruction: true } : instruction ? { instruction } : {};
       const outcome = await json(route("profile/refresh"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sections }),
+        body: JSON.stringify(body),
       });
       if (!current(generation) || state.view !== "profiles" || requestId !== state.profileRequest) return;
       if (outcome.status === "unchanged") {
-        if (await loadProfile()) status("Nothing new to refresh. Stored Profile reused with zero generation calls.");
+        if (await loadProfile()) status("Nothing new to create or refresh. Stored Profile reused with zero generation calls.");
       } else {
         showReceipt(outcome.operation_id, outcome);
         byId("detail").append(button("View Profile", loadProfile));
-        status(`Profile refresh pending; operation ${outcome.operation_id}.`);
+        status(`Profile creation/refresh pending; operation ${outcome.operation_id}.`);
       }
     } catch (error) {
-      if (current(generation) && state.view === "profiles" && requestId === state.profileRequest) showError(error);
+      if (current(generation) && state.view === "profiles" && requestId === state.profileRequest) {
+        if (error.message === "ProfileInputsNotReady") {
+          status("Profile inputs are not ready. Check the input operation, then try again.", true);
+        } else {
+          showError(error);
+        }
+      }
     }
   }
 
@@ -278,7 +306,8 @@
     list.replaceChildren();
     for (const item of state.items) {
       const id = state.view === "resources" ? item.resource_id : item.unit_id;
-      const kind = state.view === "resources" ? item.resource_type : item.kind;
+      const kind = state.view === "resources" ? item.resource_type
+        : item.kind === "insight" && item.subtype ? `insight · ${item.subtype}` : item.kind;
       const caption = state.view === "resources" ? `${item.media_type} · version ${item.active_version}` : item.text;
       const row = element("li");
       const control = button(id, () => openItem(item), "list-item");
@@ -292,12 +321,13 @@
 
   async function openItem(item) {
     const generation = state.generation;
+    const requestId = ++state.detailRequest;
     try {
       if (state.view === "resources") {
         const detail = await json(route(`resources/${encodeURIComponent(item.resource_id)}`));
         if (generation === state.generation && state.view === "resources") showResource(detail);
       } else {
-        showMemory(item);
+        await showMemory(item, generation, requestId);
       }
     } catch (error) {
       if (!current(generation)) return;
@@ -306,20 +336,28 @@
     }
   }
 
-  function showMemory(item) {
+  async function showMemory(item, generation, requestId) {
     const detail = byId("detail");
+    const citations = item.citations || [];
+    const sourceMessages = element("div");
+    sourceMessages.append(element("h4", "Source messages"));
+    if (citations.length) sourceMessages.append(element("p", "Loading source messages…"));
+    else sourceMessages.append(element("p", "No source messages available."));
     detail.replaceChildren(
-      element("span", item.kind === "insight" ? "L2 Insight" : "L1 Memory", "badge"),
+      element("span", item.kind === "insight" ? "Insight" : "L1 Memory", "badge"),
       element("h3", item.unit_id),
+      element("h4", item.kind === "insight" ? "Insight" : "Extracted fact"),
       element("p", item.text, "source-text"),
+      sourceMessages,
       labelValue("Origin", item.origin),
     );
+    if (item.kind === "insight" && item.subtype) detail.append(labelValue("Subtype", item.subtype));
     if (item.supports?.length) {
       detail.append(element("h4", "Supporting memories"));
       for (const support of item.supports) detail.append(element("p", support.memory_id));
     }
     detail.append(element("h4", "Source provenance"));
-    for (const citation of item.citations || []) {
+    for (const citation of citations) {
       const row = element("div", undefined, "citation");
       row.append(labelValue("Source", citation.source_id || "Unknown"));
       row.append(labelValue("Version", citation.source_version));
@@ -330,6 +368,26 @@
       }
       detail.append(row);
     }
+    if (!citations.length) return;
+    const sourceIds = [...new Set(citations.map((citation) => citation.source_id).filter(Boolean))];
+    const sources = await Promise.all(sourceIds.map(async (sourceId) => {
+      try { return await json(route(`evidence/${encodeURIComponent(sourceId)}`)); }
+      catch (_) { return null; }
+    }));
+    if (!current(generation) || state.view !== "memories" || requestId !== state.detailRequest) return;
+    sourceMessages.replaceChildren(element("h4", "Source messages"));
+    for (const [index, source] of sources.entries()) {
+      const group = element("div", undefined, "citation");
+      group.append(element("h4", sourceIds[index]));
+      if (!source) group.append(element("p", "Source messages unavailable."));
+      else if (!source.original?.messages?.length) group.append(element("p", "No source messages available."));
+      else for (const message of source.original.messages) {
+        group.append(labelValue("Role", message.role));
+        group.append(element("pre", typeof message.content === "string" ? message.content : JSON.stringify(message.content), "source-text"));
+      }
+      sourceMessages.append(group);
+    }
+    if (!sources.length) sourceMessages.append(element("p", "No source messages available."));
   }
 
   async function inspectSource(sourceId) {
@@ -666,7 +724,7 @@
       const result = await json("/v1/recall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: state.user, query, recall_level: "fast", profile_sections: [], allow_partial: true }),
+        body: JSON.stringify({ user_id: state.user, query, recall_level: "fast", include_profile: false, allow_partial: true }),
       });
       if (!current(generation)) return;
       const detail = byId("detail");

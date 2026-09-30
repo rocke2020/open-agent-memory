@@ -108,14 +108,14 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
                 body = {
                     "query": "What fruit does Lin grow?",
                     "recall_level": "fast",
-                    "profile_sections": ["main"],
+                    "include_profile": False,
                 }
             else:
                 path = "/v1/users/lin/search-many"
                 body = {
                     "queries": ["apple orchard", "pear orchard"],
                     "recall_level": "fast",
-                    "profile_sections": ["main"],
+                    "include_profile": False,
                 }
             root_response = await client.post(path, json=body, headers=root_headers)
             assert root_response.status_code == 404
@@ -134,13 +134,7 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
         assert all(
             row["result"]["diagnostics"]["generative_calls"] == 0 for row in payload["results"]
         )
-        assert all(
-            any(
-                field["value"] == "1990-05-10"
-                for field in row["result"]["profile"]["sections"]["main"]
-            )
-            for row in payload["results"]
-        )
+        assert all("profile" not in row["result"] for row in payload["results"])
         assert payload["diagnostics"]["planner_calls"] == int(delegated)
         if delegated:
             assert payload["planner"]["usage"]["total_tokens"] == 20

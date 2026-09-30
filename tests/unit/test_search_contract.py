@@ -8,13 +8,13 @@ from oam.config import load_config
 from oam.contracts.search import RecallLevel, SearchManyRequest, SearchRequest
 
 
-def test_search_defaults_to_mid_with_main_profile_selection() -> None:
+def test_search_defaults_to_mid_with_profile_inclusion() -> None:
     request = SearchRequest(query="What changed?")
     batch = SearchManyRequest(queries=["What changed?"])
 
     assert request.recall_level is RecallLevel.MID
     assert batch.recall_level is RecallLevel.MID
-    assert request.profile_sections == ["main"]
+    assert request.include_profile is True
     assert request.allow_partial is False
 
 

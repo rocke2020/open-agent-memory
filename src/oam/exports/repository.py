@@ -18,7 +18,6 @@ from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.indexing.identity import index_generation
 from oam.profiles.inputs import load_profile_inputs
-from oam.profiles.projection import SECTIONS
 from oam.profiles.service import _current_snapshot, _view
 
 EXPORT_PART_BYTES = 1024 * 1024
@@ -209,7 +208,7 @@ class ExportRepository:
         )
         inputs = load_profile_inputs(connection, profile_authority, generation)
         snapshot = _current_snapshot(connection, authority)
-        view = _view(self.config, inputs, snapshot, list(SECTIONS), sys.maxsize)
+        view = _view(self.config, inputs, snapshot, sys.maxsize)
         return {
             "kind": "profile",
             "profile_revision": view["profile_revision"],
@@ -217,7 +216,10 @@ class ExportRepository:
             "policy_epoch": view["policy_epoch"],
             "freshness": view["freshness"],
             "pending_inputs": view["pending_inputs"],
-            "sections": view["sections"],
+            "content": view["content"],
+            "instruction": view["instruction"],
+            "references": view["references"],
+            "support_ids": view["support_ids"],
         }
 
     @staticmethod

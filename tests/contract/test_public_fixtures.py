@@ -22,8 +22,5 @@ def test_public_request_fixtures_validate_against_the_runtime_contracts() -> Non
     }
 
     assert validated["evidence-append.json"].messages[1].learning_eligible is False
-    assert validated["search-fast.json"].profile_sections == []
-    assert [section.value for section in validated["profile-refresh.json"].sections] == [
-        "main",
-        "preferences",
-    ]
+    assert validated["search-fast.json"].include_profile is False
+    assert validated["profile-refresh.json"].instruction == "Summarize the user's enduring context."

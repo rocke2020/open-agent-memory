@@ -165,11 +165,9 @@ class RecalledChunksConfig(FrozenModel):
 
 
 class ProfileConfig(FrozenModel):
-    main_tokens: PositiveInt
-    preferences_tokens: PositiveInt
-    experiences_tokens: PositiveInt
-    max_fields_per_section: PositiveInt
-    max_value_bytes: PositiveInt
+    max_content_bytes: PositiveInt
+    max_output_tokens: PositiveInt
+    attempt_timeout_seconds: PositiveFloat
 
 
 class PlannerConfig(FrozenModel):

@@ -172,3 +172,107 @@ def test_validator_rejects_profile_field_with_missing_resource_support(tmp_path)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ExportValidationError, match="Profile support"):
         validate_directory(tmp_path)
+
+
+def test_validator_rejects_document_reference_to_absent_source(tmp_path):
+    _write_records(
+        tmp_path,
+        [
+            {
+                "kind": "profile",
+                "profile_revision": 1,
+                "freshness": "current",
+                "policy_epoch": 1,
+                "content": "## Main content\n\nClaim [1].\n\n## References\n\n1. Chat",
+                "support_ids": ["fact_1"],
+                "references": [
+                    {
+                        "support_id": "fact_1",
+                        "kind": "fact",
+                        "source_id": "absent",
+                        "source_version": 1,
+                        "passage_id": "p",
+                    }
+                ],
+            }
+        ],
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["policy_epoch"] = 1
+    manifest["profiles"] = [{"profile_id": "user", "profile_revision": 1, "freshness": "current"}]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ExportValidationError, match="Profile support"):
+        validate_directory(tmp_path)
+
+
+def test_validator_rejects_document_reference_without_matching_fact(tmp_path):
+    _write_records(
+        tmp_path,
+        [
+            {"kind": "evidence", "evidence_id": "e", "source_id": "s", "source_version": 1},
+            {"kind": "passage", "passage_id": "p", "evidence_id": "e"},
+            {
+                "kind": "profile",
+                "profile_revision": 1,
+                "freshness": "current",
+                "policy_epoch": 1,
+                "content": "## Main content\n\nClaim [1].\n\n## References\n\n1. Chat",
+                "support_ids": ["invented_fact"],
+                "references": [
+                    {
+                        "support_id": "invented_fact",
+                        "kind": "fact",
+                        "source_id": "s",
+                        "source_version": 1,
+                        "passage_id": "p",
+                    }
+                ],
+            },
+        ],
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["policy_epoch"] = 1
+    manifest["profiles"] = [{"profile_id": "user", "profile_revision": 1, "freshness": "current"}]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ExportValidationError, match="Profile support"):
+        validate_directory(tmp_path)
+
+
+def test_validator_accepts_document_reference_through_a_supported_fact(tmp_path):
+    _write_records(
+        tmp_path,
+        [
+            {"kind": "evidence", "evidence_id": "e", "source_id": "s", "source_version": 1},
+            {"kind": "passage", "passage_id": "p", "evidence_id": "e"},
+            {"kind": "memory", "memory_id": "m"},
+            {"kind": "support", "memory_id": "m", "evidence_id": "e", "passage_id": "p"},
+            {
+                "kind": "profile",
+                "profile_revision": 1,
+                "freshness": "current",
+                "policy_epoch": 1,
+                "content": "## Main content\n\nClaim [1].\n\n## References\n\n1. Conversation",
+                "support_ids": ["m"],
+                "references": [
+                    {
+                        "support_id": "m",
+                        "kind": "fact",
+                        "source_id": "s",
+                        "source_version": 1,
+                        "passage_id": "p",
+                    }
+                ],
+            },
+        ],
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["policy_epoch"] = 1
+    manifest["profiles"] = [{"profile_id": "user", "profile_revision": 1, "freshness": "current"}]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert validate_directory(tmp_path)["profile"] == 1

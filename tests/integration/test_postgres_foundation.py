@@ -161,7 +161,7 @@ def test_asserted_user_grants_upgrade_without_expanding_keyed_user_grants(tmp_pa
             "VALUES ('tenant','restricted','user:restricted',%s,'active')",
             (b"r" * 32,),
         )
-    assert apply_migrations(candidate_dsn, migrations) == 5
+    assert apply_migrations(candidate_dsn, migrations) == 10
     with psycopg.connect(candidate_dsn) as connection:
         after = connection.execute(
             "SELECT capabilities FROM grants WHERE tenant_id='tenant' AND user_id='alice'"
@@ -191,13 +191,13 @@ def test_legacy_asserted_v12_upgrades_and_restricts_function(tmp_path) -> None:
     )
     assert apply_migrations(candidate_dsn, previous) == 12
 
-    assert apply_migrations(candidate_dsn, migrations) == 4
+    assert apply_migrations(candidate_dsn, migrations) == 9
     assert apply_migrations(candidate_dsn, migrations) == 0
     with psycopg.connect(candidate_dsn) as connection:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(version,) for version in range(1, 17)]
+        assert versions == [(version,) for version in range(1, 22)]
         owner, api_can_execute, public_can_execute = connection.execute(
             "SELECT pg_get_userbyid(p.proowner),"
             "has_function_privilege('oam_api',p.oid,'EXECUTE'),"
@@ -217,6 +217,46 @@ def test_legacy_asserted_v12_upgrades_and_restricts_function(tmp_path) -> None:
     canonical_v12.write_text(canonical_v12.read_text() + "-- checksum drift\n")
     with pytest.raises(MigrationError, match="applied migration 12 checksum changed"):
         apply_migrations(candidate_dsn, tampered)
+
+
+def test_plural_insight_subtype_migration_converts_existing_rows(tmp_path) -> None:
+    dsn = _isolated_dsn()
+    database_name = "oam_insight_subtypes_" + uuid4().hex
+    with psycopg.connect(dsn, autocommit=True) as administrator:
+        administrator.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    candidate_dsn = make_conninfo(dsn, dbname=database_name)
+    migrations = Path(__file__).parents[2] / "migrations"
+    previous = tmp_path / "before_plural_subtypes"
+    previous.mkdir()
+    for path in sorted(migrations.glob("*.sql")):
+        if int(path.name[:4]) <= 19:
+            shutil.copy2(path, previous / path.name)
+    assert apply_migrations(candidate_dsn, previous) == 19
+
+    old_values = ("preference", "pattern", "project", "relationship", "general")
+    new_values = ("preferences", "patterns", "projects", "relationships", "general_insights")
+    with psycopg.connect(candidate_dsn) as connection:
+        connection.execute("INSERT INTO tenants(tenant_id,state) VALUES ('tenant','active')")
+        connection.execute(
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime) "
+            "VALUES ('tenant','user','synthetic','default','persistent')"
+        )
+        for index, subtype in enumerate(old_values):
+            connection.execute(
+                "INSERT INTO insights(tenant_id,user_id,insight_id,revision,synthesis_text,"
+                "input_digest,recipe_id,generation_id,visible_from,subtype) "
+                "VALUES ('tenant','user',%s,1,'Supported synthesis',%s,'recipe','generation',1,%s)",
+                (f"insight-{index}", b"x" * 32, subtype),
+            )
+    assert apply_migrations(candidate_dsn, migrations) == 2
+    with psycopg.connect(candidate_dsn) as connection:
+        values = connection.execute("SELECT subtype FROM insights ORDER BY insight_id").fetchall()
+        default = connection.execute(
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_name='insights' AND column_name='subtype'"
+        ).fetchone()[0]
+    assert values == [(value,) for value in new_values]
+    assert "general_insights" in default
 
 
 def test_user_key_migration_refuses_existing_principal_name_collision(tmp_path) -> None:

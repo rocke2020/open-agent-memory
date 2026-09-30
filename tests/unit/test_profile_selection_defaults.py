@@ -3,7 +3,7 @@ from oam.contracts.search import SearchManyRequest, SearchRequest
 
 
 def test_public_recall_defaults_to_main_and_explicit_empty_disables_profile() -> None:
-    assert RecallRequest(user_id="alice", query="q").profile_sections == ["main"]
-    assert SearchRequest(query="q").profile_sections == ["main"]
-    assert SearchManyRequest(queries=["q"]).profile_sections == ["main"]
-    assert RecallRequest(user_id="alice", query="q", profile_sections=[]).profile_sections == []
+    assert RecallRequest(user_id="alice", query="q").include_profile is True
+    assert SearchRequest(query="q").include_profile is True
+    assert SearchManyRequest(queries=["q"]).include_profile is True
+    assert RecallRequest(user_id="alice", query="q", include_profile=False).include_profile is False

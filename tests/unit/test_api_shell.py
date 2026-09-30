@@ -39,6 +39,19 @@ async def test_inspector_serves_a_same_origin_script_under_its_csp(client) -> No
     assert script.headers["content-type"].startswith("text/javascript")
 
 
+async def test_inspector_serves_its_logo_and_uses_it_as_the_favicon(client) -> None:
+    page = await client.get("/ui/")
+    logo = await client.get("/ui/oam-logo.svg")
+
+    assert page.status_code == 200
+    assert '<link rel="icon" type="image/svg+xml" href="/ui/oam-logo.svg">' in page.text
+    assert '<img class="brand-logo" src="/ui/oam-logo.svg"' in page.text
+    assert logo.status_code == 200
+    assert logo.headers["content-type"].startswith("image/svg+xml")
+    assert "<svg" in logo.text and 'viewBox="0 0 64 64"' in logo.text
+    assert "Open Agent Memory" in logo.text
+
+
 async def test_readiness_fails_when_required_model_roles_are_unbound(client) -> None:
     response = await client.get("/health/ready")
 

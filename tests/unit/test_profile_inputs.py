@@ -1,5 +1,6 @@
 import json
 from contextlib import nullcontext
+from datetime import UTC, datetime
 
 import pytest
 
@@ -19,6 +20,8 @@ class ProfileCursor:
             self.rows = self.connection.units
         elif "/* profile:resources */" in query:
             self.rows = self.connection.resources
+        elif "/* profile:source_scope */" in query:
+            self.rows = self.connection.source_scope
         elif "/* profile:pending */" in query:
             self.rows = self.connection.pending
         elif "/* profile:insight_support */" in query:
@@ -50,6 +53,7 @@ class ProfileConnection:
                 "memory_id": "fact_1",
                 "insight_id": None,
                 "insight_revision": None,
+                "insight_subtype": None,
                 "content_text": "The user prefers Python examples.",
             },
             {
@@ -59,6 +63,7 @@ class ProfileConnection:
                 "memory_id": None,
                 "insight_id": "insight_1",
                 "insight_revision": 2,
+                "insight_subtype": "projects",
                 "content_text": "The user often works on backend services.",
             },
         ]
@@ -80,6 +85,14 @@ class ProfileConnection:
             }
         ]
         self.pending = []
+        self.source_scope = [
+            {"input_role": "interaction", "source_id": "chat_1", "active_version": 1},
+            {
+                "input_role": "profile_resource",
+                "source_id": "user-preference-examples",
+                "active_version": 2,
+            },
+        ]
         self.insight_links = [
             {"insight_id": "insight_1", "insight_revision": 2, "memory_id": "fact_1"}
         ]
@@ -89,6 +102,7 @@ class ProfileConnection:
                 "passage_id": "passage_1",
                 "source_id": "chat_1",
                 "source_version": 1,
+                "event_time": datetime(2026, 9, 29, 12, 3, tzinfo=UTC),
                 "normalized_text": "Please show Python examples.",
                 "locator": {"message": 1},
             }
@@ -158,18 +172,22 @@ def test_loader_returns_supported_memory_exact_fields_and_cited_prompt_inputs() 
             "passage_id": "passage_1",
             "source_id": "chat_1",
             "source_version": 1,
+            "event_time": "2026-09-29T12:03:00+00:00",
             "text": "Please show Python examples.",
             "locator": {"message": 1},
         }
     ]
     assert result.prompt_inputs[1]["support_memory_ids"] == ["fact_1"]
     assert result.prompt_inputs[1]["source_passages"] == result.prompt_inputs[0]["source_passages"]
+    assert result.prompt_inputs[1]["subtype"] == "projects"
+    assert result.prompt_inputs[1]["revision"] == 2
     assert result.pending_inputs == 0
     assert result.policy_epoch == 4
     assert len(result.identity) == 32
     eligible_sql = next(query for query, _ in connection.calls if "/* profile:eligible */" in query)
     assert "s.input_role='interaction'" in eligible_sql
     assert "u.origin='memory'" in eligible_sql
+    assert "JOIN insights i" in eligible_sql
     assert all("accepted_seq" not in query for query, _ in connection.calls)
 
 
@@ -179,11 +197,36 @@ def test_evidence_only_change_does_not_dirty_profile_identity_but_coverage_does(
 
     connection.evidence_only_revision = 8
     assert load(connection).identity == first.identity
+    assert load(connection).scope_identity == first.scope_identity
 
-    connection.pending = [{"source_id": "chat_2"}]
+    connection.source_scope.append(
+        {"input_role": "interaction", "source_id": "chat_2", "active_version": 1}
+    )
+    connection.pending = [{"source_id": "chat_2", "source_version": 1, "coverage_state": "pending"}]
     pending = load(connection)
     assert pending.pending_inputs == 1
+    assert pending.failed_inputs == 0
+    assert pending.waiting_source_ids == ("chat_2",)
     assert pending.identity != first.identity
+    assert pending.scope_identity != first.scope_identity
+
+    connection.pending = [{"source_id": "chat_2", "source_version": 1, "coverage_state": "failed"}]
+    failed = load(connection)
+    assert failed.pending_inputs == 1
+    assert failed.failed_inputs == 1
+    assert failed.blocked_inputs == 0
+    assert failed.waiting_source_ids == ()
+    assert failed.identity != pending.identity
+    assert failed.scope_identity == pending.scope_identity
+
+    connection.units[1]["insight_subtype"] = "relationships"
+    assert load(connection).identity != failed.identity
+
+    connection.pending = [{"source_id": "chat_2", "source_version": 1, "coverage_state": "blocked"}]
+    blocked = load(connection)
+    assert blocked.failed_inputs == 0
+    assert blocked.blocked_inputs == 1
+    assert blocked.waiting_source_ids == ("chat_2",)
 
 
 def test_bounded_prompt_keeps_insights_when_many_facts_exist() -> None:
@@ -211,6 +254,7 @@ def test_bounded_prompt_keeps_insights_when_many_facts_exist() -> None:
     assert len(inputs.prompt_inputs) <= 64
     assert {item["kind"] for item in inputs.prompt_inputs} == {"fact", "insight"}
     assert len(inputs.supported) == 101
+    assert inputs.uncovered_inputs == 37
 
 
 def test_prompt_limits_cited_passages_per_input() -> None:

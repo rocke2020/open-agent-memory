@@ -2,6 +2,6 @@
   "query": "Which synthetic measurement was recorded on September 20?",
   "recall_level": "fast",
   "max_context_tokens": 1024,
-  "profile_sections": [],
+  "include_profile": false,
   "allow_partial": false
 }

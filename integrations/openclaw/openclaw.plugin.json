@@ -1,0 +1,39 @@
+{
+  "id": "oam-openclaw",
+  "name": "Open Agent Memory",
+  "description": "Personal memory through an OAM service",
+  "kind": "memory",
+  "categories": ["memory"],
+  "contracts": { "tools": ["memory_search"] },
+  "configContracts": {
+    "secretInputs": {
+      "paths": [{ "path": "apiKey", "expected": "string", "ownerKind": "capability" }]
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["baseUrl", "userId", "apiKey", "allowedDirectConversations"],
+    "properties": {
+      "baseUrl": { "type": "string", "minLength": 1 },
+      "userId": { "type": "string", "minLength": 1 },
+      "apiKey": { "type": ["string", "object"] },
+      "targetAgentId": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$" },
+      "maxContextTokens": { "type": "integer", "minimum": 1, "maximum": 8192 },
+      "allowLocalMainAgent": { "type": "boolean" },
+      "allowedDirectConversations": {
+        "type": "array",
+        "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["channel", "chatId", "senderId"],
+          "properties": {
+            "channel": { "type": "string", "minLength": 1 },
+            "accountId": { "type": "string", "minLength": 1 },
+            "chatId": { "type": "string", "minLength": 1 },
+            "senderId": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

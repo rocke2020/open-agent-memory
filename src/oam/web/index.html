@@ -5,15 +5,19 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Open Agent Memory Inspector</title>
+  <link rel="icon" type="image/svg+xml" href="/ui/oam-logo.svg">
   <link rel="stylesheet" href="/ui/styles.css">
   <script src="/ui/app.js" defer></script>
 </head>
 <body>
   <header class="site-header">
-    <div class="site-heading">
-      <span class="eyebrow">Open Agent Memory</span>
-      <h1>Memory Inspector</h1>
-      <p>Inspect supported memories, typed Resources, originals, and source operations.</p>
+    <div class="site-brand">
+      <img class="brand-logo" src="/ui/oam-logo.svg" width="64" height="64" alt="">
+      <div class="site-heading">
+        <span class="eyebrow">Open Agent Memory</span>
+        <h1>Memory Inspector</h1>
+        <p>Inspect supported memories, typed Resources, originals, and source operations.</p>
+      </div>
     </div>
     <span class="version">v0.0.1</span>
   </header>
@@ -63,16 +67,13 @@
             </div>
           </form>
           <form id="profile-form" class="profile-form" hidden>
-            <fieldset>
-              <legend>Profile sections</legend>
-              <label><input type="checkbox" name="section" value="main" checked>Main</label>
-              <label><input type="checkbox" name="section" value="preferences">Preferences</label>
-              <label><input type="checkbox" name="section" value="experiences">Experiences</label>
-            </fieldset>
+            <label for="profile-instruction">Custom Profile instruction (optional)</label>
+            <textarea id="profile-instruction" rows="3" maxlength="4000" placeholder="Leave blank to reuse the saved instruction"></textarea>
+            <label><input id="profile-reset-instruction" type="checkbox">Use the default Profile format</label>
             <label>Preview token budget <input id="profile-budget" type="number" min="0" placeholder="Server default"></label>
             <div class="actions">
               <button type="submit">View Profile</button>
-              <button id="refresh-profile" type="button" class="secondary">Refresh Profile</button>
+              <button id="refresh-profile" type="button" class="secondary">Create/Refresh Profile</button>
             </div>
           </form>
           <button id="new-resource" type="button" class="secondary" hidden>Add Resource</button>

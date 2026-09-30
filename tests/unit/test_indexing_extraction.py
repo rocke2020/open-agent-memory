@@ -11,6 +11,14 @@ from oam.indexing.extraction import ExtractionError, extract_facts
 from oam.models.runtime import RuntimeModels
 
 
+def test_user_subject_wording_is_explicit_in_fact_and_insight_prompts():
+    from oam.indexing.extraction import EXTRACTION_SYSTEM, INSIGHT_SYSTEM
+
+    for prompt in (EXTRACTION_SYSTEM, INSIGHT_SYSTEM):
+        assert "the user" in prompt
+        assert "they/them/their" in prompt
+
+
 def test_rejected_completed_output_retains_usage_without_becoming_valid_no_facts():
     with (
         extraction_models({"outcome": "facts", "facts": []}) as (models, config),
@@ -341,7 +349,10 @@ def test_invalid_temporal_annotation_preserves_the_supported_fact(annotation_cha
     assert len(result.facts) == 1 and result.facts[0].annotations == ()
 
 
-@pytest.mark.parametrize("subtype", ["preference", "pattern", "project", "relationship", "general"])
+@pytest.mark.parametrize(
+    "subtype",
+    ["preferences", "patterns", "projects", "relationships", "experiences", "general_insights"],
+)
 def test_insight_requires_two_distinct_known_supports_and_preserves_source_references(subtype):
     from oam.indexing.extraction import InsightInput, synthesize_insight
 
@@ -374,17 +385,22 @@ def test_insight_requires_two_distinct_known_supports_and_preserves_source_refer
     [
         {
             "outcome": "insight",
-            "subtype": "general",
+            "subtype": "general_insights",
             "text": "A claim",
             "support_ids": ["f1", "invented"],
         },
         {
             "outcome": "insight",
-            "subtype": "general",
+            "subtype": "general_insights",
             "text": "A claim",
             "support_ids": ["f1", "f1"],
         },
-        {"outcome": "insight", "subtype": "general", "text": " ", "support_ids": ["f1", "f2"]},
+        {
+            "outcome": "insight",
+            "subtype": "general_insights",
+            "text": " ",
+            "support_ids": ["f1", "f2"],
+        },
         {"outcome": "no_insight", "subtype": None, "text": "A claim", "support_ids": []},
         {"outcome": "no_insight", "subtype": None, "text": None, "support_ids": ["f1"]},
         {},
@@ -420,7 +436,14 @@ def test_insight_distinguishes_valid_no_insight_and_rejects_duplicate_input_iden
 
 @pytest.mark.parametrize(
     "change",
-    [{}, {"subtype": None}, {"subtype": "fact"}, {"subtype": "unknown"}, {"subtype": 1}],
+    [
+        {},
+        {"subtype": None},
+        {"subtype": "fact"},
+        {"subtype": "preference"},
+        {"subtype": "unknown"},
+        {"subtype": 1},
+    ],
 )
 def test_insight_rejects_missing_or_unsupported_subtype(change):
     from oam.indexing.extraction import InsightInput, synthesize_insight
@@ -446,6 +469,11 @@ def test_no_insight_cannot_publish_a_subtype():
         InsightInput(id="f1", text="A", source_refs=("s1",)),
         InsightInput(id="f2", text="B", source_refs=("s2",)),
     )
-    reply = {"outcome": "no_insight", "subtype": "general", "text": None, "support_ids": []}
+    reply = {
+        "outcome": "no_insight",
+        "subtype": "general_insights",
+        "text": None,
+        "support_ids": [],
+    }
     with extraction_models(reply) as (models, config), pytest.raises(ExtractionError):
         synthesize_insight(models, facts=facts, config=config, timeout_seconds=1)

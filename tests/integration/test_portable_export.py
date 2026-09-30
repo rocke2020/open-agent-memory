@@ -6,6 +6,7 @@ import json
 import httpx
 import pytest
 from api_test_app import create_api_only_app as create_app
+from psycopg.conninfo import make_conninfo
 from test_core_http import ROOT, use_created_user_key
 from test_core_http import core_database as core_database
 from test_recall_repository import (
@@ -23,12 +24,13 @@ from oam.config import load_config
 from oam.db.sources import SourceRepository
 from oam.exports.repository import ExportPolicyChanged, ExportRepository
 from oam.exports.validation import validate_directory
+from oam.workers.index_source import process_one
 
 pytestmark = pytest.mark.integration
 
 
 async def test_public_export_includes_eligible_profile_fields(core_database, tmp_path):
-    _, _, root_headers = core_database
+    dsn, _, root_headers = core_database
     app = create_app(ROOT / "configs/oam.yaml")
     async with (
         app.router.lifespan_context(app),
@@ -48,8 +50,23 @@ async def test_public_export_includes_eligible_profile_fields(core_database, tmp
             headers={"Idempotency-Key": "basic-v1"},
         )
         assert created.status_code == 202, created.text
+        config = load_config(ROOT / "configs/oam.yaml").config
+        queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+        content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+        assert process_one(
+            config, queue_dsn, content_dsn, models=object(), worker_id="export-resource"
+        )
+        requested = await client.post("/v1/users/lin/profile/refresh", json={})
+        assert requested.status_code == 202, requested.text
+        assert process_one(
+            config,
+            queue_dsn,
+            content_dsn,
+            models=object(),
+            worker_id="export-profile",
+        )
         profile = await client.get("/v1/users/lin/profile")
-        assert any(field["value"] == "1990-05-10" for field in profile.json()["sections"]["main"])
+        assert "1990-05-10" in profile.json()["content"]
 
         receipt = await client.post("/v1/users/lin/exports")
         assert receipt.status_code == 202, receipt.text
@@ -77,8 +94,8 @@ async def test_public_export_includes_eligible_profile_fields(core_database, tmp
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(response.content)
         exported_profile = next(record for record in records if record["kind"] == "profile")
-        assert exported_profile["sections"]["main"][0]["value"] == "1990-05-10"
-        assert exported_profile["sections"]["main"][0]["supports"][0]["resource_id"] == "basic"
+        assert "1990-05-10" in exported_profile["content"]
+        assert exported_profile["references"][0]["resource_id"] == "basic"
         assert validate_directory(tmp_path)["profile"] == 1
 
         deleted = await client.delete("/v1/users/lin/resources/basic")
@@ -86,7 +103,7 @@ async def test_public_export_includes_eligible_profile_fields(core_database, tmp
         assert deleted.json()["excluded_versions"] == [1]
         assert (await client.get(f"/v1/users/lin/exports/{export_id}")).status_code == 409
         current = await client.get("/v1/users/lin/profile")
-        assert all(field["value"] != "1990-05-10" for field in current.json()["sections"]["main"])
+        assert current.json()["content"] is None
 
 
 def test_export_manifest_parts_and_original_expire_on_deletion(source_database):

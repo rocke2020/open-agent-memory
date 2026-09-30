@@ -75,8 +75,23 @@ async def test_profile_resource_delete_excludes_exact_field_and_reuses_cleanup_r
             headers={"Idempotency-Key": "basic-v1"},
         )
         assert created.status_code == 202, created.text
+        config = load_config(ROOT / "configs/oam.yaml").config
+        queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+        content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+        assert process_one(
+            config, queue_dsn, content_dsn, models=object(), worker_id="resource-before-profile"
+        )
+        requested = await client.post("/v1/users/lin/profile/refresh", json={})
+        assert requested.status_code == 202, requested.text
+        assert process_one(
+            config,
+            queue_dsn,
+            content_dsn,
+            models=object(),
+            worker_id="profile-before-delete",
+        )
         before = await client.get("/v1/users/lin/profile")
-        assert any(field["value"] == "1990-05-10" for field in before.json()["sections"]["main"])
+        assert "1990-05-10" in before.json()["content"]
 
         deleted = await client.delete("/v1/users/lin/resources/basic")
         assert deleted.status_code == 202, deleted.text
@@ -86,7 +101,7 @@ async def test_profile_resource_delete_excludes_exact_field_and_reuses_cleanup_r
         assert repeated.status_code == 202, repeated.text
         assert repeated.json()["cleanup_operation_id"] == deleted.json()["cleanup_operation_id"]
         after = await client.get("/v1/users/lin/profile")
-        assert all(field["value"] != "1990-05-10" for field in after.json()["sections"]["main"])
+        assert after.json()["content"] is None
         assert (await client.get("/v1/users/lin/resources/basic")).status_code == 404
         config = load_config(ROOT / "configs/oam.yaml").config
         assert process_one(

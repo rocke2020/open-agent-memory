@@ -176,13 +176,9 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert config.context.source_detail_budget_fraction == 0.4
     assert config.context.tokenizer == "oam-unicode-quarter-v1"
     assert (config.chunks.default_tokens, config.chunks.max_tokens) == (8192, 8192)
-    assert (
-        config.profile.main_tokens,
-        config.profile.preferences_tokens,
-        config.profile.experiences_tokens,
-    ) == (256, 512, 512)
-    assert config.profile.max_fields_per_section == 32
-    assert config.profile.max_value_bytes == 2048
+    assert config.profile.max_content_bytes == 16384
+    assert config.profile.max_output_tokens == 2048
+    assert config.profile.attempt_timeout_seconds == 180
     assert (config.planner.max_calls, config.planner.max_context_tokens) == (1, 2048)
     assert config.request.batch_deadline_seconds == 10
     assert config.request.delegated_deadline_seconds == 10

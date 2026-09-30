@@ -1,0 +1,27 @@
+{
+  "name": "@rocke2020/oam-openclaw",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Open Agent Memory plugin for OpenClaw",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild index.ts --format=esm --platform=node --target=node22 --outfile=dist/index.js",
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "setup": "node setup.mjs",
+    "prepack": "npm run build"
+  },
+  "bin": { "oam-openclaw-setup": "./setup.mjs" },
+  "files": [
+    "setup.mjs",
+    "index.ts",
+    "dist/index.js",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "compat": { "pluginApi": ">=2026.9.6" },
+    "install": { "minHostVersion": ">=2026.9.6" }
+  },
+  "devDependencies": { "esbuild": "0.27.7" }
+}

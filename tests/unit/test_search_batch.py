@@ -124,25 +124,6 @@ def test_invalid_later_batch_query_dispatches_nothing() -> None:
     assert calls == []
 
 
-def test_invalid_profile_selection_dispatches_no_batch_query() -> None:
-    from oam.api.search import search_many
-
-    config = load_config("configs/oam.yaml").config
-    calls = []
-
-    def search_one(request, deadline_at):
-        calls.append(request.query)
-        return {}
-
-    with pytest.raises(ValueError, match="Profile section"):
-        search_many(
-            config,
-            SearchManyRequest(queries=["one", "two"], profile_sections=["unknown"]),
-            search_one,
-        )
-    assert calls == []
-
-
 def test_batch_reports_failed_query_without_hiding_successful_empty_result() -> None:
     from oam.api.search import search_many
     from oam.retrieval.service import RecallUnavailable
@@ -343,7 +324,7 @@ def test_database_runtime_authorizes_batch_once_before_search(monkeypatch) -> No
         result = runtime.search_many(
             "caller",
             "lin",
-            SearchManyRequest(queries=["current city", "preferred style"], profile_sections=[]),
+            SearchManyRequest(queries=["current city", "preferred style"], include_profile=False),
         )
     finally:
         runtime._http.close()

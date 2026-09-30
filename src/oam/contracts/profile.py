@@ -1,21 +1,30 @@
-from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
 
 
 class FrozenContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class ProfileSection(StrEnum):
-    MAIN = "main"
-    PREFERENCES = "preferences"
-    EXPERIENCES = "experiences"
-
-
 class ProfileRefreshRequest(FrozenContract):
-    sections: list[ProfileSection] = Field(default_factory=lambda: [ProfileSection.MAIN])
+    instruction: str | None = Field(default=None, min_length=1, max_length=4000)
+    reset_instruction: bool = False
+
+    @field_validator("instruction")
+    @classmethod
+    def normalize_instruction(cls, value: str | None) -> str | None:
+        if value is not None:
+            value = value.strip()
+            if not value:
+                raise ValueError("instruction cannot be blank")
+        return value
+
+    @model_validator(mode="after")
+    def validate_instruction(self) -> "ProfileRefreshRequest":
+        if self.instruction is not None and self.reset_instruction:
+            raise ValueError("instruction and reset_instruction cannot be combined")
+        return self
 
 
 class ProfileRefreshUnchanged(FrozenContract):

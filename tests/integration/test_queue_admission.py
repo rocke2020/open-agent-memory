@@ -103,6 +103,31 @@ def finish_operation(dsn, operation_id, *, status="succeeded"):
         )
 
 
+def test_profile_dependency_can_settle_after_failed_insight_work(queue_database):
+    dsn, authority = queue_database
+    accept(dsn, authority, "upstream")
+    accept(dsn, authority, "ordinary", cap=3)
+    finish_operation(dsn, "upstream", status="failed_terminal")
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "UPDATE work_units SET dependency_ids=ARRAY['upstream'] WHERE work_unit_id='ordinary'"
+        )
+        connection.execute(
+            "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,kind,"
+            "schema_version,status,plan_sealed) "
+            "VALUES ('t','u','profile','writer','refresh_profile',1,'accepted',true)"
+        )
+        connection.execute(
+            "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,"
+            "input_digest,generation_id,status,dependency_ids,attempts_remaining) "
+            "VALUES ('t','u','profile','profile','refresh_profile',"
+            "decode(repeat('00',32),'hex'),'generation','queued',ARRAY['upstream'],1)"
+        )
+    claimed = claim(dsn, "profile-worker")
+    assert claimed is not None and claimed.work_unit_id == "profile"
+    assert claim(dsn, "ordinary-worker") is None
+
+
 def test_replicas_cannot_accept_more_than_the_user_queue_cap(queue_database):
     dsn, authority = queue_database
     barrier = Barrier(4)
@@ -205,25 +230,26 @@ def test_profile_refresh_reuses_work_and_obeys_queue_cap(queue_database):
     service = ProfileService(config, Pool())
     accept(dsn, authority, "root", cap=1)
     with pytest.raises(QueueAdmissionFull):
-        service.refresh(authority, ["main"])
+        service.refresh(authority)
     finish_operation(dsn, "root")
-    receipt = service.refresh(authority, ["main"])
+    receipt = service.refresh(authority)
     assert pending(dsn) == 1
-    assert service.refresh(authority, ["main"]) == receipt
-    current = service.get(authority, ["main"], 1000)
+    assert service.refresh(authority) == receipt
+    current = service.get(authority, 1000)
     with psycopg.connect(dsn) as connection:
         connection.execute(
-            "INSERT INTO profiles(tenant_id,user_id,profile_id,profile_revision,sections,"
+            "INSERT INTO profiles(tenant_id,user_id,profile_id,profile_revision,sections,content,"
             "input_identity,policy_epoch,generation_id,visible_from) "
-            "VALUES ('t','u','user',1,'{\"main\":[],\"preferences\":[],\"experiences\":[]}',"
-            "%s,%s,%s,1)",
+            "VALUES ('t','u','user',1,'{}',%s,%s,%s,%s,1)",
             (
+                "## Main content\n\nNo supported details yet.\n\n"
+                "## References\n\nNo references yet.",
                 bytes.fromhex(current["input_identity"]),
                 current["policy_epoch"],
                 index_generation(config, {}),
             ),
         )
-    unchanged = service.refresh(authority, ["main"])
+    unchanged = service.refresh(authority)
     assert unchanged["status"] == "unchanged"
     assert unchanged["generation_calls"] == 0
     assert pending(dsn) == 1

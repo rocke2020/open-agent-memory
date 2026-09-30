@@ -1,15 +1,29 @@
+import pytest
+from pydantic import ValidationError
+
 from oam.contracts.profile import (
     ProfileRefreshAccepted,
     ProfileRefreshRequest,
     ProfileRefreshUnchanged,
-    ProfileSection,
 )
 
 
-def test_profile_refresh_defaults_to_main_section() -> None:
+def test_profile_refresh_accepts_one_optional_instruction_and_explicit_reset() -> None:
     request = ProfileRefreshRequest()
 
-    assert request.sections == [ProfileSection.MAIN]
+    assert request.instruction is None
+    assert not request.reset_instruction
+    assert (
+        ProfileRefreshRequest(instruction="Return a JSON summary").instruction
+        == "Return a JSON summary"
+    )
+    assert ProfileRefreshRequest(reset_instruction=True).reset_instruction
+    with pytest.raises(ValidationError):
+        ProfileRefreshRequest(instruction="JSON", reset_instruction=True)
+    with pytest.raises(ValidationError):
+        ProfileRefreshRequest.model_validate({"sections": ["main"]})
+    with pytest.raises(ValidationError):
+        ProfileRefreshRequest(instruction="   ")
 
 
 def test_unchanged_profile_response_has_no_operation() -> None:

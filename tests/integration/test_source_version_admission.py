@@ -328,3 +328,52 @@ def test_inspector_lists_supported_memory_until_source_deletion(source_database)
         attempts_remaining=2,
     )
     assert inspector.list_memories(connection, authority, after=None)["items"] == []
+
+
+def test_inspector_lists_newest_added_memories_across_pages(source_database, monkeypatch):
+    connection, authority = source_database
+    SourceRepository().accept(connection, authority, command())
+    connection.execute(
+        "UPDATE users SET index_generation_id='generation' WHERE tenant_id=%s AND user_id=%s",
+        (authority.tenant_id, authority.user_id),
+    )
+    connection.execute(
+        "INSERT INTO passages(tenant_id,user_id,passage_id,evidence_id,parse_revision,"
+        "locator,normalized_text,generation_id,visible_from) "
+        "VALUES (%s,%s,'passage','evidence1',1,'{}','Supported text','generation',1)",
+        (authority.tenant_id, authority.user_id),
+    )
+    added = [
+        ("z-old", "2026-01-01T00:00:00Z"),
+        ("a-middle", "2026-01-02T00:00:00Z"),
+        ("b-new", "2026-01-03T00:00:00Z"),
+        ("m-new", "2026-01-03T00:00:00Z"),
+    ]
+    vector = str([1.0] + [0.0] * 1023)
+    for memory_id, created_at in added:
+        connection.execute(
+            "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,"
+            "assertion_kind,generation_id,visible_from) "
+            "VALUES (%s,%s,%s,'Supported text','stated','generation',1)",
+            (authority.tenant_id, authority.user_id, memory_id),
+        )
+        connection.execute(
+            "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
+            "support_kind,span) VALUES (%s,%s,%s,'evidence1','passage','exact','{}')",
+            (authority.tenant_id, authority.user_id, memory_id),
+        )
+        connection.execute(
+            "INSERT INTO search_units(tenant_id,user_id,unit_id,source_id,source_version,"
+            "evidence_id,memory_id,kind,origin,content_text,generation_id,embedding,"
+            "lexical_text,locator,created_at) VALUES (%s,%s,%s,'source',1,'evidence1',%s,"
+            "'fact','memory','Supported text','generation',%s::vector,'Supported text',"
+            "'{}',%s)",
+            (authority.tenant_id, authority.user_id, memory_id, memory_id, vector, created_at),
+        )
+    monkeypatch.setattr("oam.db.inspection.INSPECTION_PAGE_SIZE", 2)
+
+    first = SourceInspector().list_memories(connection, authority, after=None)
+    second = SourceInspector().list_memories(connection, authority, after=first["next_after"])
+    assert [item["unit_id"] for item in first["items"]] == ["m-new", "b-new"]
+    assert [item["unit_id"] for item in second["items"]] == ["a-middle", "z-old"]
+    assert second["next_after"] is None

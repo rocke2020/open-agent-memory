@@ -225,10 +225,20 @@ class SourceInspector:
     def list_memories(self, connection, authority: AuthorizedUser, *, after: str | None) -> dict:
         with connection.transaction():
             epoch = self._admit(connection, authority)
+            cursor_time = None
+            if after:
+                cursor_row = connection.execute(
+                    "SELECT created_at FROM search_units WHERE tenant_id=%s AND user_id=%s "
+                    "AND unit_id=%s",
+                    (authority.tenant_id, authority.user_id, after),
+                ).fetchone()
+                if cursor_row is None:
+                    raise ValueError("invalid memory cursor")
+                cursor_time = cursor_row[0]
             with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}) "
-                    "SELECT u.unit_id,u.kind,u.origin,u.content_text AS text,u.locator,"
+                    "SELECT u.unit_id,u.kind,i.subtype,u.origin,u.content_text AS text,u.locator,"
                     "COALESCE((SELECT jsonb_agg(jsonb_build_object('source_id',e.source_id,"
                     "'source_version',e.source_version,'evidence_id',sp.evidence_id,"
                     "'passage_id',sp.passage_id,'span',sp.span) "
@@ -246,9 +256,14 @@ class SourceInspector:
                     "FROM insight_support isp WHERE isp.tenant_id=u.tenant_id "
                     "AND isp.user_id=u.user_id AND isp.insight_id=u.insight_id "
                     "AND isp.insight_revision=u.insight_revision),'[]'::jsonb) AS supports "
-                    "FROM eligible u WHERE u.kind IN ('fact','insight') AND u.unit_id>%s "
-                    "ORDER BY u.unit_id LIMIT %s",
-                    (after or "", INSPECTION_PAGE_SIZE + 1),
+                    "FROM eligible u LEFT JOIN insights i ON "
+                    "(i.tenant_id,i.user_id,i.insight_id,i.revision)="
+                    "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision) "
+                    "WHERE u.kind IN ('fact','insight') "
+                    "AND (%s::timestamptz IS NULL OR "
+                    "(u.created_at,u.unit_id)<(%s::timestamptz,%s)) "
+                    "ORDER BY u.created_at DESC,u.unit_id DESC LIMIT %s",
+                    (cursor_time, cursor_time, after or "", INSPECTION_PAGE_SIZE + 1),
                 )
                 rows = cursor.fetchall()
             items = [dict(row) for row in rows[:INSPECTION_PAGE_SIZE]]

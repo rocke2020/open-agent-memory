@@ -129,11 +129,9 @@ chunks:
   max_tokens: 8192
 
 profile:
-  main_tokens: 256
-  preferences_tokens: 512
-  experiences_tokens: 512
-  max_fields_per_section: 32
-  max_value_bytes: 2048
+  max_content_bytes: 16384
+  max_output_tokens: 2048
+  attempt_timeout_seconds: 180
 
 planner:
   max_calls: 1

@@ -80,6 +80,26 @@ def validate_directory(path: str | Path) -> dict[str, int]:
             for record in all_records
             if record["kind"] == "passage"
         }
+        evidence_sources = {
+            record["evidence_id"]: (record["source_id"], record["source_version"])
+            for record in all_records
+            if record["kind"] == "evidence"
+        }
+        passage_sources = {
+            passage_id: evidence_sources.get(evidence_id)
+            for passage_id, evidence_id in passage_evidence.items()
+        }
+        fact_support_passages = {
+            (record["memory_id"], record["passage_id"])
+            for record in all_records
+            if record["kind"] == "support"
+        }
+        insight_members = {}
+        for record in all_records:
+            if record["kind"] == "insight_support":
+                insight_members.setdefault(
+                    (record["insight_id"], record["insight_revision"]), set()
+                ).add(record["memory_id"])
         memory_ids = {record["memory_id"] for record in all_records if record["kind"] == "memory"}
         insight_ids = {
             (record["insight_id"], record["revision"])
@@ -135,6 +155,69 @@ def validate_directory(path: str | Path) -> dict[str, int]:
                 if (record["source_id"], record["source_version"]) not in source_ids:
                     raise ExportValidationError("Resource abstract source reference is missing")
             elif record["kind"] == "profile":
+                if "content" in record:
+                    if record["policy_epoch"] != manifest["policy_epoch"]:
+                        raise ExportValidationError("Profile state does not match manifest")
+                    content = record["content"]
+                    references = record["references"]
+                    support_ids = record["support_ids"]
+                    if (
+                        (
+                            content is not None
+                            and (not isinstance(content, str) or not content.strip())
+                        )
+                        or not isinstance(references, list)
+                        or not isinstance(support_ids, list)
+                    ):
+                        raise ExportValidationError("Profile content is invalid")
+                    if content is None and (references or support_ids):
+                        raise ExportValidationError("Profile support is missing")
+                    if [ref.get("support_id") for ref in references] != support_ids:
+                        raise ExportValidationError("Profile support is missing")
+                    for ref in references:
+                        if ref.get("kind") == "profile_resource":
+                            expected_support_id = (
+                                f"profile_resource:{ref.get('resource_id')}:"
+                                f"{ref.get('resource_version')}"
+                            )
+                            valid = (
+                                source_roles.get(
+                                    (ref.get("resource_id"), ref.get("resource_version"))
+                                )
+                                == "profile_resource"
+                                and ref.get("support_id") == expected_support_id
+                            )
+                        else:
+                            passages = ref.get("passages") or [ref]
+                            support_id = ref.get("support_id")
+                            if ref.get("kind") == "fact":
+                                supported = support_id in memory_ids
+                                member_ids = {support_id}
+                            elif ref.get("kind") == "insight":
+                                insight_key = (support_id, ref.get("revision"))
+                                supported = insight_key in insight_ids
+                                member_ids = insight_members.get(insight_key, set())
+                            else:
+                                supported = False
+                                member_ids = set()
+                            valid = (
+                                supported
+                                and isinstance(passages, list)
+                                and bool(passages)
+                                and all(
+                                    passage_sources.get(passage.get("passage_id"))
+                                    == (passage.get("source_id"), passage.get("source_version"))
+                                    and any(
+                                        (memory_id, passage.get("passage_id"))
+                                        in fact_support_passages
+                                        for memory_id in member_ids
+                                    )
+                                    for passage in passages
+                                )
+                            )
+                        if not valid:
+                            raise ExportValidationError("Profile support is missing")
+                    continue
                 if record["policy_epoch"] != manifest["policy_epoch"] or set(
                     record["sections"]
                 ) != {"main", "preferences", "experiences"}:

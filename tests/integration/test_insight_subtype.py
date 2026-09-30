@@ -52,9 +52,16 @@ def insert_insight(connection, tenant, *, subtype=None, include_subtype=True):
 
 def test_persisted_insight_subtypes_and_historical_default(insight_connection):
     connection, tenant = insight_connection
-    for subtype in ("preference", "pattern", "project", "relationship", "general"):
+    for subtype in (
+        "preferences",
+        "patterns",
+        "projects",
+        "relationships",
+        "experiences",
+        "general_insights",
+    ):
         assert insert_insight(connection, tenant, subtype=subtype) == subtype
-    assert insert_insight(connection, tenant, include_subtype=False) == "general"
+    assert insert_insight(connection, tenant, include_subtype=False) == "general_insights"
 
 
 @pytest.mark.parametrize("subtype", [None, "fact", "unknown"])
@@ -95,7 +102,7 @@ def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(insight_co
             assert stage == "insight"
             return {
                 "outcome": "insight",
-                "subtype": "pattern",
+                "subtype": "patterns",
                 "text": "Repeated supported behavior.",
                 "support_ids": ["f1", "f2"],
                 "usage": {},
@@ -114,5 +121,5 @@ def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(insight_co
     row = connection.execute(
         "SELECT subtype,synthesis_text FROM insights WHERE tenant_id=%s", (tenant,)
     ).fetchone()
-    assert row == ("pattern", "Repeated supported behavior.")
+    assert row == ("patterns", "Repeated supported behavior.")
     assert published_units[0]["kind"] == "insight"
