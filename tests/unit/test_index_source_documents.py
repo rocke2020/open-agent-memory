@@ -48,6 +48,9 @@ class MemoryStore:
     def guard(self, connection):
         pass
 
+    def check_retry_claim(self):
+        raise AssertionError("document fixture does not expect overflow retries")
+
     def checkpoint(self, stage, inputs, produce):
         result = produce()
         self.completed_stages.append(stage)
@@ -136,7 +139,11 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision():
     store.config = store.config.model_copy(
         update={
             "chunk": store.config.chunk.model_copy(
-                update={"target_estimated_tokens": 512, "max_estimated_tokens": 768}
+                update={
+                    "ingestion": store.config.chunk.ingestion.model_copy(
+                        update={"target_estimated_tokens": 512, "max_estimated_tokens": 768}
+                    )
+                }
             )
         }
     )
@@ -155,7 +162,7 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision():
         assert locator["revision"] == 3
         assert locator["block"] == f"text:{index}"
         assert text[locator["start"] : locator["end"]] == unit["text"]
-        assert len(unit["text"]) <= store.config.chunk.max_estimated_tokens * 4
+        assert len(unit["text"]) <= store.config.chunk.ingestion.max_estimated_tokens * 4
     evidence_values = [
         parameters
         for query, parameters in store.statements
@@ -207,6 +214,26 @@ def test_image_resource_indexes_vision_text_with_region_citation():
     assert store.units[1]["locator"]["region"] == [0.1, 0.2, 0.9, 0.8]
     assert store.units[1]["locator"]["extraction_method"] == "vision"
     assert models.embedded == ["Subject SYN-001", "Glucose 92 mg/dL"]
+
+
+def test_fact_completion_cap_does_not_raise_resource_vision_or_abstract_budgets():
+    original = base64.b64decode(
+        (MEDICAL_FIXTURES / "synthetic-lab-report.png.b64").read_text(encoding="ascii")
+    )
+    store = MemoryStore(content=original, media_type="image/png")
+    budgets = []
+
+    class BudgetModels(LocalModels):
+        def generate(self, role, **kwargs):
+            budgets.append((role, kwargs["max_output_tokens"]))
+            return super().generate(role, **kwargs)
+
+        def generate_vision(self, image, **kwargs):
+            budgets.append(("document_vision", kwargs["max_output_tokens"]))
+            return super().generate_vision(image, **kwargs)
+
+    index_source._resource(store, BudgetModels())
+    assert budgets == [("document_vision", 4096), ("abstract", 4096)]
 
 
 def test_invalid_vision_output_does_not_complete_vision_checkpoint():
@@ -436,6 +463,9 @@ def test_interaction_locator_keeps_original_message_order_and_internal_id(monkey
         ],
     }
     store = MemoryStore(content=json.dumps(request).encode(), input_role="interaction")
+    store.config = store.config.model_copy(
+        update={"extraction": store.config.extraction.model_copy(update={"reference_max_facts": 0})}
+    )
     connection = SimpleNamespace(cursor=lambda: None)
 
     @contextmanager

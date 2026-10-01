@@ -31,6 +31,10 @@ def stable_id(prefix: str, *parts: object) -> str:
     return prefix + "_" + hashlib.sha256(value.encode()).hexdigest()[:32]
 
 
+def input_digest(inputs: object) -> bytes:
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).digest()
+
+
 @dataclass
 class IndexStore:
     dsn: str
@@ -118,8 +122,23 @@ class IndexStore:
         ):
             raise StaleIndexWork("claim, policy, or source is no longer eligible")
 
+    def check_retry_claim(self):
+        """Recheck cancellation and renew the fenced lease before a split child call."""
+        with self.transaction() as connection:
+            self.guard(connection)
+            connection.execute(
+                RENEW_LEASE_SQL,
+                (
+                    self.config.lease.seconds,
+                    *self.key,
+                    self.claim.work_unit_id,
+                    self.worker_id,
+                    self.claim.fence,
+                ),
+            )
+
     def checkpoint(self, stage: str, inputs: object, produce):
-        digest = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).digest()
+        digest = input_digest(inputs)
         identity = (
             *self.key,
             self.source["source_id"],
@@ -190,9 +209,7 @@ class IndexStore:
         with self.transaction() as connection:
             self.guard(connection)
             for index, (stage, inputs, produce) in enumerate(stages):
-                digest = hashlib.sha256(
-                    json.dumps(inputs, sort_keys=True, default=str).encode()
-                ).digest()
+                digest = input_digest(inputs)
                 identity = (
                     *self.key,
                     self.source["source_id"],

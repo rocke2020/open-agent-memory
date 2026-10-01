@@ -83,9 +83,9 @@ class SearchOutputOptions(FrozenContract):
         if (
             chunks is not None
             and chunks.max_tokens is not None
-            and chunks.max_tokens > config.chunks.max_tokens
+            and chunks.max_tokens > config.chunk.recall.max_tokens
         ):
-            raise ValueError(f"include.chunks.max_tokens exceeds {config.chunks.max_tokens}")
+            raise ValueError(f"include.chunks.max_tokens exceeds {config.chunk.recall.max_tokens}")
 
 
 class SearchQueryOptions(SearchOutputOptions):

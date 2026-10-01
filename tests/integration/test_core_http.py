@@ -215,6 +215,25 @@ class SyntheticIndexModels:
         self.generation_calls.append(role)
         envelope = json.loads(kwargs["user"])
         if role == "extraction":
+            if "passages" in envelope:
+                facts = [
+                    {
+                        "text": p["center"]["text"],
+                        "quote": p["center"]["text"],
+                        "passage_id": p["passage_id"],
+                        "category": "preference",
+                        "entities": ["Lin"],
+                    }
+                    for p in envelope["passages"]
+                ]
+                if self.invalid_fact:
+                    facts.append({**facts[0], "quote": "Not in the source"})
+                return ModelResult(
+                    content=json.dumps({"outcome": "facts", "facts": facts}),
+                    usage=Usage(
+                        input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
+                    ),
+                )
             center = envelope["center"]
             output = {
                 "outcome": "facts",
@@ -1113,7 +1132,7 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
         assert consolidation.json()["usage"]["total_tokens"] == 30
         assert consolidation.json()["embedding_usage"]["total_tokens"] == 1
         assert "link_coverage" not in consolidation.json()["stage_state"]
-        assert finished.json()["usage"]["total_tokens"] == 60
+        assert finished.json()["usage"]["total_tokens"] == 30
         assert finished.json()["usage"]["coverage"] == "complete"
         assert finished.json()["embedding_usage"]["total_tokens"] == 4
         with psycopg.connect(dsn) as connection:
@@ -1167,7 +1186,7 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
             ).fetchone()[0]
             == 2
         )
-    assert models.generation_calls == ["extraction", "extraction", "insights"]
+    assert models.generation_calls == ["extraction", "insights"]
 
 
 async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(

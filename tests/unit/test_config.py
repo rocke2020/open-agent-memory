@@ -132,16 +132,20 @@ def test_canonical_config_has_one_owner_for_database_auth_and_work_limits() -> N
 def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     config = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config
 
-    assert (config.chunk.target_estimated_tokens, config.chunk.max_estimated_tokens) == (
+    assert (
+        config.chunk.ingestion.target_estimated_tokens,
+        config.chunk.ingestion.max_estimated_tokens,
+    ) == (
         2048,
         4096,
     )
-    assert config.chunk.extractable_overlap_estimated_tokens == 0
-    assert config.chunk.previous_context_estimated_tokens == 128
+    assert config.chunk.ingestion.extractable_overlap_estimated_tokens == 0
+    assert config.chunk.ingestion.previous_context_estimated_tokens == 128
     assert (config.extraction.max_input_tokens, config.extraction.max_output_tokens) == (
         8192,
-        4096,
+        64000,
     )
+    assert config.extraction.group_max_estimated_output_tokens == 4096
     assert config.extraction.max_facts_per_group == 64
     index_limits = (
         config.index.semantic_link_min_similarity,
@@ -175,7 +179,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert config.context.source_seed_tokens == 8192
     assert config.context.source_detail_budget_fraction == 0.4
     assert config.context.tokenizer == "oam-unicode-quarter-v1"
-    assert (config.chunks.default_tokens, config.chunks.max_tokens) == (8192, 8192)
+    assert (config.chunk.recall.default_tokens, config.chunk.recall.max_tokens) == (8192, 8192)
     assert config.profile.max_content_bytes == 16384
     assert config.profile.max_output_tokens == 2048
     assert config.profile.attempt_timeout_seconds == 180
@@ -235,11 +239,15 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
     base = yaml.safe_load((REPOSITORY_ROOT / "configs" / "oam.yaml").read_text())
     base["resource"]["max_bytes"] = 12345
     base["search"]["fast"]["fused_candidates"] = 128
+    base["chunk"]["ingestion"]["target_estimated_tokens"] = 37
+    base["chunk"]["recall"]["default_tokens"] = 101
     config_directory = tmp_path / "configs"
     config_directory.mkdir()
     (config_directory / "oam.yaml").write_text(yaml.safe_dump(base))
     override = tmp_path / "operator.yaml"
-    override.write_text("search:\n  fast:\n    max_results: 19\n")
+    override.write_text(
+        "search:\n  fast:\n    max_results: 19\nchunk:\n  recall:\n    max_tokens: 203\n"
+    )
 
     output = subprocess.check_output(
         [
@@ -248,14 +256,15 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
             "from oam.config import load_config; import sys; "
             "c = load_config(sys.argv[1]).config; "
             "print(c.resource.max_bytes, c.search.fast.fused_candidates, "
-            "c.search.fast.max_results)",
+            "c.search.fast.max_results, c.chunk.ingestion.target_estimated_tokens, "
+            "c.chunk.recall.default_tokens, c.chunk.recall.max_tokens)",
             str(override),
         ],
         cwd=tmp_path,
         text=True,
     )
 
-    assert output.strip() == "12345 128 19"
+    assert output.strip() == "12345 128 19 37 101 203"
 
 
 def test_missing_canonical_numeric_limit_is_not_filled_by_python(

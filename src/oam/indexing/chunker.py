@@ -6,8 +6,12 @@ import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
-from oam.config import ChunkConfig
+from oam.config import IngestionChunkConfig
 from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimated_tokens
+
+# Portions Copyright (c) 2025 Vectorize AI, Inc.
+# MIT license: third_party_licenses/extraction-split-MIT.txt.
+MIN_OUTPUT_SPLIT_CHARS = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +28,7 @@ class TextChunk:
 
 
 def chunk_text(
-    text: str, config: ChunkConfig, *, previous_context: str = ""
+    text: str, config: IngestionChunkConfig, *, previous_context: str = ""
 ) -> tuple[TextChunk, ...]:
     """Chunk one already-eligible message; the caller owns cross-message eligibility."""
     if config.extractable_overlap_estimated_tokens:
@@ -73,6 +77,44 @@ def chunk_text(
 
 def _bounded_end(weights: list[int], start: int, tokens: int) -> int:
     return bisect_right(weights, weights[start] + tokens * UNITS_PER_TOKEN) - 1
+
+
+def split_chunk_for_output_retry(
+    chunk: TextChunk, config: IngestionChunkConfig
+) -> tuple[TextChunk, TextChunk] | None:
+    """Halve an overflowing source span, preferring nearby sentence boundaries."""
+    text = chunk.text
+    if len(text.strip()) <= MIN_OUTPUT_SPLIT_CHARS:
+        return None
+    mid_point = len(text) // 2
+    search_range = int(len(text) * 0.2)
+    search_start = max(0, mid_point - search_range)
+    search_end = min(len(text), mid_point + search_range)
+    best_split = mid_point
+    for ending in [". ", "! ", "? ", "\n\n"]:
+        pos = text.rfind(ending, search_start, search_end)
+        if pos != -1:
+            best_split = pos + len(ending)
+            break
+    first_half, second_half = text[:best_split], text[best_split:]
+    if not first_half.strip() or not second_half.strip():
+        return None
+    return (
+        TextChunk(
+            first_half,
+            chunk.start,
+            chunk.start + best_split,
+            chunk.previous_context,
+            estimated_tokens(cumulative_units(first_half)[-1]),
+        ),
+        TextChunk(
+            second_half,
+            chunk.start + best_split,
+            chunk.end,
+            _tail(chunk.previous_context + first_half, config.previous_context_estimated_tokens),
+            estimated_tokens(cumulative_units(second_half)[-1]),
+        ),
+    )
 
 
 def _tail(text: str, tokens: int) -> str:

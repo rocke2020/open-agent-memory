@@ -107,7 +107,6 @@ PUBLIC_LIMIT_SECTIONS = (
     "index",
     "recall",
     "context",
-    "chunks",
     "profile",
     "planner",
     "request",

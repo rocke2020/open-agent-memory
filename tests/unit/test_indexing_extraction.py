@@ -11,6 +11,213 @@ from oam.indexing.extraction import ExtractionError, extract_facts
 from oam.models.runtime import RuntimeModels
 
 
+def test_default_extraction_requests_a_64000_token_completion_budget():
+    requests = []
+    with extraction_models({"outcome": "no_facts", "facts": []}, requests) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk("Hello.", 0, 6, "", 2),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert result.outcome == "no_facts"
+    assert requests[0]["max_tokens"] == 64000
+
+
+def test_default_extraction_uses_offered_existing_memory_context():
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {
+                "text": "The user prefers tea.",
+                "quote": "I prefer tea.",
+                "related_existing_ids": ["old-tea"],
+            }
+        ],
+    }
+    references = ({"id": "old-tea", "text": "The user prefers tea.", "role": "user"},)
+    requests = []
+    with extraction_models(reply, requests) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk("I prefer tea.", 0, 13, "", 4),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+            references=references,
+        )
+    assert result.facts[0].related_existing_ids == ("old-tea",)
+    assert json.loads(requests[0]["messages"][1]["content"])["reference_facts"] == list(references)
+
+
+def test_reference_hints_are_validated_without_rejecting_new_source_support():
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {
+                "text": "The user prefers tea.",
+                "quote": "I prefer tea.",
+                "related_existing_ids": ["old-tea", "foreign", "old-tea"],
+            }
+        ],
+    }
+    requests = []
+    with extraction_models(reply, requests) as (models, config):
+        config = config.model_copy(
+            update={
+                "extraction": config.extraction.model_copy(
+                    update={"reference_max_facts": 8, "reference_max_input_tokens": 512}
+                )
+            }
+        )
+        result = extract_facts(
+            models,
+            chunk=TextChunk("I prefer tea.", 0, 13, "", 4),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+            references=(
+                {
+                    "id": "old-tea",
+                    "text": "The user prefers tea.",
+                    "role": "user",
+                    "mentioned_at": "2026-09-01T09:00:00Z",
+                },
+            ),
+        )
+    assert len(result.facts) == 1
+    assert result.facts[0].quote == "I prefer tea."
+    assert result.facts[0].related_existing_ids == ("old-tea",)
+    assert [(d.field, d.code) for d in result.diagnostics] == [
+        ("related_existing_ids", "invalid_reference")
+    ]
+    envelope = json.loads(requests[0]["messages"][1]["content"])
+    assert envelope["reference_facts"][0]["id"] == "old-tea"
+
+
+def test_reference_budget_never_truncates_new_evidence_or_reference_claims():
+    requests = []
+    text = "I prefer tea."
+    with extraction_models({"outcome": "no_facts", "facts": []}, requests) as (models, config):
+        config = config.model_copy(
+            update={
+                "extraction": config.extraction.model_copy(
+                    update={"reference_max_facts": 8, "reference_max_input_tokens": 40}
+                )
+            }
+        )
+        extract_facts(
+            models,
+            chunk=TextChunk(text, 0, len(text), "", 4),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+            references=({"id": "long", "text": "old claim " * 100, "role": "user"},),
+        )
+    envelope = json.loads(requests[0]["messages"][1]["content"])
+    assert envelope["center"]["text"] == text
+    assert envelope["reference_facts"] == []
+
+
+def test_old_reference_quote_cannot_become_new_support():
+    with extraction_models(
+        {
+            "outcome": "facts",
+            "facts": [
+                {"text": "The user prefers tea.", "quote": "I prefer tea."},
+                {"text": "The user now prefers coffee.", "quote": "I now prefer coffee."},
+            ],
+        }
+    ) as (models, config):
+        config = config.model_copy(
+            update={
+                "extraction": config.extraction.model_copy(
+                    update={"reference_max_facts": 8, "reference_max_input_tokens": 512}
+                )
+            }
+        )
+        result = extract_facts(
+            models,
+            chunk=TextChunk("I now prefer coffee.", 0, 20, "", 5),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+            references=({"id": "old", "text": "I prefer tea.", "role": "user"},),
+        )
+    assert [fact.text for fact in result.facts] == ["The user now prefers coffee."]
+
+
+def test_disabled_reference_input_preserves_original_model_envelope():
+    requests = []
+    with extraction_models({"outcome": "no_facts", "facts": []}, requests) as (models, config):
+        config = config.model_copy(
+            update={"extraction": config.extraction.model_copy(update={"reference_max_facts": 0})}
+        )
+        extract_facts(
+            models,
+            chunk=TextChunk("Hello.", 0, 6, "", 2),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+            references=({"id": "ignored", "text": "Old claim.", "role": "user"},),
+        )
+    envelope = json.loads(requests[0]["messages"][1]["content"])
+    assert set(envelope) == {
+        "message_role",
+        "mentioned_at",
+        "reference_timezone",
+        "center",
+        "previous_context_only",
+        "max_facts",
+    }
+
+
+@pytest.mark.parametrize("hint", [None, "old", [None, [], "foreign"]])
+def test_malformed_optional_reference_hint_keeps_a_valid_fact(hint):
+    with extraction_models(
+        {
+            "outcome": "facts",
+            "facts": [{"text": "Tea.", "quote": "Tea.", "related_existing_ids": hint}],
+        }
+    ) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk("Tea.", 0, 4, "", 1),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert len(result.facts) == 1
+    assert "related_existing_ids" not in result.model_dump(mode="json")["facts"][0]
+    assert result.diagnostics[0].code == "invalid_reference"
+
+
+def test_reference_instructions_cannot_displace_a_full_new_evidence_input():
+    from oam.indexing.extraction import EXTRACTION_SYSTEM, extraction_envelope, model_input_tokens
+
+    with extraction_models({"outcome": "no_facts", "facts": []}) as (models, config):
+        chunk = TextChunk("An eligible assertion." * 100, 0, 2200, "", 550)
+        envelope = extraction_envelope(chunk=chunk, config=config, message_role="user")
+        budget = model_input_tokens(EXTRACTION_SYSTEM, envelope)
+        config = config.model_copy(
+            update={
+                "extraction": config.extraction.model_copy(
+                    update={"reference_max_facts": 8, "max_input_tokens": budget}
+                )
+            }
+        )
+        result = extract_facts(
+            models,
+            chunk=chunk,
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+            references=({"id": "old", "text": "Old."},),
+        )
+    assert result.outcome == "no_facts"
+
+
 def test_user_subject_wording_is_explicit_in_fact_and_insight_prompts():
     from oam.indexing.extraction import EXTRACTION_SYSTEM, INSIGHT_SYSTEM
 
@@ -76,6 +283,8 @@ def extraction_models(reply, requests=None, *, config=None):
     def respond(request):
         if requests is not None:
             requests.append(json.loads(request.content))
+        if callable(reply):
+            return reply(request)
         return httpx.Response(
             200,
             json={

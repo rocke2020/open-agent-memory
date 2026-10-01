@@ -122,10 +122,11 @@ def test_explicit_reasoning_effort_reaches_generation_request_and_index_identity
             "extraction",
             system="Extract.",
             user="A fact.",
-            max_output_tokens=1024,
+            max_output_tokens=configured.extraction.max_output_tokens,
             timeout_seconds=2,
         )
     assert seen[0]["reasoning_effort"] == effort
+    assert seen[0]["max_tokens"] == 64000
     assert index_generation(base, environment) != index_generation(configured, environment)
 
 

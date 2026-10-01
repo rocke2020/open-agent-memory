@@ -6,6 +6,7 @@ from threading import Barrier
 import httpx
 import psycopg
 import pytest
+import yaml
 from api_test_app import create_api_only_app as create_app
 from psycopg.conninfo import make_conninfo
 from test_core_http import ROOT, SyntheticIndexModels, use_created_user_key
@@ -89,10 +90,14 @@ class CompletedInvalidModels(SyntheticIndexModels):
 
 
 @pytest.fixture
-async def accepted_source(core_database):
+async def accepted_source(core_database, tmp_path):
     dsn, tenant, headers = core_database
-    config = load_config(ROOT / "configs/oam.yaml").config
-    app = create_app(ROOT / "configs/oam.yaml")
+    values = yaml.safe_load((ROOT / "configs/oam.yaml").read_text())
+    values["extraction"]["group_max_passages"] = 1
+    path = tmp_path / "singleton.yaml"
+    path.write_text(yaml.safe_dump(values))
+    config = load_config(path).config
+    app = create_app(path)
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(

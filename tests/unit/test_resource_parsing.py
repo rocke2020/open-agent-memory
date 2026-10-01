@@ -17,6 +17,7 @@ from oam.resources.types import ResourceLimitError, ResourceParseError
 
 def _limits(**overrides: int) -> ResourceConfig:
     values = {
+        "max_output_tokens": 4096,
         "max_bytes": 1_024,
         "url_fetch_timeout_seconds": 30,
         "pdf_child_timeout_seconds": 30,

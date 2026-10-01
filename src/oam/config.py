@@ -34,6 +34,7 @@ class FrozenModel(BaseModel):
 
 
 class ResourceConfig(FrozenModel):
+    max_output_tokens: PositiveInt
     max_bytes: PositiveInt
     url_fetch_timeout_seconds: PositiveInt
     pdf_child_timeout_seconds: PositiveInt
@@ -55,14 +56,14 @@ class APIConfig(FrozenModel):
         return self
 
 
-class ChunkConfig(FrozenModel):
+class IngestionChunkConfig(FrozenModel):
     target_estimated_tokens: PositiveInt
     max_estimated_tokens: PositiveInt
     extractable_overlap_estimated_tokens: NonNegativeInt
     previous_context_estimated_tokens: PositiveInt
 
     @model_validator(mode="after")
-    def validate_target(self) -> ChunkConfig:
+    def validate_target(self) -> IngestionChunkConfig:
         if self.target_estimated_tokens > self.max_estimated_tokens:
             raise ValueError("target_estimated_tokens cannot exceed max_estimated_tokens")
         return self
@@ -70,8 +71,12 @@ class ChunkConfig(FrozenModel):
 
 class ExtractionConfig(FrozenModel):
     max_input_tokens: PositiveInt
+    group_max_estimated_output_tokens: PositiveInt
     max_output_tokens: PositiveInt
     max_facts_per_group: PositiveInt
+    group_max_passages: PositiveInt
+    reference_max_facts: NonNegativeInt
+    reference_max_input_tokens: PositiveInt
 
 
 class SearchTier(FrozenModel):
@@ -162,6 +167,11 @@ class RecalledChunksConfig(FrozenModel):
         if self.default_tokens > self.max_tokens:
             raise ValueError("default_tokens cannot exceed max_tokens")
         return self
+
+
+class ChunkConfig(FrozenModel):
+    ingestion: IngestionChunkConfig
+    recall: RecalledChunksConfig
 
 
 class ProfileConfig(FrozenModel):
@@ -362,7 +372,6 @@ class OAMConfig(FrozenModel):
     index: IndexConfig
     recall: RecallConfig
     context: ContextConfig
-    chunks: RecalledChunksConfig
     profile: ProfileConfig
     planner: PlannerConfig
     request: RequestConfig

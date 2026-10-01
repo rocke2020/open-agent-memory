@@ -1,11 +1,11 @@
 import pytest
 
-from oam.config import ChunkConfig
+from oam.config import IngestionChunkConfig
 from oam.indexing.chunker import chunk_text
 
 
 def limits():
-    return ChunkConfig(
+    return IngestionChunkConfig(
         target_estimated_tokens=4,
         max_estimated_tokens=6,
         extractable_overlap_estimated_tokens=0,

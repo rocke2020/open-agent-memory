@@ -137,7 +137,7 @@ async def test_binding_names_alone_cannot_make_the_foundation_ready(tmp_path) ->
             422,
         ),
         (
-            "chunks:\n  default_tokens: 16\n  max_tokens: 32\n",
+            "chunk:\n  recall:\n    default_tokens: 16\n    max_tokens: 32\n",
             "decompose-and-search",
             {
                 "query": "q",
@@ -205,7 +205,8 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     payload = response.json()
     assert payload["contract_version"] == "0.0.1"
     assert payload["limits"]["resource"]["max_bytes"] == 20 * 1024 * 1024
-    assert payload["limits"]["chunk"]["max_estimated_tokens"] == 4096
+    assert payload["limits"]["chunk"]["ingestion"]["max_estimated_tokens"] == 4096
+    assert payload["limits"]["chunk"]["recall"]["max_tokens"] == 8192
     assert payload["features"]["source_lifecycle"] is True
     assert payload["features"]["recorded_debug"] is True
     assert payload["features"]["portable_export"] is True

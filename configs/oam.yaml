@@ -1,6 +1,8 @@
 contract_version: "0.0.1"
 
 resource:
+  # Resource abstracts and vision keep a separate completion budget from learned-memory extraction.
+  max_output_tokens: 4096
   max_bytes: 20971520
   url_fetch_timeout_seconds: 30
   pdf_child_timeout_seconds: 30
@@ -15,17 +17,37 @@ api:
   max_request_bytes: 25165824
 
 chunk:
-  target_estimated_tokens: 2048
-  max_estimated_tokens: 4096
-  # Source spans never overlap, so each extracted fact has one owning chunk.
-  extractable_overlap_estimated_tokens: 0
-  # The prior chunk's tail helps extraction but is not owned by the new chunk.
-  previous_context_estimated_tokens: 128
+  # Split each message/document into passages before indexing, in either extraction mode.
+  # These are per-passage limits using the local token estimate, not batch group sizes.
+  ingestion:
+    target_estimated_tokens: 2048
+    max_estimated_tokens: 4096
+    # Source spans never overlap, so each extracted fact has one owning passage.
+    extractable_overlap_estimated_tokens: 0
+    # The prior passage's tail is context only; it cannot support a new fact.
+    previous_context_estimated_tokens: 128
+  # Reserved response budget for include.chunks; separate recalled chunks are not yet served.
+  # These limits do not control ingestion splitting or extraction grouping.
+  recall:
+    default_tokens: 8192
+    max_tokens: 8192
 
 extraction:
+  # Complete model input, including instructions, passage metadata and references.
   max_input_tokens: 8192
-  max_output_tokens: 4096
+  # Group planning estimates output as 3 * source tokens + 128 * passage count.
+  # Multi-passage groups must fit this estimate and max_input_tokens; size is not fixed.
+  group_max_estimated_output_tokens: 4096
+  # Generation completion cap, leaving room for reasoning and visible JSON.
+  # This is separate from the group-planning estimate above.
+  max_output_tokens: 64000
   max_facts_per_group: 64
+  # Adjacent eligible passages within one source share a bounded call by default.
+  # This is a passage cap, not a turn count; 1 restores one call per passage.
+  group_max_passages: 64
+  # Existing-memory context is enabled by default; zero disables it.
+  reference_max_facts: 8
+  reference_max_input_tokens: 512
 
 search:
   max_query_tokens: 512
@@ -122,11 +144,6 @@ context:
   source_detail_budget_fraction: 0.4
   # Local Unicode-based token estimate used for context budgeting.
   tokenizer: oam-unicode-quarter-v1
-
-# Optional include.chunks response budget; chunk above controls ingestion splitting.
-chunks:
-  default_tokens: 8192
-  max_tokens: 8192
 
 profile:
   max_content_bytes: 16384

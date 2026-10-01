@@ -126,7 +126,7 @@ def test_search_output_budgets_follow_selected_config(tmp_path: Path, request_ty
     path = tmp_path / "operator.yaml"
     path.write_text(
         "context:\n  default_tokens: 10\n  max_tokens: 20\n"
-        "chunks:\n  default_tokens: 30\n  max_tokens: 40\n"
+        "chunk:\n  recall:\n    default_tokens: 30\n    max_tokens: 40\n"
     )
     config = load_config(path).config
     query = {"query": "q"} if request_type is SearchRequest else {"queries": ["q"]}
