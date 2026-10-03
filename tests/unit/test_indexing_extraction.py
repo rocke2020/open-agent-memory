@@ -96,7 +96,7 @@ def test_reference_hints_are_validated_without_rejecting_new_source_support():
     assert envelope["reference_facts"][0]["id"] == "old-tea"
 
 
-def test_reference_budget_never_truncates_new_evidence_or_reference_claims():
+def test_soft_reference_target_keeps_new_evidence_and_indivisible_old_claims():
     requests = []
     text = "I prefer tea."
     with extraction_models({"outcome": "no_facts", "facts": []}, requests) as (models, config):
@@ -117,7 +117,9 @@ def test_reference_budget_never_truncates_new_evidence_or_reference_claims():
         )
     envelope = json.loads(requests[0]["messages"][1]["content"])
     assert envelope["center"]["text"] == text
-    assert envelope["reference_facts"] == []
+    assert envelope["reference_facts"] == [
+        {"id": "long", "text": "old claim " * 100, "role": "user"}
+    ]
 
 
 def test_old_reference_quote_cannot_become_new_support():

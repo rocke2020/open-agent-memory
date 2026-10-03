@@ -46,8 +46,10 @@ extraction:
   # This is a passage cap, not a turn count; 1 restores one call per passage.
   group_max_passages: 64
   # Existing-memory context is enabled by default; zero disables it.
-  reference_max_facts: 8
-  reference_max_input_tokens: 512
+  reference_max_facts: 10
+  # Soft target for proportional reference previews; complete sentences/clauses may exceed it.
+  # max_input_tokens remains the hard limit for the full model request.
+  reference_max_input_tokens: 2048
 
 search:
   max_query_tokens: 512

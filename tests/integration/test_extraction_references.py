@@ -128,6 +128,36 @@ def run_source(dsn, config, models):
     )
 
 
+async def test_reference_checkpoint_keeps_full_claim_while_wire_uses_a_semantic_preview(
+    reference_client,
+):
+    client, dsn, tenant, config, _ = reference_client
+    old_text = (("C" * 398 + ". ") * 8).rstrip()
+    await retain(client, "full-old-context", [old_text])
+    assert run_source(dsn, config, ReferenceModels())
+    operation_id = await retain(client, "preview-context", ["A new assertion."])
+    models = ReferenceModels()
+    assert run_source(dsn, config, models)
+    assert len(models.inputs) == 1
+    offered = models.inputs[0]["reference_facts"]
+    assert len(offered) == 1
+    assert old_text.startswith(offered[0]["text"]) and offered[0]["text"] != old_text
+    assert offered[0]["text"].endswith(".") and offered[0]["text_truncated"]
+    with psycopg.connect(dsn) as connection:
+        connection.execute("SET TRANSACTION READ ONLY")
+        source_id = connection.execute(
+            "SELECT source_id FROM operations WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation_id),
+        ).fetchone()[0]
+        frozen = connection.execute(
+            "SELECT output FROM index_stage_results WHERE tenant_id=%s AND source_id=%s "
+            "AND stage_key LIKE 'references:%%'",
+            (tenant, source_id),
+        ).fetchone()[0]["references"]
+    assert frozen[0]["id"] == offered[0]["id"] and frozen[0]["text"] == old_text
+    assert "text_truncated" not in frozen[0]
+
+
 async def test_public_reference_path_preserves_occurrences_and_concurrent_support(
     reference_client, tmp_path
 ):

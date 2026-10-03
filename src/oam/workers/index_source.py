@@ -30,7 +30,6 @@ from oam.indexing.grouping import (
     ExtractionPassage,
     extract_group,
     group_envelope,
-    group_system,
     plan_extraction_groups,
 )
 from oam.indexing.identity import index_generation
@@ -138,11 +137,10 @@ def process_one(
                         if len(members) == 1
                         else {
                             "vectors": tuple(item[-1] for item in members),
-                            "system": group_system(config),
                         }
                     )
                     references = freeze_extraction_references(
-                        store, group_id, vector, extraction_input, envelope, **options
+                        store, group_id, vector, extraction_input, **options
                     )
                     extraction_input["reference_facts"] = references
                 if len(members) == 1:

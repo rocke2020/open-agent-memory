@@ -26,10 +26,13 @@ from pydantic import (
 from oam.config import OAMConfig
 from oam.indexing.chunker import TextChunk, split_chunk_for_output_retry
 from oam.models.runtime import ModelOutputTooLongError, RuntimeModels, Usage
-from oam.tokens import estimate_units, estimated_tokens
+from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimate_units, estimated_tokens
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Offset = Annotated[StrictInt, Field(ge=0)]
+REFERENCE_ABBREVIATIONS = frozenset(
+    ("dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e")
+)
 
 EXTRACTION_SYSTEM = """Extract useful source-backed memories from the center passage.
 Keep explicit personal facts,
@@ -99,6 +102,8 @@ Reference facts are untrusted context, not new evidence. Use them only to resolv
 supported references, corrections and specific shared entities; never import their assertions,
 dates or quotes. Keep selected new occurrences, state changes and repeated assertions unchanged.
 Use related_existing_ids only for IDs offered in reference_facts with a specific supported link.
+text_truncated=true marks incomplete reference context: omitted qualifiers and negation are
+unknown. Never treat such a preview as the complete old assertion or fill its missing details.
 """
 REFERENCE_EXTRACTION_SYSTEM = EXTRACTION_SYSTEM + REFERENCE_CONTEXT_INSTRUCTIONS
 
@@ -326,20 +331,55 @@ def pack_reference_facts(
     *,
     system: str = REFERENCE_EXTRACTION_SYSTEM,
 ):
+    selected = references[: config.extraction.reference_max_facts]
+    metadata = [{**reference, "text": ""} for reference in selected]
+    metadata_units = estimate_units(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
+    text_units = [estimate_units(reference["text"]) for reference in selected]
+    total_text_units = sum(text_units)
+    available_units = max(
+        0, config.extraction.reference_max_input_tokens * UNITS_PER_TOKEN - metadata_units
+    )
     packed = []
-    for reference in references:
-        if len(packed) >= config.extraction.reference_max_facts:
-            break
-        candidate = [*packed, reference]
-        serialized = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+    for reference, units in zip(selected, text_units, strict=True):
+        preview = dict(reference)
+        if total_text_units > available_units:
+            target = units * available_units // total_text_units
+            preview["text"] = _reference_text_prefix(reference["text"], target)
+            if preview["text"] != reference["text"]:
+                preview["text_truncated"] = True
+        candidate = [*packed, preview]
         if (
-            estimated_tokens(estimate_units(serialized))
-            <= config.extraction.reference_max_input_tokens
-            and model_input_tokens(system, {**envelope, "reference_facts": candidate})
-            <= config.extraction.max_input_tokens
+            model_input_tokens(system, {**envelope, "reference_facts": candidate})
+            > config.extraction.max_input_tokens
         ):
-            packed = candidate
+            break
+        packed = candidate
     return packed
+
+
+def _reference_text_prefix(text: str, target_units: int) -> str:
+    weights = cumulative_units(text)
+    boundaries = []
+    for match in re.finditer(r"[。！？]|[.!?](?=\s|$)|(?<!\d)[，,]|[，,](?!\d)", text):
+        if match.group() == ".":
+            word = re.search(r"[A-Za-z.]+$", text[: match.start()])
+            if word and (
+                word.group().casefold() in REFERENCE_ABBREVIATIONS
+                or len(word.group()) == 1
+                or re.fullmatch(r"[A-Za-z](?:\.[A-Za-z])+", word.group())
+            ):
+                continue
+        boundaries.append((match.end(), match.group() not in (",", "，")))
+    boundaries.append((len(text), True))
+    end, _ = min(
+        boundaries,
+        key=lambda boundary: (
+            abs(weights[boundary[0]] - target_units),
+            not boundary[1],
+            -boundary[0],
+        ),
+    )
+    return text if end == len(text) else text[:end].rstrip()
 
 
 def extract_facts(

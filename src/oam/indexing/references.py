@@ -5,7 +5,6 @@ from __future__ import annotations
 from psycopg.types.json import Jsonb
 
 from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
-from oam.indexing.extraction import REFERENCE_EXTRACTION_SYSTEM, pack_reference_facts
 from oam.indexing.store import IndexStore, input_digest
 
 
@@ -27,10 +26,8 @@ def freeze_extraction_references(
     passage_id: str,
     vector,
     inputs: dict,
-    envelope: dict,
     *,
     vectors=None,
-    system: str = REFERENCE_EXTRACTION_SYSTEM,
 ) -> list[dict]:
     """Reuse completed extraction; revise only unfinished inputs after reference revocation."""
     identity = (
@@ -96,7 +93,7 @@ def freeze_extraction_references(
                 }
                 for row in rows
             )
-            references = pack_reference_facts(candidates, envelope, store.config, system=system)
+            references = list(candidates)
         connection.execute(
             "INSERT INTO index_stage_results(tenant_id,user_id,source_id,source_version,"
             "generation_id,stage_key,input_digest,output,work_unit_id,attempt_id) "
