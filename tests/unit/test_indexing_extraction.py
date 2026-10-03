@@ -410,6 +410,256 @@ def test_extraction_does_not_guess_between_repeated_quote_occurrences():
     assert result.facts == () and result.outcome == "partial"
 
 
+@pytest.mark.parametrize(
+    ("source", "quote", "original"),
+    [
+        (
+            "* **Get the records appraised** by a professional to determine their value.",
+            "Get the records appraised by a professional to determine their value.",
+            "Get the records appraised** by a professional to determine their value.",
+        ),
+        (
+            "The user prefers **green tea** over coffee.",
+            "The user prefers green tea over coffee.",
+            "The user prefers **green tea** over coffee.",
+        ),
+        (
+            "1. Appraisal:\n\t* **Get the records appraised** by a professional.",
+            "Get the records appraised by a professional.",
+            "Get the records appraised** by a professional.",
+        ),
+    ],
+)
+def test_plain_emphasis_quote_restores_exact_original_support(source, quote, original):
+    reply = {"outcome": "facts", "facts": [{"text": quote, "quote": quote}]}
+    with extraction_models(reply) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(source, 0, len(source), "", 20),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert result.outcome == "facts" and result.diagnostics == ()
+    fact = result.facts[0]
+    assert fact.quote == original
+    assert (fact.start, fact.end) == (
+        source.index(original),
+        source.index(original) + len(original),
+    )
+    assert source[fact.start : fact.end] == fact.quote
+
+
+@pytest.mark.parametrize(
+    ("source", "quote"),
+    [
+        ("It **may not be** unique.", "It may not have been unique."),
+        ("I prefer **green tea** today.", "I prefer green tea."),
+        ("I prefer **tea**. I prefer **tea**.", "I prefer tea."),
+        ("`I prefer **tea**.`", "I prefer tea."),
+        ("~~~\nI prefer **tea**.\n~~~", "I prefer tea."),
+        (r"I prefer \**tea**.", "I prefer tea."),
+        ("The identifier is item**ID**x.", "The identifier is itemIDx."),
+        ("    **literal** value", "literal value"),
+        ("\t* **literal** value", "literal value"),
+        ("***literal*** value", "literal value"),
+        ("<pre>**literal** value</pre>", "literal value"),
+        ("*     **literal** value", "literal value"),
+        ("1. Example:\n    *     **literal** value", "literal value"),
+    ],
+)
+def test_format_recovery_rejects_rewrites_ambiguity_and_literal_markers(source, quote):
+    reply = {"outcome": "facts", "facts": [{"text": quote, "quote": quote}]}
+    with extraction_models(reply) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(source, 0, len(source), "", 20),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert result.facts == () and result.outcome == "partial"
+    assert [diagnostic.code for diagnostic in result.diagnostics] == ["invalid_fact"]
+
+
+def test_explicit_original_span_disambiguates_repeated_plain_emphasis_quote():
+    source = "I prefer **tea**. I prefer **tea**."
+    start = source.rindex("I prefer")
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {"text": "Prefers tea.", "quote": "I prefer tea.", "start": start, "end": len(source)}
+        ],
+    }
+    with extraction_models(reply) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(source, 0, len(source), "", 20),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert result.outcome == "facts" and result.diagnostics == ()
+    assert (result.facts[0].quote, result.facts[0].start, result.facts[0].end) == (
+        source[start:],
+        start,
+        len(source),
+    )
+
+
+@pytest.mark.parametrize("explicit_span", [False, True])
+def test_interior_chunk_with_unknown_code_context_keeps_markers_literal(explicit_span):
+    source = "pattern = '**literal**' + suffix"
+    record = {"text": "Literal pattern.", "quote": "pattern = 'literal' + suffix"}
+    if explicit_span:
+        record.update(start=512, end=512 + len(source))
+    with extraction_models({"outcome": "facts", "facts": [record]}) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(source, 512, 512 + len(source), "", 20),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert result.facts == () and result.outcome == "partial"
+
+
+@pytest.mark.parametrize("explicit_other_occurrence", [False, True])
+def test_plain_emphasis_annotation_keeps_fact_owned_original_span(explicit_other_occurrence):
+    source = "I moved in **early 2024**. My colleague visited in **early 2024**."
+    annotation = {
+        "role": "event",
+        "start": "2024-01-01T00:00:00Z",
+        "end": "2025-01-01T00:00:00Z",
+        "instant": False,
+        "granularity": "year",
+        "meaning": "possible_period",
+        "quote": "in early 2024",
+    }
+    if explicit_other_occurrence:
+        offset = source.rindex("in **early")
+        annotation.update(span_start=offset, span_end=offset + len("in **early 2024**"))
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {
+                "text": "Moved in early 2024.",
+                "quote": "I moved in early 2024.",
+                "annotations": [annotation],
+            }
+        ],
+    }
+    with extraction_models(reply) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(source, 0, len(source), "", 20),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert len(result.facts) == 1
+    if explicit_other_occurrence:
+        assert result.outcome == "partial" and result.facts[0].annotations == ()
+    else:
+        assert result.outcome == "facts" and result.diagnostics == ()
+        resolved = result.facts[0].annotations[0]
+        assert resolved.quote == "in **early 2024"
+        assert source[resolved.span_start : resolved.span_end] == resolved.quote
+
+
+@pytest.mark.parametrize("explicit_other_occurrence", [False, True])
+def test_annotation_resolves_only_within_accepted_fact_support(explicit_other_occurrence):
+    source = "I moved in 2024. My colleague visited in 2024."
+    base = 20
+    annotation = {
+        "role": "event",
+        "start": "2024-01-01T00:00:00Z",
+        "end": "2025-01-01T00:00:00Z",
+        "instant": False,
+        "granularity": "year",
+        "meaning": "possible_period",
+        "quote": "2024",
+    }
+    if explicit_other_occurrence:
+        offset = base + source.rindex("2024")
+        annotation.update(span_start=offset, span_end=offset + 4)
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {"text": "Moved in 2024.", "quote": "I moved in 2024.", "annotations": [annotation]}
+        ],
+    }
+    with extraction_models(reply) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(source, base, base + len(source), "", 12),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert len(result.facts) == 1
+    if explicit_other_occurrence:
+        assert result.outcome == "partial" and result.facts[0].annotations == ()
+    else:
+        assert result.outcome == "facts" and result.diagnostics == ()
+        resolved = result.facts[0].annotations[0]
+        assert (resolved.span_start, resolved.span_end) == (31, 35)
+
+
+def test_annotation_does_not_guess_repeated_date_within_fact_support():
+    source = "In 2024, I moved after visiting in 2024."
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {
+                "text": "Moved after visiting in 2024.",
+                "quote": source,
+                "annotations": [
+                    {
+                        "role": "event",
+                        "start": "2024-01-01T00:00:00Z",
+                        "end": "2025-01-01T00:00:00Z",
+                        "instant": False,
+                        "granularity": "year",
+                        "meaning": "possible_period",
+                        "quote": "2024",
+                    }
+                ],
+            }
+        ],
+    }
+    with extraction_models(reply) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(source, 0, len(source), "", 12),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert len(result.facts) == 1 and result.facts[0].annotations == ()
+    assert result.outcome == "partial"
+
+
+@pytest.mark.parametrize("contiguous", [False, True])
+def test_fact_support_rejects_joined_fragments(contiguous):
+    source = "Outdoor events this month:\n1. Music in the park\n2. River concert"
+    quote = source if contiguous else "Outdoor events this month:\n2. River concert"
+    reply = {
+        "outcome": "facts",
+        "facts": [{"text": "River concert occurs outdoors this month.", "quote": quote}],
+    }
+    with extraction_models(reply) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(source, 0, len(source), "", 18),
+            config=config,
+            message_role="assistant",
+            timeout_seconds=1,
+        )
+    assert len(result.facts) == int(contiguous)
+    assert result.outcome == ("facts" if contiguous else "partial")
+
+
 def test_annotation_keeps_event_and_reference_roles_and_rejects_wrong_quote():
     annotation = {
         "role": "event",
@@ -519,6 +769,8 @@ def test_extraction_drops_invented_quote_and_forward_relation_without_reindexing
         {"instant": 0},
         {"start": 1704067200},
         {"quote": "1999"},
+        {"meaning": "event"},
+        {"timezone": "+00:00"},
     ],
 )
 def test_invalid_temporal_annotation_preserves_the_supported_fact(annotation_change):

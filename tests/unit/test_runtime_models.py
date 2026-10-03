@@ -13,6 +13,47 @@ from oam.config import ModelsConfig, load_config
 from oam.models.runtime import ModelOutputError, RuntimeModels
 
 
+def test_canonical_extraction_preserves_low_reasoning_effort_on_the_wire():
+    base = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    roles = base.models.roles.model_copy(update={"extraction": "indexing_low"})
+    configured = base.model_copy(update={"models": base.models.model_copy(update={"roles": roles})})
+    seen = []
+
+    def respond(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"outcome":"no_facts","facts":[]}'},
+                    }
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        result = RuntimeModels(
+            configured,
+            {
+                "OAM_GENERATIVE_MODEL": "structured-model",
+                "OAM_GENERATIVE_ENDPOINT": "https://model.example/v1",
+                "OAM_GENERATIVE_API_KEY": "synthetic",
+            },
+            http,
+        ).generate(
+            "extraction",
+            system="Extract supported memory.",
+            user="Hello.",
+            max_output_tokens=configured.extraction.max_output_tokens,
+            timeout_seconds=2,
+        )
+    assert json.loads(result.content) == {"outcome": "no_facts", "facts": []}
+    assert seen[0]["reasoning_effort"] == "low"
+    assert seen[0]["max_tokens"] == 64000
+
+
 def runtime_config():
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     models = ModelsConfig.model_validate(

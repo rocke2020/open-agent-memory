@@ -31,13 +31,13 @@ def test_one_group_call_validates_each_fact_against_its_own_message():
     reply = {
         "outcome": "facts",
         "facts": [
-            {"passage_id": "p-user", "text": "The user prefers tea.", "quote": "I prefer tea."},
+            {"passage_id": "p0", "text": "The user prefers tea.", "quote": "I prefer tea."},
             {
-                "passage_id": "p-assistant",
+                "passage_id": "p1",
                 "text": "Green tea was recommended.",
                 "quote": "Try green tea.",
             },
-            {"passage_id": "p-user", "text": "Wrong owner.", "quote": "Try green tea."},
+            {"passage_id": "p0", "text": "Wrong owner.", "quote": "Try green tea."},
             {"passage_id": "unknown", "text": "Unknown owner.", "quote": "I prefer tea."},
         ],
     }
@@ -50,6 +50,7 @@ def test_one_group_call_validates_each_fact_against_its_own_message():
         ("p-assistant", "Try green tea."),
     ]
     envelope = json.loads(requests[0]["messages"][1]["content"])
+    assert [p["passage_id"] for p in envelope["passages"]] == ["p0", "p1"]
     assert [p["message_role"] for p in envelope["passages"]] == ["user", "assistant"]
     assert [p["mentioned_at"] for p in envelope["passages"]] == [
         "2026-09-01T00:00:00+00:00",
@@ -106,9 +107,9 @@ def test_cross_passage_relations_skip_rejected_targets_without_renumbering():
     reply = {
         "outcome": "facts",
         "facts": [
-            {"passage_id": "a", "text": "Invalid.", "quote": "Missing."},
-            {"passage_id": "a", "text": "Tea.", "quote": "Tea."},
-            {"passage_id": "b", "text": "Coffee.", "quote": "Coffee.", "caused_by": [0, 1]},
+            {"passage_id": "p0", "text": "Invalid.", "quote": "Missing."},
+            {"passage_id": "p0", "text": "Tea.", "quote": "Tea."},
+            {"passage_id": "p1", "text": "Coffee.", "quote": "Coffee.", "caused_by": [0, 1]},
         ],
     }
     with extraction_models(reply) as (models, config):
@@ -120,3 +121,25 @@ def test_cross_passage_relations_skip_rejected_targets_without_renumbering():
         )
     assert [(f.output_index, f.passage_id) for f in result.facts] == [(1, "a"), (2, "b")]
     assert result.facts[1].caused_by == (1,)
+
+
+@pytest.mark.parametrize("owner", [None, 0, "foreign", "canonical-a"])
+def test_group_rejects_unoffered_ownership_without_guessing(owner):
+    from oam.indexing.grouping import extract_group
+
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {"passage_id": owner, "text": "Unowned tea.", "quote": "Tea."},
+            {"passage_id": "p1", "text": "Owned tea.", "quote": "Tea."},
+        ],
+    }
+    with extraction_models(reply) as (models, config):
+        result = extract_group(
+            models,
+            passages=(passage("canonical-a", "Tea.", 0), passage("canonical-b", "Tea.", 1)),
+            config=config,
+            timeout_seconds=1,
+        )
+    assert [(f.output_index, f.passage_id) for f in result.facts] == [(1, "canonical-b")]
+    assert [(d.output_index, d.code) for d in result.diagnostics] == [(0, "invalid_passage")]

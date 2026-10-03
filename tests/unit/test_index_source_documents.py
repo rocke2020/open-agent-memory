@@ -489,3 +489,72 @@ def test_interaction_locator_keeps_original_message_order_and_internal_id(monkey
     assert len(store.units) == 1
     assert store.units[0]["locator"]["message_index"] == 1
     assert store.units[0]["locator"]["message_id"] == "retained"
+
+
+@pytest.mark.parametrize(
+    ("model_calls", "provider_calls", "expected_waves"),
+    [(2, 16, [2, 2, 2, 2, 1]), (8, 16, [8, 1]), (8, 2, [2, 2, 2, 2, 1])],
+)
+def test_interaction_extraction_waves_use_configured_model_capacity(
+    monkeypatch, model_calls, provider_calls, expected_waves
+):
+    request = {
+        "source_id": "document",
+        "messages": [
+            {
+                "message_id": f"message-{index}",
+                "role": "user",
+                "content": f"Statement {index}.",
+                "event_time": "2026-09-23T00:00:00Z",
+                "learning_eligible": True,
+            }
+            for index in range(9)
+        ],
+    }
+    waves = []
+
+    class InteractionStore(MemoryStore):
+        def checkpoints(self, stages):
+            waves.append(len(stages))
+            return [MemoryStore.checkpoint(self, *stage) for stage in stages]
+
+        def checkpoint(self, stage, inputs, produce):
+            if stage.startswith("extract:"):
+                waves.append(1)
+            return super().checkpoint(stage, inputs, produce)
+
+    store = InteractionStore(content=json.dumps(request).encode(), input_role="interaction")
+    store.config = store.config.model_copy(
+        update={
+            "worker": store.config.worker.model_copy(update={"max_model_calls": model_calls}),
+            "provider": store.config.provider.model_copy(
+                update={"llm_concurrency": provider_calls}
+            ),
+            "extraction": store.config.extraction.model_copy(
+                update={"group_max_passages": 1, "reference_max_facts": 0}
+            ),
+        }
+    )
+    connection = SimpleNamespace(cursor=lambda: None)
+
+    @contextmanager
+    def connect(*args, **kwargs):
+        yield connection
+
+    monkeypatch.setattr(index_source.psycopg, "connect", connect)
+    monkeypatch.setattr(
+        index_source, "claim_one", lambda *args, **kwargs: SimpleNamespace(stage="index_source")
+    )
+    monkeypatch.setattr(index_source, "IndexStore", lambda *args, **kwargs: store)
+    from oam.indexing import links
+
+    monkeypatch.setattr(links, "build_links", lambda *args, **kwargs: {})
+
+    assert index_source.process_one(
+        store.config, "queue", "content", models=LocalModels(), worker_id="worker"
+    )
+    assert waves == expected_waves
+    assert [unit["locator"]["message_id"] for unit in store.units] == [
+        f"message-{index}" for index in range(9)
+    ]
+    assert store.finished and store.stages["extraction_coverage"] == "complete"

@@ -166,7 +166,7 @@ def test_later_unsplittable_overflow_counts_parent_and_successful_sibling_usage(
 
     def respond(request):
         members = json.loads(json.loads(request.content)["messages"][1]["content"])["passages"]
-        if len(members) > 1 or members[0]["passage_id"] == "b":
+        if len(members) > 1 or members[0]["center"]["text"] == "Coffee.":
             return response("", "length")
         return response(json.dumps({"outcome": "no_facts", "facts": []}))
 

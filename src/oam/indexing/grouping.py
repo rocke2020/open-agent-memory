@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
+from typing import cast
 
 from oam.config import OAMConfig
 from oam.indexing.chunker import TextChunk, split_chunk_for_output_retry
@@ -25,17 +26,15 @@ from oam.models.runtime import ModelOutputTooLongError
 GROUP_OUTPUT_TEXT_MULTIPLIER = 3
 GROUP_OUTPUT_PASSAGE_TOKENS = 128
 GROUP_EXTRACTION_SYSTEM = (
-    EXTRACTION_SYSTEM
-    + """
-Input contains ordered passages, each with its own center, message_index, message_role and date.
-Every fact MUST include passage_id copied from its owning offered passage. Interpret every
-center/role/date rule above against that owner. Copy quotes and annotations only from that center.
-Other passages can resolve an explicit reference but cannot change a fact's speaker or date.
-Cover secondary topics and preserve each new supported assertion, including a repeated assertion
-in another passage. Never suppress a separate occurrence because it resembles another passage.
-Facts share one zero-based output sequence. caused_by and updates refer to earlier facts in that
-same sequence, including facts owned by a different passage. Preserve source order when possible.
+    """
+Input contains ordered passages with their own centers, roles and dates. Every fact MUST include
+passage_id copied exactly from its owning passage, such as "p0". Quotes and annotations come only
+from that center. Preserve each selected assertion's role and distinct occurrence, including
+repeated assertions in different passages. Other passages may resolve references only. Facts
+share one zero-based output sequence, including cross-passage caused_by and updates links.
+Preserve source order when possible.
 """
+    + EXTRACTION_SYSTEM
 )
 
 
@@ -60,7 +59,7 @@ def group_envelope(
     reference_timezone: str | None = None,
 ) -> dict:
     centers = []
-    for passage in passages:
+    for index, passage in enumerate(passages):
         envelope = extraction_envelope(
             chunk=passage.chunk,
             config=config,
@@ -70,7 +69,7 @@ def group_envelope(
         )
         centers.append(
             {
-                "passage_id": passage.passage_id,
+                "passage_id": f"p{index}",
                 "message_index": passage.message_index,
                 "message_role": passage.role,
                 "mentioned_at": envelope["mentioned_at"],
@@ -164,10 +163,21 @@ def extract_group(
             error,
             check_retry_claim,
         )
-    return validate_fact_output(
+    passages_by_alias = {f"p{index}": passage for index, passage in enumerate(passages)}
+    result = validate_fact_output(
         body,
         usage,
         config,
-        {p.passage_id: p.chunk for p in passages},
+        {alias: passage.chunk for alias, passage in passages_by_alias.items()},
         {ref["id"] for ref in envelope.get("reference_facts", [])},
+    )
+    return result.model_copy(
+        update={
+            "facts": tuple(
+                fact.model_copy(
+                    update={"passage_id": passages_by_alias[cast(str, fact.passage_id)].passage_id}
+                )
+                for fact in result.facts
+            )
+        }
     )
