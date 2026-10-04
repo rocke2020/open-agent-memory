@@ -3,6 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock
 
+import httpx
 import pytest
 
 from oam.workers import index_source, runner
@@ -169,6 +170,23 @@ def test_failed_claim_releases_capacity_and_does_not_log_private_error(monkeypat
     assert (attempts, active, completed) == (3, 0, 2)
     error_output = capsys.readouterr().err
     assert "RuntimeError" in error_output
+    assert "private-provider-response" not in error_output
+
+
+def test_failed_claim_reports_cause_type_without_private_provider_error(monkeypatch, capsys):
+    configure_worker(monkeypatch, limiting_field=("worker", "max_tasks"))
+
+    def process(*args, **kwargs):
+        try:
+            raise httpx.ReadError("private-provider-response")
+        except httpx.ReadError as error:
+            raise RuntimeError("multiple extraction stages failed") from error
+
+    monkeypatch.setattr(runner, "process_one", process)
+    assert runner.run_worker_from_environment(CONFIG_PATH, once=True) == 1
+    error_output = capsys.readouterr().err
+    assert "RuntimeError" in error_output
+    assert "ReadError" in error_output
     assert "private-provider-response" not in error_output
 
 

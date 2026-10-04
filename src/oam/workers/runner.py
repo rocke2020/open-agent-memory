@@ -147,8 +147,13 @@ class WorkerRunner:
                     worker_id=self.worker_id,
                 )
             except Exception as error:
+                cause = (
+                    f" (cause: {type(error.__cause__).__name__})"
+                    if error.__cause__ is not None
+                    else ""
+                )
                 print(
-                    f"indexing claim failed: {type(error).__name__}",
+                    f"indexing claim failed: {type(error).__name__}{cause}",
                     file=sys.stderr,
                     flush=True,
                 )

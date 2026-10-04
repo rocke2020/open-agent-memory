@@ -30,7 +30,7 @@ class TextChunk:
 def chunk_text(
     text: str, config: IngestionChunkConfig, *, previous_context: str = ""
 ) -> tuple[TextChunk, ...]:
-    """Chunk one already-eligible message; the caller owns cross-message eligibility."""
+    """Chunk eligible text at original offsets, omitting whitespace-only source spans."""
     if config.extractable_overlap_estimated_tokens:
         raise ValueError("owned source overlap must remain zero")
     if not text.strip():
@@ -61,15 +61,16 @@ def chunk_text(
                 spaces = tuple(re.finditer(r"\s+", text[start:target]))
                 end = start + spaces[-1].end() if spaces else target
         content = text[start:end]
-        chunks.append(
-            TextChunk(
-                text=content,
-                start=start,
-                end=end,
-                previous_context=context,
-                estimated_tokens=estimated_tokens(weights[end] - weights[start]),
+        if content.strip():
+            chunks.append(
+                TextChunk(
+                    text=content,
+                    start=start,
+                    end=end,
+                    previous_context=context,
+                    estimated_tokens=estimated_tokens(weights[end] - weights[start]),
+                )
             )
-        )
         context = _tail(context + content, config.previous_context_estimated_tokens)
         start = end
     return tuple(chunks)

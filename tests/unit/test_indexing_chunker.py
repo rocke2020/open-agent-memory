@@ -47,3 +47,25 @@ def test_cjk_and_emoji_chunks_preserve_source_and_reject_impossible_hard_max():
     impossible = limits().model_copy(update={"max_estimated_tokens": 1})
     with pytest.raises(ValueError, match="hard maximum"):
         chunk_text("😀", impossible)
+
+
+@pytest.mark.parametrize("suffix", ["", "b" * 16])
+def test_blank_split_spans_are_not_model_inputs_and_keep_original_offsets(suffix):
+    text = "a" * 16 + "\n\n" + suffix
+    chunks = chunk_text(text, limits())
+    expected = [("a" * 16 + "\n", 0, 17)]
+    if suffix:
+        expected.append((suffix, 18, 34))
+    assert [(item.text, item.start, item.end) for item in chunks] == expected
+    assert all(item.text == text[item.start : item.end] for item in chunks)
+    assert all(item.text.strip() for item in chunks)
+    assert all(item.estimated_tokens <= limits().max_estimated_tokens for item in chunks)
+    if suffix:
+        assert chunks[1].previous_context == "aaaaaa\n\n"
+
+
+def test_long_blank_prefix_keeps_original_start_of_nonblank_chunk():
+    text = "\n" * 24 + "Fact"
+    chunks = chunk_text(text, limits())
+    assert [(item.text, item.start, item.end) for item in chunks] == [("\n" * 8 + "Fact", 16, 28)]
+    assert chunks[0].previous_context == "\n" * 8
