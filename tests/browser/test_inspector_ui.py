@@ -33,6 +33,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
     profile_failed = False
     profile_blocked = False
     profile_indexing = False
+    profile_overrides = {}
     calls = []
 
     def respond(route):
@@ -102,7 +103,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 "blocked_inputs": 1 if profile_blocked else 0,
                 "content": None
                 if profile_missing
-                else "## Main content\n\nThe user is an engineer. Keep personal data local [1]."
+                else "## Main content\n\nThe user is an **engineer**. Keep personal data local [1]."
                 "\n\n## References\n\n1. Conversation chat-1",
                 "references": []
                 if profile_missing
@@ -112,9 +113,11 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                         "support_id": "fact-1",
                         "source_id": "chat-1",
                         "passage_id": "p1",
+                        "event_time": "2026-09-29T12:30:00+00:00",
                     }
                 ],
             }
+            data.update(profile_overrides)
         else:
             raise AssertionError(f"Unexpected request: {path}")
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
@@ -141,32 +144,36 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert detail.get_by_text("preferences", exact=True).is_visible()
 
                 page.locator('[data-view="profiles"]').click()
+                detail.get_by_text("Read-only Profile", exact=True).wait_for()
+                assert detail.locator(".profile-content strong").count() == 1
+                assert detail.locator(".profile-content strong").inner_text() == "engineer"
                 detail.get_by_text(
                     "The user is an engineer. Keep personal data local [1].", exact=True
                 ).wait_for()
                 assert detail.get_by_text("L3 Profile", exact=True).count() == 0
-                assert detail.locator("h4").all_inner_texts() == [
-                    "Main content",
-                    "References",
-                ]
+                assert detail.locator(".profile-content h4").all_inner_texts() == ["Main content"]
+                assert "Conversation chat-1" not in detail.locator(".profile-content").inner_text()
                 top_level = detail.evaluate(
                     "root => [...root.children].map(el => el.textContent.trim())"
                 )
-                assert top_level.index(
-                    next(text for text in top_level if text.startswith("Main content"))
-                ) < next(i for i, text in enumerate(top_level) if text.startswith("Last refreshed"))
-                assert detail.get_by_text("Last refreshed", exact=True).is_visible()
-                assert (
-                    "2026"
-                    in detail.get_by_text("Last refreshed", exact=True).locator("..").inner_text()
-                )
+                summary = detail.get_by_label("Profile status", exact=True)
+                assert summary.get_by_text("Up to date", exact=True).is_visible()
+                updated = summary.locator("time")
+                assert updated.get_attribute("datetime") == "2026-09-29T12:30:00+00:00"
+                assert "Updated" in updated.inner_text()
+                assert "ago" in updated.inner_text()
+                assert "2026" in updated.get_attribute("title")
+                assert top_level[1].startswith("Up to date")
                 assert detail.get_by_text("Freshness", exact=True).count() == 0
                 assert detail.get_by_text("Revision", exact=True).count() == 0
                 assert detail.get_by_text("Pending inputs", exact=True).count() == 0
                 assert top_level[-1].startswith("Reference details")
                 assert not detail.locator("details").evaluate("element => element.open")
-                assert detail.get_by_text("References", exact=True).count() == 1
+                assert detail.get_by_text("References", exact=True).count() == 0
+                reference = detail.get_by_text("[1] Conversation on 2026-09-29", exact=True)
+                assert not reference.is_visible()
                 detail.locator("details summary").click()
+                assert reference.is_visible()
                 assert detail.get_by_text("Support · fact", exact=True).count() == 0
                 assert detail.get_by_text("Conversation", exact=True).is_visible()
                 assert calls[-1][1].endswith("/profile")
@@ -174,6 +181,8 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 profile_missing = True
                 page.locator('[data-view="profiles"]').click()
                 detail.get_by_text("No generated Profile yet", exact=False).wait_for()
+                assert summary.get_by_text("Not created", exact=True).is_visible()
+                assert summary.locator("time").count() == 0
                 assert detail.get_by_text("Last refreshed", exact=True).count() == 0
                 assert detail.get_by_text("partial Profile", exact=False).count() == 0
                 page.locator("#refresh-profile").click()
@@ -194,13 +203,77 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 profile_failed = True
                 page.locator('[data-view="profiles"]').click()
                 detail.get_by_text("1 Insight input failed", exact=False).wait_for()
+                assert summary.get_by_text("Incomplete", exact=True).is_visible()
                 assert detail.get_by_text("partial", exact=True).count() == 0
 
                 profile_failed = False
                 profile_blocked = True
                 page.locator('[data-view="profiles"]').click()
                 detail.get_by_text("Failed initial processing", exact=True).wait_for()
+                assert summary.get_by_text("Out of date", exact=True).is_visible()
                 assert detail.get_by_text("partial", exact=True).count() == 0
+
+                profile_blocked = False
+                profile_overrides.update(
+                    profile_revision=4,
+                    content=None,
+                    updated_at=None,
+                    freshness="missing",
+                    pending_inputs=1,
+                    failed_inputs=1,
+                    references=[],
+                    omitted=[],
+                )
+                page.locator('[data-view="profiles"]').click()
+                detail.get_by_text(
+                    "This stored revision has no Profile document", exact=False
+                ).wait_for()
+                assert summary.get_by_text("Needs rebuild", exact=True).is_visible()
+                assert summary.get_by_text("Updated time not recorded", exact=True).is_visible()
+                assert summary.locator("time").count() == 0
+                assert detail.get_by_text("Last refreshed", exact=True).count() == 0
+                assert (
+                    detail.get_by_text(
+                        "This Profile uses only ready information", exact=False
+                    ).count()
+                    == 0
+                )
+                assert "no Profile document" in page.locator("#status").inner_text()
+                assert detail.get_by_text("1 Insight input failed", exact=False).is_visible()
+
+                profile_overrides.update(
+                    updated_at="2026-09-29T12:30:00+00:00",
+                    freshness="current",
+                    failed_inputs=0,
+                    pending_inputs=0,
+                    omitted=[{"reason": "budget"}],
+                )
+                page.locator("#profile-budget").fill("0")
+                page.locator("#profile-form button").first.click()
+                detail.get_by_text(
+                    "Profile exceeds the preview token budget", exact=False
+                ).wait_for()
+                assert "preview token budget" in page.locator("#status").inner_text()
+                assert detail.get_by_text("Refresh it to rebuild", exact=False).count() == 0
+                assert summary.get_by_text("Up to date", exact=True).is_visible()
+                assert summary.locator("time").is_visible()
+
+                profile_overrides.update(freshness="stale", omitted=[])
+                page.locator('[data-view="profiles"]').click()
+                detail.get_by_text("stored Profile is unavailable", exact=False).wait_for()
+                assert summary.get_by_text("Out of date", exact=True).is_visible()
+
+                profile_overrides.update(
+                    content='{"occupation":"Engineer","note":"<script>alert(1)</script>"}',
+                    instruction="Return JSON.",
+                    freshness="current",
+                )
+                page.locator('[data-view="profiles"]').click()
+                detail.get_by_text("Saved instruction", exact=True).wait_for()
+                rendered = detail.locator("pre").inner_text()
+                assert json.loads(rendered)["occupation"] == "Engineer"
+                assert detail.locator("script").count() == 0
+                assert page.locator("#status").inner_text() == "Profile loaded."
             finally:
                 context.close()
                 browser.close()

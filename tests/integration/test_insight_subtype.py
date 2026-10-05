@@ -79,7 +79,13 @@ def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(insight_co
     class PublicationStore:
         key = (tenant, "scope")
         generation_id = "generation"
-        source = {"accepted_seq": 1}
+        source = {
+            "accepted_seq": 1,
+            "source_id": "source-a",
+            "source_version": 1,
+        }
+        examined = set()
+        last_outcome = "no_insight"
 
         @contextmanager
         def transaction(self):
@@ -89,12 +95,31 @@ def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(insight_co
             pass
 
         def execute(self, query, parameters=None):
-            if query.startswith("WITH eligible"):
-                rows = [("f1", "A", "source-a", 1), ("f2", "B", "source-b", 1)]
+            if "SELECT unit_id FROM eligible WHERE kind='fact'" in query:
+                examined_ids = set(parameters[3] or []) if parameters else set()
+                rows = [(value,) for value in ("f1", "f2") if value not in examined_ids]
+                return SimpleNamespace(fetchall=lambda: rows)
+            if "SELECT candidate.unit_id" in query:
+                rows = [
+                    ("f1", "A", "source-a", 1, None, None, None, None),
+                    ("f2", "B", "source-b", 1, None, None, None, None),
+                ]
+                return SimpleNamespace(fetchall=lambda: rows)
+            if "SELECT unit_id FROM eligible WHERE unit_id=ANY" in query:
+                rows = [("f1",), ("f2",)]
                 return SimpleNamespace(fetchall=lambda: rows)
             if query.startswith("INSERT INTO insight_support"):
                 return None
             return connection.execute(query, parameters)
+
+        def l2_progress(self, connection):
+            return set(self.examined), self.last_outcome
+
+        def mark_l2_group(self, connection, unit_ids, outcome):
+            assert set(unit_ids) == {"f1", "f2"}
+            assert outcome == "insight"
+            self.examined.update(unit_ids)
+            self.last_outcome = outcome
 
         def checkpoint(self, stage, inputs, produce):
             if stage == "insight_embed":

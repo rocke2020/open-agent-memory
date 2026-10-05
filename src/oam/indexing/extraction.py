@@ -196,6 +196,8 @@ class InsightInput(FrozenProjection):
     id: NonBlank
     text: NonBlank
     source_refs: tuple[NonBlank, ...] = Field(min_length=1)
+    mentioned_at: datetime | None = None
+    temporal_annotations: tuple[TemporalAnnotation, ...] = ()
 
 
 class InsightResult(FrozenProjection):

@@ -47,7 +47,7 @@ where = ["src"]
 include = ["oam*"]
 
 [tool.setuptools.package-data]
-oam = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg"]
+oam = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg", "profiles/*.txt"]
 
 [tool.setuptools.data-files]
 "share/open-agent-memory" = ["configs/oam.yaml"]

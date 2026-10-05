@@ -1,10 +1,59 @@
 import json
+import sqlite3
 from contextlib import nullcontext
 from datetime import UTC, datetime
 
 import pytest
 
 from oam.auth.credentials import AuthorizedUser
+from oam.profiles.inputs import PENDING_PROFILE_INPUTS_SQL
+
+
+@pytest.mark.parametrize(
+    ("retry_version", "retry_generation", "ready", "expected"),
+    [
+        (1, "gen", "true", []),
+        (2, "gen", "true", [("chat", 1, "failed")]),
+        (1, "old", "true", [("chat", 1, "failed")]),
+        (1, "gen", "false", [("chat", 1, "failed")]),
+    ],
+)
+def test_profile_coverage_recognizes_only_current_source_insight_retry(
+    retry_version, retry_generation, ready, expected
+) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            "CREATE TABLE sources(tenant_id,user_id,source_id,active_version,input_role,status);"
+            "CREATE TABLE source_versions(tenant_id,user_id,source_id,source_version,status);"
+            "CREATE TABLE evidence(tenant_id,user_id,source_id,source_version,status,"
+            "learning_eligible,evidence_id);"
+            "CREATE TABLE operations(tenant_id,user_id,operation_id,source_id,source_version,"
+            "kind,status,stage_state);"
+            "CREATE TABLE work_units(tenant_id,user_id,operation_id,generation_id,status);"
+            "INSERT INTO sources VALUES('tenant','alice','chat',1,'interaction','active');"
+            "INSERT INTO source_versions VALUES('tenant','alice','chat',1,'active');"
+            "INSERT INTO evidence VALUES('tenant','alice','chat',1,'active',1,'evidence');"
+            "INSERT INTO operations VALUES('tenant','alice','index','chat',1,"
+            "'index_interaction','succeeded','{}');"
+            "INSERT INTO work_units VALUES('tenant','alice','index','gen','succeeded');"
+            "INSERT INTO operations VALUES('tenant','alice','failed','chat',1,"
+            "'consolidate','partial_failed','{}');"
+            "INSERT INTO work_units VALUES('tenant','alice','failed','gen','failed_terminal');"
+        )
+        query = PENDING_PROFILE_INPUTS_SQL.replace("%s", "?")
+        parameters = ("gen", "gen", "gen", "tenant", "alice", "gen", "gen")
+        assert connection.execute(query, parameters).fetchall() == [("chat", 1, "failed")]
+        # PostgreSQL's ->> yields text; use its literal text value in this SQL boundary fixture.
+        connection.execute(
+            "INSERT INTO operations VALUES('tenant','alice','retry','chat',?,"
+            "'consolidate','succeeded',?)",
+            (retry_version, json.dumps({"insights_ready": ready})),
+        )
+        connection.execute(
+            "INSERT INTO work_units VALUES('tenant','alice','retry',?,'succeeded')",
+            (retry_generation,),
+        )
+        assert connection.execute(query, parameters).fetchall() == expected
 
 
 class ProfileCursor:

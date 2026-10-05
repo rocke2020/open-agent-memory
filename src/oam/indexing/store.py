@@ -294,6 +294,38 @@ class IndexStore:
             )
         return outputs
 
+    def l2_progress(self, connection) -> tuple[set[str], str]:
+        row = connection.execute(
+            "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
+            "AND operation_id=%s",
+            (*self.key, self.claim.operation_id),
+        ).fetchone()
+        state = row[0] if row and row[0] else {}
+        state = state if isinstance(state, dict) else {}
+        values = state.get("l2_examined_ids", [])
+        return (
+            {value for value in values if isinstance(value, str)},
+            state.get("last_insight_outcome", "no_insight"),
+        )
+
+    def mark_l2_group(self, connection, unit_ids, outcome: str) -> None:
+        row = connection.execute(
+            "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
+            "AND operation_id=%s FOR UPDATE",
+            (*self.key, self.claim.operation_id),
+        ).fetchone()
+        state = dict(row[0] or {}) if row else {}
+        existing = state.get("l2_examined_ids", [])
+        state["l2_examined_ids"] = sorted(
+            {value for value in existing if isinstance(value, str)} | set(unit_ids)
+        )
+        state["last_insight_outcome"] = outcome
+        connection.execute(
+            "UPDATE operations SET stage_state=%s,updated_at=clock_timestamp() "
+            "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
+            (Jsonb(state), *self.key, self.claim.operation_id),
+        )
+
     def readiness(self, connection, **stages):
         connection.execute(
             "UPDATE operations SET stage_state=stage_state||%s::jsonb,updated_at=clock_timestamp() "
@@ -381,11 +413,24 @@ class IndexStore:
                         self.claim.operation_id,
                     ),
                 )
+                l2_priority_at = connection.execute(
+                    "SELECT COALESCE(min(created_at),clock_timestamp()) "
+                    "FROM search_units WHERE tenant_id=%s AND user_id=%s "
+                    "AND kind='fact' AND source_id=%s AND source_version=%s "
+                    "AND generation_id=%s",
+                    (
+                        *self.key,
+                        self.source["source_id"],
+                        self.source["source_version"],
+                        self.generation_id,
+                    ),
+                ).fetchone()[0]
                 connection.execute(
                     "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,"
-                    "stage,input_digest,generation_id,status,available_at,attempts_remaining) "
+                    "stage,input_digest,generation_id,status,available_at,attempts_remaining,"
+                    "l2_priority_at) "
                     "VALUES (%s,%s,%s,%s,'consolidate',%s,%s,'queued',"
-                    "clock_timestamp()+(%s*interval '1 second'),%s) ON CONFLICT DO NOTHING",
+                    "clock_timestamp()+(%s*interval '1 second'),%s,%s) ON CONFLICT DO NOTHING",
                     (
                         *self.key,
                         work_id,
@@ -394,6 +439,7 @@ class IndexStore:
                         self.generation_id,
                         CONSOLIDATION_DELAY_SECONDS,
                         self.config.retry.max_attempts,
+                        l2_priority_at,
                     ),
                 )
                 self.readiness(

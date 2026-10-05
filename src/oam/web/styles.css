@@ -9,6 +9,8 @@
   --accent-text: #fff;
   --selected: #e5f4f6;
   --error: #a32331;
+  --positive: #176e46;
+  --warning: #956a00;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,6 +24,8 @@
     --accent-text: #102027;
     --selected: #274147;
     --error: #ff9ba5;
+    --positive: #8dd7ac;
+    --warning: #ffd577;
   }
 }
 
@@ -130,6 +134,43 @@ textarea:focus-visible {
   border-radius: 99rem;
   padding: 0.3rem 0.7rem;
   white-space: nowrap;
+}
+
+.profile-freshness {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.profile-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+}
+
+.profile-state::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.profile-state[data-freshness="current"] {
+  color: var(--positive);
+}
+
+.profile-state[data-freshness="dirty"],
+.profile-state[data-freshness="stale"],
+.profile-state[data-freshness="partial"],
+.profile-state[data-freshness="uncovered"],
+.profile-state[data-freshness="missing"] {
+  color: var(--warning);
 }
 
 main {

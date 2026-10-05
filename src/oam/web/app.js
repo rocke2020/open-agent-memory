@@ -168,13 +168,24 @@
       status("Loading Profile…");
       const profile = await json(route(params.size ? `profile?${params}` : "profile"));
       if (!current(generation) || state.view !== "profiles" || requestId !== state.profileRequest) return false;
-      showProfile(profile);
-      status("Profile loaded.");
+      const message = showProfile(profile);
+      status(message || "Profile loaded.");
       return true;
     } catch (error) {
       if (current(generation) && state.view === "profiles" && requestId === state.profileRequest) showError(error);
       return false;
     }
+  }
+
+  function profileParagraph(text) {
+    const paragraph = element("p");
+    let start = 0;
+    for (const match of text.matchAll(/\*\*([^*\n]+)\*\*/g)) {
+      paragraph.append(document.createTextNode(text.slice(start, match.index)), element("strong", match[1]));
+      start = match.index + match[0].length;
+    }
+    paragraph.append(document.createTextNode(text.slice(start)));
+    return paragraph;
   }
 
   function renderProfileContent(content) {
@@ -188,13 +199,43 @@
     }
     if (!content.startsWith("## Main content\n")) return element("pre", content, "source-text");
     const rendered = element("div", undefined, "profile-content");
-    for (const line of content.split("\n")) {
+    const mainContent = content.split("\n\n## References\n", 1)[0];
+    for (const line of mainContent.split("\n")) {
       if (!line.trim()) continue;
       if (line.startsWith("## ")) rendered.append(element("h4", line.slice(3)));
-      else if (line.startsWith("- ")) rendered.append(element("p", line.slice(2)));
-      else rendered.append(element("p", line));
+      else rendered.append(profileParagraph(line.startsWith("- ") ? line.slice(2) : line));
     }
     return rendered;
+  }
+
+  function profileStatusLine(profile) {
+    const labels = {
+      current: "Up to date",
+      dirty: "Out of date",
+      stale: "Out of date",
+      partial: "Incomplete",
+      uncovered: "Incomplete",
+      missing: profile.profile_revision == null ? "Not created" : "Needs rebuild",
+    };
+    const line = element("div", undefined, "profile-freshness");
+    line.setAttribute("aria-label", "Profile status");
+    const badge = element("span", labels[profile.freshness] || "Status unknown", "profile-state");
+    badge.dataset.freshness = profile.freshness || "unknown";
+    line.append(badge);
+    const updated = profile.updated_at ? new Date(profile.updated_at) : null;
+    if (updated && !Number.isNaN(updated.getTime())) {
+      const elapsed = (Date.now() - updated.getTime()) / 1000;
+      const units = [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60], ["second", 1]];
+      const [unit, seconds] = units.find(([, seconds]) => Math.abs(elapsed) >= seconds) || units.at(-1);
+      const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" }).format(-Math.round(elapsed / seconds), unit);
+      const time = element("time", `Updated ${relative}`);
+      time.dateTime = profile.updated_at;
+      time.title = updated.toLocaleString();
+      line.append(element("span", "·"), time);
+    } else if (profile.profile_revision != null) {
+      line.append(element("span", "·"), element("span", "Updated time not recorded"));
+    }
+    return line;
   }
 
   function showProfile(profile) {
@@ -203,34 +244,42 @@
     const blockedInputs = profile.blocked_inputs || 0;
     const uncoveredInputs = profile.uncovered_inputs || 0;
     detail.replaceChildren(element("h3", "Read-only Profile"));
+    detail.append(profileStatusLine(profile));
     if (profile.content) detail.append(renderProfileContent(profile.content));
-    if (profile.profile_revision != null) {
-      detail.append(labelValue("Last refreshed", profile.updated_at
-        ? new Date(profile.updated_at).toLocaleString()
-        : "Not recorded for this revision"));
-    }
     if (profile.instruction) detail.append(labelValue("Saved instruction", profile.instruction));
     if (failedInputs > 0) detail.append(labelValue("Failed Insight inputs", failedInputs));
     if (blockedInputs > 0) detail.append(labelValue("Failed initial processing", blockedInputs));
-    if (profile.profile_revision == null) {
-      detail.append(element("p", "No generated Profile yet. Use Create/Refresh Profile to create one from eligible inputs."));
-    } else if (!profile.content) {
-      detail.append(element("p", "The stored Profile is unavailable for these inputs. Refresh it to rebuild from current sources."));
+    let message = "";
+    if (!profile.content) {
+      if ((profile.omitted || []).some(item => item.reason === "budget")) {
+        message = "Profile exceeds the preview token budget. Increase or clear the budget to view the complete document.";
+      } else if (profile.profile_revision == null) {
+        message = "No generated Profile yet. Use Create/Refresh Profile to create one from eligible inputs.";
+      } else if (profile.freshness === "missing") {
+        message = "This stored revision has no Profile document. Use Create/Refresh Profile to build one from current sources.";
+      } else {
+        message = "The stored Profile is unavailable for these inputs. Refresh it to rebuild from current sources.";
+      }
+      detail.append(element("p", message));
     }
-    if (failedInputs > 0) detail.append(element("p", `${failedInputs} Insight input${failedInputs === 1 ? "" : "s"} failed. This Profile uses only ready information.`));
+    if (failedInputs > 0) detail.append(element("p", `${failedInputs} Insight input${failedInputs === 1 ? "" : "s"} failed. ${profile.content ? "This Profile uses" : "A refreshed Profile can use"} only ready information.`));
     if (blockedInputs > 0) detail.append(element("p", `${blockedInputs} memory input${blockedInputs === 1 ? "" : "s"} could not be prepared. Check the input operation before refreshing the Profile.`));
     if (uncoveredInputs > 0) detail.append(element("p", `${uncoveredInputs} eligible memory item${uncoveredInputs === 1 ? " was" : "s were"} beyond this Profile's input limit. The document may miss details.`));
     const references = profile.references || [];
     if (references.length) {
       const referenceDetails = element("details", undefined, "profile-references");
       referenceDetails.append(element("summary", `Reference details (${references.length})`));
-      for (const reference of references) {
+      for (const [index, reference] of references.entries()) {
         const row = element("div", undefined, "citation");
         if (reference.kind === "profile_resource") {
+          row.append(element("p", `[${index + 1}] Provided profile details`));
           row.append(labelValue("Profile Resource", reference.resource_id));
           row.append(button("Inspect Resource", () => openProfileResource(reference.resource_id)));
         } else {
-          for (const passage of reference.passages || [reference]) {
+          const passages = reference.passages || [reference];
+          const dates = [...new Set(passages.filter(passage => passage.event_time).map(passage => passage.event_time.slice(0, 10)))];
+          row.append(element("p", `[${index + 1}] Conversation${dates.length ? ` on ${dates.join("; ")}` : ""}`));
+          for (const passage of passages) {
             row.append(labelValue("Conversation", passage.source_id));
             row.append(labelValue("Passage", passage.passage_id));
           }
@@ -239,6 +288,7 @@
       }
       detail.append(referenceDetails);
     }
+    return message;
   }
 
   async function openProfileResource(resourceId) {

@@ -1,8 +1,9 @@
 import json
+from typing import Any
 
 import pytest
 
-from oam.profiles.document import build_profile_document
+from oam.profiles.document import build_profile_document, render_stored_profile_fields
 
 INPUTS = [
     {
@@ -141,3 +142,130 @@ def test_default_profile_rejects_a_reference_number_without_a_matching_support()
             instruction=None,
             max_content_bytes=4096,
         )
+
+
+def test_default_profile_deduplicates_supports_without_changing_citation_sources() -> None:
+    second = {
+        **INPUTS[0],
+        "id": "fact_2",
+        "source_passages": [
+            {
+                "source_id": "chat_2",
+                "source_version": 1,
+                "passage_id": "passage_2",
+                "event_time": None,
+            }
+        ],
+    }
+    result = build_profile_document(
+        json.dumps(
+            {
+                "content": "First claim [1]. Second claim [2]. First source again [3].",
+                "support_ids": ["fact_1", "fact_2", "fact_1"],
+            }
+        ),
+        [INPUTS[0], second],
+        EXACT,
+        instruction=None,
+        max_content_bytes=4096,
+    )
+
+    assert "First claim [1]. Second claim [2]. First source again [1]." in result["content"]
+    assert result["support_ids"] == ["fact_1", "fact_2", "profile_resource:basic:2"]
+    assert [reference.get("source_id") for reference in result["references"][:2]] == [
+        "chat_1",
+        "chat_2",
+    ]
+    assert "Date of birth: 1990-05-10 [3]" in result["content"]
+
+    with pytest.raises(ValueError, match="reference marker"):
+        build_profile_document(
+            json.dumps(
+                {
+                    "content": "First [1], second [2], invalid [3].",
+                    "support_ids": ["fact_1", "fact_2"],
+                }
+            ),
+            [INPUTS[0], second],
+            EXACT,
+            instruction=None,
+            max_content_bytes=4096,
+        )
+    with pytest.raises(ValueError, match="reference marker"):
+        build_profile_document(
+            json.dumps({"content": "Bad claim [4].", "support_ids": ["fact_1", "fact_1"]}),
+            INPUTS,
+            [],
+            instruction=None,
+            max_content_bytes=4096,
+        )
+    with pytest.raises(ValueError, match="unsupported input"):
+        build_profile_document(
+            json.dumps({"content": "Bad claim [1].", "support_ids": ["unknown", "unknown"]}),
+            INPUTS,
+            [],
+            instruction=None,
+            max_content_bytes=4096,
+        )
+    with pytest.raises(ValueError, match="repeated a support"):
+        build_profile_document(
+            json.dumps({"content": '{"references":[1,2]}', "support_ids": ["fact_1", "fact_1"]}),
+            INPUTS,
+            [],
+            instruction="Return JSON.",
+            max_content_bytes=4096,
+        )
+
+
+def test_stored_fields_preserve_conflicts_and_all_resource_references() -> None:
+    supports = [
+        {"kind": "profile_resource", "resource_id": "owner", "resource_version": 2},
+        {"kind": "profile_resource", "resource_id": "imported", "resource_version": 1},
+    ]
+    sections: dict[str, list[dict[str, Any]]] = {
+        "main": [
+            {
+                "key": "role",
+                "value": "Stored role",
+                "qualifier": "at the time of the conversation",
+                "state": "conflict",
+                "supports": supports,
+            }
+        ],
+        "experiences": [
+            {
+                "key": "episode",
+                "value": {
+                    "situation": "A task",
+                    "action": "A change",
+                    "observed_outcome": "Done",
+                    "conditions": ["One project"],
+                },
+                "qualifier": "",
+                "state": "active",
+                "supports": supports,
+            }
+        ],
+    }
+    eligible = {"profile_resource:owner:2", "profile_resource:imported:1"}
+
+    document = render_stored_profile_fields(sections, [], eligible, max_content_bytes=4096)
+
+    assert document["content"].count("Stored role") == 1
+    assert "at the time of the conversation" in document["content"]
+    assert "conflicting sources" in document["content"]
+    assert '"observed_outcome": "Done"' in document["content"]
+    assert '"conditions": ["One project"]' in document["content"]
+    assert document["support_ids"] == ["profile_resource:owner:2", "profile_resource:imported:1"]
+    assert [reference["resource_id"] for reference in document["references"]] == [
+        "owner",
+        "imported",
+    ]
+    assert document["content"].count("[1] [2]") == 2
+
+    with pytest.raises(ValueError, match="no longer eligible"):
+        render_stored_profile_fields(
+            sections, [], {"profile_resource:owner:2"}, max_content_bytes=4096
+        )
+    with pytest.raises(ValueError, match="size limit"):
+        render_stored_profile_fields(sections, [], eligible, max_content_bytes=200)

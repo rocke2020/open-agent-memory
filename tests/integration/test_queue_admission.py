@@ -21,7 +21,7 @@ from oam.db.sources import IdempotencyConflict, SourceRepository
 from oam.indexing.identity import index_generation
 from oam.indexing.store import IndexStore
 from oam.operations.repository import OperationIdempotencyConflict, OperationRepository
-from oam.profiles.service import ProfileService
+from oam.profiles.service import ProfileService, profile_identity
 from oam.workers.claims import claim_one
 
 pytestmark = pytest.mark.integration
@@ -244,7 +244,7 @@ def test_profile_refresh_reuses_work_and_obeys_queue_cap(queue_database):
             (
                 "## Main content\n\nNo supported details yet.\n\n"
                 "## References\n\nNo references yet.",
-                bytes.fromhex(current["input_identity"]),
+                profile_identity(bytes.fromhex(current["input_identity"]), None),
                 current["policy_epoch"],
                 index_generation(config, {}),
             ),

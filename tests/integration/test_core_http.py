@@ -1209,7 +1209,8 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         def generate(self, role, **kwargs):
             if role != "profile":
                 return super().generate(role, **kwargs)
-            assert "Use 'the user' for this one person" in kwargs["system"]
+            assert kwargs["max_output_tokens"] == config.profile.max_output_tokens
+            assert kwargs["timeout_seconds"] == config.profile.attempt_timeout_seconds
             self.generation_calls.append(role)
             if self.timeout_profile:
                 raise httpx.ReadTimeout("synthetic uncertain Profile response")
@@ -1838,6 +1839,7 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
     from oam.config import load_config
     from oam.indexing.identity import index_generation
     from oam.models.runtime import ModelResult, Usage
+    from oam.profiles.service import profile_identity
     from oam.profiles.worker import process_profile_claim
     from oam.workers.claims import claim_one
     from oam.workers.index_source import process_one
@@ -1979,7 +1981,11 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
                 connection.execute(
                     "UPDATE work_units SET input_digest=%s,dependency_ids='{}' "
                     "WHERE tenant_id=%s AND user_id='scope' AND work_unit_id=%s",
-                    (bytes.fromhex(current.json()["input_identity"]), tenant, claim.work_unit_id),
+                    (
+                        profile_identity(bytes.fromhex(current.json()["input_identity"]), None),
+                        tenant,
+                        claim.work_unit_id,
+                    ),
                 )
                 connection.execute(
                     "UPDATE attempts SET disposition='unknown_external_outcome' "
@@ -2056,7 +2062,8 @@ async def test_profile_main_can_use_supported_project_or_relationship_insight(
                 }
             elif role == "profile":
                 self.generation_calls.append(role)
-                assert "enduring projects" in kwargs["system"]
+                assert kwargs["max_output_tokens"] == config.profile.max_output_tokens
+                assert kwargs["timeout_seconds"] == config.profile.attempt_timeout_seconds
                 insight = next(
                     item
                     for item in json.loads(kwargs["user"])["inputs"]
@@ -2134,7 +2141,8 @@ async def test_profile_main_builds_dated_age_career_and_family_from_user_facts(c
             if role != "profile":
                 return super().generate(role, **kwargs)
             self.generation_calls.append(role)
-            assert "explicitly stated sex" in kwargs["system"]
+            assert kwargs["max_output_tokens"] == config.profile.max_output_tokens
+            assert kwargs["timeout_seconds"] == config.profile.attempt_timeout_seconds
             facts = [
                 item for item in json.loads(kwargs["user"])["inputs"] if item["kind"] == "fact"
             ]

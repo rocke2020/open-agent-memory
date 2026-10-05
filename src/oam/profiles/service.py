@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 from typing import Any
@@ -17,7 +18,9 @@ from oam.db.inspection import SourceInspector
 from oam.db.queue_admission import require_queue_capacity
 from oam.indexing.identity import index_generation
 from oam.operations.repository import OperationRepository
+from oam.profiles.document import render_stored_profile_fields
 from oam.profiles.inputs import ProfileInputs, load_profile_inputs
+from oam.profiles.prompt import PROFILE_SYSTEM
 from oam.tokens import estimate_units, estimated_tokens
 
 
@@ -33,7 +36,7 @@ def _current_snapshot(connection, authority: AuthorizedUser):
     with connection.cursor(row_factory=dict_row) as cursor:
         bind_user(cursor, authority)
         cursor.execute(
-            'SELECT profile_revision,content,instruction,support_ids,"references",'
+            'SELECT profile_revision,sections,content,instruction,support_ids,"references",'
             "input_identity,policy_epoch,generation_id,published_at "
             "FROM profiles WHERE tenant_id=%s AND user_id=%s AND profile_id='user' "
             "AND visible_to IS NULL ORDER BY profile_revision DESC LIMIT 1",
@@ -43,9 +46,8 @@ def _current_snapshot(connection, authority: AuthorizedUser):
 
 
 def profile_identity(input_identity: bytes, instruction: str | None) -> bytes:
-    if instruction is None:
-        return input_identity
-    return hashlib.sha256(input_identity + instruction.encode("utf-8")).digest()
+    recipe = json.dumps([input_identity.hex(), PROFILE_SYSTEM, instruction], ensure_ascii=False)
+    return hashlib.sha256(recipe.encode("utf-8")).digest()
 
 
 def _view(
@@ -54,13 +56,28 @@ def _view(
     snapshot: dict[str, Any] | None,
     max_tokens: int,
 ) -> dict[str, Any]:
-    del config
-    supported = snapshot is not None and set(snapshot["support_ids"]) <= inputs.eligible_support_ids
+    legacy_unavailable = False
+    if snapshot and snapshot["content"] is None and any(snapshot.get("sections", {}).values()):
+        try:
+            document = render_stored_profile_fields(
+                snapshot["sections"],
+                inputs.prompt_inputs,
+                inputs.eligible_support_ids,
+                max_content_bytes=config.profile.max_content_bytes,
+            )
+            snapshot = {**snapshot, **document}
+        except ValueError:
+            legacy_unavailable = True
+    supported = (
+        snapshot is not None
+        and not legacy_unavailable
+        and set(snapshot["support_ids"]) <= inputs.eligible_support_ids
+    )
     content = snapshot["content"] if snapshot and supported else None
     budget_omitted = content is not None and estimated_tokens(estimate_units(content)) > max_tokens
     if budget_omitted:
         content = None
-    if snapshot is None or snapshot["content"] is None:
+    if snapshot is None or snapshot["content"] is None and not legacy_unavailable:
         freshness = "missing"
     elif not supported:
         freshness = "stale"

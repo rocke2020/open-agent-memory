@@ -111,7 +111,7 @@ WHERE s.tenant_id=%s AND s.user_id=%s
       (w.tenant_id,w.user_id,w.operation_id)=(o.tenant_id,o.user_id,o.operation_id)
     WHERE (o.tenant_id,o.user_id,o.source_id,o.source_version)=
           (s.tenant_id,s.user_id,s.source_id,s.active_version)
-      AND o.kind='index_interaction' AND o.status='succeeded'
+      AND o.kind IN ('index_interaction','consolidate') AND o.status='succeeded'
       AND o.stage_state->>'insights_ready'='true' AND w.generation_id=%s
   )
 ORDER BY s.source_id
