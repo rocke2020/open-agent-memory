@@ -21,6 +21,8 @@ def _binding(capability: ModelCapability):
                 endpoint_env="MODEL_URL",
                 api_key_env="MODEL_KEY",
                 capabilities=frozenset({ModelCapability.CHAT, capability}),
+                reasoning_effort="low",
+                thinking="disabled",
             )
         },
     )
@@ -64,6 +66,8 @@ def test_openai_compatible_client_uses_visible_chat_content_and_output_limit() -
     assert result.reasoning_content == "hidden"
     assert seen_payload["max_tokens"] == 1_024
     assert seen_payload["model"] == "synthetic-model"
+    assert seen_payload["reasoning_effort"] == "low"
+    assert seen_payload["thinking"] == {"type": "disabled"}
 
 
 def test_openai_compatible_client_decodes_embedding_and_rerank_responses() -> None:

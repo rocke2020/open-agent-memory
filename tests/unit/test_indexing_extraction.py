@@ -275,6 +275,8 @@ def extraction_models(reply, requests=None, *, config=None):
                             "model": "synthetic-chat",
                             "endpoint_env": "MODEL_URL",
                             "capabilities": ["chat"],
+                            "reasoning_effort": "low",
+                            "thinking": "disabled",
                         }
                     },
                 }

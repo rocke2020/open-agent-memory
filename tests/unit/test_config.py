@@ -38,7 +38,9 @@ def test_canonical_config_freezes_v001_trial_limits_without_active_provider_role
     assert resolved.config.api.max_concurrent_requests == 10
     assert set(resolved.config.models.bindings) == {"indexing_low", "indexing_high"}
     assert resolved.config.models.bindings["indexing_low"].reasoning_effort == "low"
+    assert resolved.config.models.bindings["indexing_low"].thinking == "disabled"
     assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "high"
+    assert resolved.config.models.bindings["indexing_high"].thinking == "disabled"
     assert resolved.config.models.required_unbound_roles() == {
         "abstract",
         "document_vision",
@@ -280,3 +282,27 @@ def test_missing_canonical_numeric_limit_is_not_filled_by_python(
 
     with pytest.raises(ConfigurationError, match="resource.max_bytes"):
         load_config(canonical)
+
+
+def test_canonical_config_exposes_l2_and_profile_feature_switches() -> None:
+    config = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config
+
+    assert config.index.insights_enabled is True
+    assert config.profile.enabled is True
+
+
+def test_disabled_l2_and_profile_remove_only_their_model_roles_from_required_set() -> None:
+    config = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config.model_copy(
+        update={
+            "index": load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config.index.model_copy(
+                update={"insights_enabled": False}
+            ),
+            "profile": load_config(
+                REPOSITORY_ROOT / "configs" / "oam.yaml"
+            ).config.profile.model_copy(update={"enabled": False}),
+        }
+    )
+
+    assert "insights" not in config.required_model_roles()
+    assert "profile" not in config.required_model_roles()
+    assert "extraction" in config.required_model_roles()

@@ -372,7 +372,7 @@ def process_one(
             store.readiness(
                 connection, links_ready=True, temporal_links_ready=True, link_coverage=links
             )
-        store.finish(schedule_consolidation=True)
+        store.finish(schedule_consolidation=config.index.insights_enabled)
     except Exception as error:
         store.fail(error)
         raise

@@ -33,6 +33,7 @@ def test_resolver_freezes_endpoint_and_redacts_secret_from_all_public_views() ->
     assert resolved.endpoint == "https://models.example.test/v1"
     assert resolved.model == "example-chat"
     assert resolved.credential_configured is True
+    assert resolved.redacted()["thinking"] is None
     assert "super-secret-key" not in repr(resolved)
     assert "super-secret-key" not in str(resolved.redacted())
     assert "changed-secret" not in str(resolved.redacted())
@@ -125,3 +126,14 @@ def test_resolver_rejects_secret_bearing_endpoint_forms_without_echoing(endpoint
 
     assert "OAM_CHAT_URL" in str(captured.value)
     assert "secret-in-url" not in str(captured.value)
+
+
+def test_chat_parameters_fail_closed_without_explicit_effort_or_thinking() -> None:
+    resolved = resolve_model_binding(
+        _models(),
+        "extraction",
+        {"OAM_CHAT_URL": "https://models.example.test/v1", "OAM_CHAT_KEY": "secret"},
+    )
+    assert resolved is not None
+    with pytest.raises(ModelBindingResolutionError, match="explicit reasoning_effort and thinking"):
+        resolved.chat_parameters()

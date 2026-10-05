@@ -403,7 +403,9 @@ def _planner_config(tmp_path: Path):
         "      protocol: openai_compatible\n"
         "      model: local-planner\n"
         "      endpoint_env: MODEL_URL\n"
-        "      capabilities: [chat]\n",
+        "      capabilities: [chat]\n"
+        "      reasoning_effort: low\n"
+        "      thinking: disabled\n",
         encoding="utf-8",
     )
     return load_config(config_path).config

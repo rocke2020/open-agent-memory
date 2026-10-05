@@ -122,6 +122,8 @@ search:
     max_results: 96
 
 index:
+  # L2 Insight synthesis is independently configurable; Profile may consume L2 when enabled.
+  insights_enabled: true
   embedding_dimensions: 1024
   # Create index-time semantic links only above this cosine similarity.
   semantic_link_min_similarity: 0.7
@@ -148,6 +150,7 @@ context:
   tokenizer: oam-unicode-quarter-v1
 
 profile:
+  enabled: true
   max_content_bytes: 16384
   max_output_tokens: 2048
   attempt_timeout_seconds: 180
@@ -253,6 +256,7 @@ models:
       api_key_env: OAM_GENERATIVE_API_KEY
       capabilities: [chat, vision]
       reasoning_effort: low
+      thinking: disabled
     indexing_high:
       protocol: openai_compatible
       model_env: OAM_GENERATIVE_MODEL
@@ -260,3 +264,4 @@ models:
       api_key_env: OAM_GENERATIVE_API_KEY
       capabilities: [chat]
       reasoning_effort: high
+      thinking: disabled

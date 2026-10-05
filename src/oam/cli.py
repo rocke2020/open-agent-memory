@@ -89,7 +89,7 @@ def _preflight(
     probe_client: CapabilityProbeClient | None = None,
 ) -> int:
     resolved = load_config(config_path)
-    missing = sorted(resolved.config.models.required_unbound_roles())
+    missing = sorted(resolved.config.required_unbound_roles())
     runtime_environment = os.environ if environment is None else environment
     if probe_client is None:
         with httpx.Client(
@@ -100,12 +100,14 @@ def _preflight(
                 resolved.config.models,
                 runtime_environment,
                 OpenAICompatibleProbeClient(http=http),
+                required_roles=resolved.config.required_model_roles(),
             )
     else:
         report = run_model_preflight(
             resolved.config.models,
             runtime_environment,
             probe_client,
+            required_roles=resolved.config.required_model_roles(),
         )
     payload = {
         "config_sha256": resolved.sha256,

@@ -51,6 +51,7 @@ def test_canonical_extraction_preserves_low_reasoning_effort_on_the_wire():
         )
     assert json.loads(result.content) == {"outcome": "no_facts", "facts": []}
     assert seen[0]["reasoning_effort"] == "low"
+    assert seen[0]["thinking"] == {"type": "disabled"}
     assert seen[0]["max_tokens"] == 64000
 
 
@@ -73,6 +74,11 @@ def runtime_config():
                     "endpoint_env": "MODEL_URL",
                     "api_key_env": "MODEL_KEY",
                     "capabilities": [capability],
+                    **(
+                        {"reasoning_effort": "low", "thinking": "disabled"}
+                        if capability in {"chat", "vision"}
+                        else {}
+                    ),
                 }
                 for alias, capability in (
                     ("chat", "chat"),
@@ -148,6 +154,7 @@ def test_explicit_reasoning_effort_reaches_generation_request_and_index_identity
     base = runtime_config()
     values = base.models.model_dump(mode="json")
     values["bindings"]["chat"]["reasoning_effort"] = effort
+    values["bindings"]["chat"]["thinking"] = "enabled"
     configured = base.model_copy(update={"models": ModelsConfig.model_validate(values)})
     environment = {"MODEL_URL": "https://model.example/v1", "MODEL_KEY": "synthetic"}
     seen = []
@@ -167,6 +174,7 @@ def test_explicit_reasoning_effort_reaches_generation_request_and_index_identity
             timeout_seconds=2,
         )
     assert seen[0]["reasoning_effort"] == effort
+    assert seen[0]["thinking"] == {"type": "enabled"}
     assert seen[0]["max_tokens"] == 64000
     assert index_generation(base, environment) != index_generation(configured, environment)
 

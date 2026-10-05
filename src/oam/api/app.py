@@ -280,7 +280,7 @@ def create_app(
 
     @app.get("/health/ready", tags=["Health"])
     async def readiness(response: Response) -> dict[str, Any]:
-        missing = sorted(resolved.config.models.required_unbound_roles())
+        missing = sorted(resolved.config.required_unbound_roles())
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         worker = app.state.worker
         worker_running = worker is not None and worker.healthy
@@ -336,7 +336,7 @@ def create_app(
                 "deep_recall": True,
                 "batch_recall": True,
                 "planner": config.models.roles.planner is not None,
-                "profiles": runtime is not None,
+                "profiles": runtime is not None and config.profile.enabled,
                 "inspector": True,
                 "source_lifecycle": True,
                 "recorded_debug": True,

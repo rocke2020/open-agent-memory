@@ -175,6 +175,7 @@ class ChunkConfig(FrozenModel):
 
 
 class ProfileConfig(FrozenModel):
+    enabled: bool = True
     max_content_bytes: PositiveInt
     max_output_tokens: PositiveInt
     attempt_timeout_seconds: PositiveFloat
@@ -256,6 +257,7 @@ class UserConfig(FrozenModel):
 
 
 class IndexConfig(FrozenModel):
+    insights_enabled: bool = True
     embedding_dimensions: PositiveInt = Field(le=2000)
     semantic_link_min_similarity: float = Field(ge=0, le=1)
     semantic_link_max_neighbors: PositiveInt
@@ -299,6 +301,7 @@ class ModelBinding(FrozenModel):
     api_key_env: str | None = Field(default=None, min_length=1)
     capabilities: frozenset[ModelCapability]
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    thinking: Literal["enabled", "disabled"] | None = None
 
     @model_validator(mode="after")
     def validate_model_source(self) -> ModelBinding:
@@ -391,6 +394,19 @@ class OAMConfig(FrozenModel):
     export: ExportConfig
     backup: BackupConfig
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+
+    def required_model_roles(self) -> frozenset[str]:
+        roles = set(REQUIRED_MODEL_ROLES)
+        if not self.index.insights_enabled:
+            roles.discard("insights")
+        if not self.profile.enabled:
+            roles.discard("profile")
+        return frozenset(roles)
+
+    def required_unbound_roles(self) -> set[str]:
+        return {
+            role for role in self.required_model_roles() if getattr(self.models.roles, role) is None
+        }
 
 
 @dataclass(frozen=True, slots=True)

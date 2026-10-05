@@ -288,6 +288,8 @@ class DatabaseRuntime:
     def get_profile(self, actor: RequestActor, user_id: str, max_tokens: int) -> dict:
         from oam.profiles.service import ProfileService
 
+        if not self.config.profile.enabled:
+            raise NotImplementedError("Profile feature is disabled")
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
         return ProfileService(self.config, self.pool).get(authority, max_tokens)
@@ -297,6 +299,8 @@ class DatabaseRuntime:
     ) -> dict:
         from oam.profiles.service import ProfileService
 
+        if not self.config.profile.enabled:
+            raise NotImplementedError("Profile feature is disabled")
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:append")
             self._authorize(connection, actor, user_id, "memory:read")

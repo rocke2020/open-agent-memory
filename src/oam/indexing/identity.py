@@ -14,7 +14,16 @@ INDEX_RECIPE = "oam-source-fact-insight-v23"
 
 def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
     roles = {}
-    for role in ("extraction", "insights", "embedding", "abstract", "document_vision"):
+    roles_to_hash: tuple[str, ...] = (
+        "extraction",
+        "insights",
+        "embedding",
+        "abstract",
+        "document_vision",
+    )
+    if not config.index.insights_enabled:
+        roles_to_hash = tuple(role for role in roles_to_hash if role != "insights")
+    for role in roles_to_hash:
         binding = resolve_model_binding(config.models, role, environment)
         if binding is not None:
             roles[role] = {
@@ -22,6 +31,7 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
                 "endpoint": binding.endpoint,
                 "protocol": binding.protocol,
                 "reasoning_effort": binding.reasoning_effort,
+                "thinking": binding.thinking,
             }
     extraction = config.extraction.model_dump(mode="json")
     references_enabled = bool(config.extraction.reference_max_facts)

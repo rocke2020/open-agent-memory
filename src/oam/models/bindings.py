@@ -22,6 +22,7 @@ class ResolvedModelBinding:
     capabilities: frozenset[ModelCapability]
     credential_configured: bool
     reasoning_effort: str | None = None
+    thinking: str | None = None
     _api_key: str | None = field(default=None, repr=False, compare=False)
 
     def redacted(self) -> dict[str, Any]:
@@ -34,6 +35,17 @@ class ResolvedModelBinding:
             "capabilities": sorted(capability.value for capability in self.capabilities),
             "credential_configured": self.credential_configured,
             "reasoning_effort": self.reasoning_effort,
+            "thinking": self.thinking,
+        }
+
+    def chat_parameters(self) -> dict[str, Any]:
+        if self.reasoning_effort is None or self.thinking is None:
+            raise ModelBindingResolutionError(
+                f"model role {self.role!r} requires explicit reasoning_effort and thinking"
+            )
+        return {
+            "reasoning_effort": self.reasoning_effort,
+            "thinking": {"type": self.thinking},
         }
 
 
@@ -94,5 +106,6 @@ def resolve_model_binding(
         capabilities=binding.capabilities,
         credential_configured=api_key is not None,
         reasoning_effort=binding.reasoning_effort,
+        thinking=binding.thinking,
         _api_key=api_key,
     )

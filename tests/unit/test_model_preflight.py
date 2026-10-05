@@ -23,6 +23,8 @@ def _models() -> ModelsConfig:
             model="chat-model",
             endpoint_env="CHAT_URL",
             capabilities=frozenset({ModelCapability.CHAT}),
+            reasoning_effort="low",
+            thinking="disabled",
         ),
         "embedding": ModelBinding(
             protocol="openai_compatible",
@@ -35,6 +37,8 @@ def _models() -> ModelsConfig:
             model="vision-model",
             endpoint_env="VISION_URL",
             capabilities=frozenset({ModelCapability.VISION}),
+            reasoning_effort="low",
+            thinking="disabled",
         ),
     }
     return ModelsConfig(
@@ -307,3 +311,32 @@ def test_transport_failure_is_redacted_per_role_and_later_probes_continue() -> N
     assert vision.status is PreflightStatus.PASSED
     assert "embeddings" in client.probed_capabilities
     assert "vision" in client.probed_capabilities
+
+
+def test_disabled_feature_role_failure_does_not_block_required_preflight() -> None:
+    models = _models()
+    values = models.model_dump(mode="json")
+    values["roles"]["profile"] = "profile"
+    values["bindings"]["profile"] = {
+        "protocol": "openai_compatible",
+        "model": "profile-model",
+        "endpoint_env": "PROFILE_URL",
+        "capabilities": ["chat"],
+        "reasoning_effort": "low",
+        "thinking": "disabled",
+    }
+    models = ModelsConfig.model_validate(values)
+    report = run_model_preflight(
+        models,
+        {
+            "CHAT_URL": "https://models.example.test/v1",
+            "EMBEDDING_URL": "https://embeddings.example.test/v1",
+            "VISION_URL": "https://vision.example.test/v1",
+        },
+        FakeProbeClient(),
+        required_roles=frozenset({"extraction", "embedding", "document_vision", "abstract"}),
+    )
+
+    profile = next(result for result in report.roles if result.role == "profile")
+    assert profile.status is PreflightStatus.FAILED
+    assert report.runnable is True

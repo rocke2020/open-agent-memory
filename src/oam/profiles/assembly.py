@@ -7,6 +7,8 @@ from oam.tokens import estimate_units, estimated_tokens
 def search_with_profile(config, pool, recall_service, authority, request, *, deadline_at=None):
     if not request.include_profile:
         return recall_service.search(authority, request, deadline_at=deadline_at)
+    if not config.profile.enabled:
+        raise NotImplementedError("Profile feature is disabled")
     budget = request.max_context_tokens or config.context.default_tokens
     profile_limit = max(0, budget // 2 - 4)
     service = ProfileService(config, pool)

@@ -233,8 +233,8 @@ class RuntimeModels:
         headers = {"content-type": "application/json"}
         if binding._api_key is not None:
             headers["authorization"] = f"Bearer {binding._api_key}"
-        if path == "/chat/completions" and binding.reasoning_effort is not None:
-            payload = {**payload, "reasoning_effort": binding.reasoning_effort}
+        if path == "/chat/completions":
+            payload = {**payload, **binding.chat_parameters()}
         deadline = time.monotonic() + timeout_seconds
         kind = "embedding" if path == "/embeddings" else "llm"
         slots = (

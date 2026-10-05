@@ -95,8 +95,11 @@ def run_model_preflight(
     models: ModelsConfig,
     environment: Mapping[str, str],
     client: CapabilityProbeClient,
+    *,
+    required_roles: frozenset[str] | None = None,
 ) -> ModelPreflightReport:
     results: list[RolePreflightResult] = []
+    required = REQUIRED_MODEL_ROLES if required_roles is None else required_roles
     for role, capability in _role_capabilities():
         binding: ResolvedModelBinding | None = None
         try:
@@ -133,9 +136,7 @@ def run_model_preflight(
         )
 
     by_role = {result.role: result for result in results}
-    runnable = all(result.status is not PreflightStatus.FAILED for result in results) and all(
-        by_role[role].status is PreflightStatus.PASSED for role in REQUIRED_MODEL_ROLES
-    )
+    runnable = all(by_role[role].status is PreflightStatus.PASSED for role in required)
     return ModelPreflightReport(runnable=runnable, roles=tuple(results))
 
 

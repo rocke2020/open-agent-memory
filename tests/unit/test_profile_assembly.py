@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from oam.config import load_config
 from oam.contracts.search import SearchRequest
 from oam.profiles import assembly
@@ -51,3 +53,28 @@ def test_explicit_profile_opt_out_skips_profile_read(monkeypatch) -> None:
         SearchRequest(query="q", include_profile=False),
     )
     assert result["context"] == "Memory detail"
+
+
+def test_disabled_profile_feature_does_not_read_or_inject_profile(monkeypatch) -> None:
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={"profile": config.profile.model_copy(update={"enabled": False})}
+    )
+
+    class NoProfileRead:
+        def __init__(self, *_args):
+            raise AssertionError("Profile should not be read")
+
+    class Recall:
+        def search(self, _authority, request, *, deadline_at=None):
+            return {"context": "Memory detail", "context_tokens": 4}
+
+    monkeypatch.setattr(assembly, "ProfileService", NoProfileRead)
+    with pytest.raises(NotImplementedError, match="Profile feature is disabled"):
+        assembly.search_with_profile(
+            config,
+            None,
+            Recall(),
+            None,
+            SearchRequest(query="q", include_profile=True),
+        )
