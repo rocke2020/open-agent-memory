@@ -284,11 +284,28 @@ def test_missing_canonical_numeric_limit_is_not_filled_by_python(
         load_config(canonical)
 
 
-def test_canonical_config_exposes_l2_and_profile_feature_switches() -> None:
+def test_canonical_config_enables_l2_and_profile_model_roles() -> None:
     config = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config
+
+    assert config.index.insights_enabled is True
+    assert config.profile.enabled is True
+    assert {"insights", "profile"} <= config.required_unbound_roles()
+
+
+def test_operator_config_can_disable_l2_and_profile_model_roles(tmp_path: Path) -> None:
+    path = tmp_path / "oam.yaml"
+    path.write_text("index:\n  insights_enabled: false\nprofile:\n  enabled: false\n")
+
+    config = load_config(path).config
 
     assert config.index.insights_enabled is False
     assert config.profile.enabled is False
+    assert config.required_unbound_roles() == {
+        "abstract",
+        "document_vision",
+        "embedding",
+        "extraction",
+    }
 
 
 @pytest.mark.parametrize(

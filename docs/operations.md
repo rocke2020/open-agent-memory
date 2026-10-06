@@ -16,6 +16,8 @@ Existing-fact extraction context is enabled by default alongside message groupin
 
 `configs/oam.yaml` owns authentication mode, limits, role aliases, retrieval/profile policy, worker concurrency, leases, and retention. An alternate operator YAML may override selected fields; omitted fields come from the canonical YAML, never a second set of Python numeric defaults. At CLI startup, inherited process variables take precedence and `./.env` fills only missing variables. Environment variables supply the PostgreSQL DSNs, the private `OAM_ROOT_API_KEY` value when operator-supplied, model identifiers selected through `model_env`, model endpoint/key values referenced by the selected binding, operator secret-handoff destinations, and an optional alternate config path. An environment variable never overrides a behavioral default invisibly.
 
+API and worker commands reject missing or malformed required PostgreSQL connection strings and unresolved enabled model bindings before starting their services. Migration validates only its migration connection configuration; it does not require model credentials. Startup validation performs no model calls. Use `oam preflight` separately to verify actual provider capabilities.
+
 Required v0.0.1 roles are extraction, Insights, embedding, document vision, Resource abstract, and Profile generation. Reranker and planner are optional. Each binding declares `protocol: openai_compatible`, exactly one of `model` or `model_env`, an endpoint environment variable, an optional key environment variable, and capabilities; preflight verifies the role-specific behavior rather than trusting a provider name.
 
 ## 2. Commands
@@ -29,6 +31,8 @@ Required v0.0.1 roles are extraction, Insights, embedding, document vision, Reso
 - `oam model-permits --config <operator.yaml> configure` applies changed YAML capacity values after APIs and workers have been stopped. Active HTTP ownership and live/uncertain model permits block the change.
 - `oam recover-bootstrap` uses separate administrative database authority to replace a committed bootstrap key whose one-time handoff failed.
 - `oam validate-export <directory>` checks a downloaded format-1 manifest, every declared JSONL part and original, counts, hashes and source/support identities without a database or model.
+
+`GET /health/live` reports process liveness. `GET /health/ready` returns `200` only when a bounded read through the API database connection confirms all required migration versions, enabled model configuration resolves, the embedded worker is healthy and its queue/content database connections respond when configured, and model admission is available. Otherwise it returns `503` with a reason and database/schema status. Readiness makes no model calls and does not prove provider reachability. Apply migration `0023_readiness_metadata.sql` to grant runtime roles read-only access to the migration registry before deploying this readiness check.
 
 ## 3. Bootstrap and Credentials
 

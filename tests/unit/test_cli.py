@@ -64,7 +64,7 @@ def test_validate_export_command_checks_downloaded_members(tmp_path, capsys) -> 
     assert main(["validate-export", str(tmp_path)]) == 2
 
 
-@pytest.mark.parametrize("enable_features", [False, True], ids=["defaults", "enabled"])
+@pytest.mark.parametrize("enable_features", [False, True], ids=["disabled", "enabled"])
 def test_preflight_fails_closed_and_names_every_missing_required_role(
     tmp_path, capsys, enable_features
 ) -> None:
@@ -116,6 +116,7 @@ def test_api_command_uses_memory_ui_default_port(monkeypatch) -> None:
         launched.update(host=host, port=port)
 
     monkeypatch.setattr(uvicorn, "run", capture_run)
+    monkeypatch.setattr(cli, "validate_startup_environment", lambda *args, **kwargs: None)
 
     assert main(["api", "--config", str(REPOSITORY_ROOT / "configs" / "oam.yaml")]) == 0
     assert launched == {"host": "127.0.0.1", "port": 17333}

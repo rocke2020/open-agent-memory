@@ -12,10 +12,11 @@ import httpx
 from dotenv import load_dotenv
 
 from oam import __version__
-from oam.config import load_config
+from oam.config import ConfigurationError, load_config
 from oam.models.client import OpenAICompatibleProbeClient
 from oam.models.preflight import CapabilityProbeClient, run_model_preflight
 from oam.paths import default_config_path
+from oam.startup import validate_startup_environment
 
 DEFAULT_API_PORT = 17333
 
@@ -147,7 +148,14 @@ def main(argv: list[str] | None = None) -> int:
 
         from oam.api.app import create_app
 
-        uvicorn.run(create_app(args.config, bind_host=args.host), host=args.host, port=args.port)
+        try:
+            config = load_config(args.config).config
+            validate_startup_environment(config, os.environ, command="api")
+            app = create_app(args.config, bind_host=args.host)
+        except ConfigurationError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        uvicorn.run(app, host=args.host, port=args.port)
         return 0
     if args.command == "migrate":
         from oam.db.migrations import migrate_from_environment

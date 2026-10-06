@@ -12,9 +12,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import httpx
+import psycopg
 from psycopg.errors import (
     InsufficientPrivilege,
     InvalidAuthorizationSpecification,
+    UndefinedTable,
     UniqueViolation,
 )
 from psycopg_pool import ConnectionPool
@@ -50,12 +52,15 @@ from oam.contracts.retain import (
 from oam.contracts.search import SearchManyRequest, SearchRequest
 from oam.db.context import bind_user
 from oam.db.inspection import SourceInspector
+from oam.db.migrations import load_migrations
+from oam.db.readiness import DATABASE_READINESS_TIMEOUT_SECONDS
 from oam.db.sources import AcceptanceReceipt, AcceptSource, SourceNotFound, SourceRepository
 from oam.debug.traces import TraceRepository
 from oam.exports.repository import ExportRepository
 from oam.indexing.identity import index_generation
 from oam.models.runtime import RuntimeModels
 from oam.operations.repository import OperationNotFound, OperationRecord, OperationRepository
+from oam.paths import default_migration_directory
 from oam.profiles.resources import map_profile_resource
 from oam.resources.url_fetch import fetch_resource_url, safe_source_url
 
@@ -194,8 +199,12 @@ class DatabaseRuntime:
     _operations: OperationRepository = field(init=False, repr=False)
     _credential_cache: PositiveCredentialCache = field(init=False, repr=False)
     _administration: CredentialAdministration = field(init=False, repr=False)
+    _required_migrations: frozenset[int] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self._required_migrations = frozenset(
+            item.version for item in load_migrations(default_migration_directory())
+        )
         self._http = httpx.Client(trust_env=False)
         if self.models is None:
             self.models = RuntimeModels(
@@ -230,6 +239,41 @@ class DatabaseRuntime:
         self._http.close()
         if self.capacity is not None:
             self.capacity.close()
+
+    def readiness(self) -> dict:
+        """Probe the current connection and required schema using runtime authority."""
+        try:
+            with (
+                self.pool.connection(timeout=DATABASE_READINESS_TIMEOUT_SECONDS) as connection,
+                connection.transaction(),
+            ):
+                connection.execute("SET TRANSACTION READ ONLY")
+                connection.execute(
+                    "SELECT set_config('statement_timeout',%s,true)",
+                    (str(int(DATABASE_READINESS_TIMEOUT_SECONDS * 1000)),),
+                )
+                rows = connection.execute("SELECT version FROM schema_migrations").fetchall()
+        except (UndefinedTable, InsufficientPrivilege):
+            return {
+                "database": "connected",
+                "schema": "unavailable",
+                "reason": "schema_unavailable",
+            }
+        except (psycopg.Error, TimeoutError):
+            return {
+                "database": "unavailable",
+                "schema": "unchecked",
+                "reason": "database_unavailable",
+            }
+        missing = sorted(self._required_migrations - {row[0] for row in rows})
+        if missing:
+            return {
+                "database": "connected",
+                "schema": "outdated",
+                "missing_migrations": missing,
+                "reason": "schema_outdated",
+            }
+        return {"database": "connected", "schema": "current"}
 
     def choose_auto_auth_mode(self) -> str:
         with self.pool.connection() as connection:

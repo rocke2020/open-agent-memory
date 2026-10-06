@@ -52,7 +52,7 @@ async def test_inspector_serves_its_logo_and_uses_it_as_the_favicon(client) -> N
     assert "Open Agent Memory" in logo.text
 
 
-@pytest.mark.parametrize("enable_features", [False, True], ids=["defaults", "enabled"])
+@pytest.mark.parametrize("enable_features", [False, True], ids=["disabled", "enabled"])
 async def test_readiness_fails_when_required_model_roles_are_unbound(
     tmp_path, enable_features
 ) -> None:

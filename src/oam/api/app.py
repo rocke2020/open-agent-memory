@@ -37,6 +37,7 @@ from oam.auth.administration import (
     CredentialPrincipalUnavailable,
 )
 from oam.auth.modes import AssertedIdentity
+from oam.capacity import CapacityUnavailable
 from oam.config import ConfigurationError, OAMConfig, load_config
 from oam.contracts.credentials import (
     CredentialIssuedResponse,
@@ -84,6 +85,7 @@ from oam.operations.state import OperationStatus as StoredOperationStatus
 from oam.profiles.service import ProfileInputsNotReady, ProfileRefreshUnresolved
 from oam.resources.url_fetch import ResourceFetchUnavailable
 from oam.retrieval.service import RecallUnavailable
+from oam.startup import validate_model_environment
 from oam.workers.runner import WorkerRunner
 
 CSP = "; ".join(
@@ -286,6 +288,8 @@ def create_app(
         worker_running = worker is not None and worker.healthy
         payload = {
             "ready": False,
+            "database": "not_configured",
+            "schema": "unchecked",
             "missing_required_roles": missing,
             "embedded_worker_running": (
                 worker_running if resolved.config.worker.embedded_enabled else None
@@ -296,12 +300,18 @@ def create_app(
                 else "core_only"
             ),
         }
+        probe = getattr(runtime, "readiness", None)
+        if probe is not None:
+            payload.update(await run_in_threadpool(probe))
+            if payload["database"] != "connected" or payload["schema"] != "current":
+                return payload
         capacity = getattr(runtime, "capacity", None)
         if capacity is not None:
             try:
                 state = await run_in_threadpool(capacity.status)
-            except psycopg.Error:
+            except (psycopg.Error, CapacityUnavailable):
                 payload["reason"] = "capacity_unavailable"
+                return payload
             else:
                 payload["capacity"] = state
                 if (
@@ -309,6 +319,25 @@ def create_app(
                     or state["embedding_unknown"] >= resolved.config.provider.embedding_concurrency
                 ):
                     payload["reason"] = "model_capacity_blocked"
+                    return payload
+        if probe is None:
+            return payload
+        try:
+            validate_model_environment(resolved.config, os.environ)
+        except ConfigurationError:
+            payload["reason"] = "model_configuration_invalid"
+            return payload
+        if resolved.config.worker.embedded_enabled and not worker_running:
+            payload["reason"] = "embedded_worker_unavailable"
+            return payload
+        if resolved.config.worker.embedded_enabled and not await run_in_threadpool(
+            worker.databases_ready
+        ):
+            payload["reason"] = "worker_database_unavailable"
+            return payload
+        payload.pop("reason", None)
+        payload["ready"] = True
+        response.status_code = status.HTTP_200_OK
         return payload
 
     @app.get("/v1/capabilities", tags=["Capabilities"])

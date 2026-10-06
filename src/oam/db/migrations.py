@@ -13,6 +13,7 @@ import psycopg
 
 from oam.config import ConfigurationError, load_config
 from oam.paths import default_config_path, default_migration_directory
+from oam.startup import validate_startup_environment
 
 _MIGRATION_NAME = re.compile(r"^(?P<version>\d{4})_(?P<name>[a-z0-9][a-z0-9_-]*)\.sql$")
 _LEGACY_ASSERTED_USER_V12_SHA256 = (
@@ -137,6 +138,11 @@ def migrate_from_environment(config_path: str | Path) -> int:
             f"missing required environment variable {dsn_environment_name}",
             file=sys.stderr,
         )
+        return 2
+    try:
+        validate_startup_environment(resolved.config, os.environ, command="migrate")
+    except ConfigurationError as error:
+        print(str(error), file=sys.stderr)
         return 2
     configured_root = os.environ.get(resolved.config.auth.root_key_env)
     if configured_root == "":
