@@ -94,6 +94,7 @@ async def accepted_source(core_database, tmp_path):
     dsn, tenant, headers = core_database
     values = yaml.safe_load((ROOT / "configs/oam.yaml").read_text())
     values["extraction"]["group_max_passages"] = 1
+    values["index"]["insights_enabled"] = True
     path = tmp_path / "singleton.yaml"
     path.write_text(yaml.safe_dump(values))
     config = load_config(path).config

@@ -9,45 +9,58 @@ from psycopg.pq import TransactionStatus
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.db.context import bind_user
-from oam.db.eligibility import ELIGIBLE_UNITS
+from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE
 
-_FACTS = f"""
-WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}),
-facts AS MATERIALIZED (
-    SELECT * FROM eligible
+
+def _seeds(columns: str = "") -> str:
+    return f"""
+WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS_CANDIDATE}),
+seeds AS MATERIALIZED (
+    SELECT tenant_id,user_id,unit_id{columns} FROM eligible
     WHERE tenant_id=%(tenant)s AND user_id=%(user)s
       AND kind='fact' AND generation_id=%(generation)s
-), seeds AS NOT MATERIALIZED (
-    SELECT * FROM facts WHERE unit_id=ANY(%(ids)s)
+      AND unit_id=ANY(%(ids)s)
 )
 """
 
+
+_CANDIDATE = """
+candidate.tenant_id=seed.tenant_id AND candidate.user_id=seed.user_id
+AND candidate.kind='fact' AND candidate.generation_id=%(generation)s
+AND candidate.unit_id<>seed.unit_id
+AND (SELECT true FROM eligible qualified WHERE
+     (qualified.tenant_id,qualified.user_id,qualified.unit_id)=
+     (candidate.tenant_id,candidate.user_id,candidate.unit_id)) IS TRUE
+"""
+
 _SEMANTIC = (
-    _FACTS
-    + """
+    _seeds(",embedding")
+    + f"""
 , inserted AS (
     INSERT INTO unit_links(tenant_id,user_id,source_id,target_id,kind,weight)
     SELECT seed.tenant_id,seed.user_id,seed.unit_id,target.unit_id,'semantic',target.weight
     FROM seeds seed
     CROSS JOIN LATERAL (
-        SELECT candidate.unit_id,1-(candidate.embedding <=> seed.embedding) AS weight
-        FROM facts candidate
-        WHERE candidate.tenant_id=seed.tenant_id AND candidate.user_id=seed.user_id
-          AND candidate.unit_id<>seed.unit_id
-          AND 1-(candidate.embedding <=> seed.embedding)>0
-          AND 1-(candidate.embedding <=> seed.embedding)>=%(similarity)s
-          AND NOT EXISTS (
-              SELECT 1 FROM unit_links prior
-              WHERE prior.tenant_id=seed.tenant_id AND prior.user_id=seed.user_id
-                AND prior.source_id=seed.unit_id AND prior.target_id=candidate.unit_id
-                AND prior.kind='semantic'
-          )
-        ORDER BY candidate.embedding <=> seed.embedding,candidate.unit_id
-        LIMIT GREATEST(0,%(semantic_neighbors)s-(
-            SELECT count(*) FROM unit_links prior
-            WHERE prior.tenant_id=seed.tenant_id AND prior.user_id=seed.user_id
-              AND prior.source_id=seed.unit_id AND prior.kind='semantic'
-        ))
+        WITH neighbors AS MATERIALIZED (
+            SELECT candidate.unit_id,candidate.embedding <=> seed.embedding AS distance
+            FROM search_units candidate
+            WHERE {_CANDIDATE}
+              AND NOT EXISTS (
+                  SELECT 1 FROM unit_links prior
+                  WHERE prior.tenant_id=seed.tenant_id AND prior.user_id=seed.user_id
+                    AND prior.source_id=seed.unit_id AND prior.target_id=candidate.unit_id
+                    AND prior.kind='semantic'
+              )
+            ORDER BY candidate.embedding <=> seed.embedding
+            LIMIT GREATEST(0,%(semantic_neighbors)s-(
+                SELECT count(*) FROM unit_links prior
+                WHERE prior.tenant_id=seed.tenant_id AND prior.user_id=seed.user_id
+                  AND prior.source_id=seed.unit_id AND prior.kind='semantic'
+            ))
+        )
+        SELECT unit_id,1-distance AS weight FROM neighbors
+        WHERE 1-distance>0 AND 1-distance>=%(similarity)s
+        ORDER BY distance,unit_id
     ) target
     ON CONFLICT DO NOTHING
     RETURNING 1
@@ -72,17 +85,16 @@ SELECT count(*) FROM inserted
 """
 
 _INTERVAL = (
-    _FACTS
-    + """
+    _seeds()
+    + f"""
 , proposals AS (
     SELECT seed.tenant_id,seed.user_id,seed.unit_id AS source_id,
            target.unit_id AS target_id,target.source_annotation,target.target_annotation,target.gap
     FROM seeds seed
     CROSS JOIN LATERAL (
-        SELECT candidate.unit_id,witness.source_annotation,witness.target_annotation,witness.gap
-        FROM facts candidate
-        CROSS JOIN LATERAL (
-            SELECT source_time.annotation_id AS source_annotation,
+        WITH witnesses AS (
+            SELECT DISTINCT ON (target_time.unit_id)
+                   target_time.unit_id,source_time.annotation_id AS source_annotation,
                    target_time.annotation_id AS target_annotation,
                    GREATEST(0,
                        EXTRACT(EPOCH FROM
@@ -95,21 +107,23 @@ _INTERVAL = (
               ON target_time.tenant_id=source_time.tenant_id
              AND target_time.user_id=source_time.user_id
              AND target_time.role=source_time.role
-             AND target_time.unit_id=candidate.unit_id
+             AND target_time.unit_id<>source_time.unit_id
+             AND target_time.time_span && tstzrange(
+                 lower(source_time.time_span)-%(horizon)s*interval '1 second',
+                 upper(source_time.time_span)+%(horizon)s*interval '1 second','[]')
             WHERE source_time.tenant_id=seed.tenant_id AND source_time.user_id=seed.user_id
               AND source_time.unit_id=seed.unit_id AND source_time.role=%(role)s
-              AND target_time.time_span && tstzrange(
-                  lower(source_time.time_span)-%(horizon)s*interval '1 second',
-                  upper(source_time.time_span)+%(horizon)s*interval '1 second','[]')
-            ORDER BY gap,
-                     CASE WHEN seed.unit_id<candidate.unit_id
+            ORDER BY target_time.unit_id,gap,
+                     CASE WHEN seed.unit_id<target_time.unit_id
                           THEN source_time.annotation_id ELSE target_time.annotation_id END,
-                     CASE WHEN seed.unit_id<candidate.unit_id
+                     CASE WHEN seed.unit_id<target_time.unit_id
                           THEN target_time.annotation_id ELSE source_time.annotation_id END
-            LIMIT 1
-        ) witness
-        WHERE candidate.tenant_id=seed.tenant_id AND candidate.user_id=seed.user_id
-          AND candidate.unit_id<>seed.unit_id AND witness.gap<%(horizon)s
+        )
+        SELECT candidate.unit_id,witness.source_annotation,witness.target_annotation,witness.gap
+        FROM witnesses witness JOIN search_units candidate ON
+             (candidate.tenant_id,candidate.user_id,candidate.unit_id)=
+             (seed.tenant_id,seed.user_id,witness.unit_id)
+        WHERE {_CANDIDATE} AND witness.gap<%(horizon)s
         ORDER BY witness.gap,candidate.unit_id
         LIMIT %(temporal_neighbors)s
     ) target
@@ -126,8 +140,24 @@ _POINT_COLUMNS = {
 
 
 def _point_query(column: str) -> str:
+    # Each side contributes at most k neighbors. Any omitted row already has
+    # k nearer (or equal-gap, smaller-ID) rows on that side and cannot enter
+    # the exact global top-k. Equal timestamps belong to the ascending side.
+    probes = " UNION ALL ".join(
+        f"""
+        (SELECT candidate.unit_id,candidate.{column} AS instant
+         FROM search_units candidate
+         WHERE {_CANDIDATE}
+           AND candidate.{column}{comparison}seed.{column}
+           AND candidate.{column}>seed.{column}-%(horizon)s*interval '1 second'
+           AND candidate.{column}<seed.{column}+%(horizon)s*interval '1 second'
+         ORDER BY candidate.{column} {direction},candidate.unit_id
+         LIMIT %(temporal_neighbors)s)
+        """
+        for comparison, direction in (("<", "DESC"), (">=", "ASC"))
+    )
     return (
-        _FACTS
+        _seeds(f",{column}")
         + f"""
     , proposals AS (
         SELECT seed.tenant_id,seed.user_id,seed.unit_id AS source_id,
@@ -135,15 +165,11 @@ def _point_query(column: str) -> str:
                NULL::text AS target_annotation,target.gap
         FROM seeds seed
         CROSS JOIN LATERAL (
-            SELECT candidate.unit_id,
+            SELECT neighbor.unit_id,
                    abs(EXTRACT(EPOCH FROM
-                       candidate.{column}-seed.{column}))::double precision AS gap
-            FROM facts candidate
-            WHERE candidate.tenant_id=seed.tenant_id AND candidate.user_id=seed.user_id
-              AND candidate.unit_id<>seed.unit_id
-              AND candidate.{column}>seed.{column}-%(horizon)s*interval '1 second'
-              AND candidate.{column}<seed.{column}+%(horizon)s*interval '1 second'
-            ORDER BY gap,candidate.unit_id
+                       neighbor.instant-seed.{column}))::double precision AS gap
+            FROM ({probes}) neighbor
+            ORDER BY gap,neighbor.unit_id
             LIMIT %(temporal_neighbors)s
         ) target
         WHERE seed.{column} IS NOT NULL
@@ -187,6 +213,14 @@ def build_links(
     with connection.cursor() as cursor:
         bind_user(cursor, authority)
         cursor.execute("SET LOCAL jit = off")
+        cursor.execute(
+            "SELECT set_config('hnsw.iterative_scan',%s,true), "
+            "set_config('hnsw.max_scan_tuples',%s,true)",
+            (
+                config.index.semantic_link_ann_iterative_scan,
+                str(config.index.semantic_link_ann_scan_max_tuples),
+            ),
+        )
         cursor.execute(_SEMANTIC, parameters)
         result["semantic_links"] = cursor.fetchone()[0]
         temporal_count = 0

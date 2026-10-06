@@ -261,6 +261,8 @@ class IndexConfig(FrozenModel):
     embedding_dimensions: PositiveInt = Field(le=2000)
     semantic_link_min_similarity: float = Field(ge=0, le=1)
     semantic_link_max_neighbors: PositiveInt
+    semantic_link_ann_iterative_scan: Literal["strict_order"]
+    semantic_link_ann_scan_max_tuples: PositiveInt
     temporal_link_max_neighbors: PositiveInt
     temporal_link_horizon_seconds: PositiveFloat
 
