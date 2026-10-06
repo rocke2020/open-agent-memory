@@ -161,7 +161,7 @@ def test_asserted_user_grants_upgrade_without_expanding_keyed_user_grants(tmp_pa
             "VALUES ('tenant','restricted','user:restricted',%s,'active')",
             (b"r" * 32,),
         )
-    assert apply_migrations(candidate_dsn, migrations) == 10
+    assert apply_migrations(candidate_dsn, migrations) == 12
     with psycopg.connect(candidate_dsn) as connection:
         after = connection.execute(
             "SELECT capabilities FROM grants WHERE tenant_id='tenant' AND user_id='alice'"
@@ -191,13 +191,13 @@ def test_legacy_asserted_v12_upgrades_and_restricts_function(tmp_path) -> None:
     )
     assert apply_migrations(candidate_dsn, previous) == 12
 
-    assert apply_migrations(candidate_dsn, migrations) == 9
+    assert apply_migrations(candidate_dsn, migrations) == 11
     assert apply_migrations(candidate_dsn, migrations) == 0
     with psycopg.connect(candidate_dsn) as connection:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(version,) for version in range(1, 22)]
+        assert versions == [(version,) for version in range(1, 24)]
         owner, api_can_execute, public_can_execute = connection.execute(
             "SELECT pg_get_userbyid(p.proowner),"
             "has_function_privilege('oam_api',p.oid,'EXECUTE'),"
@@ -248,7 +248,7 @@ def test_plural_insight_subtype_migration_converts_existing_rows(tmp_path) -> No
                 "VALUES ('tenant','user',%s,1,'Supported synthesis',%s,'recipe','generation',1,%s)",
                 (f"insight-{index}", b"x" * 32, subtype),
             )
-    assert apply_migrations(candidate_dsn, migrations) == 2
+    assert apply_migrations(candidate_dsn, migrations) == 4
     with psycopg.connect(candidate_dsn) as connection:
         values = connection.execute("SELECT subtype FROM insights ORDER BY insight_id").fetchall()
         default = connection.execute(

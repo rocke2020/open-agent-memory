@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import threading
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
@@ -75,7 +76,7 @@ class MemoryStore:
             sha256=hashlib.sha256(content).hexdigest(),
         )
 
-    def finish(self, *, schedule_consolidation=False):
+    def finish(self, *, schedule_consolidation=False, semantic_seed_ids=None):
         self.finished = True
 
     def fail(self, error):
@@ -479,7 +480,7 @@ def test_interaction_locator_keeps_original_message_order_and_internal_id(monkey
     monkeypatch.setattr(index_source, "IndexStore", lambda *args, **kwargs: store)
     from oam.indexing import links
 
-    monkeypatch.setattr(links, "build_links", lambda *args, **kwargs: {})
+    monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
 
     assert index_source.process_one(
         store.config, "queue", "content", models=LocalModels(), worker_id="worker"
@@ -493,7 +494,7 @@ def test_interaction_locator_keeps_original_message_order_and_internal_id(monkey
 
 @pytest.mark.parametrize(
     ("model_calls", "provider_calls", "expected_waves"),
-    [(2, 16, [2, 2, 2, 2, 1]), (8, 16, [8, 1]), (8, 2, [2, 2, 2, 2, 1])],
+    [(2, 16, [1, 1, 1, 1, 1, 1, 1, 1, 1]), (8, 16, [7, 2]), (8, 2, [1, 1, 1, 1, 1, 1, 1, 1, 1])],
 )
 def test_interaction_extraction_waves_use_configured_model_capacity(
     monkeypatch, model_calls, provider_calls, expected_waves
@@ -548,7 +549,7 @@ def test_interaction_extraction_waves_use_configured_model_capacity(
     monkeypatch.setattr(index_source, "IndexStore", lambda *args, **kwargs: store)
     from oam.indexing import links
 
-    monkeypatch.setattr(links, "build_links", lambda *args, **kwargs: {})
+    monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
 
     assert index_source.process_one(
         store.config, "queue", "content", models=LocalModels(), worker_id="worker"
@@ -558,3 +559,120 @@ def test_interaction_extraction_waves_use_configured_model_capacity(
         f"message-{index}" for index in range(9)
     ]
     assert store.finished and store.stages["extraction_coverage"] == "complete"
+
+
+def test_interaction_pipeline_overlaps_next_extraction_with_previous_publish(monkeypatch):
+    request = {
+        "source_id": "document",
+        "messages": [
+            {
+                "message_id": f"message-{index}",
+                "role": "user",
+                "content": f"Statement {index}.",
+                "event_time": "2026-09-23T00:00:00Z",
+                "learning_eligible": True,
+            }
+            for index in range(3)
+        ],
+    }
+
+    class PipelineStore(MemoryStore):
+        def checkpoints(self, stages):
+            return [self.checkpoint(*stage) for stage in stages]
+
+    store = PipelineStore(content=json.dumps(request).encode(), input_role="interaction")
+    store.config = store.config.model_copy(
+        update={
+            "worker": store.config.worker.model_copy(update={"max_model_calls": 2}),
+            "provider": store.config.provider.model_copy(update={"llm_concurrency": 2}),
+            "extraction": store.config.extraction.model_copy(
+                update={"group_max_passages": 1, "reference_max_facts": 0}
+            ),
+        }
+    )
+    second_extraction_started = threading.Event()
+    embedding_started = threading.Event()
+    overlap = threading.Event()
+    extraction_count = 0
+    extraction_lock = threading.Lock()
+    active_calls = 0
+    max_active_calls = 0
+    active_lock = threading.Lock()
+
+    class OverlapModels(LocalModels):
+        def generate(self, role, **kwargs):
+            nonlocal extraction_count, active_calls, max_active_calls
+            with extraction_lock:
+                extraction_count += 1
+                call_number = extraction_count
+            with active_lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+            try:
+                if call_number == 2:
+                    second_extraction_started.set()
+                    assert embedding_started.wait(1)
+                if role == "extraction":
+                    center = json.loads(kwargs["user"])["center"]
+                    return ModelResult(
+                        content=json.dumps(
+                            {
+                                "outcome": "facts",
+                                "facts": [
+                                    {
+                                        "text": "The user made a concrete statement.",
+                                        "quote": center["text"],
+                                        "start": center["start"],
+                                        "end": center["end"],
+                                    }
+                                ],
+                            }
+                        ),
+                        usage=Usage(),
+                    )
+                return super().generate(role, **kwargs)
+            finally:
+                with active_lock:
+                    active_calls -= 1
+
+        def embed(self, texts, **kwargs):
+            nonlocal active_calls, max_active_calls
+            with active_lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+            try:
+                if (
+                    texts == ("The user made a concrete statement.",)
+                    and not embedding_started.is_set()
+                ):
+                    assert second_extraction_started.wait(1)
+                    with active_lock:
+                        assert active_calls == 2
+                    overlap.set()
+                    embedding_started.set()
+                return super().embed(texts, **kwargs)
+            finally:
+                with active_lock:
+                    active_calls -= 1
+
+    connection = SimpleNamespace(cursor=lambda: None)
+
+    @contextmanager
+    def connect(*args, **kwargs):
+        yield connection
+
+    monkeypatch.setattr(index_source.psycopg, "connect", connect)
+    monkeypatch.setattr(
+        index_source, "claim_one", lambda *args, **kwargs: SimpleNamespace(stage="index_source")
+    )
+    monkeypatch.setattr(index_source, "IndexStore", lambda *args, **kwargs: store)
+    from oam.indexing import links
+
+    monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
+    assert index_source.process_one(
+        store.config, "queue", "content", models=OverlapModels(), worker_id="worker"
+    )
+    assert embedding_started.is_set()
+    assert overlap.is_set()
+    assert max_active_calls == 2
+    assert active_calls == 0

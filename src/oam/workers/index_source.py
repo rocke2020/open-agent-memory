@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+from concurrent.futures import Future, ThreadPoolExecutor
 from uuid import uuid4
 
 import psycopg
@@ -74,6 +75,11 @@ def process_one(
         return True
     store = IndexStore(content_dsn, config, claim, worker_id, index_generation(config, os.environ))
     try:
+        if claim.stage == "index_semantic_links":
+            from oam.workers.semantic_links import process_semantic_claim
+
+            process_semantic_claim(store)
+            return True
         if claim.stage == "consolidate":
             with store.transaction() as connection:
                 store.guard(connection)
@@ -103,13 +109,20 @@ def process_one(
         fact_ids = []
         extraction_diagnostics = []
         pending_extractions = []
+        effective_model_calls = min(
+            config.worker.max_model_calls,
+            config.provider.llm_concurrency,
+        )
+        extraction_batch_capacity = max(1, effective_model_calls - 1)
+        # One producer thread is sufficient for one-batch-ahead overlap; the
+        # reserved model slot stays available for embedding/publication.
+        extraction_executor = ThreadPoolExecutor(max_workers=1)
+        extraction_futures: list[Future] = []
 
-        def flush_extractions():
-            if not pending_extractions:
-                return
+        def prepare_extraction_batch(batch):
             tasks = []
             group_ids = []
-            for members in pending_extractions:
+            for members in batch:
                 passages = tuple(by_passage[item[0]] for item in members)
                 group_id = (
                     members[0][0]
@@ -119,7 +132,7 @@ def process_one(
                 group_ids.append(group_id)
                 if len(members) == 1:
                     passage_id, chunk, message, _, _, extraction_input, vector = members[0]
-                    envelope = extraction_envelope(
+                    extraction_envelope(
                         chunk=chunk,
                         config=config,
                         message_role=message.role.value,
@@ -135,9 +148,7 @@ def process_one(
                     options = (
                         {}
                         if len(members) == 1
-                        else {
-                            "vectors": tuple(item[-1] for item in members),
-                        }
+                        else {"vectors": tuple(item[-1] for item in members)}
                     )
                     references = freeze_extraction_references(
                         store, group_id, vector, extraction_input, **options
@@ -174,11 +185,13 @@ def process_one(
             extracted = (
                 [store.checkpoint(*tasks[0])] if len(tasks) == 1 else store.checkpoints(tasks)
             )
+            return batch, group_ids, extracted
+
+        def publish_extraction_batch(batch_result):
+            batch, group_ids, extracted = batch_result
             failures = []
             publishable = []
-            for members, group_id, output in zip(
-                pending_extractions, group_ids, extracted, strict=True
-            ):
+            for members, group_id, output in zip(batch, group_ids, extracted, strict=True):
                 if isinstance(output, Exception):
                     failures.append((group_id, output))
                     continue
@@ -196,31 +209,44 @@ def process_one(
                         "multiple extraction stages failed; usage coverage is partial"
                     ) from failures[0][1]
                 raise failures[0][1]
-            if publishable:
-                texts = tuple(fact.text for _, _, result in publishable for fact in result.facts)
-                batch_id = stable_id("facts_batch", [item[0] for item in publishable])
-                embedded = store.checkpoint(
-                    "facts_embed:" + batch_id,
-                    texts,
-                    lambda: models.embed(
-                        texts, timeout_seconds=config.model.attempt_timeout_seconds
-                    ),
-                )
-                offset = 0
-                for _, members, result in publishable:
-                    count = len(result.facts)
-                    fact_ids.extend(
-                        _publish_facts(
-                            store,
-                            {item[0]: (item[2], item[3], item[4]) for item in members},
-                            result,
-                            embedded["vectors"][offset : offset + count],
-                            metadata=request,
-                            diagnostics=extraction_diagnostics,
-                        )
+            if not publishable:
+                return
+            texts = tuple(fact.text for _, _, result in publishable for fact in result.facts)
+            batch_id = stable_id("facts_batch", [item[0] for item in publishable])
+            embedded = store.checkpoint(
+                "facts_embed:" + batch_id,
+                texts,
+                lambda: models.embed(texts, timeout_seconds=config.model.attempt_timeout_seconds),
+            )
+            offset = 0
+            for _, members, result in publishable:
+                count = len(result.facts)
+                fact_ids.extend(
+                    _publish_facts(
+                        store,
+                        {item[0]: (item[2], item[3], item[4]) for item in members},
+                        result,
+                        embedded["vectors"][offset : offset + count],
+                        metadata=request,
+                        diagnostics=extraction_diagnostics,
                     )
-                    offset += count
-            pending_extractions.clear()
+                )
+                offset += count
+
+        def submit_extraction_batch(batch):
+            if effective_model_calls <= 1:
+                publish_extraction_batch(prepare_extraction_batch(batch))
+                return
+            extraction_futures.append(extraction_executor.submit(prepare_extraction_batch, batch))
+            # Keep one batch queued behind the producer. The reserved model
+            # slot remains available for embedding/publication consumption.
+            if len(extraction_futures) >= 2:
+                publish_extraction_batch(extraction_futures.pop(0).result())
+
+        def drain_extractions():
+            while extraction_futures:
+                publish_extraction_batch(extraction_futures.pop(0).result())
+            extraction_executor.shutdown(wait=True)
 
         prepared = []
         previous = ""
@@ -350,12 +376,12 @@ def process_one(
                 pending_extractions.append(
                     [published.pop(identifier) for identifier in ending_groups[passage_id]]
                 )
-                if len(pending_extractions) == min(
-                    config.worker.max_model_calls,
-                    config.provider.llm_concurrency,
-                ):
-                    flush_extractions()
-        flush_extractions()
+                if len(pending_extractions) == extraction_batch_capacity:
+                    submit_extraction_batch(pending_extractions)
+                    pending_extractions = []
+        if pending_extractions:
+            submit_extraction_batch(pending_extractions)
+        drain_extractions()
         with store.transaction() as connection:
             store.guard(connection)
             store.readiness(
@@ -364,16 +390,23 @@ def process_one(
                 extraction_coverage="partial" if extraction_diagnostics else "complete",
                 extraction_diagnostics=extraction_diagnostics,
             )
-        from oam.indexing.links import build_links
+        from oam.indexing.links import build_temporal_links
 
         with store.transaction() as connection:
             store.guard(connection)
-            links = build_links(connection, store.authority, config, store.generation_id, fact_ids)
-            store.readiness(
-                connection, links_ready=True, temporal_links_ready=True, link_coverage=links
+            links = build_temporal_links(
+                connection, store.authority, config, store.generation_id, fact_ids
             )
-        store.finish(schedule_consolidation=config.index.insights_enabled)
-    except Exception as error:
+            store.readiness(connection, temporal_links_ready=True, link_coverage=links)
+        store.finish(
+            schedule_consolidation=config.index.insights_enabled, semantic_seed_ids=fact_ids
+        )
+    except BaseException as error:
+        executor = locals().get("extraction_executor")
+        if executor is not None:
+            for future in locals().get("extraction_futures", ()):
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
         store.fail(error)
         raise
     return True

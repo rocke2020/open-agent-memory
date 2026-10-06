@@ -6,7 +6,8 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Lock
 
 import httpx
 import psycopg
@@ -42,6 +43,8 @@ class IndexStore:
     claim: ClaimedWork
     worker_id: str
     generation_id: str
+    _unsettled_model_stages: set[str] = field(default_factory=set, init=False, repr=False)
+    _model_stage_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def __post_init__(self):
         self.authority = AuthorizedUser(
@@ -94,6 +97,8 @@ class IndexStore:
             )
 
     def guard(self, connection):
+        if self.claim.stage == "index_semantic_links":
+            connection.execute("SET LOCAL jit = off")
         user = connection.execute(
             "SELECT state,policy_epoch,index_generation_id FROM users "
             "WHERE tenant_id=%s AND user_id=%s FOR UPDATE",
@@ -101,7 +106,8 @@ class IndexStore:
         ).fetchone()
         row = connection.execute(
             "SELECT w.owner_id,w.fence,w.status,w.lease_expires_at>clock_timestamp(),"
-            "o.cancellation_revision,o.status,s.status,s.active_version,sv.status "
+            "o.cancellation_revision,o.status,s.status,s.active_version,sv.status,"
+            "w.generation_id,o.source_id,o.source_version,w.operation_id,w.input_digest "
             "FROM work_units w JOIN operations o USING(tenant_id,user_id,operation_id) "
             "JOIN sources s ON (s.tenant_id,s.user_id,s.source_id)="
             "(o.tenant_id,o.user_id,o.source_id) "
@@ -118,7 +124,15 @@ class IndexStore:
             or row is None
             or row[:5] != (self.worker_id, self.claim.fence, "running", True, 0)
             or row[5] not in {"accepted", "running"}
-            or row[6:] != ("active", self.source["source_version"], "active")
+            or row[6:9] != ("active", self.source["source_version"], "active")
+            or row[9:13]
+            != (
+                self.generation_id,
+                self.source["source_id"],
+                self.source["source_version"],
+                self.claim.operation_id,
+            )
+            or bytes(row[13]) != bytes(self.source["input_digest"])
         ):
             raise StaleIndexWork("claim, policy, or source is no longer eligible")
 
@@ -147,54 +161,50 @@ class IndexStore:
             stage,
             digest,
         )
-        with self.transaction() as connection:
-            self.guard(connection)
-            existing = connection.execute(
-                "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
-                "AND source_id=%s AND source_version=%s AND generation_id=%s "
-                "AND stage_key=%s AND input_digest=%s",
-                identity,
-            ).fetchone()
-            if existing:
-                return existing[0]
-            connection.execute(
-                RENEW_LEASE_SQL,
-                (
-                    self.config.lease.seconds,
-                    *self.key,
-                    self.claim.work_unit_id,
-                    self.worker_id,
-                    self.claim.fence,
-                ),
-            )
-            connection.execute(
-                "UPDATE attempts SET disposition='unknown_external_outcome',request_ref=%s "
-                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
-                (stage, *self.key, self.claim.work_unit_id, self.claim.attempt_id),
-            )
+        with self._model_stage_lock:
+            with self.transaction() as connection:
+                self.guard(connection)
+                existing = connection.execute(
+                    "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
+                    "AND source_id=%s AND source_version=%s AND generation_id=%s "
+                    "AND stage_key=%s AND input_digest=%s",
+                    identity,
+                ).fetchone()
+                if existing:
+                    return existing[0]
+                connection.execute(
+                    RENEW_LEASE_SQL,
+                    (
+                        self.config.lease.seconds,
+                        *self.key,
+                        self.claim.work_unit_id,
+                        self.worker_id,
+                        self.claim.fence,
+                    ),
+                )
+                self._record_model_stage_state(connection, stage, dispatched=(stage,))
+            self._unsettled_model_stages.add(stage)
         output = produce()
         if hasattr(output, "model_dump"):
             output = output.model_dump(mode="json")
         usage = output.get("usage", {})
-        with self.transaction() as connection:
-            self.guard(connection)
-            connection.execute(
-                "INSERT INTO index_stage_results(tenant_id,user_id,source_id,source_version,"
-                "generation_id,stage_key,input_digest,output,usage,work_unit_id,attempt_id) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                (
-                    *identity,
-                    Jsonb(output),
-                    Jsonb(usage),
-                    self.claim.work_unit_id,
-                    self.claim.attempt_id,
-                ),
-            )
-            connection.execute(
-                "UPDATE attempts SET disposition='claimed',response_ref=%s "
-                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
-                (stage, *self.key, self.claim.work_unit_id, self.claim.attempt_id),
-            )
+        with self._model_stage_lock:
+            with self.transaction() as connection:
+                self.guard(connection)
+                connection.execute(
+                    "INSERT INTO index_stage_results(tenant_id,user_id,source_id,source_version,"
+                    "generation_id,stage_key,input_digest,output,usage,work_unit_id,attempt_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                    (
+                        *identity,
+                        Jsonb(output),
+                        Jsonb(usage),
+                        self.claim.work_unit_id,
+                        self.claim.attempt_id,
+                    ),
+                )
+                self._record_model_stage_state(connection, stage, completed=(stage,))
+            self._unsettled_model_stages.remove(stage)
         return output
 
     def checkpoints(self, stages):
@@ -206,44 +216,46 @@ class IndexStore:
             return []
         outputs = [None] * len(stages)
         pending = []
-        with self.transaction() as connection:
-            self.guard(connection)
-            for index, (stage, inputs, produce) in enumerate(stages):
-                digest = input_digest(inputs)
-                identity = (
-                    *self.key,
-                    self.source["source_id"],
-                    self.source["source_version"],
-                    self.generation_id,
-                    stage,
-                    digest,
-                )
-                existing = connection.execute(
-                    "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
-                    "AND source_id=%s AND source_version=%s AND generation_id=%s "
-                    "AND stage_key=%s AND input_digest=%s",
-                    identity,
-                ).fetchone()
-                if existing:
-                    outputs[index] = existing[0]
-                else:
-                    pending.append((index, stage, identity, produce))
-            if pending:
-                connection.execute(
-                    RENEW_LEASE_SQL,
-                    (
-                        self.config.lease.seconds,
+        with self._model_stage_lock:
+            with self.transaction() as connection:
+                self.guard(connection)
+                for index, (stage, inputs, produce) in enumerate(stages):
+                    digest = input_digest(inputs)
+                    identity = (
                         *self.key,
-                        self.claim.work_unit_id,
-                        self.worker_id,
-                        self.claim.fence,
-                    ),
-                )
-                connection.execute(
-                    "UPDATE attempts SET disposition='unknown_external_outcome',request_ref=%s "
-                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
-                    (pending[0][1], *self.key, self.claim.work_unit_id, self.claim.attempt_id),
-                )
+                        self.source["source_id"],
+                        self.source["source_version"],
+                        self.generation_id,
+                        stage,
+                        digest,
+                    )
+                    existing = connection.execute(
+                        "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
+                        "AND source_id=%s AND source_version=%s AND generation_id=%s "
+                        "AND stage_key=%s AND input_digest=%s",
+                        identity,
+                    ).fetchone()
+                    if existing:
+                        outputs[index] = existing[0]
+                    else:
+                        pending.append((index, stage, identity, produce))
+                if pending:
+                    connection.execute(
+                        RENEW_LEASE_SQL,
+                        (
+                            self.config.lease.seconds,
+                            *self.key,
+                            self.claim.work_unit_id,
+                            self.worker_id,
+                            self.claim.fence,
+                        ),
+                    )
+                    self._record_model_stage_state(
+                        connection,
+                        pending[0][1],
+                        dispatched=tuple(stage for _, stage, _, _ in pending),
+                    )
+            self._unsettled_model_stages.update(stage for _, stage, _, _ in pending)
         if not pending:
             return outputs
         failures = []
@@ -262,37 +274,48 @@ class IndexStore:
                     continue
                 if hasattr(output, "model_dump"):
                     output = output.model_dump(mode="json")
-                with self.transaction() as connection:
-                    self.guard(connection)
-                    connection.execute(
-                        "INSERT INTO index_stage_results(tenant_id,user_id,source_id,"
-                        "source_version,generation_id,stage_key,input_digest,output,usage,"
-                        "work_unit_id,attempt_id) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                        (
-                            *identity,
-                            Jsonb(output),
-                            Jsonb(output.get("usage", {})),
-                            self.claim.work_unit_id,
-                            self.claim.attempt_id,
-                        ),
-                    )
+                with self._model_stage_lock:
+                    with self.transaction() as connection:
+                        self.guard(connection)
+                        connection.execute(
+                            "INSERT INTO index_stage_results(tenant_id,user_id,source_id,"
+                            "source_version,generation_id,stage_key,input_digest,output,usage,"
+                            "work_unit_id,attempt_id) "
+                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                            (
+                                *identity,
+                                Jsonb(output),
+                                Jsonb(output.get("usage", {})),
+                                self.claim.work_unit_id,
+                                self.claim.attempt_id,
+                            ),
+                        )
+                        self._record_model_stage_state(connection, stage, completed=(stage,))
+                    self._unsettled_model_stages.remove(stage)
                 outputs[index] = output
-        with self.transaction() as connection:
+        with self._model_stage_lock, self.transaction() as connection:
             self.guard(connection)
-            connection.execute(
-                "UPDATE attempts SET disposition=%s,request_ref=%s,response_ref=%s "
-                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
-                (
-                    "unknown_external_outcome" if failures else "claimed",
-                    failures[0][0] if failures else pending[-1][1],
-                    None if failures else pending[-1][1],
-                    *self.key,
-                    self.claim.work_unit_id,
-                    self.claim.attempt_id,
-                ),
+            self._record_model_stage_state(
+                connection, failures[0][0] if failures else pending[-1][1]
             )
         return outputs
+
+    def _record_model_stage_state(self, connection, stage_ref, *, dispatched=(), completed=()):
+        # Local stage state changes after guarded commits under the stage lock.
+        # Remote calls run outside both locks; failed calls remain unsettled.
+        pending = (self._unsettled_model_stages | set(dispatched)) - set(completed)
+        connection.execute(
+            "UPDATE attempts SET disposition=%s,request_ref=%s,response_ref=%s "
+            "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
+            (
+                "unknown_external_outcome" if pending else "claimed",
+                min(pending) if pending else stage_ref,
+                None if pending else stage_ref,
+                *self.key,
+                self.claim.work_unit_id,
+                self.claim.attempt_id,
+            ),
+        )
 
     def l2_progress(self, connection) -> tuple[set[str], str]:
         row = connection.execute(
@@ -390,10 +413,88 @@ class IndexStore:
             ),
         )
 
-    def finish(self, *, schedule_consolidation: bool = False):
+    def finish(self, *, schedule_consolidation: bool = False, semantic_seed_ids=None):
         with self.transaction() as connection:
+            if self.claim.stage == "index_semantic_links":
+                timeout = min(self.config.lease.seconds, self.config.model.attempt_timeout_seconds)
+                connection.execute(
+                    "SELECT set_config('statement_timeout',%s,true)", (str(int(timeout * 1000)),)
+                )
             self.guard(connection)
-            self.summarize_usage(connection)
+            if self.claim.stage != "index_semantic_links":
+                self.summarize_usage(connection)
+            seeds = sorted(set(semantic_seed_ids or ()))
+            if semantic_seed_ids is not None:
+                from oam.indexing.links import SEMANTIC_LINK_RECIPE
+
+                if seeds:
+                    manifest = {
+                        "source_id": self.source["source_id"],
+                        "source_version": self.source["source_version"],
+                        "generation_id": self.generation_id,
+                        "seed_ids": seeds,
+                        "recipe": SEMANTIC_LINK_RECIPE,
+                    }
+                    digest = input_digest(manifest)
+                    work_id = stable_id("work_semantic_links", self.claim.operation_id)
+                    connection.execute(
+                        "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,"
+                        "stage,input_digest,generation_id,dependency_ids,status,"
+                        "attempts_remaining) "
+                        "VALUES (%s,%s,%s,%s,'index_semantic_links',%s,%s,%s,'queued',%s) "
+                        "ON CONFLICT DO NOTHING",
+                        (
+                            *self.key,
+                            work_id,
+                            self.claim.operation_id,
+                            digest,
+                            self.generation_id,
+                            [self.claim.work_unit_id],
+                            self.config.retry.max_attempts,
+                        ),
+                    )
+                    existing = connection.execute(
+                        "SELECT input_digest,generation_id,dependency_ids,stage,operation_id "
+                        "FROM work_units WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
+                        (*self.key, work_id),
+                    ).fetchone()
+                    if existing != (
+                        digest,
+                        self.generation_id,
+                        [self.claim.work_unit_id],
+                        "index_semantic_links",
+                        self.claim.operation_id,
+                    ):
+                        raise StaleIndexWork("semantic work identity is incompatible")
+                    self.readiness(connection, semantic_link_manifest=manifest)
+                self.readiness(
+                    connection,
+                    memory_ready=True,
+                    temporal_links_ready=True,
+                    links_ready=not seeds,
+                    semantic_links_status="pending" if seeds else "succeeded",
+                )
+            if self.claim.stage == "index_semantic_links":
+                state = connection.execute(
+                    "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
+                    "AND operation_id=%s",
+                    (*self.key, self.claim.operation_id),
+                ).fetchone()[0]
+                count = connection.execute(
+                    "SELECT count(*) FROM unit_links WHERE tenant_id=%s AND user_id=%s "
+                    "AND kind='semantic' AND source_id=ANY(%s)",
+                    (*self.key, state["semantic_link_manifest"]["seed_ids"]),
+                ).fetchone()[0]
+                self.readiness(
+                    connection,
+                    links_ready=True,
+                    semantic_links_status="succeeded",
+                    link_coverage={
+                        **state.get("link_coverage", {}),
+                        "semantic_links": count,
+                        "coverage": "complete",
+                    },
+                )
             if schedule_consolidation:
                 consolidation_id = stable_id(
                     "op_consolidate", self.claim.operation_id, self.generation_id
@@ -448,6 +549,8 @@ class IndexStore:
                     consolidation_operation_id=consolidation_id,
                     consolidation_status="pending",
                 )
+            if self.claim.stage == "index_semantic_links":
+                self.guard(connection)
             connection.execute(
                 "UPDATE work_units SET status='succeeded',updated_at=clock_timestamp() "
                 "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
@@ -459,10 +562,10 @@ class IndexStore:
                 (*self.key, self.claim.work_unit_id, self.claim.attempt_id),
             )
             connection.execute(
-                "UPDATE operations SET status='succeeded',updated_at=clock_timestamp(), "
+                "UPDATE operations SET status=%s,updated_at=clock_timestamp(), "
                 "stage_state=stage_state-'error'-'error_detail' "
                 "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
-                (*self.key, self.claim.operation_id),
+                ("running" if seeds else "succeeded", *self.key, self.claim.operation_id),
             )
             if self.claim.stage == "consolidate":
                 connection.execute(
@@ -487,6 +590,14 @@ class IndexStore:
                 "WHERE tenant_id=%s AND user_id=%s",
                 (self.source["accepted_seq"], *self.key),
             )
+            if self.claim.stage == "index_semantic_links":
+                valid = connection.execute(
+                    "SELECT lease_expires_at>clock_timestamp() FROM work_units "
+                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
+                    (*self.key, self.claim.work_unit_id),
+                ).fetchone()
+                if valid is None or not valid[0]:
+                    raise StaleIndexWork("semantic completion lease expired")
 
     def fail(self, error: Exception):
         from oam.indexing.extraction import ExtractionError
@@ -502,6 +613,15 @@ class IndexStore:
         retryable = not_dispatched or (
             isinstance(error, ExtractionError) and known_usage is not None and error.retryable
         )
+        # The source coordinator drains all producers before failure settlement.
+        # One error cannot settle several stages with unsaved outcomes.
+        if len(self._unsettled_model_stages) > 1:
+            not_dispatched = False
+            known_usage = None
+            retryable = False
+        semantic = self.claim.stage == "index_semantic_links"
+        if semantic:
+            retryable = isinstance(error, (psycopg.Error, OSError))
         with self.transaction() as connection:
             owned = connection.execute(
                 "UPDATE work_units SET status=CASE WHEN %s AND attempts_remaining>0 "
@@ -512,7 +632,7 @@ class IndexStore:
                 (retryable, *self.key, self.claim.work_unit_id, self.worker_id, self.claim.fence),
             ).fetchone()
             if owned:
-                if not_dispatched:
+                if not_dispatched or semantic:
                     connection.execute(
                         "UPDATE attempts SET disposition='failed',usage=NULL,response_ref=NULL,"
                         "finished_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
@@ -532,9 +652,14 @@ class IndexStore:
                         ),
                     )
                 retrying = owned[0] == "queued"
+                if semantic:
+                    diagnostic.update(
+                        links_ready=False, semantic_links_status="pending" if retrying else "failed"
+                    )
                 if retrying:
                     diagnostic["last_retry_error"] = dict(diagnostic)
-                self.summarize_usage(connection)
+                if not semantic:
+                    self.summarize_usage(connection)
                 connection.execute(
                     "UPDATE operations SET status=%s,"
                     "stage_state=stage_state||%s::jsonb "

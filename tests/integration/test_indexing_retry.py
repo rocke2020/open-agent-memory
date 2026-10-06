@@ -1,7 +1,10 @@
 """Known invalid model output uses the existing bounded work-claim budget."""
 
 import json
-from threading import Barrier
+import os
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from threading import Barrier, Event
 
 import httpx
 import psycopg
@@ -139,6 +142,169 @@ def run_source(dsn, config, models):
     )
 
 
+def claimed_checkpoint_store(accepted_source):
+    _, dsn, _, config, _ = accepted_source
+    with psycopg.connect(make_conninfo(dsn, options="-c role=oam_queue")) as connection:
+        claim = claim_one(
+            connection.cursor(),
+            worker_id="overlap",
+            attempt_id="overlap-attempt",
+            lease_seconds=config.lease.seconds,
+            user_concurrency=config.user.concurrency,
+        )
+    store = IndexStore(
+        make_conninfo(dsn, options="-c role=oam_content"),
+        config,
+        claim,
+        "overlap",
+        index_generation(config, os.environ),
+    )
+    return store, dsn
+
+
+@pytest.mark.parametrize("unresolved", [False, True])
+@pytest.mark.parametrize("batch", [False, True])
+async def test_overlapping_checkpoints_preserve_outstanding_external_state(
+    accepted_source, unresolved, batch
+):
+    store, dsn = claimed_checkpoint_store(accepted_source)
+    started, release = Event(), Event()
+
+    def extraction():
+        started.set()
+        assert release.wait(5)
+        if unresolved:
+            raise httpx.ReadTimeout("synthetic outstanding extraction")
+        return {"usage": {}}
+
+    def peer_extraction():
+        assert release.wait(5)
+        return {"usage": {}}
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = (
+            executor.submit(
+                store.checkpoints,
+                [
+                    ("extract:outstanding", {}, extraction),
+                    ("extract:peer", {}, peer_extraction),
+                ],
+            )
+            if batch
+            else executor.submit(store.checkpoint, "extract:outstanding", {}, extraction)
+        )
+        try:
+            assert started.wait(5)
+            store.checkpoint("facts_embed:complete", {}, lambda: {"usage": {}})
+            with psycopg.connect(dsn) as connection:
+                assert connection.execute(
+                    "SELECT disposition,request_ref,response_ref FROM attempts "
+                    "WHERE attempt_id='overlap-attempt'"
+                ).fetchone() == ("unknown_external_outcome", "extract:outstanding", None)
+        finally:
+            release.set()
+        if unresolved:
+            if batch:
+                assert any(isinstance(output, httpx.ReadTimeout) for output in future.result(5))
+            else:
+                with pytest.raises(httpx.ReadTimeout):
+                    future.result(timeout=5)
+            store.checkpoint("passage_embed:later", {}, lambda: {"usage": {}})
+        else:
+            future.result(timeout=5)
+    with psycopg.connect(dsn) as connection:
+        disposition = connection.execute(
+            "SELECT disposition FROM attempts WHERE attempt_id='overlap-attempt'"
+        ).fetchone()[0]
+        assert disposition == ("unknown_external_outcome" if unresolved else "claimed")
+
+
+async def test_failed_checkpoint_commit_keeps_attempt_unresolved(accepted_source, monkeypatch):
+    store, dsn = claimed_checkpoint_store(accepted_source)
+    original = store.transaction
+    returned = Event()
+
+    @contextmanager
+    def failed_commit():
+        with original() as connection:
+            yield connection
+            if returned.is_set():
+                raise psycopg.OperationalError("synthetic checkpoint commit failure")
+
+    def completed():
+        returned.set()
+        return {"usage": {}}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "transaction", failed_commit)
+        with pytest.raises(psycopg.OperationalError):
+            store.checkpoint("extract:unsaved", {}, completed)
+    store.checkpoint("facts_embed:later", {}, lambda: {"usage": {}})
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT disposition,request_ref,response_ref FROM attempts "
+            "WHERE attempt_id='overlap-attempt'"
+        ).fetchone() == ("unknown_external_outcome", "extract:unsaved", None)
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM index_stage_results WHERE stage_key='extract:unsaved'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.parametrize("known_usage", [False, True])
+async def test_consumer_failure_preserves_unknown_overlapping_extraction(
+    accepted_source, known_usage
+):
+    client, dsn, tenant, config, operation_id = accepted_source
+    config = config.model_copy(
+        update={
+            "worker": config.worker.model_copy(update={"max_model_calls": 2}),
+            "provider": config.provider.model_copy(update={"llm_concurrency": 2}),
+        }
+    )
+    producer_started, consumer_failed = Event(), Event()
+
+    class MixedFailureModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            if role == "extraction":
+                text = json.loads(kwargs["user"])["center"]["text"]
+                if text == "Lin prefers morning updates.":
+                    producer_started.set()
+                    assert consumer_failed.wait(5)
+                    raise httpx.ReadTimeout("overlapping extraction outcome is unknown")
+            return super().generate(role, **kwargs)
+
+        def embed(self, texts, **kwargs):
+            if texts == ("Lin prefers concise updates.",):
+                assert producer_started.wait(5)
+                consumer_failed.set()
+                if known_usage:
+                    raise ModelOutputError(
+                        "completed fact embedding is invalid",
+                        usage=Usage(
+                            input_tokens=9, output_tokens=0, total_tokens=9, coverage="complete"
+                        ),
+                    )
+                raise httpx.ConnectTimeout("fact embedding failed before dispatch")
+            return super().embed(texts, **kwargs)
+
+    with pytest.raises(ModelOutputError if known_usage else httpx.ConnectTimeout):
+        run_source(dsn, config, MixedFailureModels())
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == "partial"
+    assert operation["usage"]["coverage"] == "partial"
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT disposition FROM attempts WHERE tenant_id=%s", (tenant,)
+        ).fetchone() == ("unknown_external_outcome",)
+        assert connection.execute(
+            "SELECT status FROM work_units WHERE tenant_id=%s", (tenant,)
+        ).fetchone() == ("failed_terminal",)
+    assert run_source(dsn, config, SyntheticIndexModels()) is False
+
+
 async def test_two_extractions_overlap_and_keep_distinct_source_support(accepted_source):
     client, dsn, tenant, config, operation_id = accepted_source
 
@@ -152,7 +318,12 @@ async def test_two_extractions_overlap_and_keep_distinct_source_support(accepted
                 self.barrier.wait()
             return super().generate(role, **kwargs)
 
-    assert run_source(dsn, config, OverlapModels()) is True
+    models = OverlapModels()
+    assert run_source(dsn, config, models) is True
+    direct = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert direct["status"] == "processing" and direct["readiness"]["memory_ready"] is True
+    assert direct["readiness"]["links_ready"] is False
+    assert run_source(dsn, config, models) is True
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "succeeded"
     assert operation["usage"]["total_tokens"] == 60
@@ -176,6 +347,8 @@ async def test_failed_consolidation_keeps_completed_l1(accepted_source):
     assert run_source(dsn, config, SyntheticIndexModels()) is True
     source = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     consolidate_id = source["stage_state"]["consolidation_operation_id"]
+    assert source["status"] == "processing" and source["readiness"]["links_ready"] is False
+    assert run_source(dsn, config, SyntheticIndexModels()) is True
     with psycopg.connect(dsn) as connection:
         connection.execute(
             "UPDATE work_units SET available_at=clock_timestamp() WHERE tenant_id=%s "
@@ -233,6 +406,9 @@ async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_at
         operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
         assert operation["status"] == "processing"
     assert run_source(dsn, config, models) is True
+    direct = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert direct["status"] == "processing" and direct["readiness"]["links_ready"] is False
+    assert run_source(dsn, config, models) is True
     assert run_source(dsn, config, models) is False
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "succeeded"
@@ -244,7 +420,10 @@ async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_at
     assert models.first_calls == 1
     with psycopg.connect(dsn) as connection:
         attempts = connection.execute(
-            "SELECT disposition,usage FROM attempts WHERE tenant_id=%s ORDER BY ordinal", (tenant,)
+            "SELECT a.disposition,a.usage FROM attempts a JOIN work_units w "
+            "USING(tenant_id,user_id,work_unit_id) WHERE a.tenant_id=%s "
+            "AND w.stage='index_source' ORDER BY a.ordinal",
+            (tenant,),
         ).fetchall()
         assert [row[0] for row in attempts] == ["failed", "failed", "succeeded"]
         assert [row[1]["total_tokens"] for row in attempts[:2]] == [30, 30]
@@ -293,6 +472,9 @@ async def test_pre_dispatch_connect_timeout_reuses_completed_stages(accepted_sou
             (tenant,),
         ).fetchone() == ("failed", None, None)
 
+    assert run_source(dsn, config, models) is True
+    direct = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert direct["status"] == "processing" and direct["readiness"]["links_ready"] is False
     assert run_source(dsn, config, models) is True
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "succeeded"

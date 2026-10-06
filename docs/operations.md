@@ -4,6 +4,8 @@
 
 OAM uses one canonical behavior file and explicit operator commands. No required role silently falls back to a provider or model; no accepted asynchronous write depends on a client connection remaining open.
 
+Apply all migrations before starting upgraded workers. Interaction indexing has two work units under one operation: direct facts and temporal links become readable first, and semantic links finish afterward. During that interval the HTTP operation reports `processing` with `memory_ready=true`, `temporal_links_ready=true`, `links_ready=false` and `stage_state.semantic_links_status="pending"` or `"running"`. The worker renews its lease between bounded semantic batches and computes proposals outside the shared user-row lock. Terminal semantic failure reports partial failure while preserving direct memory; an exhausted expired semantic claim settles on the next queue poll. Automatic database retries reuse the same work unit. The separate public retry endpoint still requires replanning for terminal dependency-bearing work; it does not restart this dependent stage. Wait for `links_ready=true` when complete graph coverage is required.
+
 Release runtimes need the system PostgreSQL client library (`libpq`) before installing OAM. The local development dependency group installs the self-contained Psycopg binary extension; release installations omit that group. The release image must retain the system library's license notice.
 
 ## 1. Configuration

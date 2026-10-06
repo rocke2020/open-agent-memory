@@ -119,13 +119,22 @@ async def retain(client, key, texts):
 
 
 def run_source(dsn, config, models):
-    return process_one(
+    processed = process_one(
         config,
         make_conninfo(dsn, options="-c role=oam_queue"),
         make_conninfo(dsn, options="-c role=oam_content"),
         models=models,
         worker_id="reference-worker",
     )
+    if processed:
+        process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="reference-worker",
+        )
+    return processed
 
 
 async def test_reference_checkpoint_keeps_full_claim_while_wire_uses_a_semantic_preview(

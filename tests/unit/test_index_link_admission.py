@@ -9,7 +9,7 @@ from psycopg.pq import TransactionStatus
 from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.indexing.identity import index_generation
-from oam.indexing.links import build_links
+from oam.indexing.links import propose_semantic_links
 
 
 class LinkConnection:
@@ -38,6 +38,9 @@ class LinkConnection:
     def fetchone(self):
         return self.row
 
+    def fetchall(self):
+        return []
+
 
 def test_link_search_uses_index_budget_independently_of_recall_budget(tmp_path):
     path = tmp_path / "override.yaml"
@@ -56,7 +59,7 @@ def test_link_search_uses_index_budget_independently_of_recall_budget(tmp_path):
     authority = AuthorizedUser("key", "tenant", "worker", "user", frozenset())
     connection = LinkConnection()
 
-    build_links(connection, authority, config, "generation", ["seed"])
+    propose_semantic_links(connection, authority, config, "generation", ["seed"])
 
     assert connection.settings == {
         "hnsw.iterative_scan": "strict_order",

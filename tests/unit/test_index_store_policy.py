@@ -12,7 +12,22 @@ class GuardConnection:
         self.rows = iter(
             [
                 ("active", 2, "generation"),
-                ("worker", 3, "running", True, 0, "running", source_status, 1, "active"),
+                (
+                    "worker",
+                    3,
+                    "running",
+                    True,
+                    0,
+                    "running",
+                    source_status,
+                    1,
+                    "active",
+                    "generation",
+                    "source",
+                    1,
+                    "operation",
+                    b"x" * 32,
+                ),
             ]
         )
 
@@ -28,8 +43,15 @@ def guarded_store(stage):
     store.key = ("tenant", "user")
     store.worker_id = "worker"
     store.generation_id = "generation"
-    store.claim = SimpleNamespace(work_unit_id="work", fence=3, stage=stage)
-    store.source = {"policy_epoch": 1, "source_version": 1}
+    store.claim = SimpleNamespace(
+        work_unit_id="work", fence=3, stage=stage, operation_id="operation"
+    )
+    store.source = {
+        "policy_epoch": 1,
+        "source_version": 1,
+        "source_id": "source",
+        "input_digest": b"x" * 32,
+    }
     return store
 
 

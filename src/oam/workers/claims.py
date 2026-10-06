@@ -60,6 +60,7 @@ def claim_one(
         raise ValueError("lease_seconds must be positive")
     if user_concurrency <= 0:
         raise ValueError("user_concurrency must be positive")
+    cursor.execute("SELECT oam_settle_expired_semantic_work()", ())
     cursor.execute(CLAIM_ONE_SQL, (worker_id, attempt_id, lease_seconds, user_concurrency))
     row = cursor.fetchone()
     if row is None:

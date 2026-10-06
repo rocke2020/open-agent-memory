@@ -1,4 +1,4 @@
-"""Bounded fact-link proposals inside the caller's fenced publication transaction."""
+"""Bounded semantic proposals and fenced fact-link publication."""
 
 from __future__ import annotations
 
@@ -10,6 +10,10 @@ from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE
+from oam.indexing.store import StaleIndexWork
+
+SEMANTIC_LINK_RECIPE = "oam-semantic-links-v1"
+SEMANTIC_SEED_BATCH_SIZE = 1000
 
 
 def _seeds(columns: str = "") -> str:
@@ -33,12 +37,10 @@ AND (SELECT true FROM eligible qualified WHERE
      (candidate.tenant_id,candidate.user_id,candidate.unit_id)) IS TRUE
 """
 
-_SEMANTIC = (
+_SEMANTIC_PROPOSALS = (
     _seeds(",embedding")
     + f"""
-, inserted AS (
-    INSERT INTO unit_links(tenant_id,user_id,source_id,target_id,kind,weight)
-    SELECT seed.tenant_id,seed.user_id,seed.unit_id,target.unit_id,'semantic',target.weight
+    SELECT seed.unit_id,target.unit_id,target.weight
     FROM seeds seed
     CROSS JOIN LATERAL (
         WITH neighbors AS MATERIALIZED (
@@ -62,10 +64,7 @@ _SEMANTIC = (
         WHERE 1-distance>0 AND 1-distance>=%(similarity)s
         ORDER BY distance,unit_id
     ) target
-    ON CONFLICT DO NOTHING
-    RETURNING 1
-)
-SELECT count(*) FROM inserted
+    ORDER BY seed.unit_id,target.weight DESC,target.unit_id
 """
 )
 
@@ -179,7 +178,7 @@ def _point_query(column: str) -> str:
     )
 
 
-def build_links(
+def build_temporal_links(
     connection,
     authority: AuthorizedUser,
     config: OAMConfig,
@@ -213,16 +212,6 @@ def build_links(
     with connection.cursor() as cursor:
         bind_user(cursor, authority)
         cursor.execute("SET LOCAL jit = off")
-        cursor.execute(
-            "SELECT set_config('hnsw.iterative_scan',%s,true), "
-            "set_config('hnsw.max_scan_tuples',%s,true)",
-            (
-                config.index.semantic_link_ann_iterative_scan,
-                str(config.index.semantic_link_ann_scan_max_tuples),
-            ),
-        )
-        cursor.execute(_SEMANTIC, parameters)
-        result["semantic_links"] = cursor.fetchone()[0]
         temporal_count = 0
         cursor.execute(
             "SELECT coalesce(bool_or(t.role='event'),false),"
@@ -250,4 +239,116 @@ def build_links(
                 cursor.execute(_point_query(column), {**parameters, "basis": basis})
                 temporal_count += cursor.fetchone()[0]
         result["temporal_links"] = temporal_count
+    return result
+
+
+def propose_semantic_links(connection, authority, config, generation_id, seed_ids):
+    """Read at most one seed batch; the caller supplies a read-only timed transaction."""
+    if len(seed_ids) > SEMANTIC_SEED_BATCH_SIZE:
+        raise ValueError("semantic seed batch exceeds its bound")
+    with connection.cursor() as cursor:
+        bind_user(cursor, authority)
+        cursor.execute("SET LOCAL jit = off")
+        cursor.execute(
+            "SELECT set_config('hnsw.iterative_scan',%s,true), "
+            "set_config('hnsw.max_scan_tuples',%s,true)",
+            (
+                config.index.semantic_link_ann_iterative_scan,
+                str(config.index.semantic_link_ann_scan_max_tuples),
+            ),
+        )
+        cursor.execute(
+            _SEMANTIC_PROPOSALS,
+            {
+                "tenant": authority.tenant_id,
+                "user": authority.user_id,
+                "generation": generation_id,
+                "ids": sorted(set(seed_ids)),
+                "similarity": config.index.semantic_link_min_similarity,
+                "semantic_neighbors": config.index.semantic_link_max_neighbors,
+            },
+        )
+        return cursor.fetchall()
+
+
+def publish_semantic_links(connection, authority, config, generation_id, seed_ids, proposals):
+    """Recheck endpoints and capacity inside the caller's guarded user-row transaction."""
+    if connection.info.transaction_status != TransactionStatus.INTRANS:
+        raise ValueError("semantic publication requires the caller's transaction")
+    connection.execute("SET LOCAL jit = off")
+    seeds = set(seed_ids)
+    pairs = {}
+    for seed, target, weight in proposals:
+        if seed not in seeds or seed == target or not 0 < weight <= 1:
+            raise ValueError("invalid semantic proposal")
+        if weight < config.index.semantic_link_min_similarity:
+            raise ValueError("semantic proposal is below the similarity threshold")
+        pairs[seed, target] = max(weight, pairs.get((seed, target), 0))
+    endpoints = seeds | {target for _, target in pairs}
+    parameters = {
+        "tenant": authority.tenant_id,
+        "user": authority.user_id,
+        "generation": generation_id,
+        "ids": sorted(endpoints),
+    }
+    eligible = connection.execute(_seeds() + "SELECT unit_id FROM seeds", parameters).fetchall()
+    if {row[0] for row in eligible} != endpoints:
+        raise StaleIndexWork("semantic proposal endpoints are no longer eligible")
+    existing = {seed: set() for seed in seeds}
+    for seed, target in connection.execute(
+        "SELECT source_id,target_id FROM unit_links WHERE tenant_id=%s AND user_id=%s "
+        "AND source_id=ANY(%s) AND kind='semantic'",
+        (authority.tenant_id, authority.user_id, sorted(seeds)),
+    ).fetchall():
+        existing[seed].add(target)
+    retained = []
+    by_seed = {seed: [] for seed in seeds}
+    for (seed, target), weight in pairs.items():
+        if target not in existing[seed]:
+            by_seed[seed].append((target, weight))
+    for seed in sorted(seeds):
+        remaining = max(0, config.index.semantic_link_max_neighbors - len(existing[seed]))
+        ordered = sorted(
+            by_seed[seed],
+            key=lambda item: (-item[1], item[0]),
+        )
+        retained.extend((seed, target, weight) for target, weight in ordered[:remaining])
+    if not retained:
+        return 0
+    return connection.execute(
+        "INSERT INTO unit_links(tenant_id,user_id,source_id,target_id,kind,weight) "
+        "SELECT %s,%s,p.source_id,p.target_id,'semantic',p.weight "
+        "FROM unnest(%s::text[],%s::text[],%s::double precision[]) "
+        "AS p(source_id,target_id,weight) ON CONFLICT DO NOTHING",
+        (
+            authority.tenant_id,
+            authority.user_id,
+            [row[0] for row in retained],
+            [row[1] for row in retained],
+            [row[2] for row in retained],
+        ),
+    ).rowcount
+
+
+def build_links(connection, authority, config, generation_id, new_fact_ids):
+    """Construct both link kinds inside an already guarded transaction."""
+    result = build_temporal_links(connection, authority, config, generation_id, new_fact_ids)
+    ids = sorted(
+        row[0]
+        for row in connection.execute(
+            _seeds() + "SELECT unit_id FROM seeds",
+            {
+                "tenant": authority.tenant_id,
+                "user": authority.user_id,
+                "generation": generation_id,
+                "ids": sorted(set(new_fact_ids)),
+            },
+        ).fetchall()
+    )
+    for offset in range(0, len(ids), SEMANTIC_SEED_BATCH_SIZE):
+        batch = ids[offset : offset + SEMANTIC_SEED_BATCH_SIZE]
+        proposals = propose_semantic_links(connection, authority, config, generation_id, batch)
+        result["semantic_links"] += publish_semantic_links(
+            connection, authority, config, generation_id, batch, proposals
+        )
     return result

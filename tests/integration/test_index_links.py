@@ -348,7 +348,7 @@ def test_semantic_link_query_has_an_hnsw_access_path(database):
     connection.execute("SET LOCAL enable_seqscan = off")
     connection.execute("SET LOCAL enable_sort = off")
     plan = connection.execute(
-        "EXPLAIN (FORMAT JSON) " + links._SEMANTIC,
+        "EXPLAIN (FORMAT JSON) " + links._SEMANTIC_PROPOSALS,
         {
             "tenant": authority.tenant_id,
             "user": authority.user_id,

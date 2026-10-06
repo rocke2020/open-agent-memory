@@ -935,6 +935,13 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
             models=models,
             worker_id="report-worker",
         )
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="report-worker",
+        )
         app.state.runtime.models = models
         generation_calls = list(models.generation_calls)
         for mode in ("fast", "mid", "deep"):

@@ -22,20 +22,35 @@ WHERE sp.tenant_id=current_setting('oam.tenant_id',true)
   AND {_ACTIVE_SUPPORT_PREDICATE}
 """.strip()
 
+# One parent per scalar lookup prevents stale statistics from turning support
+# validation into repeatedly reordered whole-user joins. Missing parents fail closed.
 _ALL_CURRENT_MEMORY_SUPPORT = f"""
 EXISTS (
     SELECT 1 FROM support sp
-    LEFT JOIN passages p USING (tenant_id,user_id,passage_id)
-    LEFT JOIN evidence e ON (e.tenant_id,e.user_id,e.evidence_id) =
-                            (sp.tenant_id,sp.user_id,sp.evidence_id)
-    LEFT JOIN source_versions v ON (v.tenant_id,v.user_id,v.source_id,v.source_version) =
-                                   (e.tenant_id,e.user_id,e.source_id,e.source_version)
-    LEFT JOIN sources s ON (s.tenant_id,s.user_id,s.source_id) =
-                        (e.tenant_id,e.user_id,e.source_id)
     WHERE (sp.tenant_id,sp.user_id,sp.memory_id) =
           (m.tenant_id,m.user_id,m.memory_id)
-    HAVING count(*)>0 AND bool_and(COALESCE(
-        p.generation_id=m.generation_id AND {_ACTIVE_SUPPORT_PREDICATE},false))
+    HAVING count(*)>0 AND bool_and(COALESCE((
+        SELECT (
+            SELECT (
+                SELECT (
+                    SELECT p.generation_id=m.generation_id AND {_ACTIVE_SUPPORT_PREDICATE}
+                    FROM sources s
+                    WHERE (s.tenant_id,s.user_id,s.source_id) =
+                          (sp.tenant_id,sp.user_id,e.source_id)
+                )
+                FROM source_versions v
+                WHERE (v.tenant_id,v.user_id,v.source_id,v.source_version) =
+                      (sp.tenant_id,sp.user_id,e.source_id,e.source_version)
+            )
+            FROM evidence e
+            WHERE (e.tenant_id,e.user_id,e.evidence_id) =
+                  (sp.tenant_id,sp.user_id,sp.evidence_id)
+        )
+        FROM passages p
+        WHERE (p.tenant_id,p.user_id,p.passage_id) =
+              (sp.tenant_id,sp.user_id,sp.passage_id)
+        OFFSET 0
+    ),false))
     OFFSET 0
 )
 """.strip()
