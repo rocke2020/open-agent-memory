@@ -9,10 +9,6 @@ import pytest
 from oam.workers import index_source, runner
 
 CONFIG_PATH = Path(__file__).parents[2] / "configs" / "oam.yaml"
-LIMITS = (
-    ("worker", "max_tasks"),
-    ("database", "worker_pool_max"),
-)
 
 
 @pytest.fixture(autouse=True)
@@ -60,14 +56,10 @@ def test_cleanup_claim_runs_without_loading_deleted_original(monkeypatch):
     assert calls == [("content", claim, "worker")]
 
 
-def configure_worker(monkeypatch, *, limiting_field):
+def configure_worker(monkeypatch):
     resolved = runner.load_config(CONFIG_PATH)
     config = resolved.config
-    for section, field in LIMITS:
-        value = 2 if (section, field) == limiting_field else 4
-        config = config.model_copy(
-            update={section: getattr(config, section).model_copy(update={field: value})}
-        )
+    config = config.model_copy(update={"worker": config.worker.model_copy(update={"max_tasks": 2})})
     monkeypatch.setattr(runner, "load_config", lambda _: replace(resolved, config=config))
     monkeypatch.setenv("OAM_WORKER_QUEUE_DSN", "synthetic-queue")
     monkeypatch.setenv("OAM_WORKER_CONTENT_DSN", "synthetic-content")
@@ -77,11 +69,8 @@ def configure_worker(monkeypatch, *, limiting_field):
     return stopped
 
 
-@pytest.mark.parametrize("limiting_field", LIMITS)
-def test_worker_overlaps_sources_within_each_configured_limit_and_drains(
-    monkeypatch, limiting_field
-):
-    stopped = configure_worker(monkeypatch, limiting_field=limiting_field)
+def test_worker_overlaps_sources_within_task_limit_and_drains(monkeypatch):
+    stopped = configure_worker(monkeypatch)
     overlapped = Event()
     exceeded = Event()
     release = Event()
@@ -98,7 +87,6 @@ def test_worker_overlaps_sources_within_each_configured_limit_and_drains(
                     queue,
                     content,
                     worker_id,
-                    config.worker.max_model_calls,
                 )
             )
             clients.append(models._http)
@@ -134,7 +122,7 @@ def test_worker_overlaps_sources_within_each_configured_limit_and_drains(
 
 
 def test_failed_claim_releases_capacity_and_does_not_log_private_error(monkeypatch, capsys):
-    stopped = configure_worker(monkeypatch, limiting_field=("worker", "max_tasks"))
+    stopped = configure_worker(monkeypatch)
     overlapped = Event()
     release = Event()
     lock = Lock()
@@ -174,7 +162,7 @@ def test_failed_claim_releases_capacity_and_does_not_log_private_error(monkeypat
 
 
 def test_failed_claim_reports_cause_type_without_private_provider_error(monkeypatch, capsys):
-    configure_worker(monkeypatch, limiting_field=("worker", "max_tasks"))
+    configure_worker(monkeypatch)
 
     def process(*args, **kwargs):
         try:
@@ -191,7 +179,7 @@ def test_failed_claim_reports_cause_type_without_private_provider_error(monkeypa
 
 
 def test_idle_worker_checks_for_new_work_within_half_second(monkeypatch):
-    configure_worker(monkeypatch, limiting_field=("worker", "max_tasks"))
+    configure_worker(monkeypatch)
 
     class StopAfterWait(Event):
         def __init__(self):

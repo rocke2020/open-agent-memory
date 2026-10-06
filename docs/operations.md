@@ -23,7 +23,7 @@ Required v0.0.1 roles are extraction, Insights, embedding, document vision, Reso
 - `oam preflight` resolves configuration, redacts secrets, and tests enabled role capabilities.
 - `oam migrate` applies versioned PostgreSQL migrations with a separate migration credential.
 - `oam api` runs the FastAPI role, bundled Inspector and, by default, an embedded background runner. Embedded mode requires the queue and worker-content DSNs in addition to the API DSN. Set `worker.embedded_enabled: false` for API-only processes.
-- `oam worker` runs the same background processors with separate queue/content database roles. `--once` processes at most one queued work unit and exits. Each runner has up to `worker.max_tasks` concurrent tasks, further bounded by `database.worker_pool_max`; per-user claims and model calls have separate limits. The embedded flag does not disable an explicitly launched worker.
+- `oam worker` runs the same background processors with separate queue/content database roles. `--once` processes at most one queued work unit and exits. Each runner has up to `worker.max_tasks` concurrent tasks; per-user claims, generation, embedding and indexing DB transactions have independent limits. The embedded flag does not disable an explicitly launched worker.
 - `oam model-permits --config <operator.yaml> list` inspects unresolved model-call metadata using the migration DSN's operator authority. API and worker credentials cannot directly update permit records.
 - `oam model-permits --config <operator.yaml> reconcile <permit-id> --reason <text> --known-completed` releases a permit after independently confirming remote completion. `--force-unknown` instead acknowledges unresolved remote work and leaves physical concurrency explicitly unverified.
 - `oam model-permits --config <operator.yaml> configure` applies changed YAML capacity values after APIs and workers have been stopped. Active HTTP ownership and live/uncertain model permits block the change.
@@ -48,18 +48,18 @@ The canonical capacity defaults are:
 |---|---:|---|
 | `api.max_concurrent_requests` | 10 | Shared admitted business HTTP requests across replicas |
 | `api.max_concurrent_writes` | 6 | Shared mutating requests; four total slots remain available to reads |
-| `worker.max_tasks` | 4 | Tasks per runner, subject to its database bound |
-| `worker.max_model_calls` | 8 | Outbound calls per background runner |
+| `worker.max_tasks` | 10 | Tasks per runner |
+| `database.indexing_concurrency` | 4 | Shared indexing transactions across replicas; model I/O holds no DB slot |
 | `user.concurrency` | 2 | Live claims per tenant/user across all runners |
 | `queue.max_pending_per_user` | 1,000 | Unfinished root intake requests, including delayed required children |
 | `provider.llm_concurrency` | 32 | Shared text/vision generation calls |
 | `provider.embedding_concurrency` | 8 | Shared embedding calls |
-| `provider.embedding_search_reserved` | 4 | Embedding capacity withheld from background work; search may use any free slot |
+| `provider.embedding_search_reserved` | 0 | Optional embedding capacity withheld from background work; search may use any free slot |
 | `provider.rerank_concurrency` | 4 | Local reranking calls per foreground model client |
 
 HTTP admission covers `/v1/` routes; liveness/readiness and static assets remain accessible without consuming those business slots. POST search is a read for admission. Overload returns retryable `429` with `Retry-After` before body consumption or source acceptance. Each admitted HTTP request holds a separate PostgreSQL session for its admission slot; include up to ten such sessions deployment-wide and short model-admission transactions in database connection planning, in addition to content pools. Runtime DSNs must connect directly or through session pooling; transaction pooling cannot preserve session advisory-lock ownership.
 
-The first API or worker startup freezes shared capacity settings in PostgreSQL. Replicas with conflicting shared limits fail startup. Replace the former `provider.global_concurrency` override with the explicit generation/embedding settings in an operator YAML; the loader rejects obsolete keys. For later tuning, stop APIs/workers, resolve uncertain permits, run the operator `configure` command, then restart all processes with matching settings. Numerical defaults are initial capacity settings; they are not a throughput or latency guarantee.
+The first API or worker startup freezes shared capacity settings in PostgreSQL. Replicas with conflicting shared limits fail startup. Operator YAML uses independent generation, embedding, worker-task and indexing-transaction limits; obsolete `worker.max_model_calls`, `database.worker_pool_max` and `provider.global_concurrency` keys must be removed. To upgrade an existing deployment to migration 0023 or change shared limits: stop API and worker processes, resolve uncertain permits, run `oam migrate`, run `oam model-permits --config <operator.yaml> configure`, then restart every replica with matching settings. The configurator rejects active model permits, HTTP admissions and indexing transaction slots. Numerical defaults are initial capacity settings; they are not a throughput or latency guarantee.
 
 Intake admission checks idempotency before the root count. Running work, automatic retries and delayed consolidation keep their root slot; an explicit retry needs a new slot. Exact receipt reuse and unchanged Profile refresh still work at the intake cap. Source-deletion cleanup is exempt so that a full intake queue does not prevent source removal. The URL path performs a cheap queue precheck before fetching and repeats the authoritative check when accepting bytes.
 

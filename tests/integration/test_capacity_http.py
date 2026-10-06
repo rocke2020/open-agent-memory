@@ -114,6 +114,11 @@ def provider_configuration(path: Path, *, embedded=True):
                                 if role == "document_vision"
                                 else "chat"
                             ],
+                            **(
+                                {"reasoning_effort": "none", "thinking": "disabled"}
+                                if role != "embedding"
+                                else {}
+                            ),
                         }
                         for role in roles
                     },

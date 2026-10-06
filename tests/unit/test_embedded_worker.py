@@ -45,18 +45,22 @@ def worker_dependencies(monkeypatch):
     return capacities, clients
 
 
-def worker_config(*, shutdown_seconds=2):
+def worker_config(*, shutdown_seconds=2, max_tasks=4):
     config = load_config(CONFIG_PATH).config
     return config.model_copy(
         update={
-            "worker": config.worker.model_copy(update={"max_tasks": 4, "max_model_calls": 1}),
+            "worker": config.worker.model_copy(update={"max_tasks": max_tasks}),
+            "database": config.database.model_copy(update={"indexing_concurrency": 1}),
             "user": config.user.model_copy(update={"concurrency": 1}),
             "lease": config.lease.model_copy(update={"shutdown_seconds": shutdown_seconds}),
         }
     )
 
 
-def test_runner_uses_task_slots_and_drains_before_closing_clients(monkeypatch, worker_dependencies):
+@pytest.mark.parametrize("max_tasks", [2, 10])
+def test_runner_uses_task_slots_and_drains_before_closing_clients(
+    monkeypatch, worker_dependencies, max_tasks
+):
     capacities, clients = worker_dependencies
     started = Event()
     release = Event()
@@ -66,14 +70,14 @@ def test_runner_uses_task_slots_and_drains_before_closing_clients(monkeypatch, w
     def process(config, queue, content, *, models, worker_id):
         with lock:
             calls.append((queue, content, worker_id))
-            if len(calls) == 4:
+            if len(calls) == max_tasks:
                 started.set()
         assert release.wait(3)
         assert not models._http.is_closed
         return True
 
     monkeypatch.setattr(runner, "process_one", process)
-    worker = runner.WorkerRunner.from_environment(worker_config(), ENVIRONMENT)
+    worker = runner.WorkerRunner.from_environment(worker_config(max_tasks=max_tasks), ENVIRONMENT)
     worker.start()
     with ThreadPoolExecutor(1) as supervisor:
         try:
@@ -84,9 +88,11 @@ def test_runner_uses_task_slots_and_drains_before_closing_clients(monkeypatch, w
             assert not stopped.done()
             assert not capacities[0].closed.is_set()
         finally:
+            worker.request_stop()
             release.set()
+            worker.shutdown()
         assert stopped.result(timeout=2)
-    assert len(calls) == 4, "shutdown admitted another claim"
+    assert len(calls) == max_tasks, "shutdown admitted another claim"
     assert all(call[:2] == ("synthetic-queue", "synthetic-content") for call in calls)
     assert not worker.healthy
     assert capacities[0].closed.is_set()

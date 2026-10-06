@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
+from threading import BoundedSemaphore, Lock
 
 import httpx
 import psycopg
@@ -14,12 +17,15 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
+from oam.capacity import CAPACITY_POLL_SECONDS, CapacityUnavailable
 from oam.config import OAMConfig
 from oam.db.context import bind_user
 from oam.workers.claims import RENEW_LEASE_SQL, ClaimedWork
 
 MEMORY_REVISION = 1
 CONSOLIDATION_DELAY_SECONDS = 8 * 60 * 60
+_INDEXING_CONNECTION_SLOTS: dict[tuple[str, int], BoundedSemaphore] = {}
+_INDEXING_CONNECTION_SLOTS_LOCK = Lock()
 
 
 class StaleIndexWork(RuntimeError):
@@ -84,14 +90,56 @@ class IndexStore:
 
     @contextmanager
     def transaction(self):
-        with psycopg.connect(self.dsn) as connection:
-            bind_user(connection.cursor(), self.authority)
-            yield connection
-            connection.execute(
-                "UPDATE users SET projection_epoch=projection_epoch+1 "
-                "WHERE tenant_id=%s AND user_id=%s",
-                self.key,
+        timeout = self.config.model.attempt_timeout_seconds
+        deadline = time.monotonic() + timeout
+        limit = self.config.database.indexing_concurrency
+        with _INDEXING_CONNECTION_SLOTS_LOCK:
+            slots = _INDEXING_CONNECTION_SLOTS.setdefault(
+                (self.dsn, limit), BoundedSemaphore(limit)
             )
+        if not slots.acquire(timeout=timeout):
+            raise CapacityUnavailable("indexing database connection wait expired")
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CapacityUnavailable("indexing database admission wait expired")
+            with psycopg.connect(
+                self.dsn, connect_timeout=max(1, math.ceil(remaining))
+            ) as connection:
+                original_timeout = connection.execute("SHOW statement_timeout").fetchone()[0]
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise CapacityUnavailable("indexing database admission wait expired")
+                    connection.execute(
+                        "SELECT set_config('statement_timeout',%s,true)",
+                        (str(max(1, int(remaining * 1000))),),
+                    )
+                    try:
+                        slot = connection.execute(
+                            "SELECT oam_indexing_db_admit(%s)", (limit,)
+                        ).fetchone()[0]
+                    except psycopg.errors.QueryCanceled as error:
+                        raise CapacityUnavailable(
+                            "indexing database admission wait expired"
+                        ) from error
+                    if time.monotonic() >= deadline:
+                        raise CapacityUnavailable("indexing database admission wait expired")
+                    if slot is not None:
+                        break
+                    time.sleep(min(CAPACITY_POLL_SECONDS, max(0, deadline - time.monotonic())))
+                connection.execute(
+                    "SELECT set_config('statement_timeout',%s,true)", (original_timeout,)
+                )
+                bind_user(connection.cursor(), self.authority)
+                yield connection
+                connection.execute(
+                    "UPDATE users SET projection_epoch=projection_epoch+1 "
+                    "WHERE tenant_id=%s AND user_id=%s",
+                    self.key,
+                )
+        finally:
+            slots.release()
 
     def guard(self, connection):
         user = connection.execute(
@@ -136,6 +184,22 @@ class IndexStore:
                     self.claim.fence,
                 ),
             )
+
+    @contextmanager
+    def model_pipeline(self):
+        """Keep one attempt unresolved until all overlapping model stages drain."""
+        self._pipeline_owns_attempt = True
+        try:
+            yield
+            with self.transaction() as connection:
+                self.guard(connection)
+                connection.execute(
+                    "UPDATE attempts SET disposition='claimed',request_ref=NULL,response_ref=NULL "
+                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                    (*self.key, self.claim.work_unit_id, self.claim.attempt_id),
+                )
+        finally:
+            self._pipeline_owns_attempt = False
 
     def checkpoint(self, stage: str, inputs: object, produce):
         digest = input_digest(inputs)
@@ -190,11 +254,12 @@ class IndexStore:
                     self.claim.attempt_id,
                 ),
             )
-            connection.execute(
-                "UPDATE attempts SET disposition='claimed',response_ref=%s "
-                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
-                (stage, *self.key, self.claim.work_unit_id, self.claim.attempt_id),
-            )
+            if not getattr(self, "_pipeline_owns_attempt", False):
+                connection.execute(
+                    "UPDATE attempts SET disposition='claimed',response_ref=%s "
+                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                    (stage, *self.key, self.claim.work_unit_id, self.claim.attempt_id),
+                )
         return output
 
     def checkpoints(self, stages):
@@ -278,20 +343,21 @@ class IndexStore:
                         ),
                     )
                 outputs[index] = output
-        with self.transaction() as connection:
-            self.guard(connection)
-            connection.execute(
-                "UPDATE attempts SET disposition=%s,request_ref=%s,response_ref=%s "
-                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
-                (
-                    "unknown_external_outcome" if failures else "claimed",
-                    failures[0][0] if failures else pending[-1][1],
-                    None if failures else pending[-1][1],
-                    *self.key,
-                    self.claim.work_unit_id,
-                    self.claim.attempt_id,
-                ),
-            )
+        if not getattr(self, "_pipeline_owns_attempt", False):
+            with self.transaction() as connection:
+                self.guard(connection)
+                connection.execute(
+                    "UPDATE attempts SET disposition=%s,request_ref=%s,response_ref=%s "
+                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
+                    (
+                        "unknown_external_outcome" if failures else "claimed",
+                        failures[0][0] if failures else pending[-1][1],
+                        None if failures else pending[-1][1],
+                        *self.key,
+                        self.claim.work_unit_id,
+                        self.claim.attempt_id,
+                    ),
+                )
         return outputs
 
     def l2_progress(self, connection) -> tuple[set[str], str]:

@@ -18,6 +18,7 @@ from oam.config import ConfigurationError, OAMConfig
 
 CAPACITY_POLL_SECONDS = 0.05
 EXPIRED_PERMIT_RELEASE_TIMEOUT_SECONDS = 0.1
+INDEXING_ADMISSION_NAMESPACE = 186865779
 
 
 class CapacityUnavailable(TimeoutError):
@@ -73,6 +74,7 @@ class PostgresCapacity:
             ),
             "user_claims": config.user.concurrency,
             "pending_roots": config.queue.max_pending_per_user,
+            "indexing_db": config.database.indexing_concurrency,
         }
 
     def _execute(

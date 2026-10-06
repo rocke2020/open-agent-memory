@@ -119,7 +119,7 @@ def test_canonical_config_has_one_owner_for_database_auth_and_work_limits() -> N
     assert config.database.worker_queue_dsn_env == "OAM_WORKER_QUEUE_DSN"
     assert config.database.worker_content_dsn_env == "OAM_WORKER_CONTENT_DSN"
     assert config.database.api_pool_max == 10
-    assert config.database.worker_pool_max == 6
+    assert config.database.indexing_concurrency == 4
     assert config.auth.cache_ttl_seconds == 30
     assert config.auth.cache_max_entries == 4096
     assert config.ingest.max_bytes == 128 * 1024
@@ -127,7 +127,7 @@ def test_canonical_config_has_one_owner_for_database_auth_and_work_limits() -> N
     assert config.queue.max_pending_per_user == 1000
     assert config.provider.llm_concurrency == 32
     assert config.provider.embedding_concurrency == 8
-    assert config.provider.embedding_search_reserved == 4
+    assert config.provider.embedding_search_reserved == 0
     assert config.user.concurrency == 2
 
 
