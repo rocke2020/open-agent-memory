@@ -318,26 +318,22 @@ class ModelRoles(FrozenModel):
     extraction: str | None = None
     insights: str | None = None
     embedding: str | None = None
-    document_vision: str | None = None
     abstract: str | None = None
     profile: str | None = None
     reranker: str | None = None
     planner: str | None = None
 
 
-ROLE_CAPABILITY: dict[str, ModelCapability] = {
-    "extraction": ModelCapability.CHAT,
-    "insights": ModelCapability.CHAT,
-    "embedding": ModelCapability.EMBEDDINGS,
-    "document_vision": ModelCapability.VISION,
-    "abstract": ModelCapability.CHAT,
-    "profile": ModelCapability.CHAT,
-    "reranker": ModelCapability.RERANK,
-    "planner": ModelCapability.CHAT,
+ROLE_CAPABILITIES: dict[str, tuple[ModelCapability, ...]] = {
+    "extraction": (ModelCapability.CHAT, ModelCapability.VISION),
+    "insights": (ModelCapability.CHAT,),
+    "embedding": (ModelCapability.EMBEDDINGS,),
+    "abstract": (ModelCapability.CHAT,),
+    "profile": (ModelCapability.CHAT,),
+    "reranker": (ModelCapability.RERANK,),
+    "planner": (ModelCapability.CHAT,),
 }
-REQUIRED_MODEL_ROLES = frozenset(
-    {"extraction", "insights", "embedding", "document_vision", "abstract", "profile"}
-)
+REQUIRED_MODEL_ROLES = frozenset({"extraction", "insights", "embedding", "abstract", "profile"})
 
 
 class ModelsConfig(FrozenModel):
@@ -346,15 +342,18 @@ class ModelsConfig(FrozenModel):
 
     @model_validator(mode="after")
     def validate_roles(self) -> ModelsConfig:
-        for role, capability in ROLE_CAPABILITY.items():
+        for role, capabilities in ROLE_CAPABILITIES.items():
             alias = getattr(self.roles, role)
             if alias is None:
                 continue
             binding = self.bindings.get(alias)
             if binding is None:
                 raise ValueError(f"models.roles.{role} references unknown binding {alias!r}")
-            if capability not in binding.capabilities:
-                raise ValueError(f"models.roles.{role} requires capability {capability.value!r}")
+            for capability in capabilities:
+                if capability not in binding.capabilities:
+                    raise ValueError(
+                        f"models.roles.{role} requires capability {capability.value!r}"
+                    )
         return self
 
     def required_unbound_roles(self) -> set[str]:

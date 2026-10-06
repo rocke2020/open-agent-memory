@@ -51,7 +51,9 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
                     },
                 }
             else:
-                if role == "extraction":
+                if role == "extraction" and isinstance(data["messages"][-1]["content"], list):
+                    output = json.dumps({"blocks": [{"text": "Glucose 5.2 mmol/L"}]})
+                elif role == "extraction":
                     envelope = json.loads(data["messages"][-1]["content"])
                     members = envelope.get("passages", [{"center": envelope.get("center")}])
                     if len(members) > 1 or len(members[0]["center"]["text"]) > 500:
@@ -62,8 +64,6 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
                         if "passage_id" in p:
                             fact["passage_id"] = p["passage_id"]
                         output = json.dumps({"outcome": "facts", "facts": [fact]})
-                elif role == "document_vision":
-                    output = json.dumps({"blocks": [{"text": "Glucose 5.2 mmol/L"}]})
                 else:
                     output = json.dumps({"abstract": "Glucose 5.2 mmol/L."})
                 body = {
@@ -166,7 +166,7 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
                     assert process_one(
                         config, queue, content, models=models, worker_id="resource-http"
                     )
-                    assert ("document_vision", 4096) in calls
+                    assert ("extraction", 4096) in calls
                     assert ("abstract", 4096) in calls
                     for mode in ("fast", "mid"):
                         recalled = await client.post(

@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import oam.cli as cli
 from oam.cli import _preflight, main
 from oam.config import load_config
@@ -11,6 +13,15 @@ from oam.models.preflight import (
 )
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
+
+
+@pytest.fixture(autouse=True)
+def unconfigured_model_environment(monkeypatch):
+    models = load_config(REPOSITORY_ROOT / "configs/oam.yaml").config.models
+    for binding in models.bindings.values():
+        for name in (binding.model_env, binding.endpoint_env, binding.api_key_env):
+            if name is not None:
+                monkeypatch.delenv(name, raising=False)
 
 
 def test_cli_entrypoint_loads_dotenv_without_overriding_process_environment(
@@ -62,10 +73,16 @@ def test_validate_export_command_checks_downloaded_members(tmp_path, capsys) -> 
     assert main(["validate-export", str(tmp_path)]) == 2
 
 
-def test_preflight_fails_closed_and_names_every_missing_required_role(capsys) -> None:
-    exit_code = main(
-        ["preflight", "--config", str(REPOSITORY_ROOT / "configs" / "oam.yaml"), "--json"]
+def test_preflight_fails_closed_and_names_every_missing_required_role(tmp_path, capsys) -> None:
+    config = tmp_path / "unbound.yaml"
+    config.write_text(
+        "models:\n  roles:\n"
+        + "".join(
+            f"    {role}: null\n"
+            for role in ("abstract", "embedding", "extraction", "insights", "profile")
+        )
     )
+    exit_code = _preflight(config, as_json=True, environment={})
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 2
@@ -74,7 +91,6 @@ def test_preflight_fails_closed_and_names_every_missing_required_role(capsys) ->
         "contract_version": "0.0.1",
         "missing_required_roles": [
             "abstract",
-            "document_vision",
             "embedding",
             "extraction",
             "insights",
@@ -146,7 +162,6 @@ models:
     extraction: shared
     insights: shared
     embedding: shared
-    document_vision: shared
     abstract: shared
     profile: shared
   bindings:

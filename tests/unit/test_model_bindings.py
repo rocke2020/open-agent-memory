@@ -13,7 +13,7 @@ def _models() -> ModelsConfig:
                 model="example-chat",
                 endpoint_env="OAM_CHAT_URL",
                 api_key_env="OAM_CHAT_KEY",
-                capabilities=frozenset({ModelCapability.CHAT}),
+                capabilities=frozenset({ModelCapability.CHAT, ModelCapability.VISION}),
             )
         },
     )
@@ -48,7 +48,7 @@ def test_resolver_reads_model_from_environment_without_later_mutation() -> None:
                 protocol="openai_compatible",
                 model_env="OAM_CHAT_MODEL",
                 endpoint_env="OAM_CHAT_URL",
-                capabilities=frozenset({ModelCapability.CHAT}),
+                capabilities=frozenset({ModelCapability.CHAT, ModelCapability.VISION}),
             )
         },
     )
@@ -70,7 +70,7 @@ def test_model_binding_requires_exactly_one_model_source(model_fields) -> None:
         ModelBinding(
             protocol="openai_compatible",
             endpoint_env="OAM_CHAT_URL",
-            capabilities=frozenset({ModelCapability.CHAT}),
+            capabilities=frozenset({ModelCapability.CHAT, ModelCapability.VISION}),
             **model_fields,
         )
 
@@ -95,7 +95,7 @@ def test_resolver_fails_closed_when_environment_model_is_missing() -> None:
                 protocol="openai_compatible",
                 model_env="OAM_CHAT_MODEL",
                 endpoint_env="OAM_CHAT_URL",
-                capabilities=frozenset({ModelCapability.CHAT}),
+                capabilities=frozenset({ModelCapability.CHAT, ModelCapability.VISION}),
             )
         },
     )

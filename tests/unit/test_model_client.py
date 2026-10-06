@@ -20,7 +20,7 @@ def _binding(capability: ModelCapability):
                 model="synthetic-model",
                 endpoint_env="MODEL_URL",
                 api_key_env="MODEL_KEY",
-                capabilities=frozenset({ModelCapability.CHAT, capability}),
+                capabilities=frozenset({ModelCapability.CHAT, ModelCapability.VISION, capability}),
                 reasoning_effort="low",
                 thinking="disabled",
             )

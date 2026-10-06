@@ -136,7 +136,7 @@ class RuntimeModels:
             raise ValueError("vision requires nonempty PNG or JPEG bytes")
         if not system.strip() or not user.strip():
             raise ValueError("vision requires nonempty system and user content")
-        binding = self._binding("document_vision", "vision")
+        binding = self._binding("extraction", "vision")
         encoded = base64.b64encode(image).decode("ascii")
         body = self._post(
             binding,
