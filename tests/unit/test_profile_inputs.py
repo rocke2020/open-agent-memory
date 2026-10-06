@@ -2,6 +2,7 @@ import json
 import sqlite3
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -61,9 +62,19 @@ class ProfileCursor:
         self.connection = connection
         self.rows = []
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
     def execute(self, query, parameters=()):
         self.connection.calls.append((query, parameters))
-        if "/* profile:state */" in query:
+        if "SELECT index_generation_id FROM users" in query:
+            self.rows = [(self.connection.state["index_generation_id"],)]
+        elif "SELECT 1 FROM users" in query:
+            self.rows = [(1,)]
+        elif "/* profile:state */" in query:
             self.rows = [self.connection.state] if self.connection.state else []
         elif "/* profile:eligible */" in query:
             self.rows = self.connection.units
@@ -162,6 +173,9 @@ class ProfileConnection:
 
     def cursor(self, **_kwargs):
         return ProfileCursor(self)
+
+    def execute(self, query, parameters=()):
+        return self.cursor().execute(query, parameters)
 
 
 def authority(capabilities=frozenset({"memory:read"})):
@@ -345,3 +359,99 @@ def test_loader_requires_read_capability_and_current_generation() -> None:
     connection.state["index_generation_id"] = "gen_old"
     with pytest.raises(ValueError, match="generation"):
         load(connection)
+
+
+@pytest.mark.parametrize("remove_support", [False, True])
+def test_profile_read_uses_stored_collection_generation_and_keeps_support_checks(
+    monkeypatch, remove_support
+) -> None:
+    from oam.config import load_config
+    from oam.profiles import service
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection = ProfileConnection()
+    inputs = load(connection)
+    snapshot = {
+        "profile_revision": 7,
+        "generation_id": "gen_1",
+        "content": "The user prefers Python examples [1].",
+        "references": [{"source_id": "chat_1"}],
+        "support_ids": ["fact_unit_1"],
+        "instruction": None,
+        "input_identity": service.profile_identity(inputs.identity, None),
+        "published_at": None,
+    }
+    if remove_support:
+        connection.units.clear()
+    pool = type("Pool", (), {"connection": lambda _self: nullcontext(connection)})()
+    connection.calls.clear()
+    monkeypatch.setattr(service, "index_generation", lambda *_args: "gen_new")
+    monkeypatch.setattr(service, "_current_snapshot", lambda *_args: snapshot)
+    policies = []
+    monkeypatch.setattr(
+        service.SourceInspector,
+        "_check_policy",
+        lambda _connection, _authority, epoch: policies.append(epoch),
+    )
+
+    result = service.ProfileService(config, pool).get(authority(), 500)
+
+    assert any("FOR SHARE" in query for query, _ in connection.calls)
+    assert connection.calls[0][0].startswith("SELECT set_config('oam.tenant_id'")
+    assert result["profile_revision"] == 7
+    assert result["generation_calls"] == 0
+    assert policies == [4]
+    if remove_support:
+        assert result["content"] is None
+        assert result["references"] == []
+        assert result["support_ids"] == []
+    else:
+        assert result["content"] == snapshot["content"]
+        assert result["references"] == snapshot["references"]
+        assert result["freshness"] == "current"
+    with pytest.raises(ValueError, match="index generation changed"):
+        service.ProfileService(config, pool).refresh(
+            authority(frozenset({"memory:read", "memory:append"}))
+        )
+
+
+@pytest.mark.parametrize("profile_resources", [False, True])
+def test_unindexed_stored_profile_keeps_its_generation_and_current_identity(
+    monkeypatch, profile_resources
+) -> None:
+    from oam.config import load_config
+    from oam.profiles import service
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection = ProfileConnection()
+    connection.state["index_generation_id"] = None
+    connection.units.clear()
+    if not profile_resources:
+        connection.resources.clear()
+    inputs = load(connection)
+    support_ids = sorted(inputs.eligible_support_ids)
+    snapshot = {
+        "profile_revision": 1,
+        "generation_id": "gen_1",
+        "content": "Python examples" if profile_resources else "",
+        "references": [],
+        "support_ids": support_ids,
+        "instruction": None,
+        "input_identity": service.profile_identity(inputs.identity, None),
+        "published_at": None,
+    }
+    pool = type("Pool", (), {"connection": lambda _self: nullcontext(connection)})()
+    monkeypatch.setattr(service, "index_generation", lambda *_args: "gen_new")
+    monkeypatch.setattr(service, "_current_snapshot", lambda *_args: snapshot)
+    monkeypatch.setattr(service.SourceInspector, "_check_policy", lambda *_args: None)
+
+    result = service.ProfileService(config, pool).get(authority(), 500)
+
+    assert result["freshness"] == "current"
+    assert result["content"] == snapshot["content"]
+    assert result["generation_calls"] == 0
+    monkeypatch.setattr(service, "_current_snapshot", lambda *_args: None)
+    missing = service.ProfileService(config, pool).get(authority(), 500)
+    assert missing["freshness"] == "missing"
+    assert missing["content"] is None
+    assert missing["generation_calls"] == 0

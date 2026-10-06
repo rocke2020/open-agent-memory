@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import oam.cli as cli
 from oam.cli import _preflight, main
 from oam.config import load_config
@@ -62,10 +64,16 @@ def test_validate_export_command_checks_downloaded_members(tmp_path, capsys) -> 
     assert main(["validate-export", str(tmp_path)]) == 2
 
 
-def test_preflight_fails_closed_and_names_every_missing_required_role(capsys) -> None:
-    exit_code = main(
-        ["preflight", "--config", str(REPOSITORY_ROOT / "configs" / "oam.yaml"), "--json"]
+@pytest.mark.parametrize("enable_features", [False, True], ids=["defaults", "enabled"])
+def test_preflight_fails_closed_and_names_every_missing_required_role(
+    tmp_path, capsys, enable_features
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "index:\n  insights_enabled: " + str(enable_features).lower() + "\n"
+        "profile:\n  enabled: " + str(enable_features).lower() + "\n"
     )
+    exit_code = main(["preflight", "--config", str(config_path), "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 2
@@ -77,9 +85,8 @@ def test_preflight_fails_closed_and_names_every_missing_required_role(capsys) ->
             "document_vision",
             "embedding",
             "extraction",
-            "insights",
-            "profile",
-        ],
+        ]
+        + (["insights", "profile"] if enable_features else []),
         "ready": False,
     }
     assert {role["status"] for role in payload["roles"]} == {"disabled"}

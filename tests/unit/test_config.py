@@ -38,9 +38,9 @@ def test_canonical_config_freezes_v001_trial_limits_without_active_provider_role
     assert resolved.config.api.max_concurrent_requests == 10
     assert set(resolved.config.models.bindings) == {"indexing_low", "indexing_high"}
     assert resolved.config.models.bindings["indexing_low"].reasoning_effort == "low"
-    assert resolved.config.models.bindings["indexing_low"].thinking == "disabled"
-    assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "high"
-    assert resolved.config.models.bindings["indexing_high"].thinking == "disabled"
+    assert resolved.config.models.bindings["indexing_low"].thinking == "enabled"
+    assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "low"
+    assert resolved.config.models.bindings["indexing_high"].thinking == "enabled"
     assert resolved.config.models.required_unbound_roles() == {
         "abstract",
         "document_vision",
@@ -287,22 +287,37 @@ def test_missing_canonical_numeric_limit_is_not_filled_by_python(
 def test_canonical_config_exposes_l2_and_profile_feature_switches() -> None:
     config = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config
 
-    assert config.index.insights_enabled is True
-    assert config.profile.enabled is True
+    assert config.index.insights_enabled is False
+    assert config.profile.enabled is False
 
 
-def test_disabled_l2_and_profile_remove_only_their_model_roles_from_required_set() -> None:
-    config = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config.model_copy(
+@pytest.mark.parametrize(
+    ("insights_enabled", "profile_enabled", "expected_optional_roles"),
+    [
+        (False, False, set()),
+        (True, False, {"insights"}),
+        (False, True, {"profile"}),
+        (True, True, {"insights", "profile"}),
+    ],
+)
+def test_l2_and_profile_switches_independently_control_required_model_roles(
+    insights_enabled: bool, profile_enabled: bool, expected_optional_roles: set[str]
+) -> None:
+    base = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config
+    config = base.model_copy(
         update={
-            "index": load_config(REPOSITORY_ROOT / "configs" / "oam.yaml").config.index.model_copy(
-                update={"insights_enabled": False}
-            ),
-            "profile": load_config(
-                REPOSITORY_ROOT / "configs" / "oam.yaml"
-            ).config.profile.model_copy(update={"enabled": False}),
+            "index": base.index.model_copy(update={"insights_enabled": insights_enabled}),
+            "profile": base.profile.model_copy(update={"enabled": profile_enabled}),
         }
     )
 
-    assert "insights" not in config.required_model_roles()
-    assert "profile" not in config.required_model_roles()
-    assert "extraction" in config.required_model_roles()
+    assert (
+        config.required_model_roles()
+        == {
+            "abstract",
+            "document_vision",
+            "embedding",
+            "extraction",
+        }
+        | expected_optional_roles
+    )

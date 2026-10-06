@@ -123,10 +123,19 @@ class ProfileService:
     def get(self, authority: AuthorizedUser, max_tokens: int) -> dict[str, Any]:
         if not authority.allows("memory:read"):
             raise PermissionError("Profile read is denied")
-        generation = index_generation(self.config, os.environ)
         with self.pool.connection() as connection, connection.transaction():
-            inputs = load_profile_inputs(connection, authority, generation)
+            bind_user(connection.cursor(), authority)
+            row = connection.execute(
+                "SELECT index_generation_id FROM users WHERE tenant_id=%s AND user_id=%s FOR SHARE",
+                (authority.tenant_id, authority.user_id),
+            ).fetchone()
             snapshot = _current_snapshot(connection, authority)
+            generation = row[0] if row else None
+            if generation is None and snapshot:
+                generation = snapshot["generation_id"]
+            if generation is None:
+                generation = index_generation(self.config, os.environ)
+            inputs = load_profile_inputs(connection, authority, generation)
             result = _view(self.config, inputs, snapshot, max_tokens)
             SourceInspector._check_policy(connection, authority, inputs.policy_epoch)
             return result

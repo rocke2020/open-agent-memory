@@ -52,8 +52,18 @@ async def test_inspector_serves_its_logo_and_uses_it_as_the_favicon(client) -> N
     assert "Open Agent Memory" in logo.text
 
 
-async def test_readiness_fails_when_required_model_roles_are_unbound(client) -> None:
-    response = await client.get("/health/ready")
+@pytest.mark.parametrize("enable_features", [False, True], ids=["defaults", "enabled"])
+async def test_readiness_fails_when_required_model_roles_are_unbound(
+    tmp_path, enable_features
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "index:\n  insights_enabled: " + str(enable_features).lower() + "\n"
+        "profile:\n  enabled: " + str(enable_features).lower() + "\n"
+    )
+    transport = httpx.ASGITransport(app=create_app(config_path))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health/ready")
 
     assert response.status_code == 503
     assert response.json()["missing_required_roles"] == [
@@ -61,9 +71,7 @@ async def test_readiness_fails_when_required_model_roles_are_unbound(client) -> 
         "document_vision",
         "embedding",
         "extraction",
-        "insights",
-        "profile",
-    ]
+    ] + (["insights", "profile"] if enable_features else [])
 
 
 async def test_binding_names_alone_cannot_make_the_foundation_ready(tmp_path) -> None:

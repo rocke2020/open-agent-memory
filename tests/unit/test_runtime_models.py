@@ -13,9 +13,10 @@ from oam.config import ModelsConfig, load_config
 from oam.models.runtime import ModelOutputError, RuntimeModels
 
 
-def test_canonical_extraction_preserves_low_reasoning_effort_on_the_wire():
+@pytest.mark.parametrize("binding_name", ["indexing_low", "indexing_high"])
+def test_canonical_extraction_preserves_low_reasoning_effort_on_the_wire(binding_name):
     base = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    roles = base.models.roles.model_copy(update={"extraction": "indexing_low"})
+    roles = base.models.roles.model_copy(update={"extraction": binding_name})
     configured = base.model_copy(update={"models": base.models.model_copy(update={"roles": roles})})
     seen = []
 
@@ -51,7 +52,7 @@ def test_canonical_extraction_preserves_low_reasoning_effort_on_the_wire():
         )
     assert json.loads(result.content) == {"outcome": "no_facts", "facts": []}
     assert seen[0]["reasoning_effort"] == "low"
-    assert seen[0]["thinking"] == {"type": "disabled"}
+    assert seen[0]["thinking"] == {"type": "enabled"}
     assert seen[0]["max_tokens"] == 64000
 
 

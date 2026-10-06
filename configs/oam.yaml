@@ -256,12 +256,12 @@ models:
       api_key_env: OAM_GENERATIVE_API_KEY
       capabilities: [chat, vision]
       reasoning_effort: low
-      thinking: disabled
+      thinking: enabled
     indexing_high:
       protocol: openai_compatible
       model_env: OAM_GENERATIVE_MODEL
       endpoint_env: OAM_GENERATIVE_ENDPOINT
       api_key_env: OAM_GENERATIVE_API_KEY
       capabilities: [chat]
-      reasoning_effort: high
-      thinking: disabled
+      reasoning_effort: low
+      thinking: enabled
