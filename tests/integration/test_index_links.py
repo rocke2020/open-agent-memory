@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
+from oam.db.context import bind_user
 from oam.indexing.links import build_links
 
 pytestmark = pytest.mark.integration
@@ -187,6 +188,31 @@ def test_semantic_neighbors_exclude_stale_foreign_and_wrong_generation_before_ca
     assert repeated["semantic_links"] == 0
 
 
+def test_semantic_prior_edges_do_not_consume_the_remaining_neighbor_probe(database):
+    connection, authority, config = database
+    config = config.model_copy(
+        update={"index": config.index.model_copy(update={"semantic_link_max_neighbors": 2})}
+    )
+    add_fact(connection, authority, "seed")
+    add_fact(connection, authority, "prior")
+    add_fact(connection, authority, "next", vector=(0.8, 0.6))
+    add_fact(connection, authority, "farther", vector=(0.6, 0.8))
+    connection.execute(
+        "INSERT INTO unit_links(tenant_id,user_id,source_id,target_id,kind,weight) "
+        "VALUES (%s,%s,'seed','prior','semantic',1)",
+        (authority.tenant_id, authority.user_id),
+    )
+    connection.execute("SET LOCAL ROLE oam_content")
+
+    result = build_links(connection, authority, config, "generation", ["seed"])
+
+    assert result["semantic_links"] == 1
+    rows = connection.execute(
+        "SELECT source_id,target_id FROM unit_links ORDER BY target_id"
+    ).fetchall()
+    assert rows == [("seed", "next"), ("seed", "prior")]
+
+
 def test_undated_facts_skip_temporal_link_queries(database, monkeypatch):
     from oam.indexing import links
 
@@ -306,3 +332,89 @@ def test_temporal_period_gap_treats_touching_and_overlapping_ranges_as_zero(data
     result = build_links(connection, authority, config, "generation", ["seed"])
     assert result["temporal_links"] == 2
     assert {row[5:] for row in temporal_rows(connection, authority)} == {(0.0, 1.0)}
+
+
+def test_semantic_link_query_has_an_hnsw_access_path(database):
+    from oam.indexing import links
+
+    connection, authority, config = database
+    add_fact(connection, authority, "seed")
+    add_fact(connection, authority, "near", vector=(0.8, 0.6))
+    add_fact(connection, authority, "far", vector=(-1.0, 0.0))
+    connection.execute("SET LOCAL ROLE oam_content")
+    bind_user(connection.cursor(), authority)
+    # Expose the indexed path even on this deliberately tiny fixture. This
+    # proves planner eligibility, not the default plan on a deployed history.
+    connection.execute("SET LOCAL enable_seqscan = off")
+    connection.execute("SET LOCAL enable_sort = off")
+    plan = connection.execute(
+        "EXPLAIN (FORMAT JSON) " + links._SEMANTIC,
+        {
+            "tenant": authority.tenant_id,
+            "user": authority.user_id,
+            "generation": "generation",
+            "ids": ["seed"],
+            "similarity": config.index.semantic_link_min_similarity,
+            "semantic_neighbors": config.index.semantic_link_max_neighbors,
+        },
+    ).fetchone()[0][0]["Plan"]
+
+    def indexes(node):
+        return {node.get("Index Name")} | set().union(
+            *(indexes(child) for child in node.get("Plans", []))
+        )
+
+    assert "search_units_embedding" in indexes(plan)
+
+
+def test_point_time_probes_preserve_equal_times_and_id_ties_across_directions(database):
+    connection, authority, config = database
+    config = config.model_copy(
+        update={"index": config.index.model_copy(update={"temporal_link_max_neighbors": 2})}
+    )
+    for node_id, day in (
+        ("seed", 5),
+        ("same", 5),
+        ("a_right", 6),
+        ("b_left", 4),
+        ("c_left", 4),
+        ("d_left", 3),
+    ):
+        add_fact(connection, authority, node_id, day=day)
+    connection.execute("SET LOCAL ROLE oam_content")
+
+    build_links(connection, authority, config, "generation", ["seed"])
+
+    rows = temporal_rows(connection, authority)
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("created", "a_right", "seed"),
+        ("created", "same", "seed"),
+        ("mentioned", "a_right", "seed"),
+        ("mentioned", "same", "seed"),
+        ("updated", "a_right", "seed"),
+        ("updated", "same", "seed"),
+    ]
+    assert [row[5:] for row in rows] == [(86400.0, 0.9), (0.0, 1.0)] * 3
+
+
+def test_interval_neighbors_reduce_annotation_witnesses_before_unit_cap(database):
+    connection, authority, config = database
+    config = config.model_copy(
+        update={"index": config.index.model_copy(update={"temporal_link_max_neighbors": 2})}
+    )
+    for node_id in ("seed", "a", "b", "c"):
+        add_fact(connection, authority, node_id)
+    for annotation_id, day in (("seed-0", 0), ("seed-10", 10)):
+        annotate(connection, authority, "seed", annotation_id, "event", day)
+    for day in (1, 2, 9, 11):
+        annotate(connection, authority, "a", f"a-{day}", "event", day)
+    annotate(connection, authority, "b", "b-2", "event", 2)
+    annotate(connection, authority, "c", "c-3", "event", 3)
+    connection.execute("SET LOCAL ROLE oam_content")
+
+    build_links(connection, authority, config, "generation", ["seed"])
+
+    assert temporal_rows(connection, authority) == [
+        ("event", "a", "seed", "a-1", "seed-0", 86400.0, 0.9),
+        ("event", "b", "seed", "b-2", "seed-0", 172800.0, 0.8),
+    ]

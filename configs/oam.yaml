@@ -123,11 +123,14 @@ search:
 
 index:
   # L2 Insight synthesis is independently configurable; Profile may consume L2 when enabled.
-  insights_enabled: true
+  insights_enabled: false
   embedding_dimensions: 1024
   # Create index-time semantic links only above this cosine similarity.
   semantic_link_min_similarity: 0.7
   semantic_link_max_neighbors: 20
+  # Index-time ANN budgets are independent of recall tuning.
+  semantic_link_ann_iterative_scan: strict_order
+  semantic_link_ann_scan_max_tuples: 20000
   temporal_link_max_neighbors: 20
   # Only facts within this many seconds can receive temporal links at indexing.
   temporal_link_horizon_seconds: 86400
@@ -150,7 +153,7 @@ context:
   tokenizer: oam-unicode-quarter-v1
 
 profile:
-  enabled: true
+  enabled: false
   max_content_bytes: 16384
   max_output_tokens: 2048
   attempt_timeout_seconds: 180
