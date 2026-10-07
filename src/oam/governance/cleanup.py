@@ -6,6 +6,7 @@ import hashlib
 
 import psycopg
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
@@ -24,13 +25,16 @@ def affected_trace_ids(rows, removed_unit_ids):
     return affected
 
 
-def cleanup_claim(dsn: str, claim: ClaimedWork, worker_id: str) -> None:
+def cleanup_claim(
+    dsn: str, claim: ClaimedWork, worker_id: str, *, pool: ConnectionPool | None = None
+) -> None:
     key = (claim.tenant_id, claim.user_id)
     authority = AuthorizedUser(
         "worker", claim.tenant_id, "worker", claim.user_id, frozenset({"source:delete"})
     )
     try:
-        with psycopg.connect(dsn) as connection:
+        connection_context = pool.connection() if pool is not None else psycopg.connect(dsn)
+        with connection_context as connection:
             bind_user(connection.cursor(), authority)
             connection.execute(
                 "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s FOR UPDATE", key
@@ -175,13 +179,21 @@ def cleanup_claim(dsn: str, claim: ClaimedWork, worker_id: str) -> None:
                 (Jsonb({"active_store_cleanup": "complete"}), *key, claim.operation_id),
             )
     except Exception:
-        _mark_failed(dsn, authority, claim, worker_id)
+        _mark_failed(dsn, authority, claim, worker_id, pool=pool)
         raise
 
 
-def _mark_failed(dsn: str, authority: AuthorizedUser, claim: ClaimedWork, worker_id: str) -> None:
+def _mark_failed(
+    dsn: str,
+    authority: AuthorizedUser,
+    claim: ClaimedWork,
+    worker_id: str,
+    *,
+    pool: ConnectionPool | None = None,
+) -> None:
     key = (claim.tenant_id, claim.user_id)
-    with psycopg.connect(dsn) as connection:
+    connection_context = pool.connection() if pool is not None else psycopg.connect(dsn)
+    with connection_context as connection:
         bind_user(connection.cursor(), authority)
         row = connection.execute(
             "UPDATE work_units SET status=CASE WHEN attempts_remaining>0 THEN 'queued' "

@@ -1,7 +1,5 @@
 """Deferred semantic reads outside the shared publication lock."""
 
-import psycopg
-
 from oam.db.context import bind_user
 from oam.indexing.links import (
     SEMANTIC_LINK_RECIPE,
@@ -57,7 +55,7 @@ def process_semantic_claim(store):
     for offset in range(0, len(seeds), SEMANTIC_SEED_BATCH_SIZE):
         batch = seeds[offset : offset + SEMANTIC_SEED_BATCH_SIZE]
         store.check_retry_claim()
-        with psycopg.connect(store.dsn) as connection:
+        with store.read_only_connection() as connection:
             connection.execute("SET TRANSACTION READ ONLY")
             bind_user(connection.cursor(), store.authority)
             _set_claim_timeout(connection, store)

@@ -62,3 +62,28 @@ def test_independent_source_indexing_survives_other_source_policy_change():
 def test_consolidation_rejects_changed_related_source_policy():
     with pytest.raises(StaleIndexWork):
         guarded_store("consolidate").guard(GuardConnection())
+
+
+def test_index_store_pool_checkout_is_bounded_by_pool_timeout():
+    from contextlib import contextmanager
+
+    config = SimpleNamespace(
+        model=SimpleNamespace(attempt_timeout_seconds=30),
+        database=SimpleNamespace(indexing_concurrency=1, pool_acquire_timeout_seconds=5),
+    )
+    checkout_timeouts = []
+
+    class Pool:
+        @contextmanager
+        def connection(self, *, timeout):
+            checkout_timeouts.append(timeout)
+            raise RuntimeError("stop after checkout")
+            yield
+
+    store = object.__new__(IndexStore)
+    store.dsn = "content"
+    store.config = config
+    store.pool = Pool()
+    with pytest.raises(RuntimeError, match="stop after checkout"), store.transaction():
+        pass
+    assert checkout_timeouts == [5]

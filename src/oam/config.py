@@ -216,7 +216,20 @@ class DatabaseConfig(FrozenModel):
     worker_queue_dsn_env: str = Field(min_length=1)
     worker_content_dsn_env: str = Field(min_length=1)
     api_pool_max: PositiveInt
+    worker_pool_max: PositiveInt = 10
+    pool_min_size: PositiveInt = 1
+    pool_acquire_timeout_seconds: PositiveFloat = 5.0
     indexing_concurrency: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_pool_sizes(self) -> DatabaseConfig:
+        if not math.isfinite(self.pool_acquire_timeout_seconds):
+            raise ValueError("pool_acquire_timeout_seconds must be finite")
+        if self.pool_min_size > self.api_pool_max:
+            raise ValueError("pool_min_size cannot exceed api_pool_max")
+        if self.pool_min_size > self.worker_pool_max:
+            raise ValueError("pool_min_size cannot exceed worker_pool_max")
+        return self
 
 
 class AuthConfig(FrozenModel):

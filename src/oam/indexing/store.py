@@ -15,6 +15,7 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from oam.auth.credentials import AuthorizedUser
 from oam.capacity import CAPACITY_POLL_SECONDS, CapacityUnavailable
@@ -48,6 +49,7 @@ class IndexStore:
     claim: ClaimedWork
     worker_id: str
     generation_id: str
+    pool: ConnectionPool | None = None
     _unsettled_model_stages: set[str] = field(default_factory=set, init=False, repr=False)
     _model_stage_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
@@ -105,9 +107,15 @@ class IndexStore:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise CapacityUnavailable("indexing database admission wait expired")
-            with psycopg.connect(
-                self.dsn, connect_timeout=max(1, math.ceil(remaining))
-            ) as connection:
+            if self.pool is None:
+                connection_context = psycopg.connect(
+                    self.dsn, connect_timeout=max(1, math.ceil(remaining))
+                )
+            else:
+                connection_context = self.pool.connection(
+                    timeout=min(remaining, self.config.database.pool_acquire_timeout_seconds)
+                )
+            with connection_context as connection:
                 original_timeout = connection.execute("SHOW statement_timeout").fetchone()[0]
                 while True:
                     remaining = deadline - time.monotonic()
@@ -142,6 +150,19 @@ class IndexStore:
                 )
         finally:
             slots.release()
+
+    @contextmanager
+    def read_only_connection(self):
+        """Checkout a content connection for a read-only semantic-link batch."""
+        timeout = self.config.database.pool_acquire_timeout_seconds
+        if self.pool is None:
+            with psycopg.connect(
+                self.dsn, connect_timeout=max(1, math.ceil(timeout))
+            ) as connection:
+                yield connection
+        else:
+            with self.pool.connection(timeout=timeout) as connection:
+                yield connection
 
     def guard(self, connection):
         if self.claim.stage == "index_semantic_links":

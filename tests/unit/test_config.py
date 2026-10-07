@@ -138,6 +138,8 @@ def test_canonical_config_has_one_owner_for_database_auth_and_work_limits() -> N
     assert config.database.worker_queue_dsn_env == "OAM_WORKER_QUEUE_DSN"
     assert config.database.worker_content_dsn_env == "OAM_WORKER_CONTENT_DSN"
     assert config.database.api_pool_max == 10
+    assert config.database.worker_pool_max == 10
+    assert config.database.pool_min_size == 1
     assert config.database.indexing_concurrency == 4
     assert config.auth.cache_ttl_seconds == 30
     assert config.auth.cache_max_entries == 4096
@@ -356,3 +358,24 @@ def test_l2_and_profile_switches_independently_control_required_model_roles(
         }
         | expected_optional_roles
     )
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ("pool_min_size: 11", "pool_min_size cannot exceed api_pool_max"),
+        ("pool_min_size: 2\n  worker_pool_max: 1", "pool_min_size cannot exceed worker_pool_max"),
+    ],
+)
+def test_database_pool_sizes_are_validated_at_config_load(tmp_path, settings, message):
+    path = tmp_path / "invalid-pool.yaml"
+    path.write_text("database:\n  " + settings + "\n")
+    with pytest.raises(ConfigurationError, match=message):
+        load_config(path)
+
+
+def test_pool_acquire_timeout_rejects_non_finite_value(tmp_path):
+    path = tmp_path / "invalid-pool-timeout.yaml"
+    path.write_text("database:\n  pool_acquire_timeout_seconds: .inf\n")
+    with pytest.raises(ConfigurationError, match="pool_acquire_timeout_seconds"):
+        load_config(path)

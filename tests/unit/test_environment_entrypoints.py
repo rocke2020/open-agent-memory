@@ -13,7 +13,7 @@ CONFIG_PATH = Path(__file__).parents[2] / "configs" / "oam.yaml"
 @pytest.fixture(autouse=True)
 def local_worker_capacity(monkeypatch):
     class Capacity:
-        def __init__(self, config, dsn):
+        def __init__(self, config, dsn, *, pool=None):
             pass
 
         def configure(self):
@@ -22,7 +22,20 @@ def local_worker_capacity(monkeypatch):
         def close(self):
             pass
 
+    class Pool:
+        def connection(self, timeout=None):
+            raise AssertionError("unit test pool must not be used by stubbed process")
+
+    class Pools:
+        def __init__(self):
+            self.queue = Pool()
+            self.content = Pool()
+
+        def close(self):
+            pass
+
     monkeypatch.setattr(runner, "PostgresCapacity", Capacity)
+    monkeypatch.setattr(runner, "create_worker_pools", lambda *args: Pools())
     monkeypatch.setattr(startup, "validate_startup_environment", lambda *args, **kwargs: None)
 
 
@@ -54,7 +67,7 @@ def test_worker_once_processes_one_claim_with_separate_roles(monkeypatch):
     monkeypatch.setenv("OAM_WORKER_CONTENT_DSN", "synthetic-content")
     calls = []
 
-    def process(config, queue, content, *, models, worker_id):
+    def process(config, queue, content, *, models, worker_id, **kwargs):
         calls.append((queue, content, worker_id, models))
         return True
 

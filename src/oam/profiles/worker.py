@@ -7,6 +7,7 @@ import json
 import httpx
 import psycopg
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
@@ -58,6 +59,7 @@ def process_profile_claim(
     content_dsn: str,
     *,
     models,
+    pool: ConnectionPool | None = None,
     claim: ClaimedWork,
     worker_id: str,
 ) -> None:
@@ -71,7 +73,12 @@ def process_profile_claim(
     key = (claim.tenant_id, claim.user_id)
     generation = None
     try:
-        with psycopg.connect(content_dsn) as connection, connection.transaction():
+        connection_context = (
+            pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
+            if pool is not None
+            else psycopg.connect(content_dsn)
+        )
+        with connection_context as connection, connection.transaction():
             bind_user(connection.cursor(), authority)
             _guard(connection, claim, worker_id)
             generation = claim_generation(connection, claim)
@@ -155,7 +162,12 @@ def process_profile_claim(
             instruction=instruction if needs_model else None,
             max_content_bytes=config.profile.max_content_bytes,
         )
-        with psycopg.connect(content_dsn) as connection, connection.transaction():
+        connection_context = (
+            pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
+            if pool is not None
+            else psycopg.connect(content_dsn)
+        )
+        with connection_context as connection, connection.transaction():
             bind_user(connection.cursor(), authority)
             _guard(connection, claim, worker_id)
             current = load_profile_inputs(connection, authority, generation)
@@ -230,7 +242,12 @@ def process_profile_claim(
                 ),
             )
     except Exception as error:
-        with psycopg.connect(content_dsn) as connection, connection.transaction():
+        connection_context = (
+            pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
+            if pool is not None
+            else psycopg.connect(content_dsn)
+        )
+        with connection_context as connection, connection.transaction():
             bind_user(connection.cursor(), authority)
             owned = connection.execute(
                 "UPDATE work_units SET status='failed_terminal',updated_at=clock_timestamp() "

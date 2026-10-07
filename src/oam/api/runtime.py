@@ -222,15 +222,16 @@ class DatabaseRuntime:
     def from_dsn(cls, config: OAMConfig, dsn: str) -> DatabaseRuntime:
         pool = ConnectionPool(
             conninfo=dsn,
-            min_size=1,
+            min_size=config.database.pool_min_size,
             max_size=config.database.api_pool_max,
             open=False,
+            timeout=config.database.pool_acquire_timeout_seconds,
             name="oam-api",
         )
         return cls(config=config, pool=pool, capacity=PostgresCapacity(config, dsn, pool=pool))
 
     def open(self) -> None:
-        self.pool.open(wait=True)
+        self.pool.open(wait=True, timeout=self.config.database.pool_acquire_timeout_seconds)
         if self.capacity is not None:
             self.capacity.configure()
 

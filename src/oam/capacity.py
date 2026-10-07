@@ -85,8 +85,9 @@ class PostgresCapacity:
         timeout: float = 5.0,
     ):
         deadline = time.monotonic() + timeout
+        checkout_timeout = min(timeout, self.config.database.pool_acquire_timeout_seconds)
         connection_context = (
-            self.pool.connection(timeout=timeout)
+            self.pool.connection(timeout=checkout_timeout)
             if self.pool is not None
             else psycopg.connect(self.dsn, connect_timeout=max(1, math.ceil(timeout)))
         )
@@ -115,6 +116,10 @@ class PostgresCapacity:
             raise CapacityUnavailable("request admission is closed")
         connection = psycopg.connect(self.dsn, autocommit=True, connect_timeout=3)
         try:
+            timeout_ms = max(1, int(self.config.database.pool_acquire_timeout_seconds * 1000))
+            connection.execute(
+                "SELECT set_config('statement_timeout',%s,false)", (str(timeout_ms),)
+            )
             row = connection.execute(
                 "SELECT oam_http_admit(%s,%s)", (write, Jsonb(self.limits))
             ).fetchone()

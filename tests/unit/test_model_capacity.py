@@ -287,3 +287,64 @@ def test_dispatch_and_cleanup_database_failure_does_not_leak_local_capacity():
                     max_output_tokens=1024,
                     timeout_seconds=0.05,
                 )
+
+
+def test_capacity_pool_checkout_is_bounded_by_configured_pool_timeout():
+    from oam.capacity import PostgresCapacity
+
+    checkout_timeouts = []
+
+    class Connection:
+        def execute(self, query, parameters=()):
+            return self
+
+        def fetchone(self):
+            return (True,)
+
+    class Pool:
+        @contextmanager
+        def connection(self, *, timeout):
+            checkout_timeouts.append(timeout)
+            yield Connection()
+
+    config = runtime_config()
+    config = config.model_copy(
+        update={
+            "database": config.database.model_copy(update={"pool_acquire_timeout_seconds": 0.25})
+        }
+    )
+    PostgresCapacity(config, "unused", pool=Pool())._execute("SELECT 1", timeout=5)
+
+    assert checkout_timeouts == [0.25]
+
+
+def test_http_admission_applies_configured_statement_timeout(monkeypatch):
+    from oam.capacity import PostgresCapacity
+
+    statements = []
+
+    class Connection:
+        def execute(self, query, parameters=()):
+            statements.append((query, parameters))
+            return self
+
+        def fetchone(self):
+            return (None,)
+
+        def close(self):
+            pass
+
+    connection = Connection()
+    monkeypatch.setattr("oam.capacity.psycopg.connect", lambda *args, **kwargs: connection)
+    config = runtime_config()
+    config = config.model_copy(
+        update={
+            "database": config.database.model_copy(update={"pool_acquire_timeout_seconds": 0.25})
+        }
+    )
+
+    assert PostgresCapacity(config, "unused").try_http(write=False) is None
+    assert statements[0] == (
+        "SELECT set_config('statement_timeout',%s,false)",
+        ("250",),
+    )

@@ -21,10 +21,29 @@ ENVIRONMENT = {
 def worker_dependencies(monkeypatch):
     capacities = []
     clients = []
+    pools = []
+
+    class Pool:
+        def __init__(self, label):
+            self.label = label
+
+        def connection(self, timeout=None):
+            raise AssertionError("unit test pool must not be used by stubbed process")
+
+    class Pools:
+        def __init__(self):
+            self.queue = Pool("queue")
+            self.content = Pool("content")
+            self.closed = Event()
+            pools.append(self)
+
+        def close(self):
+            self.closed.set()
 
     class Capacity:
-        def __init__(self, config, dsn):
+        def __init__(self, config, dsn, *, pool=None):
             self.dsn = dsn
+            self.pool = pool
             self.closed = Event()
             capacities.append(self)
 
@@ -37,12 +56,34 @@ def worker_dependencies(monkeypatch):
     def models(config, environment, http, *, background, admission, stop_event):
         assert background is True
         assert admission.dsn == "synthetic-queue"
+        assert admission.pool is pools[0].queue
         clients.append(http)
         return SimpleNamespace(_http=http, stop_event=stop_event)
 
     monkeypatch.setattr(runner, "PostgresCapacity", Capacity, raising=False)
     monkeypatch.setattr(runner, "RuntimeModels", models)
-    return capacities, clients
+    monkeypatch.setattr(runner, "create_worker_pools", lambda *args: Pools())
+    return capacities, clients, pools
+
+
+def test_pool_creation_failure_closes_http_client(monkeypatch, worker_dependencies):
+    clients = []
+    factory = runner.httpx.Client
+
+    def make_client(**kwargs):
+        client = factory(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(runner.httpx, "Client", make_client)
+    monkeypatch.setattr(
+        runner,
+        "create_worker_pools",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("pool startup failed")),
+    )
+    with pytest.raises(RuntimeError, match="pool startup failed"):
+        runner.WorkerRunner.from_environment(worker_config(), ENVIRONMENT)
+    assert clients[0].is_closed
 
 
 def worker_config(*, shutdown_seconds=2, max_tasks=4):
@@ -61,13 +102,15 @@ def worker_config(*, shutdown_seconds=2, max_tasks=4):
 def test_runner_uses_task_slots_and_drains_before_closing_clients(
     monkeypatch, worker_dependencies, max_tasks
 ):
-    capacities, clients = worker_dependencies
+    capacities, clients, pools = worker_dependencies
     started = Event()
     release = Event()
     lock = Lock()
     calls = []
 
-    def process(config, queue, content, *, models, worker_id):
+    def process(config, queue, content, *, models, worker_id, queue_pool, content_pool):
+        assert queue_pool is pools[0].queue
+        assert content_pool is pools[0].content
         with lock:
             calls.append((queue, content, worker_id))
             if len(calls) == max_tasks:
@@ -96,13 +139,14 @@ def test_runner_uses_task_slots_and_drains_before_closing_clients(
     assert all(call[:2] == ("synthetic-queue", "synthetic-content") for call in calls)
     assert not worker.healthy
     assert capacities[0].closed.is_set()
+    assert pools[0].closed.is_set()
     assert clients[0].is_closed
 
 
 def test_shutdown_timeout_keeps_clients_open_until_active_task_finishes(
     monkeypatch, worker_dependencies, capsys
 ):
-    capacities, clients = worker_dependencies
+    capacities, clients, pools = worker_dependencies
     started = Event()
     release = Event()
 
@@ -130,7 +174,7 @@ def test_shutdown_timeout_keeps_clients_open_until_active_task_finishes(
 def test_runner_model_initialization_failure_closes_owned_resources(
     monkeypatch, worker_dependencies
 ):
-    capacities, _ = worker_dependencies
+    capacities, _, _ = worker_dependencies
     clients = []
     client_factory = runner.httpx.Client
 
@@ -153,7 +197,7 @@ def test_runner_model_initialization_failure_closes_owned_resources(
 def test_startup_failure_stops_submitted_tasks_and_eventually_closes_clients(
     monkeypatch, worker_dependencies
 ):
-    capacities, clients = worker_dependencies
+    capacities, clients, pools = worker_dependencies
 
     class FailingExecutor(ThreadPoolExecutor):
         def submit(self, *args, **kwargs):
@@ -177,7 +221,7 @@ def test_startup_failure_stops_submitted_tasks_and_eventually_closes_clients(
 
 
 def test_unexpected_task_exit_makes_runner_unhealthy(monkeypatch, worker_dependencies):
-    capacities, clients = worker_dependencies
+    capacities, clients, pools = worker_dependencies
 
     def process(*args, **kwargs):
         raise SystemExit("synthetic task termination")
@@ -192,7 +236,7 @@ def test_unexpected_task_exit_makes_runner_unhealthy(monkeypatch, worker_depende
 
 
 def test_shutdown_does_not_wait_for_cancelled_pollers(monkeypatch, worker_dependencies):
-    capacities, _ = worker_dependencies
+    capacities, _, _ = worker_dependencies
     started = Event()
 
     def process(*args, models, **kwargs):

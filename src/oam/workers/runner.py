@@ -15,6 +15,7 @@ import httpx
 
 from oam.capacity import PostgresCapacity
 from oam.config import ConfigurationError, OAMConfig, load_config
+from oam.db.pools import create_worker_pools
 from oam.db.readiness import postgres_connection_ready
 from oam.models.runtime import RuntimeModels
 from oam.workers.index_source import process_one
@@ -42,8 +43,11 @@ class WorkerRunner:
         self._closed = False
         self._failed = False
         self._http = httpx.Client(trust_env=False)
-        self._capacity = PostgresCapacity(config, queue_dsn)
+        self._pools = None
+        self._capacity = None
         try:
+            self._pools = create_worker_pools(config, queue_dsn, content_dsn)
+            self._capacity = PostgresCapacity(config, queue_dsn, pool=self._pools.queue)
             self._capacity.configure()
             self.models = RuntimeModels(
                 config,
@@ -143,12 +147,17 @@ class WorkerRunner:
     def _process_claims(self, *, once: bool = False) -> int:
         while not self.stop_event.is_set():
             try:
+                pools = self._pools
+                if pools is None:
+                    raise RuntimeError("worker pools are not initialized")
                 processed = process_one(
                     self.config,
                     self.queue_dsn,
                     self.content_dsn,
                     models=self.models,
                     worker_id=self.worker_id,
+                    queue_pool=pools.queue,
+                    content_pool=pools.content,
                 )
             except Exception as error:
                 cause = (
@@ -189,7 +198,12 @@ class WorkerRunner:
             try:
                 self._http.close()
             finally:
-                self._capacity.close()
+                try:
+                    if self._capacity is not None:
+                        self._capacity.close()
+                finally:
+                    if self._pools is not None:
+                        self._pools.close()
 
 
 def run_worker_from_environment(config_path: str | Path, *, once: bool = False) -> int:

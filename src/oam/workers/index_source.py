@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from oam.config import OAMConfig
 from oam.contracts.evidence import EvidenceAppendRequest
@@ -48,9 +49,21 @@ EXTRACTION_WINDOW_BATCHES = 2
 
 
 def process_one(
-    config: OAMConfig, queue_dsn: str, content_dsn: str, *, models, worker_id: str
+    config: OAMConfig,
+    queue_dsn: str,
+    content_dsn: str,
+    *,
+    models,
+    worker_id: str,
+    queue_pool: ConnectionPool | None = None,
+    content_pool: ConnectionPool | None = None,
 ) -> bool:
-    with psycopg.connect(queue_dsn) as connection:
+    queue_connection = (
+        queue_pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
+        if queue_pool is not None
+        else psycopg.connect(queue_dsn)
+    )
+    with queue_connection as connection:
         claim = claim_one(
             connection.cursor(),
             worker_id=worker_id,
@@ -61,20 +74,31 @@ def process_one(
     if claim is None:
         return False
     if claim.stage == "cleanup_source":
-        cleanup_claim(content_dsn, claim, worker_id)
+        if content_pool is None:
+            cleanup_claim(content_dsn, claim, worker_id)
+        else:
+            cleanup_claim(content_dsn, claim, worker_id, pool=content_pool)
         return True
     if claim.stage == "refresh_profile":
         from oam.profiles.worker import process_profile_claim
 
-        process_profile_claim(
-            config,
-            content_dsn,
-            models=models,
-            claim=claim,
-            worker_id=worker_id,
-        )
+        profile_kwargs = {
+            "models": models,
+            "claim": claim,
+            "worker_id": worker_id,
+        }
+        if content_pool is not None:
+            profile_kwargs["pool"] = content_pool
+        process_profile_claim(config, content_dsn, **profile_kwargs)
         return True
-    store = IndexStore(content_dsn, config, claim, worker_id, index_generation(config, os.environ))
+    store = IndexStore(
+        content_dsn,
+        config,
+        claim,
+        worker_id,
+        index_generation(config, os.environ),
+        pool=content_pool,
+    )
     try:
         if claim.stage == "index_semantic_links":
             from oam.workers.semantic_links import process_semantic_claim
