@@ -274,7 +274,7 @@ def extraction_models(reply, requests=None, *, config=None):
                             "protocol": "openai_compatible",
                             "model": "synthetic-chat",
                             "endpoint_env": "MODEL_URL",
-                            "capabilities": ["chat"],
+                            "capabilities": ["chat", "vision"],
                             "reasoning_effort": "low",
                             "thinking": "disabled",
                         }

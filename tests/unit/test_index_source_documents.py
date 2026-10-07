@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 from pypdf import PdfWriter
 
-from oam.config import load_config
+from oam.config import ModelsConfig, load_config
 from oam.contracts.resources import EvidenceResourceCreate
 from oam.models.runtime import EmbeddingResult, ModelOutputError, ModelResult, Usage
 from oam.workers import index_source
@@ -21,7 +21,9 @@ MEDICAL_FIXTURES = Path(__file__).parents[2] / "conformance/fixtures/medical"
 
 class MemoryStore:
     def __init__(self, *, content, media_type="text/plain", input_role="evidence_resource"):
-        self.config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+        self.config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config.model_copy(
+            update={"models": ModelsConfig()}
+        )
         self.key = ("tenant", "scope")
         self.authority = None
         self.generation_id = "generation"
@@ -110,7 +112,7 @@ class LocalModels:
         return ModelResult(content=json.dumps(content), usage=Usage())
 
     def generate_vision(self, image, **kwargs):
-        self.generated_roles.append("document_vision")
+        self.generated_roles.append("extraction")
         if self.fail_vision:
             raise RuntimeError("vision model unavailable")
         return ModelResult(
@@ -230,11 +232,11 @@ def test_fact_completion_cap_does_not_raise_resource_vision_or_abstract_budgets(
             return super().generate(role, **kwargs)
 
         def generate_vision(self, image, **kwargs):
-            budgets.append(("document_vision", kwargs["max_output_tokens"]))
+            budgets.append(("extraction", kwargs["max_output_tokens"]))
             return super().generate_vision(image, **kwargs)
 
     index_source._resource(store, BudgetModels())
-    assert budgets == [("document_vision", 4096), ("abstract", 4096)]
+    assert budgets == [("extraction", 4096), ("abstract", 4096)]
 
 
 def test_invalid_vision_output_does_not_complete_vision_checkpoint():
@@ -265,7 +267,7 @@ def test_scanned_pdf_resource_renders_page_for_vision_and_cites_page():
     assert store.units[1]["locator"]["block"] == "pdf:page:0001:region:0002"
     assert store.units[1]["locator"]["page"] == 1
     assert store.units[1]["locator"]["extraction_method"] == "vision"
-    assert models.generated_roles == ["document_vision", "abstract"]
+    assert models.generated_roles == ["extraction", "abstract"]
 
 
 def test_pdf_inspection_marks_unusable_text_for_vision(monkeypatch):
@@ -285,7 +287,7 @@ def test_pdf_inspection_marks_unusable_text_for_vision(monkeypatch):
 
     index_source._resource(store, models)
 
-    assert models.generated_roles == ["document_vision", "abstract"]
+    assert models.generated_roles == ["extraction", "abstract"]
     assert all("�" not in unit["text"] for unit in store.units)
     assert all(unit["locator"]["extraction_method"] == "vision" for unit in store.units)
 
@@ -316,7 +318,7 @@ def test_pdf_page_with_native_text_and_large_image_indexes_both_details():
 
     assert any("Sodium: 140 mmol/L" in unit["text"] for unit in store.units)
     assert "Potassium 4.2 mmol/L" in [unit["text"] for unit in store.units]
-    assert models.generated_roles == ["document_vision", "abstract"]
+    assert models.generated_roles == ["extraction", "abstract"]
 
 
 def test_mixed_pdf_deduplicates_native_and_vision_wording_on_same_page():
@@ -335,7 +337,7 @@ def test_mixed_pdf_deduplicates_native_and_vision_wording_on_same_page():
     assert len(native) == 1
     assert "Sodium: 140 mmol/L" in native[0]["text"]
     assert visual == ["Glucose 92 mg/dL"]
-    assert models.generated_roles == ["document_vision", "abstract"]
+    assert models.generated_roles == ["extraction", "abstract"]
 
 
 def test_pdf_visual_dedup_preserves_distinct_numeric_meanings():
@@ -388,7 +390,7 @@ def test_pdf_vector_table_keeps_native_text_and_requests_visual_rows():
     assert [unit["text"] for unit in visual] == [
         "Glucose row has a reference interval of 70-99 mg/dL"
     ]
-    assert models.generated_roles == ["document_vision", "abstract"]
+    assert models.generated_roles == ["extraction", "abstract"]
 
 
 @pytest.mark.parametrize("language", ("en", "zh"))

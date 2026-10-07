@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 
 import httpx
@@ -22,7 +23,7 @@ def _models() -> ModelsConfig:
             protocol="openai_compatible",
             model="chat-model",
             endpoint_env="CHAT_URL",
-            capabilities=frozenset({ModelCapability.CHAT}),
+            capabilities=frozenset({ModelCapability.CHAT, ModelCapability.VISION}),
             reasoning_effort="low",
             thinking="disabled",
         ),
@@ -32,21 +33,12 @@ def _models() -> ModelsConfig:
             endpoint_env="EMBEDDING_URL",
             capabilities=frozenset({ModelCapability.EMBEDDINGS}),
         ),
-        "vision": ModelBinding(
-            protocol="openai_compatible",
-            model="vision-model",
-            endpoint_env="VISION_URL",
-            capabilities=frozenset({ModelCapability.VISION}),
-            reasoning_effort="low",
-            thinking="disabled",
-        ),
     }
     return ModelsConfig(
         roles=ModelRoles(
             extraction="chat",
             insights="chat",
             embedding="embedding",
-            document_vision="vision",
             abstract="chat",
             profile="chat",
         ),
@@ -100,7 +92,6 @@ def test_preflight_probes_every_required_role_and_never_reports_credentials() ->
         {
             "CHAT_URL": "https://models.example.test/v1",
             "EMBEDDING_URL": "https://embeddings.example.test/v1",
-            "VISION_URL": "https://vision.example.test/v1",
         },
         client,
     )
@@ -108,7 +99,6 @@ def test_preflight_probes_every_required_role_and_never_reports_credentials() ->
     assert report.runnable is True
     assert {result.role for result in report.roles if result.status is PreflightStatus.PASSED} == {
         "abstract",
-        "document_vision",
         "embedding",
         "extraction",
         "insights",
@@ -145,7 +135,6 @@ def test_chat_preflight_rejects_unusable_visible_output(
         {
             "CHAT_URL": "https://models.example.test/v1",
             "EMBEDDING_URL": "https://embeddings.example.test/v1",
-            "VISION_URL": "https://vision.example.test/v1",
         },
         FakeProbeClient(chat=response),
     )
@@ -172,7 +161,6 @@ def test_embedding_preflight_rejects_invalid_vectors(
         {
             "CHAT_URL": "https://models.example.test/v1",
             "EMBEDDING_URL": "https://embeddings.example.test/v1",
-            "VISION_URL": "https://vision.example.test/v1",
         },
         FakeProbeClient(embedding=EmbeddingProbeOutput(vectors=vectors)),
     )
@@ -200,22 +188,21 @@ def test_vision_preflight_requires_meaningful_complete_visible_output(
         {
             "CHAT_URL": "https://models.example.test/v1",
             "EMBEDDING_URL": "https://embeddings.example.test/v1",
-            "VISION_URL": "https://vision.example.test/v1",
         },
         FakeProbeClient(vision=response),
     )
 
-    vision = next(result for result in report.roles if result.role == "document_vision")
+    vision = next(result for result in report.roles if result.role == "extraction")
     assert vision.status is PreflightStatus.FAILED
 
 
-@pytest.mark.parametrize("role", ["extraction", "document_vision"])
+@pytest.mark.parametrize("capability", ["chat", "vision"])
 @pytest.mark.parametrize(
     ("finish_reason", "refusal", "reason"),
     [("content_filter", None, "content_filter"), ("stop", "I cannot comply.", "refusal")],
 )
 def test_preflight_rejects_filtered_or_refused_wire_output(
-    role: str, finish_reason: str, refusal: str | None, reason: str
+    capability: str, finish_reason: str, refusal: str | None, reason: str
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/embeddings"):
@@ -228,8 +215,8 @@ def test_preflight_rejects_filtered_or_refused_wire_output(
                     ]
                 },
             )
-        vision = request.url.host == "vision.example.test"
-        filtered = vision == (role == "document_vision")
+        vision = isinstance(json.loads(request.content)["messages"][-1]["content"], list)
+        filtered = vision == (capability == "vision")
         return httpx.Response(
             200,
             json={
@@ -253,12 +240,11 @@ def test_preflight_rejects_filtered_or_refused_wire_output(
             {
                 "CHAT_URL": "https://models.example.test/v1",
                 "EMBEDDING_URL": "https://embeddings.example.test/v1",
-                "VISION_URL": "https://vision.example.test/v1",
             },
             OpenAICompatibleProbeClient(http=http),
         )
 
-    result = next(result for result in report.roles if result.role == role)
+    result = next(result for result in report.roles if result.role == "extraction")
     assert result.status is PreflightStatus.FAILED
     assert reason in result.detail
     assert report.runnable is False
@@ -296,19 +282,17 @@ def test_transport_failure_is_redacted_per_role_and_later_probes_continue() -> N
         {
             "CHAT_URL": "https://models.example.test/v1",
             "EMBEDDING_URL": "https://embeddings.example.test/v1",
-            "VISION_URL": "https://vision.example.test/v1",
         },
         client,
     )
 
     extraction = next(result for result in report.roles if result.role == "extraction")
     embedding = next(result for result in report.roles if result.role == "embedding")
-    vision = next(result for result in report.roles if result.role == "document_vision")
     assert extraction.status is PreflightStatus.FAILED
-    assert extraction.detail == "model request failed: ConnectError"
+    assert "chat: model request failed: ConnectError" in extraction.detail
+    assert "vision: visible image colors correctly identified" in extraction.detail
     assert "top-secret-key" not in str(report)
     assert embedding.status is PreflightStatus.PASSED
-    assert vision.status is PreflightStatus.PASSED
     assert "embeddings" in client.probed_capabilities
     assert "vision" in client.probed_capabilities
 
@@ -331,10 +315,9 @@ def test_disabled_feature_role_failure_does_not_block_required_preflight() -> No
         {
             "CHAT_URL": "https://models.example.test/v1",
             "EMBEDDING_URL": "https://embeddings.example.test/v1",
-            "VISION_URL": "https://vision.example.test/v1",
         },
         FakeProbeClient(),
-        required_roles=frozenset({"extraction", "embedding", "document_vision", "abstract"}),
+        required_roles=frozenset({"extraction", "embedding", "abstract"}),
     )
 
     profile = next(result for result in report.roles if result.role == "profile")

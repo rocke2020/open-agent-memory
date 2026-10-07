@@ -369,7 +369,7 @@ async def test_process_topology_indexes_and_recalls_during_imports(
                 for write in artifact["writes"]
                 for recall in artifact["recalls"]
             ), "no admitted HTTP write overlapped a recall"
-            assert any(role == "document_vision" for _, role in calls)
+            assert any(role == "extraction" and vision for _, role, vision in calls)
             assert time.monotonic() < deadline, "process acceptance exceeded its 30-second budget"
         finally:
             for task in write_tasks:

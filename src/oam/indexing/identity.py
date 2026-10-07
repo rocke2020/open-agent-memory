@@ -19,7 +19,6 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
         "insights",
         "embedding",
         "abstract",
-        "document_vision",
     )
     if not config.index.insights_enabled:
         roles_to_hash = tuple(role for role in roles_to_hash if role != "insights")

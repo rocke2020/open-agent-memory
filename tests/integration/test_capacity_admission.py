@@ -268,7 +268,7 @@ def test_shared_limit_bounds_actual_generation_dispatch_and_reuses_capacity(capa
                             "protocol": "openai_compatible",
                             "model": "synthetic",
                             "endpoint_env": "SYNTHETIC_ENDPOINT",
-                            "capabilities": ["chat"],
+                            "capabilities": ["chat", "vision"],
                             "reasoning_effort": "low",
                             "thinking": "disabled",
                         }

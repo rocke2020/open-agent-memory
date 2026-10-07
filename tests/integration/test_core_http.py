@@ -60,6 +60,16 @@ def core_database(monkeypatch):
             (tenant, digest_secret(secret)),
         )
     monkeypatch.setenv("OAM_API_DSN", make_conninfo(dsn, options="-c role=oam_api"))
+    # These tests inject models; the canonical bindings only identify their index generation.
+    for name, value in {
+        "OAM_GENERATIVE_MODEL": "synthetic-vlm",
+        "OAM_GENERATIVE_ENDPOINT": "https://unused.example.test/v1",
+        "OAM_GENERATIVE_API_KEY": "synthetic",
+        "OAM_EMBEDDING_MODEL": "synthetic-embedding",
+        "OAM_EMBEDDING_URL": "https://unused.example.test/v1",
+        "OAM_EMBEDDING_KEY": "synthetic",
+    }.items():
+        monkeypatch.setenv(name, value)
     return dsn, tenant, {"Authorization": f"Bearer {secret}"}
 
 
@@ -284,7 +294,7 @@ class SyntheticIndexModels:
     def generate_vision(self, image, **kwargs):
         from oam.models.runtime import ModelResult, Usage
 
-        self.generation_calls.append("document_vision")
+        self.generation_calls.append("extraction")
         return ModelResult(
             content=json.dumps({"blocks": self.vision_blocks or [{"text": self.vision_text}]}),
             usage=Usage(input_tokens=15, output_tokens=8, total_tokens=23, coverage="complete"),
@@ -461,7 +471,7 @@ async def test_public_pdf_and_image_retain_to_cited_recall(
         assert bytes(stored) == original
         assert connection.execute("SELECT count(*) FROM memories").fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM insights").fetchone()[0] == 0
-    assert ("document_vision" in models.generation_calls) is uses_vision
+    assert ("extraction" in models.generation_calls) is uses_vision
 
 
 async def test_mixed_native_and_image_pdf_keeps_both_cited_details(core_database):
@@ -531,7 +541,7 @@ async def test_mixed_native_and_image_pdf_keeps_both_cited_details(core_database
         )
         assert operation.json()["readiness"]["source_searchable"] is True
         assert operation.json()["stage_state"]["parse_coverage"] == "complete"
-    assert models.generation_calls == ["document_vision", "abstract"]
+    assert models.generation_calls == ["extraction", "abstract"]
     with psycopg.connect(dsn) as connection:
         stored = connection.execute(
             "SELECT original_bytes FROM source_versions WHERE tenant_id=%s", (tenant,)
@@ -668,7 +678,7 @@ async def test_bilingual_report_public_retain_to_cited_recall(core_database, lan
                 candidate["citations"][0]["page"] == 3 and term in candidate["text"]
                 for candidate in recalled.json()["items"]
             )
-        assert ("document_vision" in models.generation_calls) is (kind in {"scanned_pdf", "image"})
+        assert ("extraction" in models.generation_calls) is (kind in {"scanned_pdf", "image"})
         operation = await client.get(
             f"/v1/users/scope/operations/{uploaded.json()['operation_id']}"
         )

@@ -51,7 +51,7 @@ def test_canonical_extraction_preserves_low_reasoning_effort_on_the_wire():
         )
     assert json.loads(result.content) == {"outcome": "no_facts", "facts": []}
     assert seen[0]["reasoning_effort"] == "low"
-    assert seen[0]["thinking"] == {"type": "disabled"}
+    assert seen[0]["thinking"] == {"type": "enabled"}
     assert seen[0]["max_tokens"] == 64000
 
 
@@ -64,7 +64,6 @@ def runtime_config():
                 "insights": "chat",
                 "abstract": "chat",
                 "embedding": "vector",
-                "document_vision": "vision",
                 "reranker": "rank",
             },
             "bindings": {
@@ -73,7 +72,7 @@ def runtime_config():
                     "model": f"synthetic-{alias}",
                     "endpoint_env": "MODEL_URL",
                     "api_key_env": "MODEL_KEY",
-                    "capabilities": [capability],
+                    "capabilities": ["chat", "vision"] if alias == "chat" else [capability],
                     **(
                         {"reasoning_effort": "low", "thinking": "disabled"}
                         if capability in {"chat", "vision"}
@@ -83,7 +82,6 @@ def runtime_config():
                 for alias, capability in (
                     ("chat", "chat"),
                     ("vector", "embeddings"),
-                    ("vision", "vision"),
                     ("rank", "rerank"),
                 )
             },
@@ -234,13 +232,13 @@ def test_runtime_generation_preserves_visible_content_and_does_not_add_reasoning
     assert requests[0].headers["authorization"] == "Bearer synthetic-secret"
 
 
-def test_runtime_document_vision_sends_image_bytes_and_reads_visible_json():
+def test_runtime_vision_uses_extraction_binding_and_preserves_image_bytes():
     image = BytesIO()
     Image.new("RGB", (12, 8), "white").save(image, format="PNG")
 
     def respond(request):
         payload = json.loads(request.content)
-        assert payload["model"] == "synthetic-vision"
+        assert payload["model"] == "synthetic-chat"
         assert payload["max_tokens"] >= 1024
         content = payload["messages"][1]["content"]
         assert content[0] == {"type": "text", "text": "Read the report table."}

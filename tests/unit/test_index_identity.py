@@ -5,7 +5,7 @@ from oam.paths import default_config_path
 def test_overflow_recipe_invalidates_legacy_generation_and_references_change_it():
     from oam.indexing.identity import index_generation
 
-    config = load_config(default_config_path()).config
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
     config = config.model_copy(
         update={
             "extraction": config.extraction.model_copy(
@@ -29,7 +29,7 @@ def test_overflow_recipe_invalidates_legacy_generation_and_references_change_it(
 def test_default_grouping_uses_a_distinct_generation_from_singletons():
     from oam.indexing.identity import index_generation
 
-    config = load_config(default_config_path()).config
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
     singleton = config.model_copy(
         update={"extraction": config.extraction.model_copy(update={"group_max_passages": 1})}
     )
@@ -39,7 +39,7 @@ def test_default_grouping_uses_a_distinct_generation_from_singletons():
 def test_resource_completion_budget_invalidates_generated_resource_checkpoints():
     from oam.indexing.identity import index_generation
 
-    config = load_config(default_config_path()).config
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
     tuned = config.model_copy(
         update={"resource": config.resource.model_copy(update={"max_output_tokens": 8192})}
     )
@@ -49,7 +49,7 @@ def test_resource_completion_budget_invalidates_generated_resource_checkpoints()
 def test_recall_tuning_does_not_invalidate_indexed_content_but_model_change_does():
     from oam.indexing.identity import index_generation
 
-    config = load_config(default_config_path()).config
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
     tuned = config.model_copy(
         update={
             "search": config.search.model_copy(
@@ -74,7 +74,7 @@ def test_recall_tuning_does_not_invalidate_indexed_content_but_model_change_does
 def test_environment_model_name_is_part_of_index_generation_identity():
     from oam.indexing.identity import index_generation
 
-    config = load_config(default_config_path()).config
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
     models = ModelsConfig.model_validate(
         {
             "roles": {"embedding": "local"},

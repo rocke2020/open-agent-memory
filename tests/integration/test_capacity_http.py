@@ -30,7 +30,8 @@ def fake_provider(monkeypatch):
 
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            calls.append((self.path, request["model"]))
+            vision = isinstance(request.get("messages", [{}])[-1].get("content"), list)
+            calls.append((self.path, request["model"], vision))
             if self.path.endswith("/embeddings"):
                 response = {
                     "data": [
@@ -45,7 +46,9 @@ def fake_provider(monkeypatch):
             else:
                 role = request["model"]
                 user = request["messages"][-1]["content"]
-                if role == "extraction":
+                if role == "extraction" and isinstance(user, list):
+                    output = {"blocks": [{"text": "Glucose 5.2 mmol/L"}]}
+                elif role == "extraction":
                     center = json.loads(user)["center"]
                     output = {
                         "outcome": "facts",
@@ -63,8 +66,6 @@ def fake_provider(monkeypatch):
                             }
                         ],
                     }
-                elif role == "document_vision":
-                    output = {"blocks": [{"text": "Glucose 5.2 mmol/L"}]}
                 elif role == "insights":
                     output = {"outcome": "no_insight"}
                 else:
@@ -95,7 +96,7 @@ def fake_provider(monkeypatch):
 
 
 def provider_configuration(path: Path, *, embedded=True):
-    roles = ("extraction", "insights", "embedding", "abstract", "document_vision", "profile")
+    roles = ("extraction", "insights", "embedding", "abstract", "profile")
     path.write_text(
         yaml.safe_dump(
             {
@@ -107,13 +108,16 @@ def provider_configuration(path: Path, *, embedded=True):
                             "protocol": "openai_compatible",
                             "model": role,
                             "endpoint_env": "CAPACITY_FAKE_PROVIDER",
-                            "capabilities": [
-                                "embeddings"
-                                if role == "embedding"
-                                else "vision"
-                                if role == "document_vision"
-                                else "chat"
-                            ],
+                            "capabilities": ["embeddings"]
+                            if role == "embedding"
+                            else ["chat", "vision"]
+                            if role == "extraction"
+                            else ["chat"],
+                            **(
+                                {"reasoning_effort": "low", "thinking": "disabled"}
+                                if role != "embedding"
+                                else {}
+                            ),
                         }
                         for role in roles
                     },
@@ -219,7 +223,7 @@ async def test_embedded_runner_accepts_indexes_and_recalls_both_origins(
             results[mode] = {"elapsed_seconds": elapsed, "response": payload}
         (tmp_path / "cited-recall.json").write_text(json.dumps(results, indent=2))
     assert app.state.worker.stop_event.is_set()
-    assert any(role == "extraction" for _, role in fake_provider)
+    assert any(role == "extraction" for _, role, _ in fake_provider)
     with psycopg.connect(dsn) as connection:
         assert (
             connection.execute(

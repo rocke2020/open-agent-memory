@@ -24,7 +24,7 @@ def test_fts_rank_weights_reject_values_outside_postgres_range() -> None:
             SearchConfig.model_validate(values)
 
 
-def test_canonical_config_freezes_v001_trial_limits_without_active_provider_roles() -> None:
+def test_canonical_config_freezes_v001_trial_limits_and_model_role_bindings() -> None:
     resolved = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml")
 
     assert resolved.config.contract_version == "0.0.1"
@@ -36,20 +36,39 @@ def test_canonical_config_freezes_v001_trial_limits_without_active_provider_role
     assert resolved.config.user.max_reports == 100
     assert resolved.config.user.max_chats == 1_000
     assert resolved.config.api.max_concurrent_requests == 10
-    assert set(resolved.config.models.bindings) == {"indexing_low", "indexing_high"}
-    assert resolved.config.models.bindings["indexing_low"].reasoning_effort == "low"
-    assert resolved.config.models.bindings["indexing_low"].thinking == "disabled"
-    assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "high"
-    assert resolved.config.models.bindings["indexing_high"].thinking == "disabled"
-    assert resolved.config.models.required_unbound_roles() == {
-        "abstract",
-        "document_vision",
-        "embedding",
-        "extraction",
-        "insights",
-        "profile",
+    assert set(resolved.config.models.bindings) == {
+        "indexing_low",
+        "indexing_high",
+        "embedding_default",
     }
+    assert resolved.config.models.bindings["indexing_low"].reasoning_effort == "low"
+    assert resolved.config.models.bindings["indexing_low"].thinking == "enabled"
+    assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "high"
+    assert resolved.config.models.bindings["indexing_high"].thinking == "enabled"
+    assert resolved.config.models.required_unbound_roles() == set()
     assert len(resolved.sha256) == 64
+
+
+@pytest.mark.parametrize("capabilities", [["chat"], ["vision"]])
+def test_extraction_binding_requires_text_and_vision_capabilities(capabilities) -> None:
+    from pydantic import ValidationError
+
+    from oam.config import ModelsConfig
+
+    with pytest.raises(ValidationError, match="extraction.*requires capability"):
+        ModelsConfig.model_validate(
+            {
+                "roles": {"extraction": "vlm"},
+                "bindings": {
+                    "vlm": {
+                        "protocol": "openai_compatible",
+                        "model": "synthetic-vlm",
+                        "endpoint_env": "MODEL_URL",
+                        "capabilities": capabilities,
+                    }
+                },
+            }
+        )
 
 
 def test_role_binding_requires_the_capability_consumed_by_the_role(tmp_path: Path) -> None:

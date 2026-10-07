@@ -14,7 +14,7 @@ from psycopg.conninfo import make_conninfo
 from test_postgres_repositories import command
 
 from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedUser
-from oam.config import load_config
+from oam.config import ModelsConfig, load_config
 from oam.db.migrations import apply_migrations
 from oam.db.queue_admission import PENDING_ROOTS_SQL, QueueAdmissionFull
 from oam.db.sources import IdempotencyConflict, SourceRepository
@@ -154,7 +154,9 @@ def test_replicas_cannot_accept_more_than_the_user_queue_cap(queue_database):
 
 def test_delayed_consolidation_keeps_one_root_slot_until_all_work_ends(queue_database):
     dsn, authority = queue_database
-    config = load_config(ROOT / "configs/oam.yaml").config
+    config = load_config(ROOT / "configs/oam.yaml").config.model_copy(
+        update={"models": ModelsConfig()}
+    )
     generation = index_generation(config, {})
     accept(dsn, authority, "root", generation_id=generation)
     claimed = claim(dsn, "phase1")
@@ -215,7 +217,9 @@ def test_explicit_retry_consumes_fresh_slot_but_exact_repeat_reuses_it(queue_dat
 
 def test_profile_refresh_reuses_work_and_obeys_queue_cap(queue_database):
     dsn, authority = queue_database
-    config = load_config(ROOT / "configs/oam.yaml").config
+    config = load_config(ROOT / "configs/oam.yaml").config.model_copy(
+        update={"models": ModelsConfig()}
+    )
     config = config.model_copy(
         update={"queue": config.queue.model_copy(update={"max_pending_per_user": 1})}
     )

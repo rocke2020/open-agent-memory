@@ -291,9 +291,10 @@ def test_batch_freezes_one_implicit_time_reference_for_all_queries() -> None:
 
 def test_database_runtime_authorizes_batch_once_before_search(monkeypatch) -> None:
     from oam.api.runtime import DatabaseRuntime
+    from oam.config import ModelsConfig
     from oam.retrieval.service import RecallService
 
-    config = load_config("configs/oam.yaml").config
+    config = load_config("configs/oam.yaml").config.model_copy(update={"models": ModelsConfig()})
     authorizations = []
     searched = []
 

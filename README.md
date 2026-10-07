@@ -49,7 +49,7 @@ uv run ruff format --check .
 uv run oam preflight --config configs/oam.yaml --json
 ```
 
-The canonical configuration intentionally has no model bindings, so preflight exits `2` and lists every missing required role. When bindings are present, preflight makes one role-appropriate request per enabled role and rejects empty, malformed, reasoning-only, truncated, non-finite, or dimensionally inconsistent results. Supply endpoints and secrets through an explicit operator configuration before expecting readiness. Default tests never read a private `.env` or contact external providers.
+The canonical configuration selects generative and embedding bindings whose model names, endpoints and credentials come from the variables in `.env.example`. Supply those values before expecting preflight to pass. Preflight makes one request for each required capability of every enabled role: extraction checks both chat and vision through the same binding. It rejects empty, malformed, reasoning-only, truncated, non-finite, or dimensionally inconsistent results. Runtime embedding validation additionally requires the configured `index.embedding_dimensions` size. Reranker and planner remain unbound by default. Default tests never read a private `.env` or contact external providers.
 
 Run the API with its embedded durable worker using the operator configuration:
 

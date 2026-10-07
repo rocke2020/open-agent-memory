@@ -242,12 +242,11 @@ backup:
 models:
   # A role selects a binding below; null leaves that role unbound.
   roles:
-    extraction: null
-    insights: null
-    embedding: null
-    document_vision: null
-    abstract: null
-    profile: null
+    extraction: indexing_low
+    insights: indexing_low
+    embedding: embedding_default
+    abstract: indexing_low
+    profile: indexing_low
     reranker: null
     planner: null
   # Defining a binding alone does not activate it; assign it to a role above.
@@ -259,12 +258,18 @@ models:
       api_key_env: OAM_GENERATIVE_API_KEY
       capabilities: [chat, vision]
       reasoning_effort: low
-      thinking: disabled
+      thinking: enabled
     indexing_high:
       protocol: openai_compatible
       model_env: OAM_GENERATIVE_MODEL
       endpoint_env: OAM_GENERATIVE_ENDPOINT
       api_key_env: OAM_GENERATIVE_API_KEY
-      capabilities: [chat]
+      capabilities: [chat, vision]
       reasoning_effort: high
-      thinking: disabled
+      thinking: enabled
+    embedding_default:
+      protocol: openai_compatible
+      model_env: OAM_EMBEDDING_MODEL
+      endpoint_env: OAM_EMBEDDING_URL
+      api_key_env: OAM_EMBEDDING_KEY
+      capabilities: [embeddings]

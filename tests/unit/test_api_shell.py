@@ -13,8 +13,16 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
 @pytest.fixture
-async def client():
-    transport = httpx.ASGITransport(app=create_app(REPOSITORY_ROOT / "configs" / "oam.yaml"))
+async def client(tmp_path):
+    config = tmp_path / "unbound.yaml"
+    config.write_text(
+        "models:\n  roles:\n"
+        + "".join(
+            f"    {role}: null\n"
+            for role in ("abstract", "embedding", "extraction", "insights", "profile")
+        )
+    )
+    transport = httpx.ASGITransport(app=create_app(config))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as value:
         yield value
 
@@ -58,7 +66,6 @@ async def test_readiness_fails_when_required_model_roles_are_unbound(client) -> 
     assert response.status_code == 503
     assert response.json()["missing_required_roles"] == [
         "abstract",
-        "document_vision",
         "embedding",
         "extraction",
         "insights",
@@ -76,7 +83,6 @@ async def test_binding_names_alone_cannot_make_the_foundation_ready(tmp_path) ->
                 "extraction",
                 "insights",
                 "embedding",
-                "document_vision",
                 "abstract",
                 "profile",
             )

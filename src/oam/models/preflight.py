@@ -9,7 +9,7 @@ from typing import Protocol
 
 import httpx
 
-from oam.config import REQUIRED_MODEL_ROLES, ModelCapability, ModelsConfig
+from oam.config import REQUIRED_MODEL_ROLES, ROLE_CAPABILITIES, ModelCapability, ModelsConfig
 from oam.models.bindings import (
     ModelBindingResolutionError,
     ResolvedModelBinding,
@@ -100,7 +100,8 @@ def run_model_preflight(
 ) -> ModelPreflightReport:
     results: list[RolePreflightResult] = []
     required = REQUIRED_MODEL_ROLES if required_roles is None else required_roles
-    for role, capability in _role_capabilities():
+    for role, capabilities in ROLE_CAPABILITIES.items():
+        capability = capabilities[0]
         binding: ResolvedModelBinding | None = None
         try:
             binding = resolve_model_binding(models, role, environment)
@@ -116,11 +117,19 @@ def run_model_preflight(
                     )
                 )
                 continue
-            detail = _probe(binding, capability, client)
             status = PreflightStatus.PASSED
-        except httpx.HTTPError as exc:
-            detail = f"model request failed: {type(exc).__name__}"
-            status = PreflightStatus.FAILED
+            details = []
+            for required_capability in capabilities:
+                try:
+                    detail = _probe(binding, required_capability, client)
+                except httpx.HTTPError as exc:
+                    detail = f"model request failed: {type(exc).__name__}"
+                    status = PreflightStatus.FAILED
+                except (ValueError, RuntimeError) as exc:
+                    detail = str(exc)
+                    status = PreflightStatus.FAILED
+                details.append(f"{required_capability.value}: {detail}")
+            detail = "; ".join(details)
         except (ModelBindingResolutionError, ValueError, RuntimeError) as exc:
             detail = str(exc)
             status = PreflightStatus.FAILED
@@ -138,12 +147,6 @@ def run_model_preflight(
     by_role = {result.role: result for result in results}
     runnable = all(by_role[role].status is PreflightStatus.PASSED for role in required)
     return ModelPreflightReport(runnable=runnable, roles=tuple(results))
-
-
-def _role_capabilities() -> tuple[tuple[str, ModelCapability], ...]:
-    from oam.config import ROLE_CAPABILITY
-
-    return tuple(ROLE_CAPABILITY.items())
 
 
 def _probe(
