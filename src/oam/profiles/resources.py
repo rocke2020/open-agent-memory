@@ -1,4 +1,4 @@
-"""Deterministic mappings for registered structured Profile Resources."""
+"""Deterministic mappings for registered structured Profile Data."""
 
 import re
 from collections.abc import Mapping
@@ -56,24 +56,34 @@ def _as_of(value: Any) -> datetime | None:
     return parsed
 
 
-def map_profile_resource(
+def map_profile_data(
     resource: Mapping[str, Any], *, resource_version: int
 ) -> tuple[MappedProfileField, ...]:
-    """Validate one registered Profile Resource and return exact supported fields."""
+    """Validate one registered Profile Data input and return exact supported fields."""
     if not isinstance(resource, Mapping):
         raise ValueError("resource must be an object")
-    _check_keys(
-        resource,
-        {"resource_id", "resource_type", "subtype", "source_revision", "as_of", "content"},
-        {"resource_id", "resource_type", "subtype", "content"},
-        "resource",
-    )
-    if resource["resource_type"] != "profile":
-        raise ValueError("resource_type must be profile")
+    if "profile_data_id" in resource:
+        _check_keys(
+            resource,
+            {"profile_data_id", "subtype", "source_revision", "as_of", "content"},
+            {"profile_data_id", "subtype", "content"},
+            "profile_data",
+        )
+        resource_id = _nonempty_string(resource["profile_data_id"], "profile_data_id")
+    else:
+        # Historical immutable originals retain their accepted envelope.
+        _check_keys(
+            resource,
+            {"resource_id", "resource_type", "subtype", "source_revision", "as_of", "content"},
+            {"resource_id", "resource_type", "subtype", "content"},
+            "resource",
+        )
+        if resource["resource_type"] != "profile":
+            raise ValueError("resource_type must be profile")
+        resource_id = _nonempty_string(resource["resource_id"], "resource_id")
     subtype = resource["subtype"]
     if subtype not in {"basic-profile/v1", "preferences/v1"}:
         raise ValueError("subtype is not registered")
-    resource_id = _nonempty_string(resource["resource_id"], "resource_id")
     if type(resource_version) is not int or resource_version < 1:
         raise ValueError("resource_version must be a positive integer")
     source_revision = resource.get("source_revision")
@@ -145,3 +155,13 @@ def map_profile_resource(
         interests = [_nonempty_string(item, "content.interests") for item in value]
         fields.append(field("preferences", "interests", interests))
     return tuple(fields)
+
+
+def public_profile_data_support(support: dict[str, Any]) -> dict[str, Any]:
+    """Expose current terminology while keeping immutable stored support identities."""
+    result = dict(support)
+    result["profile_data_id"] = result.pop("resource_id")
+    result["profile_data_version"] = result.pop("resource_version")
+    if result.get("kind") == "profile_resource":
+        result["kind"] = "profile_data"
+    return result

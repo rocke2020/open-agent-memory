@@ -10,7 +10,7 @@ from psycopg.rows import dict_row
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
-from oam.profiles.resources import map_profile_resource
+from oam.profiles.resources import map_profile_data, public_profile_data_support
 
 INSPECTION_PAGE_SIZE = 50
 RESOURCE_PASSAGE_LIMIT = 200
@@ -44,7 +44,21 @@ class SourceInspector:
         if row is None or row[0] != admitted_epoch:
             raise SourcePolicyChanged("source policy changed during inspection")
 
-    def list_resources(self, connection, authority: AuthorizedUser, *, after: str | None) -> dict:
+    @staticmethod
+    def _collection_row(item: dict, input_role: str) -> dict:
+        item.pop("resource_type", None)
+        if input_role == "profile_resource":
+            item["profile_data_id"] = item.pop("resource_id")
+        return item
+
+    def list_resources(
+        self,
+        connection,
+        authority: AuthorizedUser,
+        *,
+        after: str | None,
+        input_role: str = "evidence_resource",
+    ) -> dict:
         with connection.transaction():
             epoch = self._admit(connection, authority)
             with connection.cursor(row_factory=dict_row) as cursor:
@@ -61,28 +75,41 @@ class SourceInspector:
                     "AND kind IN ('index_resource','index_profile_resource') "
                     "ORDER BY created_at DESC,operation_id DESC LIMIT 1) o ON true "
                     "WHERE s.tenant_id=%s AND s.user_id=%s AND s.status='active' "
-                    "AND s.input_role IN ('evidence_resource','profile_resource') "
+                    "AND s.input_role=%s "
                     "AND v.status='active' "
                     "AND s.source_id>%s ORDER BY s.source_id LIMIT %s",
                     (
                         authority.tenant_id,
                         authority.user_id,
+                        input_role,
                         after or "",
                         INSPECTION_PAGE_SIZE + 1,
                     ),
                 )
                 rows = cursor.fetchall()
-            items = [self._resource_row(row) for row in rows[:INSPECTION_PAGE_SIZE]]
+            items = [
+                self._collection_row(self._resource_row(row), input_role)
+                for row in rows[:INSPECTION_PAGE_SIZE]
+            ]
             self._check_policy(connection, authority, epoch)
             return {
                 "items": items,
-                "next_after": items[-1]["resource_id"]
+                "next_after": items[-1][
+                    "profile_data_id" if input_role == "profile_resource" else "resource_id"
+                ]
                 if len(rows) > INSPECTION_PAGE_SIZE
                 else None,
                 "policy_epoch": epoch,
             }
 
-    def get_resource(self, connection, authority: AuthorizedUser, resource_id: str) -> dict | None:
+    def get_resource(
+        self,
+        connection,
+        authority: AuthorizedUser,
+        resource_id: str,
+        *,
+        input_role: str = "evidence_resource",
+    ) -> dict | None:
         with connection.transaction():
             epoch = self._admit(connection, authority)
             with connection.cursor(row_factory=dict_row) as cursor:
@@ -100,9 +127,9 @@ class SourceInspector:
                     "ORDER BY created_at DESC,operation_id DESC LIMIT 1) o ON true "
                     "WHERE s.tenant_id=%s AND s.user_id=%s AND s.source_id=%s "
                     "AND s.status='active' "
-                    "AND s.input_role IN ('evidence_resource','profile_resource') "
+                    "AND s.input_role=%s "
                     "AND v.status='active'",
-                    (authority.tenant_id, authority.user_id, resource_id),
+                    (authority.tenant_id, authority.user_id, resource_id, input_role),
                 )
                 row = cursor.fetchone()
             if row is None:
@@ -118,15 +145,17 @@ class SourceInspector:
                     (authority.tenant_id, authority.user_id, resource_id, version),
                 ).fetchone()
                 if original is None:
-                    raise SourcePolicyChanged("Profile Resource changed during inspection")
+                    raise SourcePolicyChanged("Profile Data changed during inspection")
                 profile_resource = json.loads(bytes(original[0]))
                 details["subtype"] = profile_resource["subtype"]
                 details["mapped_fields"] = [
                     asdict(field)
-                    for field in map_profile_resource(profile_resource, resource_version=version)
+                    for field in map_profile_data(profile_resource, resource_version=version)
                 ]
+                for field in details["mapped_fields"]:
+                    field["support"] = public_profile_data_support(field["support"])
                 self._check_policy(connection, authority, epoch)
-                return details
+                return self._collection_row(details, input_role)
             with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     "SELECT p.passage_id,p.locator,p.normalized_text AS text "
@@ -159,10 +188,15 @@ class SourceInspector:
                 except (TypeError, ValueError):
                     details["metadata"] = None
             self._check_policy(connection, authority, epoch)
-            return details
+            return self._collection_row(details, input_role)
 
     def get_original(
-        self, connection, authority: AuthorizedUser, resource_id: str
+        self,
+        connection,
+        authority: AuthorizedUser,
+        resource_id: str,
+        *,
+        input_role: str = "evidence_resource",
     ) -> tuple[bytes, str] | None:
         with connection.transaction():
             epoch = self._admit(connection, authority)
@@ -172,9 +206,9 @@ class SourceInspector:
                 "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
                 "WHERE s.tenant_id=%s AND s.user_id=%s AND s.source_id=%s "
                 "AND s.status='active' "
-                "AND s.input_role IN ('evidence_resource','profile_resource') "
+                "AND s.input_role=%s "
                 "AND v.status='active'",
-                (authority.tenant_id, authority.user_id, resource_id),
+                (authority.tenant_id, authority.user_id, resource_id, input_role),
             ).fetchone()
             self._check_policy(connection, authority, epoch)
             return None if row is None else (bytes(row[0]), str(row[1]))

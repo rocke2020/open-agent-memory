@@ -54,7 +54,6 @@ async def test_retain_accepts_the_minimal_developer_request(body):
         else:
             path = "/v1/users/lin/resources"
             payload = {
-                "resource_type": "evidence",
                 **{k: v for k, v in body.items() if k != "user_id"},
             }
         response = await client.post(path, json=payload)
@@ -76,7 +75,6 @@ async def test_retain_rejects_caller_storage_and_tenant_selectors(field, value):
         response = await client.post(
             "/v1/users/lin/resources",
             json={
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "checkup",
                 "update_mode": "replace",
@@ -112,8 +110,7 @@ async def test_retain_requires_explicit_learning_eligibility_and_rejects_file_ap
             "/v1/users/lin/resources",
             data={
                 "metadata": (
-                    '{"resource_type":"evidence","input_type":"document",'
-                    '"document_id":"scan","update_mode":"append"}'
+                    '{"input_type":"document","document_id":"scan","update_mode":"append"}'
                 )
             },
             files={"original": ("scan.html", b"<p>99</p>", "text/html")},

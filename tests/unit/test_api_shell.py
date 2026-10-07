@@ -192,7 +192,6 @@ async def test_http_admission_uses_selected_config_limits(
             }
         elif route == "resources":
             payload = {
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "report",
                 "update_mode": "replace",
@@ -367,22 +366,27 @@ async def test_openapi_reserves_public_step_four_routes(client) -> None:
     } <= set(paths)
 
 
-async def test_openapi_exposes_typed_resource_variants(client) -> None:
+async def test_openapi_separates_profile_data_from_documents(client) -> None:
     schema = (await client.get("/openapi.json")).json()
     request = schema["paths"]["/v1/users/{user_id}/resources"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
 
     assert {item["$ref"] for item in request["oneOf"]} == {
-        "#/components/schemas/ProfileResourceRequest",
         "#/components/schemas/EvidenceTextResourceRequest",
         "#/components/schemas/EvidenceURLResourceRequest",
     }
+    profile = schema["paths"]["/v1/users/{user_id}/profile-data"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    assert profile["$ref"] == "#/components/schemas/ProfileDataRequest"
+    assert (
+        "resource_type" not in schema["components"]["schemas"]["ProfileDataRequest"]["properties"]
+    )
     assert set(schema["components"]["schemas"]["EvidenceURLResourceRequest"]["properties"]) >= {
         "url",
         "media_type",
         "document_id",
-        "resource_type",
     }
 
 

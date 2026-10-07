@@ -95,6 +95,7 @@ class LocalModels:
     def __init__(self, *, vision_blocks=None, fail_abstract=False, fail_vision=False):
         self.embedded = []
         self.generated_roles = []
+        self.abstract_inputs = []
         self.fail_abstract = fail_abstract
         self.fail_vision = fail_vision
         self.vision_blocks = vision_blocks or [
@@ -108,6 +109,8 @@ class LocalModels:
 
     def generate(self, role, **kwargs):
         self.generated_roles.append(role)
+        if role == "abstract":
+            self.abstract_inputs.append(json.loads(kwargs["user"])["passages"])
         if role == "abstract" and self.fail_abstract:
             raise RuntimeError("abstract model unavailable")
         content = (
@@ -207,6 +210,163 @@ def test_native_pdf_resource_indexes_page_text_with_page_citation():
     assert store.units[0]["locator"]["page"] == 1
     assert store.units[0]["locator"]["extraction_method"] == "native_text"
     assert models.generated_roles == ["abstract"]
+
+
+def test_native_pdf_splits_large_pages_into_exact_bounded_page_spans(monkeypatch):
+    from oam.resources import pdf_isolated
+    from oam.resources.pdf_isolated import InspectedPdfPage
+    from oam.tokens import estimate_units, estimated_tokens
+
+    text = "Manual heading\n" + "    run --safe; preserve 5 mg and do not restart.\n" * 100
+    original = (MEDICAL_FIXTURES / "bilingual/en-native.pdf").read_bytes()
+    store = MemoryStore(content=original, media_type="application/pdf")
+    store.config = store.config.model_copy(
+        update={
+            "chunk": store.config.chunk.model_copy(
+                update={
+                    "ingestion": store.config.chunk.ingestion.model_copy(
+                        update={"target_estimated_tokens": 256, "max_estimated_tokens": 512}
+                    )
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(
+        pdf_isolated,
+        "inspect_pdf",
+        lambda *_: (InspectedPdfPage("pdf:page:0001", 1, text, False),),
+    )
+    models = LocalModels()
+
+    index_source._resource(store, models)
+
+    assert len(store.units) > 1
+    assert "".join(unit["text"] for unit in store.units) == text
+    for unit in store.units:
+        locator = unit["locator"]
+        assert locator["page"] == 1 and locator["parse_revision"] == 2
+        assert locator["extraction_method"] == "native_text"
+        assert text[locator["start"] : locator["end"]] == unit["text"]
+        assert estimated_tokens(estimate_units(unit["text"])) <= 512
+    passage_rows = [
+        parameters
+        for query, parameters in store.statements
+        if query.startswith("INSERT INTO passages")
+    ]
+    assert all(parameters[4] == 2 for parameters in passage_rows)
+    assert models.generated_roles == ["abstract"]
+
+
+def test_caller_annotated_pdf_keeps_legacy_page_text_locator_and_annotation(monkeypatch):
+    from oam.contracts.resources import ResourceTemporalAnnotation
+    from oam.resources import pdf_isolated
+    from oam.resources.pdf_isolated import InspectedPdfPage
+
+    text = "Dose\n    5 mg\n" + "Retain the sealed backup.\n" * 100
+    legacy_text = "Dose 5 mg " + " ".join(["Retain the sealed backup."] * 100)
+    original = (MEDICAL_FIXTURES / "bilingual/en-native.pdf").read_bytes()
+    store = MemoryStore(content=original, media_type="application/pdf")
+    annotation = ResourceTemporalAnnotation(
+        locator="pdf:page:0001",
+        role="date_reference",
+        start="2026-10-07T00:00:00Z",
+        end="2026-10-08T00:00:00Z",
+        instant=False,
+        granularity="day",
+        meaning="duration",
+        reference_timezone="UTC",
+        quote="Dose 5 mg",
+        span_start=0,
+        span_end=9,
+    )
+    metadata = store.resource_metadata().model_copy(update={"temporal_annotations": [annotation]})
+    monkeypatch.setattr(store, "resource_metadata", lambda: metadata)
+    inserted = []
+    monkeypatch.setattr(
+        store, "insert_annotation", lambda *args, **kwargs: inserted.append(args), raising=False
+    )
+    monkeypatch.setattr(
+        pdf_isolated,
+        "inspect_pdf",
+        lambda *_: (InspectedPdfPage("pdf:page:0001", 1, text, False),),
+    )
+    store.config = store.config.model_copy(
+        update={
+            "chunk": store.config.chunk.model_copy(
+                update={
+                    "ingestion": store.config.chunk.ingestion.model_copy(
+                        update={"target_estimated_tokens": 64, "max_estimated_tokens": 128}
+                    )
+                }
+            )
+        }
+    )
+
+    index_source._resource(store, LocalModels())
+
+    assert len(store.units) == 1
+    assert store.units[0]["text"] == legacy_text
+    assert store.units[0]["locator"]["block"] == annotation.locator
+    assert store.units[0]["locator"]["parse_revision"] == 1
+    assert inserted[0][2] == annotation
+    passage_rows = [
+        parameters
+        for query, parameters in store.statements
+        if query.startswith("INSERT INTO passages")
+    ]
+    assert passage_rows[0][4] == 1
+
+
+@pytest.mark.parametrize("max_input_tokens", (180, 8192))
+def test_resource_abstract_preserves_complete_input_or_covers_later_passages(max_input_tokens):
+    from oam.indexing.extraction import model_input_tokens
+
+    content = "".join(
+        f"<p>Section {index}: retain precise labels, commands and exceptions.</p>"
+        for index in range(10)
+    )
+    store = MemoryStore(content=content.encode(), media_type="text/html")
+    store.config = store.config.model_copy(
+        update={
+            "extraction": store.config.extraction.model_copy(
+                update={"max_input_tokens": max_input_tokens}
+            )
+        }
+    )
+    models = LocalModels()
+
+    index_source._resource(store, models)
+
+    assert models.generated_roles == ["abstract"]
+    passages = models.abstract_inputs[0]
+    assert model_input_tokens(index_source.ABSTRACT_SYSTEM, {"passages": passages}) <= (
+        max_input_tokens
+    )
+    assert passages[0]["text"].startswith("Section 0:")
+    assert passages[-1]["text"].startswith("Section 9:")
+    assert [item["locator"] for item in passages] == sorted(item["locator"] for item in passages)
+    if max_input_tokens == 8192:
+        assert [item["text"] for item in passages] == [unit["text"] for unit in store.units]
+        assert store.stages["abstract_coverage"] == "full"
+    else:
+        assert len(passages) < len(store.units)
+        assert store.stages["abstract_coverage"] == "partial"
+
+
+def test_resource_abstract_skips_oversized_passage_and_uses_later_detail():
+    content = "<p>" + "introductory prose " * 400 + "</p><p>Retain the sealed backup.</p>"
+    store = MemoryStore(content=content.encode(), media_type="text/html")
+    store.config = store.config.model_copy(
+        update={"extraction": store.config.extraction.model_copy(update={"max_input_tokens": 160})}
+    )
+    models = LocalModels()
+
+    index_source._resource(store, models)
+
+    assert models.abstract_inputs == [
+        [{"locator": "html:block:0002", "text": "Retain the sealed backup."}]
+    ]
+    assert store.stages["abstract_coverage"] == "partial"
 
 
 def test_image_resource_indexes_vision_text_with_region_citation():

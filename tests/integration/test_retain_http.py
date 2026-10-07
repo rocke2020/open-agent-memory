@@ -71,7 +71,7 @@ async def test_retain_interaction_assigns_identity_and_reuses_exact_logical_requ
 
 async def test_concurrent_document_appends_and_retry_do_not_lose_or_duplicate_text(retain_client):
     client, dsn, tenant = retain_client
-    base = {"resource_type": "evidence", "input_type": "document", "document_id": "report"}
+    base = {"input_type": "document", "document_id": "report"}
     first = await client.post(
         "/v1/users/lin/resources",
         json={**base, "update_mode": "replace", "text": "First."},
@@ -105,7 +105,6 @@ async def test_user_without_a_grant_cannot_retain_or_recall(retain_client):
     denied = await client.post(
         "/v1/users/ungranted/resources",
         json={
-            "resource_type": "evidence",
             "input_type": "document",
             "document_id": "report",
             "update_mode": "replace",

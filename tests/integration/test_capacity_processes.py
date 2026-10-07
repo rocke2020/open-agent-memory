@@ -221,7 +221,6 @@ async def test_process_topology_indexes_and_recalls_during_imports(
                     data={
                         "metadata": json.dumps(
                             {
-                                "resource_type": "evidence",
                                 "input_type": "document",
                                 "document_id": kind,
                                 "update_mode": "replace",
@@ -269,7 +268,6 @@ async def test_process_topology_indexes_and_recalls_during_imports(
                             data={
                                 "metadata": json.dumps(
                                     {
-                                        "resource_type": "evidence",
                                         "input_type": "document",
                                         "document_id": kind,
                                         "update_mode": "replace",

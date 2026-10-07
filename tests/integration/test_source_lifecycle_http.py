@@ -17,7 +17,8 @@ from oam.workers.index_source import process_one
 pytestmark = pytest.mark.integration
 
 
-async def test_profile_resource_is_inspectable_through_public_resource_routes(core_database):
+async def test_profile_data_collection_crud_and_resource_boundary(core_database, monkeypatch):
+    monkeypatch.setattr("oam.db.inspection.INSPECTION_PAGE_SIZE", 1)
     _, _, root_headers = core_database
     app = create_app(ROOT / "configs/oam.yaml")
     async with (
@@ -28,28 +29,82 @@ async def test_profile_resource_is_inspectable_through_public_resource_routes(co
     ):
         await use_created_user_key(client, "lin")
         original = {
-            "resource_id": "basic",
-            "resource_type": "profile",
+            "profile_data_id": "basic",
             "subtype": "basic-profile/v1",
             "content": {"date_of_birth": "1990-05-10"},
         }
         created = await client.post(
-            "/v1/users/lin/resources", json=original, headers={"Idempotency-Key": "basic-v1"}
+            "/v1/users/lin/profile-data", json=original, headers={"Idempotency-Key": "basic-v1"}
         )
         assert created.status_code == 202, created.text
-
-        listing = await client.get("/v1/users/lin/resources")
+        document = await client.post(
+            "/v1/users/lin/resources",
+            json={
+                "input_type": "document",
+                "document_id": "report",
+                "update_mode": "replace",
+                "text": "Report.",
+            },
+            headers={"Idempotency-Key": "report"},
+        )
+        assert document.status_code == 202, document.text
+        listing = await client.get("/v1/users/lin/profile-data")
         assert listing.status_code == 200, listing.text
-        assert [
-            (item["resource_id"], item["resource_type"]) for item in listing.json()["items"]
-        ] == [("basic", "profile")]
-        detail = await client.get("/v1/users/lin/resources/basic")
+        assert [item["profile_data_id"] for item in listing.json()["items"]] == ["basic"]
+        assert "resource_type" not in listing.json()["items"][0]
+        resources = await client.get("/v1/users/lin/resources")
+        assert [item["resource_id"] for item in resources.json()["items"]] == ["report"]
+        detail = await client.get("/v1/users/lin/profile-data/basic")
         assert detail.status_code == 200, detail.text
-        assert detail.json()["subtype"] == "basic-profile/v1"
         assert detail.json()["mapped_fields"][0]["value"] == "1990-05-10"
-        response = await client.get("/v1/users/lin/resources/basic/original")
-        assert response.status_code == 200, response.text
+        assert detail.json()["mapped_fields"][0]["support"]["profile_data_id"] == "basic"
+        response = await client.get("/v1/users/lin/profile-data/basic/original")
         assert response.json() == original
+        for path in (
+            "resources/basic",
+            "resources/basic/original",
+            "profile-data/report",
+            "profile-data/report/original",
+        ):
+            assert (await client.get(f"/v1/users/lin/{path}")).status_code == 404
+        for path in ("resources/basic", "profile-data/report"):
+            assert (await client.delete(f"/v1/users/lin/{path}")).status_code == 404
+        revised = {**original, "content": {"date_of_birth": "1991-05-10"}}
+        missing_version = await client.put(
+            "/v1/users/lin/profile-data/basic",
+            json=revised,
+            headers={"Idempotency-Key": "basic-v2"},
+        )
+        assert missing_version.status_code == 422
+        changed = await client.put(
+            "/v1/users/lin/profile-data/basic",
+            json=revised,
+            headers={"Idempotency-Key": "basic-v2", "If-Match": "1"},
+        )
+        assert changed.status_code == 202, changed.text
+        retry = await client.put(
+            "/v1/users/lin/profile-data/basic",
+            json=revised,
+            headers={"Idempotency-Key": "basic-v2", "If-Match": "1"},
+        )
+        assert retry.json()["operation_id"] == changed.json()["operation_id"]
+        stale = await client.put(
+            "/v1/users/lin/profile-data/basic",
+            json=original,
+            headers={"Idempotency-Key": "basic-stale", "If-Match": "1"},
+        )
+        assert stale.status_code == 409, stale.text
+        wrong_id = await client.put(
+            "/v1/users/lin/profile-data/basic",
+            json={**revised, "profile_data_id": "other"},
+            headers={"Idempotency-Key": "wrong", "If-Match": "2"},
+        )
+        assert wrong_id.status_code in (403, 422)
+        assert (await client.get("/v1/users/lin/profile-data/basic")).json()["active_version"] == 2
+        deleted = await client.delete("/v1/users/lin/profile-data/basic")
+        assert deleted.status_code == 202, deleted.text
+        assert (await client.get("/v1/users/lin/profile-data/basic")).status_code == 404
+        assert (await client.get("/v1/users/lin/resources/report")).status_code == 200
 
 
 async def test_profile_resource_delete_excludes_exact_field_and_reuses_cleanup_receipt(
@@ -65,10 +120,9 @@ async def test_profile_resource_delete_excludes_exact_field_and_reuses_cleanup_r
     ):
         await use_created_user_key(client, "lin")
         created = await client.post(
-            "/v1/users/lin/resources",
+            "/v1/users/lin/profile-data",
             json={
-                "resource_id": "basic",
-                "resource_type": "profile",
+                "profile_data_id": "basic",
                 "subtype": "basic-profile/v1",
                 "content": {"date_of_birth": "1990-05-10"},
             },
@@ -93,16 +147,16 @@ async def test_profile_resource_delete_excludes_exact_field_and_reuses_cleanup_r
         before = await client.get("/v1/users/lin/profile")
         assert "1990-05-10" in before.json()["content"]
 
-        deleted = await client.delete("/v1/users/lin/resources/basic")
+        deleted = await client.delete("/v1/users/lin/profile-data/basic")
         assert deleted.status_code == 202, deleted.text
         assert deleted.json()["status"] == "excluded"
         assert deleted.json()["excluded_versions"] == [1]
-        repeated = await client.delete("/v1/users/lin/resources/basic")
+        repeated = await client.delete("/v1/users/lin/profile-data/basic")
         assert repeated.status_code == 202, repeated.text
         assert repeated.json()["cleanup_operation_id"] == deleted.json()["cleanup_operation_id"]
         after = await client.get("/v1/users/lin/profile")
         assert after.json()["content"] is None
-        assert (await client.get("/v1/users/lin/resources/basic")).status_code == 404
+        assert (await client.get("/v1/users/lin/profile-data/basic")).status_code == 404
         config = load_config(ROOT / "configs/oam.yaml").config
         assert process_one(
             config,
@@ -144,13 +198,12 @@ async def test_profile_resource_write_requires_resource_grant(core_database):
                 (tenant,),
             )
         body = {
-            "resource_id": "basic",
-            "resource_type": "profile",
+            "profile_data_id": "basic",
             "subtype": "basic-profile/v1",
             "content": {"date_of_birth": "1990-05-10"},
         }
         allowed = await client.post(
-            "/v1/users/lin/resources", json=body, headers={"Idempotency-Key": "grant-allowed"}
+            "/v1/users/lin/profile-data", json=body, headers={"Idempotency-Key": "grant-allowed"}
         )
         assert allowed.status_code == 202, allowed.text
 
@@ -161,8 +214,8 @@ async def test_profile_resource_write_requires_resource_grant(core_database):
                 (tenant,),
             )
         denied = await client.post(
-            "/v1/users/lin/resources",
-            json={**body, "resource_id": "other"},
+            "/v1/users/lin/profile-data",
+            json={**body, "profile_data_id": "other"},
             headers={"Idempotency-Key": "grant-denied"},
         )
         assert denied.status_code == 404, denied.text
@@ -187,7 +240,7 @@ async def test_public_resource_delete_cleans_export_and_keeps_new_independent_so
         }
         retained = await client.post(
             "/v1/users/lin/resources",
-            json={"resource_type": "evidence", **{k: v for k, v in body.items() if k != "user_id"}},
+            json={**{k: v for k, v in body.items() if k != "user_id"}},
             headers={"Idempotency-Key": "v1"},
         )
         assert retained.status_code == 202, retained.text
@@ -259,7 +312,7 @@ async def test_public_resource_delete_cleans_export_and_keeps_new_independent_so
         body.update(document_id="independent", text="Synthetic independent report.")
         other = await client.post(
             "/v1/users/lin/resources",
-            json={"resource_type": "evidence", **{k: v for k, v in body.items() if k != "user_id"}},
+            json={**{k: v for k, v in body.items() if k != "user_id"}},
             headers={"Idempotency-Key": "other"},
         )
         assert other.status_code == 202, other.text
@@ -280,7 +333,6 @@ async def test_public_resource_delete_cleans_export_and_keeps_new_independent_so
             data={
                 "metadata": json.dumps(
                     {
-                        "resource_type": "evidence",
                         **{k: v for k, v in metadata.items() if k != "user_id"},
                     }
                 )

@@ -18,6 +18,7 @@ from api_test_app import create_api_only_app as create_app
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from oam.auth.credentials import digest_secret
 from oam.db.migrations import apply_migrations
@@ -88,7 +89,6 @@ async def test_root_creates_user_key_but_cannot_read_personal_operations(core_da
         root_write = await client.post(
             "/v1/users/alice/resources",
             json={
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "root-attempt",
                 "update_mode": "replace",
@@ -100,7 +100,6 @@ async def test_root_creates_user_key_but_cannot_read_personal_operations(core_da
         retained = await client.post(
             "/v1/users/alice/resources",
             json={
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "private",
                 "update_mode": "replace",
@@ -316,7 +315,6 @@ async def test_html_upload_is_searchable_evidence_without_learned_facts(core_dat
         b"<td>5.2 mmol/L</td></tr></table></body></html>"
     )
     metadata = {
-        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "report",
         "update_mode": "replace",
@@ -418,7 +416,6 @@ async def test_public_pdf_and_image_retain_to_cited_recall(
     app = create_app(ROOT / "configs/oam.yaml")
     models = SyntheticIndexModels()
     metadata = {
-        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "report",
         "update_mode": "replace",
@@ -474,6 +471,149 @@ async def test_public_pdf_and_image_retain_to_cited_recall(
     assert ("extraction" in models.generation_calls) is uses_vision
 
 
+async def test_structured_native_pdf_late_detail_reaches_fast_and_mid_context(
+    core_database, tmp_path
+):
+    from oam.config import load_config
+    from oam.contracts.resources import ResourceMediaType
+    from oam.resources.originals import OriginalDescriptor
+    from oam.resources.pdf import parse_pdf
+    from oam.tokens import estimate_units, estimated_tokens
+    from oam.workers.index_source import process_one
+
+    dsn, tenant, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    writer = PdfWriter()
+    target = "If the seal is broken, retain the sealed backup and do not restart."
+    lines = [
+        "General safety procedure: preserve labels, commands, exceptions and exact units."
+    ] * 120 + [target]
+    for page_lines in (["Manual overview: use the current source."], lines):
+        page = writer.add_blank_page(width=612, height=792)
+        font = DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Courier"),
+            }
+        )
+        page[NameObject("/Resources")] = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})}
+        )
+        stream = DecodedStreamObject()
+        commands = ["BT /F1 4 Tf 5 TL 40 750 Td"]
+        for index, line in enumerate(page_lines):
+            if index:
+                commands.append("T*")
+            escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            commands.append(f"({escaped}) Tj")
+        commands.append("ET")
+        stream.set_data("\n".join(commands).encode("ascii"))
+        page[NameObject("/Contents")] = writer._add_object(stream)
+    output = BytesIO()
+    writer.write(output)
+    original = output.getvalue()
+    (tmp_path / "structured-native.pdf").write_bytes(original)
+    models = SyntheticIndexModels()
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        uploaded = await client.post(
+            "/v1/users/scope/resources",
+            headers={"Idempotency-Key": "structured-native"},
+            data={
+                "metadata": json.dumps(
+                    {
+                        "input_type": "document",
+                        "document_id": "structured-native",
+                        "update_mode": "replace",
+                    }
+                )
+            },
+            files={"original": ("manual.pdf", original, "application/pdf")},
+        )
+        assert uploaded.status_code == 202, uploaded.text
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="structured-native-worker",
+        )
+        app.state.runtime.models = models
+        measurements = []
+        for mode, query in (
+            (mode, query)
+            for mode in ("fast", "mid")
+            for query in (
+                "seal broken sealed backup restart",
+                "What should I do when the seal is broken?",
+            )
+        ):
+            recalled = await client.post(
+                "/v1/recall",
+                json={
+                    "user_id": "scope",
+                    "query": query,
+                    "recall_level": mode,
+                    "max_context_tokens": 1500,
+                    "include_profile": False,
+                },
+            )
+            assert recalled.status_code == 200, recalled.text
+            payload = recalled.json()
+            assert target in payload["context"]
+            assert payload["context_tokens"] == estimated_tokens(estimate_units(payload["context"]))
+            assert payload["context_tokens"] <= 1500
+            selected = next(item for item in payload["items"] if target in item["text"])
+            citation = selected["citations"][0]
+            assert selected["origin"] == "evidence"
+            assert citation["document_id"] == "structured-native"
+            assert citation["page"] == 2 and citation["parse_revision"] == 2
+            measurements.append(
+                {
+                    "mode": mode,
+                    "query": query,
+                    "context_tokens": payload["context_tokens"],
+                    "latency_seconds": recalled.elapsed.total_seconds(),
+                    "citation": citation,
+                    "context": payload["context"],
+                }
+            )
+        (tmp_path / "context-results.json").write_text(
+            json.dumps(measurements, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        operation = await client.get(
+            f"/v1/users/scope/operations/{uploaded.json()['operation_id']}"
+        )
+        assert operation.json()["readiness"]["source_searchable"] is True
+    parsed = parse_pdf(
+        OriginalDescriptor.from_bytes(ResourceMediaType.PDF, original), config.resource
+    )
+    with psycopg.connect(dsn) as connection:
+        stored = connection.execute(
+            "SELECT original_bytes FROM source_versions WHERE tenant_id=%s", (tenant,)
+        ).fetchone()[0]
+        assert bytes(stored) == original
+        rows = connection.execute(
+            "SELECT normalized_text,parse_revision,locator FROM passages WHERE tenant_id=%s",
+            (tenant,),
+        ).fetchall()
+        assert len(rows) > 2
+        for text, revision, locator in rows:
+            assert revision == locator["parse_revision"] == 2
+            page_text = parsed.pages[locator["page"] - 1].text
+            assert page_text[locator["start"] : locator["end"]] == text
+        assert connection.execute("SELECT count(*) FROM memories").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM insights").fetchone()[0] == 0
+    assert models.generation_calls == ["abstract"]
+
+
 async def test_mixed_native_and_image_pdf_keeps_both_cited_details(core_database):
     from oam.config import load_config
     from oam.workers.index_source import process_one
@@ -505,7 +645,6 @@ async def test_mixed_native_and_image_pdf_keeps_both_cited_details(core_database
             data={
                 "metadata": json.dumps(
                     {
-                        "resource_type": "evidence",
                         "input_type": "document",
                         "document_id": "mixed-report",
                         "update_mode": "replace",
@@ -572,7 +711,6 @@ async def test_failed_url_fetch_does_not_reserve_the_idempotency_key(core_databa
         return original
 
     request = {
-        "resource_type": "evidence",
         "input_type": "document_url",
         "document_id": "retry-report",
         "update_mode": "replace",
@@ -637,7 +775,6 @@ async def test_bilingual_report_public_retain_to_cited_recall(core_database, lan
     config = load_config(ROOT / "configs/oam.yaml").config
     app = create_app(ROOT / "configs/oam.yaml")
     metadata = {
-        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "report",
         "update_mode": "replace",
@@ -715,7 +852,6 @@ async def test_public_url_evidence_fetches_once_and_reuses_the_stored_original(
         return original
 
     request = {
-        "resource_type": "evidence",
         "input_type": "document_url",
         "document_id": "url-report",
         "update_mode": "replace",
@@ -810,7 +946,6 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
     app = create_app(ROOT / "configs/oam.yaml")
     models = FailedVision()
     metadata = {
-        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "partial-report",
         "update_mode": "replace",
@@ -928,7 +1063,6 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
             data={
                 "metadata": json.dumps(
                     {
-                        "resource_type": "evidence",
                         "input_type": "document",
                         "document_id": "synthetic-report",
                         "update_mode": "replace",
@@ -1271,10 +1405,9 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
     ):
         await use_created_user_key(client, "scope")
         root_invalid_resource = await client.post(
-            "/v1/users/scope/resources",
+            "/v1/users/scope/profile-data",
             json={
-                "resource_id": "unauthorized",
-                "resource_type": "profile",
+                "profile_data_id": "unauthorized",
                 "subtype": "basic-profile/v1",
                 "content": {"unknown": "value"},
             },
@@ -1319,7 +1452,6 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         report = await client.post(
             "/v1/users/scope/resources",
             json={
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "report-only",
                 "update_mode": "replace",
@@ -1332,10 +1464,9 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
             config, queue_dsn, content_dsn, models=models, worker_id="profile-report"
         )
         resource = await client.post(
-            "/v1/users/scope/resources",
+            "/v1/users/scope/profile-data",
             json={
-                "resource_id": "basic",
-                "resource_type": "profile",
+                "profile_data_id": "basic",
                 "subtype": "basic-profile/v1",
                 "content": {"date_of_birth": "1990-05-10"},
             },
@@ -1447,19 +1578,18 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         )
 
         revised_body = {
-            "resource_id": "basic",
-            "resource_type": "profile",
+            "profile_data_id": "basic",
             "subtype": "basic-profile/v1",
             "content": {"date_of_birth": "1991-05-10"},
         }
-        wrong_revision = await client.post(
-            "/v1/users/scope/resources",
+        wrong_revision = await client.put(
+            "/v1/users/scope/profile-data/basic",
             json=revised_body,
             headers={"Idempotency-Key": "profile-basic-wrong", "If-Match": "9"},
         )
         assert wrong_revision.status_code == 409
-        revised = await client.post(
-            "/v1/users/scope/resources",
+        revised = await client.put(
+            "/v1/users/scope/profile-data/basic",
             json=revised_body,
             headers={"Idempotency-Key": "profile-basic-v2", "If-Match": "1"},
         )
@@ -1486,7 +1616,6 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         evidence_only = await client.post(
             "/v1/users/scope/resources",
             json={
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "second-report",
                 "update_mode": "replace",
@@ -1556,8 +1685,8 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         ]
         assert len(new_profiles) == 1
         assert new_profiles[0]["content"] is None
-        timeout_resource = await client.post(
-            "/v1/users/scope/resources",
+        timeout_resource = await client.put(
+            "/v1/users/scope/profile-data/basic",
             json={
                 **revised_body,
                 "content": {"date_of_birth": "1992-05-10"},
@@ -2232,7 +2361,7 @@ async def test_profile_response_rejects_resource_revision_during_assembly(
     core_database, monkeypatch, surface
 ):
     from oam.config import load_config
-    from oam.contracts.profile import ProfileResourceRequest
+    from oam.contracts.profile import ProfileDataRequest
     from oam.profiles import service as profile_service
     from oam.retrieval.service import RecallService
     from oam.workers.index_source import process_one
@@ -2247,13 +2376,12 @@ async def test_profile_response_rejects_resource_revision_during_assembly(
     ):
         await use_created_user_key(client, "scope")
         resource = {
-            "resource_id": "basic",
-            "resource_type": "profile",
+            "profile_data_id": "basic",
             "subtype": "basic-profile/v1",
             "content": {"date_of_birth": "1990-05-10"},
         }
         accepted = await client.post(
-            "/v1/users/scope/resources",
+            "/v1/users/scope/profile-data",
             json=resource,
             headers={"Idempotency-Key": "profile-before-revision"},
         )
@@ -2276,10 +2404,10 @@ async def test_profile_response_rejects_resource_revision_during_assembly(
         secret = client.headers["Authorization"].removeprefix("Bearer ")
 
         def revise():
-            receipt = app.state.runtime.retain_profile_resource(
+            receipt = app.state.runtime.retain_profile_data(
                 secret,
                 "scope",
-                ProfileResourceRequest.model_validate(
+                ProfileDataRequest.model_validate(
                     {**resource, "content": {"date_of_birth": "1991-06-11"}}
                 ),
                 "profile-during-assembly",
@@ -2353,10 +2481,9 @@ async def test_new_profile_instruction_cancels_running_generation(core_database)
     ):
         await use_created_user_key(client, "scope")
         accepted = await client.post(
-            "/v1/users/scope/resources",
+            "/v1/users/scope/profile-data",
             json={
-                "resource_id": "basic",
-                "resource_type": "profile",
+                "profile_data_id": "basic",
                 "subtype": "basic-profile/v1",
                 "content": {"sex": "female"},
             },

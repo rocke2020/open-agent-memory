@@ -35,9 +35,17 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
     profile_indexing = False
     profile_overrides = {}
     calls = []
+    profile_data = None
+    profile_data_version = 0
 
     def respond(route):
-        nonlocal profile_missing, profile_failed, profile_blocked, profile_indexing
+        nonlocal \
+            profile_missing, \
+            profile_failed, \
+            profile_blocked, \
+            profile_indexing, \
+            profile_data, \
+            profile_data_version
         path = route.request.url
         calls.append((route.request.method, path, route.request.post_data))
         if path.endswith("/memories"):
@@ -65,6 +73,40 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 ],
                 "next_after": None,
             }
+        elif "/profile-data" in path:
+            if route.request.method in {"POST", "PUT"}:
+                profile_data = json.loads(route.request.post_data)
+                profile_data_version += 1
+                data = {"revision": profile_data_version, "operation_id": "data-op"}
+            elif path.endswith("/original"):
+                data = profile_data
+            elif path.endswith("/profile-data"):
+                data = {
+                    "items": [
+                        {
+                            "profile_data_id": "basic",
+                            "media_type": "application/json",
+                            "active_version": profile_data_version,
+                        }
+                    ]
+                    if profile_data
+                    else [],
+                    "next_after": None,
+                }
+            else:
+                data = {
+                    "profile_data_id": "basic",
+                    "subtype": "basic-profile/v1",
+                    "media_type": "application/json",
+                    "active_version": profile_data_version,
+                    "mapped_fields": [
+                        {
+                            "section": "main",
+                            "key": "date_of_birth",
+                            "value": profile_data["content"]["date_of_birth"],
+                        }
+                    ],
+                }
         elif path.endswith("/resources"):
             data = {"items": [], "next_after": None}
         elif path.endswith("/evidence/chat-1"):
@@ -143,20 +185,48 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert detail.get_by_text("Subtype", exact=True).is_visible()
                 assert detail.get_by_text("preferences", exact=True).is_visible()
 
+                page.locator('[data-view="profile-data"]').click()
+                page.get_by_role("button", name="Add Profile Data", exact=True).click()
+                page.get_by_label("Profile Data ID", exact=True).fill("basic")
+                page.get_by_label("Date of birth", exact=True).fill("1990-05-10")
+                page.get_by_role("button", name="Create Profile Data", exact=True).click()
+                page.get_by_role("button", name="basic", exact=False).click()
+                detail.get_by_text("1990-05-10", exact=True).wait_for()
+                detail.get_by_role("button", name="Revise", exact=True).click()
+                page.get_by_label("Date of birth", exact=True).fill("1991-05-10")
+                page.get_by_role("button", name="Create immutable revision", exact=True).click()
+                page.get_by_role("button", name="basic", exact=False).click()
+                detail.get_by_text("1991-05-10", exact=True).wait_for()
+                writes = [
+                    call
+                    for call in calls
+                    if call[0] in {"POST", "PUT"} and "/profile-data" in call[1]
+                ]
+                assert [call[0] for call in writes] == ["POST", "PUT"]
+                assert json.loads(writes[-1][2]) == {
+                    "profile_data_id": "basic",
+                    "subtype": "basic-profile/v1",
+                    "content": {"date_of_birth": "1991-05-10"},
+                }
+                page.locator('[data-view="resources"]').click()
+                page.get_by_role("button", name="Add Resource", exact=True).click()
+                assert page.get_by_label("Resource type", exact=True).count() == 0
+                assert page.get_by_label("Date of birth", exact=True).is_hidden()
+
                 page.locator('[data-view="profiles"]').click()
-                detail.get_by_text("Read-only Profile", exact=True).wait_for()
+                detail.get_by_text("Read-only User Profile", exact=True).wait_for()
                 assert detail.locator(".profile-content strong").count() == 1
                 assert detail.locator(".profile-content strong").inner_text() == "engineer"
                 detail.get_by_text(
                     "The user is an engineer. Keep personal data local [1].", exact=True
                 ).wait_for()
-                assert detail.get_by_text("L3 Profile", exact=True).count() == 0
+                assert detail.get_by_text("L3 User Profile", exact=True).count() == 0
                 assert detail.locator(".profile-content h4").all_inner_texts() == ["Main content"]
                 assert "Conversation chat-1" not in detail.locator(".profile-content").inner_text()
                 top_level = detail.evaluate(
                     "root => [...root.children].map(el => el.textContent.trim())"
                 )
-                summary = detail.get_by_label("Profile status", exact=True)
+                summary = detail.get_by_label("User Profile status", exact=True)
                 assert summary.get_by_text("Up to date", exact=True).is_visible()
                 updated = summary.locator("time")
                 assert updated.get_attribute("datetime") == "2026-09-29T12:30:00+00:00"
@@ -180,22 +250,24 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
 
                 profile_missing = True
                 page.locator('[data-view="profiles"]').click()
-                detail.get_by_text("No generated Profile yet", exact=False).wait_for()
+                detail.get_by_text("No generated User Profile yet", exact=False).wait_for()
                 assert summary.get_by_text("Not created", exact=True).is_visible()
                 assert summary.locator("time").count() == 0
                 assert detail.get_by_text("Last refreshed", exact=True).count() == 0
-                assert detail.get_by_text("partial Profile", exact=False).count() == 0
+                assert detail.get_by_text("partial User Profile", exact=False).count() == 0
                 page.locator("#refresh-profile").click()
                 page.locator("#status").get_by_text(
                     "creation/refresh pending", exact=False
                 ).wait_for()
-                assert "Create/Refresh Profile" in page.locator("#refresh-profile").inner_text()
+                assert (
+                    "Create/Refresh User Profile" in page.locator("#refresh-profile").inner_text()
+                )
                 assert json.loads(calls[-1][2]) == {}
 
                 profile_indexing = True
                 page.locator("#refresh-profile").click()
                 page.locator("#status").get_by_text(
-                    "Profile inputs are not ready", exact=False
+                    "User Profile inputs are not ready", exact=False
                 ).wait_for()
                 profile_indexing = False
 
@@ -226,7 +298,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 )
                 page.locator('[data-view="profiles"]').click()
                 detail.get_by_text(
-                    "This stored revision has no Profile document", exact=False
+                    "This stored revision has no User Profile document", exact=False
                 ).wait_for()
                 assert summary.get_by_text("Needs rebuild", exact=True).is_visible()
                 assert summary.get_by_text("Updated time not recorded", exact=True).is_visible()
@@ -234,11 +306,11 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert detail.get_by_text("Last refreshed", exact=True).count() == 0
                 assert (
                     detail.get_by_text(
-                        "This Profile uses only ready information", exact=False
+                        "This User Profile uses only ready information", exact=False
                     ).count()
                     == 0
                 )
-                assert "no Profile document" in page.locator("#status").inner_text()
+                assert "no User Profile document" in page.locator("#status").inner_text()
                 assert detail.get_by_text("1 Insight input failed", exact=False).is_visible()
 
                 profile_overrides.update(
@@ -251,7 +323,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 page.locator("#profile-budget").fill("0")
                 page.locator("#profile-form button").first.click()
                 detail.get_by_text(
-                    "Profile exceeds the preview token budget", exact=False
+                    "User Profile exceeds the preview token budget", exact=False
                 ).wait_for()
                 assert "preview token budget" in page.locator("#status").inner_text()
                 assert detail.get_by_text("Refresh it to rebuild", exact=False).count() == 0
@@ -260,7 +332,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
 
                 profile_overrides.update(freshness="stale", omitted=[])
                 page.locator('[data-view="profiles"]').click()
-                detail.get_by_text("stored Profile is unavailable", exact=False).wait_for()
+                detail.get_by_text("stored User Profile is unavailable", exact=False).wait_for()
                 assert summary.get_by_text("Out of date", exact=True).is_visible()
 
                 profile_overrides.update(
@@ -273,7 +345,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 rendered = detail.locator("pre").inner_text()
                 assert json.loads(rendered)["occupation"] == "Engineer"
                 assert detail.locator("script").count() == 0
-                assert page.locator("#status").inner_text() == "Profile loaded."
+                assert page.locator("#status").inner_text() == "User Profile loaded."
             finally:
                 context.close()
                 browser.close()

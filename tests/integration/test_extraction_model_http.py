@@ -153,7 +153,6 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
                         data={
                             "metadata": json.dumps(
                                 {
-                                    "resource_type": "evidence",
                                     "input_type": "document",
                                     "document_id": "image",
                                     "update_mode": "replace",

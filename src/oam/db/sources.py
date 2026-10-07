@@ -162,6 +162,8 @@ class SourceRepository:
         source_id: str,
         expected_version: int,
         idempotency_key: str,
+        *,
+        input_role: str = "evidence_resource",
     ) -> None:
         if not authority.allows("resource:write"):
             raise PermissionError("resource:write is required")
@@ -170,11 +172,14 @@ class SourceRepository:
             bind_user(cursor, authority)
             cursor.execute(
                 "SELECT source_id FROM operations WHERE tenant_id=%s AND user_id=%s "
-                "AND principal_id=%s AND kind='index_resource' AND dedup_key=%s",
+                "AND principal_id=%s AND kind=%s AND dedup_key=%s",
                 (
                     authority.tenant_id,
                     authority.user_id,
                     authority.principal_id,
+                    "index_profile_resource"
+                    if input_role == "profile_resource"
+                    else "index_resource",
                     idempotency_key,
                 ),
             )
@@ -185,8 +190,8 @@ class SourceRepository:
                 return
             cursor.execute(
                 "SELECT active_version FROM sources WHERE tenant_id=%s AND user_id=%s "
-                "AND source_id=%s AND input_role='evidence_resource' AND status='active'",
-                (authority.tenant_id, authority.user_id, source_id),
+                "AND source_id=%s AND input_role=%s AND status='active'",
+                (authority.tenant_id, authority.user_id, source_id, input_role),
             )
             row = cursor.fetchone()
             if row is None:
@@ -204,6 +209,7 @@ class SourceRepository:
         operation_id: str,
         work_unit_id: str,
         attempts_remaining: int,
+        expected_input_role: str | None = None,
     ) -> DeletionReceipt:
         if not authority.allows("source:delete"):
             raise PermissionError("source:delete is required")
@@ -230,7 +236,11 @@ class SourceRepository:
                 (*key, source_id),
             )
             source = cursor.fetchone()
-            if source is None or source[0] not in allowed_roles:
+            if (
+                source is None
+                or source[0] not in allowed_roles
+                or (expected_input_role is not None and source[0] != expected_input_role)
+            ):
                 raise SourceNotFound(source_id)
             cursor.execute(
                 "SELECT array_agg(source_version ORDER BY source_version) FROM source_versions "

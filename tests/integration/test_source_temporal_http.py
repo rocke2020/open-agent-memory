@@ -266,7 +266,6 @@ async def test_html_annotations_stay_evidence_and_validate_before_models(
     if not valid_quote:
         annotation["quote"] = "2024"
     metadata = {
-        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "report",
         "update_mode": "replace",
@@ -311,7 +310,6 @@ async def test_document_replace_immediately_hides_old_projection(temporal_client
     models = NoFactModels()
     app.state.runtime.models = models
     base = {
-        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "garden",
         "update_mode": "replace",

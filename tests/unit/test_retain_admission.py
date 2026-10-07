@@ -24,6 +24,15 @@ class AdmissionRuntime:
         self.authenticate(secret)
         return {"operation_id": "accepted", "source_id": "assigned", "revision": 1}
 
+    def preflight_revision(
+        self, secret, user_id, profile_data_id, expected_version, idempotency_key, *, input_role
+    ):
+        self.authenticate(secret)
+
+    def retain_profile_data(self, secret, user_id, body, idempotency_key, *, expected_version):
+        self.authenticate(secret)
+        return {"operation_id": "accepted", "source_id": body.profile_data_id, "revision": 1}
+
 
 class IncomingBody(httpx.AsyncByteStream):
     def __init__(self, content):
@@ -39,7 +48,6 @@ class IncomingBody(httpx.AsyncByteStream):
 
 def payload(kind, size):
     body = {
-        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "doc",
         "update_mode": "replace",
@@ -64,7 +72,8 @@ async def client(monkeypatch):
     monkeypatch.setattr(api, "load_config", lambda path: replace(resolved, config=config))
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(
-            app=api.create_app(ROOT / "configs/oam.yaml", runtime=AdmissionRuntime())
+            app=api.create_app(ROOT / "configs/oam.yaml", runtime=AdmissionRuntime()),
+            raise_app_exceptions=False,
         ),
         base_url="http://synthetic",
     ) as value:
@@ -147,3 +156,32 @@ async def test_bounded_retain_still_accepts_valid_content(client, kind):
     )
     assert response.status_code == 202, response.text
     assert response.json()["source_id"] == "assigned"
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+@pytest.mark.parametrize("declared_length", [None, "1"])
+async def test_profile_data_stream_overflow_returns_413(client, method, declared_length):
+    raw = json.dumps(
+        {
+            "profile_data_id": "basic",
+            "subtype": "basic-profile/v1",
+            "content": {"interests": ["x" * 4096]},
+        }
+    ).encode()
+    stream = IncomingBody(raw)
+    headers = {
+        "Authorization": "Bearer valid",
+        "Idempotency-Key": "profile-data",
+        "Content-Type": "application/json",
+    }
+    path = "/v1/users/lin/profile-data"
+    if declared_length is not None:
+        headers["Content-Length"] = declared_length
+    if method == "PUT":
+        path += "/basic"
+        headers["If-Match"] = "1"
+    response = await client.request(method, path, content=stream, headers=headers)
+    assert response.status_code == 413, response.text
+    assert response.json()["detail"]["code"] == "RequestTooLarge"
+    assert stream.consumed < len(raw)
+    assert response.headers["oam-contract-version"] == "0.0.1"
