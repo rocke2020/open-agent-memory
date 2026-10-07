@@ -321,7 +321,7 @@ def create_app(
         limits["auth"] = config.auth.model_dump(mode="json", exclude={"mode", "root_key_env"})
         limits["database"] = {
             "api_pool_max": config.database.api_pool_max,
-            "worker_pool_max": config.database.worker_pool_max,
+            "indexing_concurrency": config.database.indexing_concurrency,
         }
         return {
             "contract_version": config.contract_version,

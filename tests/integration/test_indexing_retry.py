@@ -79,9 +79,11 @@ class CompletedInvalidModels(SyntheticIndexModels):
         self.failed_role = failed_role
         self.usage = usage
         self.embedding_calls = 0
+        self.first_fact_embedded = Event()
 
     def generate(self, role, **kwargs):
         if self.failed_role == "generation" and self.generation_calls:
+            assert self.first_fact_embedded.wait(3), "ready fact did not embed during extraction"
             raise ModelOutputError("generation content is unusable", usage=self.usage)
         return super().generate(role, **kwargs)
 
@@ -89,7 +91,10 @@ class CompletedInvalidModels(SyntheticIndexModels):
         self.embedding_calls += 1
         if self.failed_role == "embedding" and self.embedding_calls == 2:
             raise ModelOutputError("embedding dimension is invalid", usage=self.usage)
-        return super().embed(texts, **kwargs)
+        result = super().embed(texts, **kwargs)
+        if self.embedding_calls == 2:
+            self.first_fact_embedded.set()
+        return result
 
 
 @pytest.fixture
@@ -260,7 +265,6 @@ async def test_consumer_failure_preserves_unknown_overlapping_extraction(
     client, dsn, tenant, config, operation_id = accepted_source
     config = config.model_copy(
         update={
-            "worker": config.worker.model_copy(update={"max_model_calls": 2}),
             "provider": config.provider.model_copy(update={"llm_concurrency": 2}),
         }
     )
@@ -290,8 +294,9 @@ async def test_consumer_failure_preserves_unknown_overlapping_extraction(
                 raise httpx.ConnectTimeout("fact embedding failed before dispatch")
             return super().embed(texts, **kwargs)
 
-    with pytest.raises(ModelOutputError if known_usage else httpx.ConnectTimeout):
+    with pytest.raises(RuntimeError, match="multiple indexing stages failed") as failure:
         run_source(dsn, config, MixedFailureModels())
+    assert isinstance(failure.value.__cause__, httpx.ReadTimeout)
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "partial"
     assert operation["usage"]["coverage"] == "partial"
@@ -526,17 +531,19 @@ async def test_unknown_timeout_is_not_automatically_requeued(accepted_source, ti
         )
 
 
-async def test_mixed_extraction_timeout_stops_before_fact_embedding(accepted_source):
+async def test_mixed_extraction_and_embedding_failures_preserve_unknown_usage(accepted_source):
     client, dsn, tenant, config, operation_id = accepted_source
 
     class MixedTimeoutModels(SyntheticIndexModels):
         def __init__(self):
             super().__init__()
             self.embedding_calls = 0
+            self.fact_embedding_started = Event()
 
         def embed(self, texts, **kwargs):
             self.embedding_calls += 1
             if self.embedding_calls == 2:
+                self.fact_embedding_started.set()
                 raise httpx.ConnectTimeout("fact embedding was dispatched")
             return super().embed(texts, **kwargs)
 
@@ -544,13 +551,15 @@ async def test_mixed_extraction_timeout_stops_before_fact_embedding(accepted_sou
             if role == "extraction":
                 text = json.loads(kwargs["user"])["center"]["text"]
                 if text == "Lin prefers morning updates.":
+                    assert self.fact_embedding_started.wait(3), "fact embedding did not overlap"
                     raise httpx.ReadTimeout("extraction outcome is unknown")
             return super().generate(role, **kwargs)
 
     models = MixedTimeoutModels()
-    with pytest.raises(httpx.ReadTimeout):
+    with pytest.raises(RuntimeError, match="multiple indexing stages failed") as failure:
         run_source(dsn, config, models)
-    assert models.embedding_calls == 1
+    assert isinstance(failure.value.__cause__, httpx.ReadTimeout)
+    assert models.embedding_calls == 2
     assert run_source(dsn, config, models) is False
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "partial"
@@ -584,7 +593,7 @@ async def test_mixed_extraction_timeout_stops_before_fact_embedding(accepted_sou
             "generation",
             Usage(input_tokens=100, output_tokens=40, total_tokens=140, coverage="complete"),
             170,
-            2,
+            3,
             "complete",
         ),
         (
@@ -594,7 +603,7 @@ async def test_mixed_extraction_timeout_stops_before_fact_embedding(accepted_sou
             11,
             "complete",
         ),
-        ("generation", Usage(), None, 2, "partial"),
+        ("generation", Usage(), None, 3, "partial"),
     ],
 )
 async def test_completed_invalid_outputs_record_known_usage_once_without_retrying(
@@ -658,3 +667,91 @@ async def test_stale_owner_cannot_record_usage_or_requeue_work(accepted_source):
         assert connection.execute(
             "SELECT disposition,usage FROM attempts WHERE tenant_id=%s", (tenant,)
         ).fetchone() == ("claimed", None)
+
+
+async def test_retry_reuses_completed_fact_vectors_when_ready_group_batching_changes(
+    accepted_source, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from oam.workers import index_source
+
+    client, dsn, tenant, config, operation_id = accepted_source
+    first = "Lin prefers concise updates."
+    second = "Lin prefers morning updates."
+    first_embedded = Event()
+
+    class Models(SyntheticIndexModels):
+        def __init__(self):
+            super().__init__()
+            self.fail_second = True
+            self.extraction_texts = []
+
+        def generate(self, role, **kwargs):
+            if role == "extraction":
+                text = json.loads(kwargs["user"])["center"]["text"]
+                self.extraction_texts.append(text)
+                if text == second and self.fail_second:
+                    self.fail_second = False
+                    assert first_embedded.wait(5), "first group never completed fact embedding"
+                    raise httpx.ConnectTimeout("second extraction failed before dispatch")
+            return super().generate(role, **kwargs)
+
+        def embed(self, texts, **kwargs):
+            result = super().embed(texts, **kwargs)
+            if texts == (first,):
+                first_embedded.set()
+            return result
+
+    models = Models()
+    with pytest.raises(httpx.ConnectTimeout, match="second extraction failed before dispatch"):
+        run_source(dsn, config, models)
+    assert models.embedding_batches == [(first, second), (first,)]
+    failed = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert failed["status"] == "processing"
+
+    class ReadyTogetherExecutor(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.submitted = []
+
+        def submit(self, *args, **kwargs):
+            future = super().submit(*args, **kwargs)
+            self.submitted.append(future)
+            if len(self.submitted) == 2:
+                for submitted in self.submitted:
+                    submitted.result(timeout=5)
+            return future
+
+    monkeypatch.setattr(index_source, "ThreadPoolExecutor", ReadyTogetherExecutor)
+    assert run_source(dsn, config, models) is True
+    indexed = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert indexed["status"] == "processing"
+    assert indexed["readiness"]["memory_ready"] is True
+    assert indexed["readiness"]["links_ready"] is False
+    assert run_source(dsn, config, models) is True
+    finished = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert finished["status"] == "succeeded"
+    assert finished["readiness"]["links_ready"] is True
+    assert finished["stage_state"]["index_attempts"] == 2
+    assert models.extraction_texts.count(first) == 1
+    indexed_batches = list(models.embedding_batches)
+    with psycopg.connect(dsn) as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM index_stage_results WHERE tenant_id=%s "
+                "AND stage_key LIKE 'extract:%%'",
+                (tenant,),
+            ).fetchone()[0]
+            == 2
+        )
+    client._transport.app.state.runtime.models = models
+    recalled = await client.post(
+        "/v1/recall",
+        json={"user_id": "lin", "query": "Lin updates", "include_profile": False},
+    )
+    assert recalled.status_code == 200, recalled.text
+    facts = [item for item in recalled.json()["items"] if item["kind"] == "fact"]
+    assert {item["text"] for item in facts} == {first, second}
+    assert all(item["citations"] for item in facts)
+    assert indexed_batches == [(first, second), (first,), (second,)]

@@ -12,7 +12,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from oam.capacity import PostgresCapacity, reconcile_model_permit
+from oam.capacity import INDEXING_ADMISSION_NAMESPACE, PostgresCapacity, reconcile_model_permit
 from oam.config import ConfigurationError, load_config
 
 HTTP_ADMISSION_NAMESPACE = 186865777
@@ -22,7 +22,23 @@ PERMIT_METADATA = (
 )
 
 
+def _assert_no_admission_locks(connection) -> None:
+    active = connection.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks "
+        "WHERE locktype='advisory' AND granted AND classid=ANY(%s::oid[]) AND objsubid=2 "
+        "AND database=(SELECT oid FROM pg_catalog.pg_database "
+        "WHERE datname=current_database())) AS active",
+        ([HTTP_ADMISSION_NAMESPACE, INDEXING_ADMISSION_NAMESPACE],),
+    ).fetchone()["active"]
+    if active:
+        raise ValueError(
+            "active HTTP or indexing work prevents configuration; stop APIs and workers first"
+        )
+
+
 def _configure(connection, limits: dict[str, int]) -> None:
+    # Check before the table locks: an indexing transaction also reads settings.
+    _assert_no_admission_locks(connection)
     # Admission reads capacity_settings before writing permits or owning an HTTP
     # slot. Holding both table locks makes the emptiness check and replacement atomic.
     connection.execute(
@@ -35,15 +51,7 @@ def _configure(connection, limits: dict[str, int]) -> None:
     ).fetchone()["active"]
     if active:
         raise ValueError("active model permits prevent configuration; stop APIs and workers first")
-    active_http = connection.execute(
-        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks "
-        "WHERE locktype='advisory' AND granted AND classid=%s AND objsubid=2 "
-        "AND database=(SELECT oid FROM pg_catalog.pg_database "
-        "WHERE datname=current_database())) AS active",
-        (HTTP_ADMISSION_NAMESPACE,),
-    ).fetchone()["active"]
-    if active_http:
-        raise ValueError("active HTTP requests prevent configuration; stop APIs and workers first")
+    _assert_no_admission_locks(connection)
     connection.execute(
         "INSERT INTO public.capacity_settings(singleton,limits) VALUES (true,%s) "
         "ON CONFLICT (singleton) DO UPDATE SET limits=EXCLUDED.limits",

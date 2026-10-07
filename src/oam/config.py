@@ -202,7 +202,6 @@ class RetryConfig(FrozenModel):
 class WorkerConfig(FrozenModel):
     embedded_enabled: bool
     max_tasks: PositiveInt
-    max_model_calls: PositiveInt
 
 
 class LeaseConfig(FrozenModel):
@@ -217,7 +216,7 @@ class DatabaseConfig(FrozenModel):
     worker_queue_dsn_env: str = Field(min_length=1)
     worker_content_dsn_env: str = Field(min_length=1)
     api_pool_max: PositiveInt
-    worker_pool_max: PositiveInt
+    indexing_concurrency: PositiveInt
 
 
 class AuthConfig(FrozenModel):

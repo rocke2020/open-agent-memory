@@ -265,7 +265,6 @@ def test_dispatch_and_cleanup_database_failure_does_not_leak_local_capacity():
     config = runtime_config()
     config = config.model_copy(
         update={
-            "worker": config.worker.model_copy(update={"max_model_calls": 1}),
             "provider": config.provider.model_copy(update={"llm_concurrency": 1}),
         }
     )

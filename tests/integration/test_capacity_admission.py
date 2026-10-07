@@ -152,21 +152,27 @@ async def test_two_http_replicas_reject_overload_before_application_acceptance(c
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def test_background_embeddings_leave_search_capacity(capacity_database):
+@pytest.mark.parametrize("reserved", [0, 4])
+def test_background_embeddings_obey_configured_search_reservation(capacity_database, reserved):
     from oam.capacity import CapacityUnavailable, PostgresCapacity
 
     dsn, config = capacity_database
+    config = config.model_copy(
+        update={
+            "provider": config.provider.model_copy(update={"embedding_search_reserved": reserved})
+        }
+    )
     worker = PostgresCapacity(config, make_conninfo(dsn, options="-c role=oam_queue"))
     api = PostgresCapacity(config, make_conninfo(dsn, options="-c role=oam_api"))
     worker.configure()
     api.configure()
     held = []
     try:
-        for _ in range(4):
+        for _ in range(8 - reserved):
             held.append(worker.acquire_model("embedding", background=True, timeout=1))
         with pytest.raises(CapacityUnavailable):
             worker.acquire_model("embedding", background=True, timeout=0.05)
-        for _ in range(4):
+        for _ in range(reserved):
             held.append(api.acquire_model("embedding", background=False, timeout=1))
         with pytest.raises(CapacityUnavailable):
             api.acquire_model("embedding", background=False, timeout=0.05)

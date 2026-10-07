@@ -82,7 +82,6 @@ class RuntimeModels:
         self._background = background
         self._admission = admission
         self._stop_event = stop_event
-        self._worker_slots = BoundedSemaphore(config.worker.max_model_calls) if background else None
         self._llm_slots = BoundedSemaphore(config.provider.llm_concurrency)
         self._embedding_slots = BoundedSemaphore(
             config.provider.embedding_concurrency
@@ -244,7 +243,7 @@ class RuntimeModels:
             if kind == "embedding"
             else self._llm_slots
         )
-        acquired = []
+        acquired = False
         permit = None
         sent = False
 
@@ -255,13 +254,9 @@ class RuntimeModels:
             return remaining
 
         try:
-            for semaphore in (self._worker_slots, slots):
-                if semaphore is not None:
-                    if not semaphore.acquire(timeout=remaining_time()):
-                        raise ModelDispatchUnavailable(
-                            "model capacity wait expired before dispatch"
-                        )
-                    acquired.append(semaphore)
+            if not slots.acquire(timeout=remaining_time()):
+                raise ModelDispatchUnavailable("model capacity wait expired before dispatch")
+            acquired = True
             if self._admission is not None and path != "/rerank":
                 permit = self._admission.acquire_model(
                     kind, background=self._background, timeout=remaining_time()
@@ -295,8 +290,8 @@ class RuntimeModels:
                     with suppress(CapacityUnavailable):
                         permit.complete()
             finally:
-                for semaphore in reversed(acquired):
-                    semaphore.release()
+                if acquired:
+                    slots.release()
         response.raise_for_status()
         try:
             body = response.json()

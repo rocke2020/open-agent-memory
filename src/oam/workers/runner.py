@@ -85,7 +85,7 @@ class WorkerRunner:
     def start(self) -> None:
         if self._executor is not None or self._closed:
             raise RuntimeError("worker runner has already started or closed")
-        concurrency = min(self.config.worker.max_tasks, self.config.database.worker_pool_max)
+        concurrency = self.config.worker.max_tasks
         self._executor = ThreadPoolExecutor(
             max_workers=concurrency, thread_name_prefix="oam-worker"
         )

@@ -7,7 +7,8 @@ import json
 import math
 import os
 import re
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import psycopg
@@ -44,6 +45,7 @@ ABSTRACT_SYSTEM = (
     "Do not infer user traits."
 )
 PASSAGE_EMBED_BATCH_SIZE = 16
+EXTRACTION_WINDOW_BATCHES = 2
 
 
 def process_one(
@@ -106,184 +108,199 @@ def process_one(
         if store.source["input_role"] != "interaction":
             raise ValueError("this source processor requires eligible interactions")
         request = EvidenceAppendRequest.model_validate_json(bytes(store.source["original_bytes"]))
-        fact_ids = []
-        extraction_diagnostics = []
-        pending_extractions = []
-        effective_model_calls = min(
-            config.worker.max_model_calls,
-            config.provider.llm_concurrency,
-        )
-        extraction_batch_capacity = max(1, effective_model_calls - 1)
-        # One producer thread is sufficient for one-batch-ahead overlap; the
-        # reserved model slot stays available for embedding/publication.
-        extraction_executor = ThreadPoolExecutor(max_workers=1)
-        extraction_futures: list[Future] = []
-
-        def prepare_extraction_batch(batch):
-            tasks = []
-            group_ids = []
-            for members in batch:
-                passages = tuple(by_passage[item[0]] for item in members)
-                group_id = (
-                    members[0][0]
-                    if len(members) == 1
-                    else stable_id("extraction_group", [item[0] for item in members])
-                )
-                group_ids.append(group_id)
-                if len(members) == 1:
-                    passage_id, chunk, message, _, _, extraction_input, vector = members[0]
-                    extraction_envelope(
-                        chunk=chunk,
-                        config=config,
-                        message_role=message.role.value,
-                        mentioned_at=message.event_time,
-                        reference_timezone=request.reference_timezone,
-                    )
-                else:
-                    envelope = group_envelope(passages, config, request.reference_timezone)
-                    extraction_input = dict(envelope)
-                    vector = members[0][-1]
-                references = []
-                if config.extraction.reference_max_facts:
-                    options = (
-                        {}
-                        if len(members) == 1
-                        else {"vectors": tuple(item[-1] for item in members)}
-                    )
-                    references = freeze_extraction_references(
-                        store, group_id, vector, extraction_input, **options
-                    )
-                    extraction_input["reference_facts"] = references
-                if len(members) == 1:
-
-                    def produce(chunk=chunk, message=message, references=references):
-                        return extract_facts(
-                            models,
-                            chunk=chunk,
-                            config=config,
-                            message_role=message.role.value,
-                            mentioned_at=message.event_time,
-                            reference_timezone=request.reference_timezone,
-                            timeout_seconds=config.model.attempt_timeout_seconds,
-                            references=tuple(references),
-                            check_retry_claim=store.check_retry_claim,
-                        )
-                else:
-
-                    def produce(passages=passages, references=references):
-                        return extract_group(
-                            models,
-                            passages=passages,
-                            config=config,
-                            reference_timezone=request.reference_timezone,
-                            timeout_seconds=config.model.attempt_timeout_seconds,
-                            references=tuple(references),
-                            check_retry_claim=store.check_retry_claim,
-                        )
-
-                tasks.append(("extract:" + group_id, extraction_input, produce))
-            extracted = (
-                [store.checkpoint(*tasks[0])] if len(tasks) == 1 else store.checkpoints(tasks)
+        with store.model_pipeline():
+            fact_ids, extraction_diagnostics = _index_interaction(config, store, models, request)
+        with store.transaction() as connection:
+            store.guard(connection)
+            store.readiness(
+                connection,
+                memory_ready=True,
+                extraction_coverage="partial" if extraction_diagnostics else "complete",
+                extraction_diagnostics=extraction_diagnostics,
             )
-            return batch, group_ids, extracted
+        from oam.indexing.links import build_temporal_links
 
-        def publish_extraction_batch(batch_result):
-            batch, group_ids, extracted = batch_result
-            failures = []
-            publishable = []
-            for members, group_id, output in zip(batch, group_ids, extracted, strict=True):
-                if isinstance(output, Exception):
-                    failures.append((group_id, output))
-                    continue
-                result = FactExtraction.model_validate(output)
-                extraction_diagnostics.extend(
-                    {"passage_id": group_id, **diagnostic.model_dump(mode="json")}
-                    for diagnostic in result.diagnostics
+        with store.transaction() as connection:
+            store.guard(connection)
+            links = build_temporal_links(
+                connection, store.authority, config, store.generation_id, fact_ids
+            )
+            store.readiness(connection, temporal_links_ready=True, link_coverage=links)
+        store.finish(
+            schedule_consolidation=config.index.insights_enabled, semantic_seed_ids=fact_ids
+        )
+    except BaseException as error:
+        store.fail(error)
+        raise
+    return True
+
+
+def _index_interaction(config, store, models, request):
+    fact_ids = []
+    extraction_diagnostics = []
+    pending_extractions = deque()
+    extraction_failures = []
+    capacity = config.provider.llm_concurrency
+    window = EXTRACTION_WINDOW_BATCHES * capacity
+    current_stage = "extraction_pipeline"
+
+    def checkpoint(stage, inputs, produce):
+        nonlocal current_stage
+        current_stage = stage
+        return store.checkpoint(stage, inputs, produce)
+
+    def submit_extraction(members):
+        passages = tuple(by_passage[item[0]] for item in members)
+        group_id = (
+            members[0][0]
+            if len(members) == 1
+            else stable_id("extraction_group", [item[0] for item in members])
+        )
+        if len(members) == 1:
+            passage_id, chunk, message, _, _, extraction_input, vector = members[0]
+            extraction_envelope(
+                chunk=chunk,
+                config=config,
+                message_role=message.role.value,
+                mentioned_at=message.event_time,
+                reference_timezone=request.reference_timezone,
+            )
+        else:
+            envelope = group_envelope(passages, config, request.reference_timezone)
+            extraction_input = dict(envelope)
+            vector = members[0][-1]
+        references = []
+        if config.extraction.reference_max_facts:
+            options = (
+                {}
+                if len(members) == 1
+                else {
+                    "vectors": tuple(item[-1] for item in members),
+                }
+            )
+            references = freeze_extraction_references(
+                store, group_id, vector, extraction_input, **options
+            )
+            extraction_input["reference_facts"] = references
+        if len(members) == 1:
+
+            def produce(chunk=chunk, message=message, references=references):
+                return extract_facts(
+                    models,
+                    chunk=chunk,
+                    config=config,
+                    message_role=message.role.value,
+                    mentioned_at=message.event_time,
+                    reference_timezone=request.reference_timezone,
+                    timeout_seconds=config.model.attempt_timeout_seconds,
+                    references=tuple(references),
+                    check_retry_claim=store.check_retry_claim,
                 )
-                if result.facts:
-                    publishable.append((group_id, members, result))
-            if failures:
-                store.mark_deferred_failure_stage("extract:" + failures[0][0])
-                if len(failures) > 1:
-                    raise RuntimeError(
-                        "multiple extraction stages failed; usage coverage is partial"
-                    ) from failures[0][1]
-                raise failures[0][1]
-            if not publishable:
-                return
-            texts = tuple(fact.text for _, _, result in publishable for fact in result.facts)
-            batch_id = stable_id("facts_batch", [item[0] for item in publishable])
-            embedded = store.checkpoint(
+        else:
+
+            def produce(passages=passages, references=references):
+                return extract_group(
+                    models,
+                    passages=passages,
+                    config=config,
+                    reference_timezone=request.reference_timezone,
+                    timeout_seconds=config.model.attempt_timeout_seconds,
+                    references=tuple(references),
+                    check_retry_claim=store.check_retry_claim,
+                )
+
+        future = extraction_executor.submit(
+            store.checkpoint, "extract:" + group_id, extraction_input, produce
+        )
+        pending_extractions.append((members, group_id, future))
+        if len(pending_extractions) >= window:
+            publish_extractions(wait=True)
+
+    def publish_extractions(*, wait=False):
+        if not pending_extractions or (not wait and not pending_extractions[0][2].done()):
+            return
+        ready = [pending_extractions.popleft()]
+        while pending_extractions and pending_extractions[0][2].done() and len(ready) < capacity:
+            ready.append(pending_extractions.popleft())
+        extracted = []
+        for _, group_id, future in ready:
+            try:
+                extracted.append(future.result())
+            except BaseException as error:
+                extraction_failures.append(("extract:" + group_id, error))
+                extracted.append(error)
+        failures = []
+        publishable = []
+        for members, group_id, output in zip(
+            [item[0] for item in ready], [item[1] for item in ready], extracted, strict=True
+        ):
+            if isinstance(output, BaseException):
+                failures.append((group_id, output))
+                continue
+            result = FactExtraction.model_validate(output)
+            extraction_diagnostics.extend(
+                {"passage_id": group_id, **diagnostic.model_dump(mode="json")}
+                for diagnostic in result.diagnostics
+            )
+            if result.facts:
+                publishable.append((group_id, members, result))
+        if failures:
+            raise failures[0][1]
+        for group_id, members, result in publishable:
+            texts = tuple(fact.text for fact in result.facts)
+            batch_id = stable_id("facts_batch", [group_id])
+            embedded = checkpoint(
                 "facts_embed:" + batch_id,
                 texts,
-                lambda: models.embed(texts, timeout_seconds=config.model.attempt_timeout_seconds),
+                lambda texts=texts: models.embed(
+                    texts, timeout_seconds=config.model.attempt_timeout_seconds
+                ),
             )
-            offset = 0
-            for _, members, result in publishable:
-                count = len(result.facts)
-                fact_ids.extend(
-                    _publish_facts(
-                        store,
-                        {item[0]: (item[2], item[3], item[4]) for item in members},
-                        result,
-                        embedded["vectors"][offset : offset + count],
-                        metadata=request,
-                        diagnostics=extraction_diagnostics,
-                    )
+            fact_ids.extend(
+                _publish_facts(
+                    store,
+                    {item[0]: (item[2], item[3], item[4]) for item in members},
+                    result,
+                    embedded["vectors"],
+                    metadata=request,
+                    diagnostics=extraction_diagnostics,
                 )
-                offset += count
-
-        def submit_extraction_batch(batch):
-            if effective_model_calls <= 1:
-                publish_extraction_batch(prepare_extraction_batch(batch))
-                return
-            extraction_futures.append(extraction_executor.submit(prepare_extraction_batch, batch))
-            # Keep one batch queued behind the producer. The reserved model
-            # slot remains available for embedding/publication consumption.
-            if len(extraction_futures) >= 2:
-                publish_extraction_batch(extraction_futures.pop(0).result())
-
-        def drain_extractions():
-            while extraction_futures:
-                publish_extraction_batch(extraction_futures.pop(0).result())
-            extraction_executor.shutdown(wait=True)
-
-        prepared = []
-        previous = ""
-        for message_index, message in enumerate(request.messages):
-            if not message.learning_eligible:
-                previous = ""
-                continue
-            evidence_id = stable_id(
-                "evidence",
-                store.generation_id,
-                store.source["source_id"],
-                store.source["source_version"],
-                message.message_id,
             )
-            chunks = chunk_text(message.content, config.chunk.ingestion, previous_context=previous)
-            for chunk in chunks:
-                passage_id = stable_id("passage", evidence_id, chunk.start, chunk.end)
-                prepared.append((passage_id, chunk, message, evidence_id, message_index))
-            previous = message.content
-        by_passage = {
-            item[0]: ExtractionPassage(
-                item[0], item[1], item[2].role.value, item[2].event_time, item[4]
-            )
-            for item in prepared
-        }
-        groups = plan_extraction_groups(
-            tuple(by_passage.values()), config, request.reference_timezone
+
+    prepared = []
+    previous = ""
+    for message_index, message in enumerate(request.messages):
+        if not message.learning_eligible:
+            previous = ""
+            continue
+        evidence_id = stable_id(
+            "evidence",
+            store.generation_id,
+            store.source["source_id"],
+            store.source["source_version"],
+            message.message_id,
         )
-        ending_groups = {
-            group[-1].passage_id: tuple(p.passage_id for p in group) for group in groups
-        }
-        published = {}
+        chunks = chunk_text(message.content, config.chunk.ingestion, previous_context=previous)
+        for chunk in chunks:
+            passage_id = stable_id("passage", evidence_id, chunk.start, chunk.end)
+            prepared.append((passage_id, chunk, message, evidence_id, message_index))
+        previous = message.content
+    by_passage = {
+        item[0]: ExtractionPassage(
+            item[0], item[1], item[2].role.value, item[2].event_time, item[4]
+        )
+        for item in prepared
+    }
+    groups = plan_extraction_groups(tuple(by_passage.values()), config, request.reference_timezone)
+    ending_groups = {group[-1].passage_id: tuple(p.passage_id for p in group) for group in groups}
+    published = {}
+    extraction_executor = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix="oam-extract")
+    try:
         for offset in range(0, len(prepared), PASSAGE_EMBED_BATCH_SIZE):
             batch = prepared[offset : offset + PASSAGE_EMBED_BATCH_SIZE]
             texts = tuple(chunk.text for _, chunk, _, _, _ in batch)
             batch_id = stable_id("passage_batch", [item[0] for item in batch])
-            embedded = store.checkpoint(
+            embedded = checkpoint(
                 "passage:" + batch_id,
                 texts,
                 lambda texts=texts: models.embed(
@@ -373,43 +390,31 @@ def process_one(
                 )
                 if passage_id not in ending_groups:
                     continue
-                pending_extractions.append(
+                submit_extraction(
                     [published.pop(identifier) for identifier in ending_groups[passage_id]]
                 )
-                if len(pending_extractions) == extraction_batch_capacity:
-                    submit_extraction_batch(pending_extractions)
-                    pending_extractions = []
-        if pending_extractions:
-            submit_extraction_batch(pending_extractions)
-        drain_extractions()
-        with store.transaction() as connection:
-            store.guard(connection)
-            store.readiness(
-                connection,
-                memory_ready=True,
-                extraction_coverage="partial" if extraction_diagnostics else "complete",
-                extraction_diagnostics=extraction_diagnostics,
-            )
-        from oam.indexing.links import build_temporal_links
-
-        with store.transaction() as connection:
-            store.guard(connection)
-            links = build_temporal_links(
-                connection, store.authority, config, store.generation_id, fact_ids
-            )
-            store.readiness(connection, temporal_links_ready=True, link_coverage=links)
-        store.finish(
-            schedule_consolidation=config.index.insights_enabled, semantic_seed_ids=fact_ids
-        )
+            publish_extractions()
+        while pending_extractions:
+            publish_extractions(wait=True)
     except BaseException as error:
-        executor = locals().get("extraction_executor")
-        if executor is not None:
-            for future in locals().get("extraction_futures", ()):
-                future.cancel()
-            executor.shutdown(wait=True, cancel_futures=True)
-        store.fail(error)
+        for _, _, future in pending_extractions:
+            future.cancel()
+        extraction_executor.shutdown(wait=True, cancel_futures=True)
+        for _, group_id, future in pending_extractions:
+            if not future.cancelled() and future.exception() is not None:
+                extraction_failures.append(("extract:" + group_id, future.exception()))
+        if not any(failure is error for _, failure in extraction_failures):
+            extraction_failures.append((current_stage, error))
+        stage, failure = extraction_failures[0]
+        store.mark_deferred_failure_stage(stage)
+        if len(extraction_failures) > 1:
+            raise RuntimeError(
+                "multiple indexing stages failed; usage coverage is partial"
+            ) from failure
         raise
-    return True
+    else:
+        extraction_executor.shutdown(wait=True)
+    return fact_ids, extraction_diagnostics
 
 
 def _resource(store, models):

@@ -145,6 +145,70 @@ def test_shared_runtime_caps_overlapping_model_requests():
     assert maximum == 2
 
 
+def test_background_embedding_runs_while_the_llm_budget_is_saturated():
+    base = runtime_config()
+    config = base.model_copy(
+        update={
+            "provider": base.provider.model_copy(
+                update={"llm_concurrency": 8, "embedding_search_reserved": 0}
+            )
+        }
+    )
+    release = Event()
+    saturated = Event()
+    exceeded = Event()
+    lock = Lock()
+    active = 0
+
+    def respond(request):
+        nonlocal active
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [1, 0]}]})
+        with lock:
+            active += 1
+            if active == 8:
+                saturated.set()
+            if active > 8:
+                exceeded.set()
+        try:
+            assert release.wait(3), "test did not release the saturated LLM budget"
+            return httpx.Response(
+                200, json={"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]}
+            )
+        finally:
+            with lock:
+                active -= 1
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        models = RuntimeModels(
+            config,
+            {"MODEL_URL": "https://models.example.test/v1", "MODEL_KEY": "synthetic"},
+            http,
+            background=True,
+        )
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            llm_calls = [
+                executor.submit(
+                    models.generate,
+                    "extraction",
+                    system="Extract.",
+                    user="Fact.",
+                    max_output_tokens=1024,
+                    timeout_seconds=2,
+                )
+                for _ in range(9)
+            ]
+            try:
+                assert saturated.wait(1), "the LLM budget did not saturate"
+                embedding = executor.submit(models.embed, ("Fact.",), timeout_seconds=1)
+                assert embedding.result(timeout=0.5).vectors == ((1.0, 0.0),)
+                assert not exceeded.is_set(), "LLM admission exceeded its independent budget"
+                assert all(not call.done() for call in llm_calls)
+            finally:
+                release.set()
+            assert all(call.result(timeout=2).content == "{}" for call in llm_calls)
+
+
 @pytest.mark.parametrize("effort", ["low", "none"])
 def test_explicit_reasoning_effort_reaches_generation_request_and_index_identity(effort):
     from oam.indexing.identity import index_generation

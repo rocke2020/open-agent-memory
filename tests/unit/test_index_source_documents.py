@@ -2,9 +2,11 @@ import base64
 import hashlib
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
+from threading import Event, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -67,6 +69,10 @@ class MemoryStore:
 
     def mark_deferred_failure_stage(self, stage):
         self.stages["failed_stage"] = stage
+
+    @contextmanager
+    def model_pipeline(self):
+        yield
 
     def resource_metadata(self):
         content = self.source["original_bytes"]
@@ -494,13 +500,7 @@ def test_interaction_locator_keeps_original_message_order_and_internal_id(monkey
     assert store.units[0]["locator"]["message_id"] == "retained"
 
 
-@pytest.mark.parametrize(
-    ("model_calls", "provider_calls", "expected_waves"),
-    [(2, 16, [1, 1, 1, 1, 1, 1, 1, 1, 1]), (8, 16, [7, 2]), (8, 2, [1, 1, 1, 1, 1, 1, 1, 1, 1])],
-)
-def test_interaction_extraction_waves_use_configured_model_capacity(
-    monkeypatch, model_calls, provider_calls, expected_waves
-):
+def test_extraction_sliding_window_embeds_ready_facts_before_slow_sibling_finishes(monkeypatch):
     request = {
         "source_id": "document",
         "messages": [
@@ -514,25 +514,51 @@ def test_interaction_extraction_waves_use_configured_model_capacity(
             for index in range(9)
         ],
     }
-    waves = []
+    fact_embedded = Event()
+    sibling_started = Event()
+    lock = Lock()
+    active = maximum = 0
+    published = []
 
     class InteractionStore(MemoryStore):
         def checkpoints(self, stages):
-            waves.append(len(stages))
-            return [MemoryStore.checkpoint(self, *stage) for stage in stages]
+            with ThreadPoolExecutor(max_workers=len(stages)) as executor:
+                futures = [executor.submit(self.checkpoint, *stage) for stage in stages]
+                return [future.result() for future in futures]
 
-        def checkpoint(self, stage, inputs, produce):
-            if stage.startswith("extract:"):
-                waves.append(1)
-            return super().checkpoint(stage, inputs, produce)
+    class PipelineModels(LocalModels):
+        def generate(self, role, **kwargs):
+            nonlocal active, maximum
+            text = json.loads(kwargs["user"])["center"]["text"]
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            try:
+                if text == "Statement 0.":
+                    assert sibling_started.wait(2), "extraction did not overlap"
+                elif text == "Statement 1.":
+                    sibling_started.set()
+                    assert fact_embedded.wait(2), "ready facts waited for a slow extraction sibling"
+                return ModelResult(
+                    content=json.dumps(
+                        {"outcome": "facts", "facts": [{"text": text, "quote": text}]}
+                    ),
+                    usage=Usage(),
+                )
+            finally:
+                with lock:
+                    active -= 1
+
+        def embed(self, texts, **kwargs):
+            if texts == ("Statement 0.",):
+                assert len(store.units) <= 4, "source preparation exceeded the bounded window"
+                fact_embedded.set()
+            return super().embed(texts, **kwargs)
 
     store = InteractionStore(content=json.dumps(request).encode(), input_role="interaction")
     store.config = store.config.model_copy(
         update={
-            "worker": store.config.worker.model_copy(update={"max_model_calls": model_calls}),
-            "provider": store.config.provider.model_copy(
-                update={"llm_concurrency": provider_calls}
-            ),
+            "provider": store.config.provider.model_copy(update={"llm_concurrency": 2}),
             "extraction": store.config.extraction.model_copy(
                 update={"group_max_passages": 1, "reference_max_facts": 0}
             ),
@@ -553,10 +579,18 @@ def test_interaction_extraction_waves_use_configured_model_capacity(
 
     monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
 
+    def publish(_store, _members, result, _vectors, **kwargs):
+        published.extend(fact.text for fact in result.facts)
+        return [fact.text for fact in result.facts]
+
+    monkeypatch.setattr(index_source, "_publish_facts", publish)
+
     assert index_source.process_one(
-        store.config, "queue", "content", models=LocalModels(), worker_id="worker"
+        store.config, "queue", "content", models=PipelineModels(), worker_id="worker"
     )
-    assert waves == expected_waves
+    assert fact_embedded.is_set()
+    assert maximum == 2 and active == 0
+    assert published == [f"Statement {index}." for index in range(9)]
     assert [unit["locator"]["message_id"] for unit in store.units] == [
         f"message-{index}" for index in range(9)
     ]
@@ -585,7 +619,6 @@ def test_interaction_pipeline_overlaps_next_extraction_with_previous_publish(mon
     store = PipelineStore(content=json.dumps(request).encode(), input_role="interaction")
     store.config = store.config.model_copy(
         update={
-            "worker": store.config.worker.model_copy(update={"max_model_calls": 2}),
             "provider": store.config.provider.model_copy(update={"llm_concurrency": 2}),
             "extraction": store.config.extraction.model_copy(
                 update={"group_max_passages": 1, "reference_max_facts": 0}
@@ -649,7 +682,7 @@ def test_interaction_pipeline_overlaps_next_extraction_with_previous_publish(mon
                 ):
                     assert second_extraction_started.wait(1)
                     with active_lock:
-                        assert active_calls == 2
+                        assert 2 <= active_calls <= 3
                     overlap.set()
                     embedding_started.set()
                 return super().embed(texts, **kwargs)
@@ -676,5 +709,5 @@ def test_interaction_pipeline_overlaps_next_extraction_with_previous_publish(mon
     )
     assert embedding_started.is_set()
     assert overlap.is_set()
-    assert max_active_calls == 2
+    assert 2 <= max_active_calls <= 3
     assert active_calls == 0

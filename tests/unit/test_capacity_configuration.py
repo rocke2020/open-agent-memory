@@ -12,11 +12,11 @@ ROOT = Path(__file__).parents[2]
 def test_canonical_capacity_limits_have_separate_scopes():
     config = load_config(ROOT / "configs/oam.yaml").config
     assert config.worker.embedded_enabled is True
-    assert config.worker.max_tasks == 4
-    assert config.worker.max_model_calls == 8
+    assert config.worker.max_tasks == 10
+    assert config.database.indexing_concurrency == 4
     assert config.provider.llm_concurrency == 32
     assert config.provider.embedding_concurrency == 8
-    assert config.provider.embedding_search_reserved == 4
+    assert config.provider.embedding_search_reserved == 0
     assert config.provider.rerank_concurrency == 4
     assert config.api.max_concurrent_requests == 10
     assert config.api.max_concurrent_writes == 6

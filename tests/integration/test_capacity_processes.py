@@ -306,7 +306,7 @@ async def test_process_topology_indexes_and_recalls_during_imports(
                     owners = {row[0] for row in rows}
                     maximum_owners = max(maximum_owners, len(owners))
                     maximum_tasks = max(maximum_tasks, len(rows))
-                    assert all(sum(row[0] == owner for row in rows) <= 4 for owner in owners)
+                    assert all(sum(row[0] == owner for row in rows) <= 10 for owner in owners)
                     assert all(sum(row[1] == user for row in rows) <= 2 for user in user_headers)
                     target_owners = api_count if embedded else worker_count
                     if len(owners) == target_owners and len(rows) >= 4:

@@ -176,8 +176,7 @@ worker:
   # Run a worker inside the API process when enabled.
   embedded_enabled: true
   # Limit running work items separately from simultaneous model calls.
-  max_tasks: 4
-  max_model_calls: 8
+  max_tasks: 10
 
 lease:
   # A work claim expires unless renewed at the heartbeat interval.
@@ -193,7 +192,8 @@ database:
   worker_queue_dsn_env: OAM_WORKER_QUEUE_DSN
   worker_content_dsn_env: OAM_WORKER_CONTENT_DSN
   api_pool_max: 10
-  worker_pool_max: 6
+  # Limit indexing database transactions across replicas.
+  indexing_concurrency: 4
 
 auth:
   # null selects the mode from root-key and database bootstrap state.
@@ -214,7 +214,7 @@ provider:
   llm_concurrency: 32
   embedding_concurrency: 8
   # Keep this many embedding permits available to foreground search.
-  embedding_search_reserved: 4
+  embedding_search_reserved: 0
   rerank_concurrency: 4
 
 user:

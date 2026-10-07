@@ -327,10 +327,11 @@ async def test_retry_reuses_completed_extraction_and_revokes_only_unfinished_ref
     assert len(models.inputs) == 3
     assert models.inputs[-1]["center"]["text"] == "I now prefer coffee."
     assert models.inputs[-1]["reference_facts"] == []
-    assert set(dispositions) == {"claimed"}
+    assert set(dispositions) <= {"claimed", "unknown_external_outcome"}
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "succeeded"
     assert operation["usage"]["total_tokens"] == 90
+    assert operation["usage"]["coverage"] == "complete"
     assert operation["stage_state"]["extraction_diagnostics"][0]["code"] == "ineligible_reference"
 
 
