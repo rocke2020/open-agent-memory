@@ -364,7 +364,7 @@ def create_app(
                 "mid_recall": True,
                 "deep_recall": True,
                 "batch_recall": True,
-                "planner": config.models.roles.planner is not None,
+                "planner": config.models.binding_for("planner") is not None,
                 "profiles": runtime is not None and config.profile.enabled,
                 "inspector": True,
                 "source_lifecycle": True,

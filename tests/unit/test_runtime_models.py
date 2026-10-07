@@ -13,11 +13,13 @@ from oam.config import ModelsConfig, load_config
 from oam.models.runtime import ModelOutputError, RuntimeModels
 
 
-@pytest.mark.parametrize("binding_name", ["indexing_low", "indexing_high"])
-def test_canonical_extraction_preserves_low_reasoning_effort_on_the_wire(binding_name):
+@pytest.mark.parametrize("effort", ["none", "low", "high", "max"])
+def test_canonical_extraction_preserves_reasoning_effort_on_the_wire(effort):
     base = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    roles = base.models.roles.model_copy(update={"extraction": binding_name})
-    configured = base.model_copy(update={"models": base.models.model_copy(update={"roles": roles})})
+    efforts = base.models.reasoning_effort.model_copy(update={"extraction": effort})
+    configured = base.model_copy(
+        update={"models": base.models.model_copy(update={"reasoning_effort": efforts})}
+    )
     seen = []
 
     def respond(request):
@@ -51,8 +53,12 @@ def test_canonical_extraction_preserves_low_reasoning_effort_on_the_wire(binding
             timeout_seconds=2,
         )
     assert json.loads(result.content) == {"outcome": "no_facts", "facts": []}
-    assert seen[0]["reasoning_effort"] == "low"
-    assert seen[0]["thinking"] == {"type": "enabled"}
+    if effort == "none":
+        assert "reasoning_effort" not in seen[0]
+        assert seen[0]["thinking"] == {"type": "disabled"}
+    else:
+        assert seen[0]["reasoning_effort"] == effort
+        assert seen[0]["thinking"] == {"type": "enabled"}
     assert seen[0]["max_tokens"] == 64000
 
 
@@ -60,30 +66,23 @@ def runtime_config():
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     models = ModelsConfig.model_validate(
         {
-            "roles": {
-                "extraction": "chat",
-                "insights": "chat",
-                "abstract": "chat",
-                "embedding": "vector",
-                "reranker": "rank",
+            "reasoning_effort": {
+                "extraction": "none",
+                "insights": "none",
+                "abstract": "none",
             },
-            "bindings": {
-                alias: {
-                    "protocol": "openai_compatible",
+            **{
+                role: {
+                    "protocol": "openai_chat" if role == "vlm" else "openai_compatible",
                     "model": f"synthetic-{alias}",
                     "endpoint_env": "MODEL_URL",
                     "api_key_env": "MODEL_KEY",
-                    "capabilities": ["chat", "vision"] if alias == "chat" else [capability],
-                    **(
-                        {"reasoning_effort": "low", "thinking": "disabled"}
-                        if capability in {"chat", "vision"}
-                        else {}
-                    ),
+                    "capabilities": ["text", "vision"] if role == "vlm" else [capability],
                 }
-                for alias, capability in (
-                    ("chat", "chat"),
-                    ("vector", "embeddings"),
-                    ("rank", "rerank"),
+                for role, alias, capability in (
+                    ("vlm", "chat", "text"),
+                    ("embedding", "vector", "embeddings"),
+                    ("reranker", "rank", "rerank"),
                 )
             },
         }
@@ -210,14 +209,13 @@ def test_background_embedding_runs_while_the_llm_budget_is_saturated():
             assert all(call.result(timeout=2).content == "{}" for call in llm_calls)
 
 
-@pytest.mark.parametrize("effort", ["low", "none"])
+@pytest.mark.parametrize("effort", ["low", "high", "max"])
 def test_explicit_reasoning_effort_reaches_generation_request_and_index_identity(effort):
     from oam.indexing.identity import index_generation
 
     base = runtime_config()
     values = base.models.model_dump(mode="json")
-    values["bindings"]["chat"]["reasoning_effort"] = effort
-    values["bindings"]["chat"]["thinking"] = "enabled"
+    values["reasoning_effort"]["extraction"] = effort
     configured = base.model_copy(update={"models": ModelsConfig.model_validate(values)})
     environment = {"MODEL_URL": "https://model.example/v1", "MODEL_KEY": "synthetic"}
     seen = []

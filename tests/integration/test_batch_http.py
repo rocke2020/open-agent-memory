@@ -30,14 +30,15 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
         config_path = tmp_path / "planner.yaml"
         config_path.write_text(
             "models:\n"
-            "  roles:\n"
-            "    planner: local\n"
-            "  bindings:\n"
-            "    local:\n"
-            "      protocol: openai_compatible\n"
-            "      model: local-planner\n"
-            "      endpoint_env: UNUSED_PLANNER_ENDPOINT\n"
-            "      capabilities: [chat]\n",
+            "  reasoning_effort:\n"
+            "    planner: none\n"
+            "  vlm:\n"
+            "    protocol: openai_chat\n"
+            "    model: local-planner\n"
+            "    model_env: null\n"
+            "    endpoint_env: UNUSED_PLANNER_ENDPOINT\n"
+            "    api_key_env: null\n"
+            "    capabilities: [text, vision]\n",
             encoding="utf-8",
         )
     config = load_config(config_path).config

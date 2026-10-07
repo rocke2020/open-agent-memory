@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import httpx
 import pytest
 
-from oam.config import ModelBinding, ModelCapability, ModelRoles, ModelsConfig
+from oam.config import ModelBinding, ModelCapability, ModelsConfig, ReasoningEfforts
 from oam.models.bindings import ResolvedModelBinding
 from oam.models.client import OpenAICompatibleProbeClient
 from oam.models.preflight import (
@@ -20,12 +20,10 @@ from oam.models.preflight import (
 def _models() -> ModelsConfig:
     bindings = {
         "chat": ModelBinding(
-            protocol="openai_compatible",
+            protocol="openai_chat",
             model="chat-model",
             endpoint_env="CHAT_URL",
-            capabilities=frozenset({ModelCapability.CHAT, ModelCapability.VISION}),
-            reasoning_effort="low",
-            thinking="disabled",
+            capabilities=frozenset({ModelCapability.TEXT, ModelCapability.VISION}),
         ),
         "embedding": ModelBinding(
             protocol="openai_compatible",
@@ -35,14 +33,14 @@ def _models() -> ModelsConfig:
         ),
     }
     return ModelsConfig(
-        roles=ModelRoles(
-            extraction="chat",
-            insights="chat",
-            embedding="embedding",
-            abstract="chat",
-            profile="chat",
+        reasoning_effort=ReasoningEfforts(
+            extraction="low",
+            insights="low",
+            abstract="low",
+            profile="low",
         ),
-        bindings=bindings,
+        vlm=bindings["chat"],
+        embedding=bindings["embedding"],
     )
 
 
@@ -289,7 +287,7 @@ def test_transport_failure_is_redacted_per_role_and_later_probes_continue() -> N
     extraction = next(result for result in report.roles if result.role == "extraction")
     embedding = next(result for result in report.roles if result.role == "embedding")
     assert extraction.status is PreflightStatus.FAILED
-    assert "chat: model request failed: ConnectError" in extraction.detail
+    assert "text: model request failed: ConnectError" in extraction.detail
     assert "vision: visible image colors correctly identified" in extraction.detail
     assert "top-secret-key" not in str(report)
     assert embedding.status is PreflightStatus.PASSED
@@ -298,25 +296,19 @@ def test_transport_failure_is_redacted_per_role_and_later_probes_continue() -> N
 
 
 def test_disabled_feature_role_failure_does_not_block_required_preflight() -> None:
-    models = _models()
-    values = models.model_dump(mode="json")
-    values["roles"]["profile"] = "profile"
-    values["bindings"]["profile"] = {
-        "protocol": "openai_compatible",
-        "model": "profile-model",
-        "endpoint_env": "PROFILE_URL",
-        "capabilities": ["chat"],
-        "reasoning_effort": "low",
-        "thinking": "disabled",
-    }
-    models = ModelsConfig.model_validate(values)
+    class ProfileFailingProbeClient(FakeProbeClient):
+        def probe_chat(self, binding, *, max_output_tokens):
+            if binding.role == "profile":
+                raise ValueError("Profile probe failed")
+            return super().probe_chat(binding, max_output_tokens=max_output_tokens)
+
     report = run_model_preflight(
-        models,
+        _models(),
         {
             "CHAT_URL": "https://models.example.test/v1",
             "EMBEDDING_URL": "https://embeddings.example.test/v1",
         },
-        FakeProbeClient(),
+        ProfileFailingProbeClient(),
         required_roles=frozenset({"extraction", "embedding", "abstract"}),
     )
 

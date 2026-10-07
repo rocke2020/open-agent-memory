@@ -44,12 +44,12 @@ def fake_provider(monkeypatch):
                     },
                 }
             else:
-                role = request["model"]
                 user = request["messages"][-1]["content"]
-                if role == "extraction" and isinstance(user, list):
+                prompt = None if isinstance(user, list) else json.loads(user)
+                if isinstance(user, list):
                     output = {"blocks": [{"text": "Glucose 5.2 mmol/L"}]}
-                elif role == "extraction":
-                    center = json.loads(user)["center"]
+                elif "center" in prompt:
+                    center = prompt["center"]
                     output = {
                         "outcome": "facts",
                         "facts": [
@@ -66,7 +66,7 @@ def fake_provider(monkeypatch):
                             }
                         ],
                     }
-                elif role == "insights":
+                elif "facts" in prompt:
                     output = {"outcome": "no_insight"}
                 else:
                     output = {"abstract": "Glucose 5.2 mmol/L."}
@@ -96,30 +96,29 @@ def fake_provider(monkeypatch):
 
 
 def provider_configuration(path: Path, *, embedded=True):
-    roles = ("extraction", "insights", "embedding", "abstract", "profile")
     path.write_text(
         yaml.safe_dump(
             {
                 "worker": {"embedded_enabled": embedded},
                 "models": {
-                    "roles": {role: role for role in roles},
-                    "bindings": {
-                        role: {
-                            "protocol": "openai_compatible",
-                            "model": role,
-                            "endpoint_env": "CAPACITY_FAKE_PROVIDER",
-                            "capabilities": ["embeddings"]
-                            if role == "embedding"
-                            else ["chat", "vision"]
-                            if role == "extraction"
-                            else ["chat"],
-                            **(
-                                {"reasoning_effort": "low", "thinking": "disabled"}
-                                if role != "embedding"
-                                else {}
-                            ),
-                        }
-                        for role in roles
+                    "reasoning_effort": {
+                        role: "none" for role in ("extraction", "insights", "abstract", "profile")
+                    },
+                    "vlm": {
+                        "protocol": "openai_chat",
+                        "model": "synthetic-vlm",
+                        "model_env": None,
+                        "endpoint_env": "CAPACITY_FAKE_PROVIDER",
+                        "api_key_env": None,
+                        "capabilities": ["text", "vision"],
+                    },
+                    "embedding": {
+                        "protocol": "openai_compatible",
+                        "model": "embedding",
+                        "model_env": None,
+                        "endpoint_env": "CAPACITY_FAKE_PROVIDER",
+                        "api_key_env": None,
+                        "capabilities": ["embeddings"],
                     },
                 },
             }
@@ -223,7 +222,7 @@ async def test_embedded_runner_accepts_indexes_and_recalls_both_origins(
             results[mode] = {"elapsed_seconds": elapsed, "response": payload}
         (tmp_path / "cited-recall.json").write_text(json.dumps(results, indent=2))
     assert app.state.worker.stop_event.is_set()
-    assert any(role == "extraction" for _, role, _ in fake_provider)
+    assert any(model == "synthetic-vlm" for _, model, _ in fake_provider)
     with psycopg.connect(dsn) as connection:
         assert (
             connection.execute(

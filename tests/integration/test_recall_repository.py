@@ -1036,14 +1036,11 @@ def test_configured_reranker_failure_obeys_partial_policy(recall_database, allow
 
     models_config = ModelsConfig.model_validate(
         {
-            "roles": {"reranker": "rank"},
-            "bindings": {
-                "rank": {
-                    "protocol": "openai_compatible",
-                    "model": "synthetic-ranker",
-                    "endpoint_env": "SYNTHETIC_URL",
-                    "capabilities": ["rerank"],
-                }
+            "reranker": {
+                "protocol": "openai_compatible",
+                "model": "synthetic-ranker",
+                "endpoint_env": "SYNTHETIC_URL",
+                "capabilities": ["rerank"],
             },
         }
     )
@@ -1083,14 +1080,11 @@ def test_configured_reranker_scores_once_and_controls_final_order(recall_databas
         update={
             "models": ModelsConfig.model_validate(
                 {
-                    "roles": {"reranker": "rank"},
-                    "bindings": {
-                        "rank": {
-                            "protocol": "openai_compatible",
-                            "model": "synthetic-ranker",
-                            "endpoint_env": "SYNTHETIC_URL",
-                            "capabilities": ["rerank"],
-                        }
+                    "reranker": {
+                        "protocol": "openai_compatible",
+                        "model": "synthetic-ranker",
+                        "endpoint_env": "SYNTHETIC_URL",
+                        "capabilities": ["rerank"],
                     },
                 }
             )

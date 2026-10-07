@@ -18,7 +18,9 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 @pytest.fixture(autouse=True)
 def unconfigured_model_environment(monkeypatch):
     models = load_config(REPOSITORY_ROOT / "configs/oam.yaml").config.models
-    for binding in models.bindings.values():
+    for binding in (models.vlm, models.embedding, models.reranker):
+        if binding is None:
+            continue
         for name in (binding.model_env, binding.endpoint_env, binding.api_key_env):
             if name is not None:
                 monkeypatch.delenv(name, raising=False)
@@ -81,10 +83,9 @@ def test_preflight_fails_closed_and_names_every_missing_required_role(
     config.write_text(
         "index:\n  insights_enabled: " + str(enable_features).lower() + "\n"
         "profile:\n  enabled: " + str(enable_features).lower() + "\n"
-        "models:\n  roles:\n"
+        "models:\n  embedding: null\n  reasoning_effort:\n"
         + "".join(
-            f"    {role}: null\n"
-            for role in ("abstract", "embedding", "extraction", "insights", "profile")
+            f"    {role}: null\n" for role in ("abstract", "extraction", "insights", "profile")
         )
     )
     exit_code = _preflight(config, as_json=True, environment={})
@@ -163,18 +164,25 @@ def test_preflight_command_runs_enabled_role_capability_probes(tmp_path, capsys)
     config_path.write_text(
         """
 models:
-  roles:
-    extraction: shared
-    insights: shared
-    embedding: shared
-    abstract: shared
-    profile: shared
-  bindings:
-    shared:
-      protocol: openai_compatible
-      model: synthetic-model
-      endpoint_env: SYNTHETIC_MODEL_URL
-      capabilities: [chat, vision, embeddings]
+  reasoning_effort:
+    extraction: none
+    insights: none
+    abstract: none
+    profile: none
+  vlm:
+    protocol: openai_chat
+    model: synthetic-model
+    model_env: null
+    endpoint_env: SYNTHETIC_MODEL_URL
+    api_key_env: null
+    capabilities: [text, vision]
+  embedding:
+    protocol: openai_compatible
+    model: synthetic-model
+    model_env: null
+    endpoint_env: SYNTHETIC_MODEL_URL
+    api_key_env: null
+    capabilities: [embeddings]
 """,
         encoding="utf-8",
     )

@@ -43,7 +43,7 @@ def decompose_and_search(
     request.validate_limits(config)
     _validate_options(request)
     _validate_queries(config, [request.query])
-    if config.models.roles.planner is None:
+    if config.models.binding_for("planner") is None:
         raise NotImplementedError("the optional planner role is not configured")
     deadline = _deadline(config, request, config.request.delegated_deadline_seconds)
     system = (

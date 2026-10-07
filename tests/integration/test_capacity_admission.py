@@ -268,16 +268,12 @@ def test_shared_limit_bounds_actual_generation_dispatch_and_reuses_capacity(capa
         update={
             "models": ModelsConfig.model_validate(
                 {
-                    "roles": {"extraction": "synthetic"},
-                    "bindings": {
-                        "synthetic": {
-                            "protocol": "openai_compatible",
-                            "model": "synthetic",
-                            "endpoint_env": "SYNTHETIC_ENDPOINT",
-                            "capabilities": ["chat", "vision"],
-                            "reasoning_effort": "low",
-                            "thinking": "disabled",
-                        }
+                    "reasoning_effort": {"extraction": "none"},
+                    "vlm": {
+                        "protocol": "openai_chat",
+                        "model": "synthetic",
+                        "endpoint_env": "SYNTHETIC_ENDPOINT",
+                        "capabilities": ["text", "vision"],
                     },
                 }
             )

@@ -154,7 +154,7 @@ def _probe(
     capability: ModelCapability,
     client: CapabilityProbeClient,
 ) -> str:
-    if capability is ModelCapability.CHAT:
+    if capability is ModelCapability.TEXT:
         response = client.probe_chat(
             binding,
             max_output_tokens=MIN_GENERATIVE_PROBE_OUTPUT_TOKENS,

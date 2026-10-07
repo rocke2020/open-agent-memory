@@ -397,16 +397,15 @@ def _planner_config(tmp_path: Path):
     config_path = tmp_path / "planner.yaml"
     config_path.write_text(
         "models:\n"
-        "  roles:\n"
-        "    planner: local\n"
-        "  bindings:\n"
-        "    local:\n"
-        "      protocol: openai_compatible\n"
-        "      model: local-planner\n"
-        "      endpoint_env: MODEL_URL\n"
-        "      capabilities: [chat]\n"
-        "      reasoning_effort: low\n"
-        "      thinking: disabled\n",
+        "  reasoning_effort:\n"
+        "    planner: none\n"
+        "  vlm:\n"
+        "    protocol: openai_chat\n"
+        "    model: local-planner\n"
+        "    model_env: null\n"
+        "    endpoint_env: MODEL_URL\n"
+        "    api_key_env: null\n"
+        "    capabilities: [text, vision]\n",
         encoding="utf-8",
     )
     return load_config(config_path).config

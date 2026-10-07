@@ -102,7 +102,7 @@ class RuntimeModels:
             raise ValueError("generation requires at least 1024 output tokens")
         if not system.strip() or not user.strip():
             raise ValueError("generation requires nonempty system and user content")
-        binding = self._binding(role, "chat")
+        binding = self._binding(role, "text")
         body = self._post(
             binding,
             "/chat/completions",

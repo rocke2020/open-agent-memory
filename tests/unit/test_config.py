@@ -36,20 +36,16 @@ def test_canonical_config_freezes_v001_trial_limits_and_model_role_bindings() ->
     assert resolved.config.user.max_reports == 100
     assert resolved.config.user.max_chats == 1_000
     assert resolved.config.api.max_concurrent_requests == 10
-    assert set(resolved.config.models.bindings) == {
-        "indexing_low",
-        "indexing_high",
-        "embedding_default",
-    }
-    assert resolved.config.models.bindings["indexing_low"].reasoning_effort == "low"
-    assert resolved.config.models.bindings["indexing_low"].thinking == "enabled"
-    assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "low"
-    assert resolved.config.models.bindings["indexing_high"].thinking == "enabled"
+    assert resolved.config.models.vlm is not None
+    assert resolved.config.models.embedding is not None
+    assert resolved.config.models.vlm.model_env == "OAM_GENERATIVE_MODEL"
+    assert resolved.config.models.embedding.model_env == "OAM_EMBEDDING_MODEL"
+    assert "thinking" not in resolved.config.models.model_dump()["vlm"]
     assert resolved.config.models.required_unbound_roles() == set()
     assert len(resolved.sha256) == 64
 
 
-@pytest.mark.parametrize("capabilities", [["chat"], ["vision"]])
+@pytest.mark.parametrize("capabilities", [["text"], ["vision"]])
 def test_extraction_binding_requires_text_and_vision_capabilities(capabilities) -> None:
     from pydantic import ValidationError
 
@@ -58,14 +54,12 @@ def test_extraction_binding_requires_text_and_vision_capabilities(capabilities) 
     with pytest.raises(ValidationError, match="extraction.*requires capability"):
         ModelsConfig.model_validate(
             {
-                "roles": {"extraction": "vlm"},
-                "bindings": {
-                    "vlm": {
-                        "protocol": "openai_compatible",
-                        "model": "synthetic-vlm",
-                        "endpoint_env": "MODEL_URL",
-                        "capabilities": capabilities,
-                    }
+                "reasoning_effort": {"extraction": "low"},
+                "vlm": {
+                    "protocol": "openai_chat",
+                    "model": "synthetic-vlm",
+                    "endpoint_env": "MODEL_URL",
+                    "capabilities": capabilities,
                 },
             }
         )
@@ -76,15 +70,13 @@ def test_role_binding_requires_the_capability_consumed_by_the_role(tmp_path: Pat
     path.write_text(
         """
 models:
-  roles:
-    embedding: shared
-  bindings:
-    shared:
+  embedding:
       protocol: openai_compatible
       model: example-chat
+      model_env: null
       endpoint_env: OAM_SHARED_URL
       api_key_env: OAM_SHARED_KEY
-      capabilities: [chat]
+      capabilities: [text]
 """,
         encoding="utf-8",
     )
@@ -99,8 +91,8 @@ def test_optional_reranker_and_planner_may_be_unbound(tmp_path: Path) -> None:
 
     resolved = load_config(path)
 
-    assert resolved.config.models.roles.reranker is None
-    assert resolved.config.models.roles.planner is None
+    assert resolved.config.models.reranker is None
+    assert resolved.config.models.reasoning_effort.planner is None
 
 
 @pytest.mark.parametrize("mode", ["dev", "api_key", "trusted"])
@@ -228,14 +220,12 @@ def test_config_identity_is_stable_across_fresh_process_hash_seeds(tmp_path: Pat
     path.write_text(
         """
 models:
-  roles:
-    extraction: shared
-  bindings:
-    shared:
-      protocol: openai_compatible
+  vlm:
+      protocol: openai_chat
       model: example-model
+      model_env: null
       endpoint_env: OAM_SHARED_URL
-      capabilities: [vision, embeddings, chat]
+      capabilities: [vision, text]
 """,
         encoding="utf-8",
     )
@@ -318,7 +308,7 @@ def test_operator_config_can_disable_l2_and_profile_model_roles(tmp_path: Path) 
     path = tmp_path / "oam.yaml"
     path.write_text(
         "index:\n  insights_enabled: false\nprofile:\n  enabled: false\n"
-        "models:\n  roles:\n    insights: null\n    profile: null\n"
+        "models:\n  reasoning_effort:\n    insights: null\n    profile: null\n"
     )
 
     config = load_config(path).config

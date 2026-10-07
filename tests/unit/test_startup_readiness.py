@@ -40,25 +40,24 @@ def runtime_config(tmp_path: Path, *, embedded: bool = False) -> Path:
                 "auth": {"mode": "dev"},
                 "worker": {"embedded_enabled": embedded},
                 "models": {
-                    "roles": {
-                        role: "synthetic"
-                        for role in (
-                            "extraction",
-                            "insights",
-                            "embedding",
-                            "abstract",
-                            "profile",
-                        )
+                    "reasoning_effort": {
+                        role: "none" for role in ("extraction", "insights", "abstract", "profile")
                     },
-                    "bindings": {
-                        "synthetic": {
-                            "protocol": "openai_compatible",
-                            "model": "synthetic",
-                            "endpoint_env": "STARTUP_MODEL_URL",
-                            "capabilities": ["chat", "vision", "embeddings"],
-                            "reasoning_effort": "low",
-                            "thinking": "disabled",
-                        }
+                    "vlm": {
+                        "protocol": "openai_chat",
+                        "model": "synthetic",
+                        "model_env": None,
+                        "endpoint_env": "STARTUP_MODEL_URL",
+                        "api_key_env": None,
+                        "capabilities": ["text", "vision"],
+                    },
+                    "embedding": {
+                        "protocol": "openai_compatible",
+                        "model": "synthetic",
+                        "model_env": None,
+                        "endpoint_env": "STARTUP_MODEL_URL",
+                        "api_key_env": None,
+                        "capabilities": ["embeddings"],
                     },
                 },
             }
@@ -136,7 +135,7 @@ def test_disabled_features_do_not_require_their_model_bindings(tmp_path, startup
     values = yaml.safe_load(path.read_text())
     values["index"] = {"insights_enabled": False}
     values["profile"] = {"enabled": False}
-    values["models"]["roles"].update(insights=None, profile=None)
+    values["models"]["reasoning_effort"].update(insights=None, profile=None)
     path.write_text(yaml.safe_dump(values))
 
     validate_startup_environment(

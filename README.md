@@ -18,7 +18,7 @@ In `api_key` mode, one credential-derived tenant and one key-bound `user_id` ide
 
 ## Architecture
 
-OAM uses Python, FastAPI, explicit SQL through psycopg, and PostgreSQL with pgvector. API processes are stateless; PostgreSQL owns accepted originals, authorization, source lifecycle, operations, worker claims, leases, fences, and application-replica recovery. Model roles use explicitly configured OpenAI-compatible endpoints with no provider, model, endpoint, or credential defaults.
+OAM uses Python, FastAPI, explicit SQL through psycopg, and PostgreSQL with pgvector. API processes are stateless; PostgreSQL owns accepted originals, authorization, source lifecycle, operations, worker claims, leases, fences, and application-replica recovery. Each service uses one configured VLM through OpenAI Chat, with per-role reasoning effort and separate embedding and optional reranker models. There are no provider, model, endpoint, or credential defaults.
 
 ```text
 trusted application -> user-authorized retain -> PostgreSQL receipt + immutable original
@@ -49,7 +49,7 @@ uv run ruff format --check .
 uv run oam preflight --config configs/oam.yaml --json
 ```
 
-The canonical configuration selects generative and embedding bindings whose model names, endpoints and credentials come from the variables in `.env.example`. Supply those values before expecting preflight to pass. Preflight makes one request for each required capability of every enabled role: extraction checks both chat and vision through the same binding. It rejects empty, malformed, reasoning-only, truncated, non-finite, or dimensionally inconsistent results. Runtime embedding validation additionally requires the configured `index.embedding_dimensions` size. Reranker and planner remain unbound by default. Default tests never read a private `.env` or contact external providers.
+The canonical configuration defines one `models.vlm` with `protocol: openai_chat` and `capabilities: [text, vision]`, plus a separate `models.embedding`. Model names, endpoints and credentials come from the variables in `.env.example`; supply those values before expecting preflight to pass. `models.reasoning_effort` sets each generative role to `none`, `low`, `high` or `max`, with none disabling thinking and null disabling that role. Preflight makes one request for each required capability of every enabled role: extraction checks both text and vision through the same VLM. It rejects empty, malformed, reasoning-only, truncated, non-finite, or dimensionally inconsistent results. Runtime embedding validation additionally requires the configured `index.embedding_dimensions` size. Reranker and planner remain disabled by default. Default tests never read a private `.env` or contact external providers.
 
 Run the API with its embedded durable worker using the operator configuration:
 

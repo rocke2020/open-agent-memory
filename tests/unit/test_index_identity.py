@@ -77,14 +77,11 @@ def test_environment_model_name_is_part_of_index_generation_identity():
     config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
     models = ModelsConfig.model_validate(
         {
-            "roles": {"embedding": "local"},
-            "bindings": {
-                "local": {
-                    "protocol": "openai_compatible",
-                    "model_env": "OAM_EMBEDDING_MODEL",
-                    "endpoint_env": "OAM_EMBEDDING_URL",
-                    "capabilities": ["embeddings"],
-                }
+            "embedding": {
+                "protocol": "openai_compatible",
+                "model_env": "OAM_EMBEDDING_MODEL",
+                "endpoint_env": "OAM_EMBEDDING_URL",
+                "capabilities": ["embeddings"],
             },
         }
     )

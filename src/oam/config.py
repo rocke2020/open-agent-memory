@@ -301,21 +301,19 @@ class BackupConfig(FrozenModel):
 
 
 class ModelCapability(StrEnum):
-    CHAT = "chat"
+    TEXT = "text"
     VISION = "vision"
     EMBEDDINGS = "embeddings"
     RERANK = "rerank"
 
 
 class ModelBinding(FrozenModel):
-    protocol: Literal["openai_compatible"]
+    protocol: Literal["openai_chat", "openai_compatible"]
     model: str | None = Field(default=None, min_length=1)
     model_env: str | None = Field(default=None, min_length=1)
     endpoint_env: str = Field(min_length=1)
     api_key_env: str | None = Field(default=None, min_length=1)
     capabilities: frozenset[ModelCapability]
-    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
-    thinking: Literal["enabled", "disabled"] | None = None
 
     @model_validator(mode="after")
     def validate_model_source(self) -> ModelBinding:
@@ -328,54 +326,66 @@ class ModelBinding(FrozenModel):
         return sorted(capability.value for capability in capabilities)
 
 
-class ModelRoles(FrozenModel):
-    extraction: str | None = None
-    insights: str | None = None
-    embedding: str | None = None
-    abstract: str | None = None
-    profile: str | None = None
-    reranker: str | None = None
-    planner: str | None = None
+ReasoningEffort = Literal["none", "low", "high", "max"]
+
+
+class ReasoningEfforts(FrozenModel):
+    extraction: ReasoningEffort | None = None
+    insights: ReasoningEffort | None = None
+    abstract: ReasoningEffort | None = None
+    profile: ReasoningEffort | None = None
+    planner: ReasoningEffort | None = None
 
 
 ROLE_CAPABILITIES: dict[str, tuple[ModelCapability, ...]] = {
-    "extraction": (ModelCapability.CHAT, ModelCapability.VISION),
-    "insights": (ModelCapability.CHAT,),
+    "extraction": (ModelCapability.TEXT, ModelCapability.VISION),
+    "insights": (ModelCapability.TEXT,),
     "embedding": (ModelCapability.EMBEDDINGS,),
-    "abstract": (ModelCapability.CHAT,),
-    "profile": (ModelCapability.CHAT,),
+    "abstract": (ModelCapability.TEXT,),
+    "profile": (ModelCapability.TEXT,),
     "reranker": (ModelCapability.RERANK,),
-    "planner": (ModelCapability.CHAT,),
+    "planner": (ModelCapability.TEXT,),
 }
 REQUIRED_MODEL_ROLES = frozenset({"extraction", "insights", "embedding", "abstract", "profile"})
 
 
 class ModelsConfig(FrozenModel):
-    roles: ModelRoles = Field(default_factory=ModelRoles)
-    bindings: dict[str, ModelBinding] = Field(default_factory=dict)
+    vlm: ModelBinding | None = None
+    reasoning_effort: ReasoningEfforts = Field(default_factory=ReasoningEfforts)
+    embedding: ModelBinding | None = None
+    reranker: ModelBinding | None = None
 
     @model_validator(mode="after")
     def validate_roles(self) -> ModelsConfig:
+        if self.vlm is not None and self.vlm.protocol != "openai_chat":
+            raise ValueError("models.vlm.protocol must be openai_chat")
+        for role in ("embedding", "reranker"):
+            binding = getattr(self, role)
+            if binding is not None and binding.protocol != "openai_compatible":
+                raise ValueError(f"models.{role}.protocol must be openai_compatible")
         for role, capabilities in ROLE_CAPABILITIES.items():
-            alias = getattr(self.roles, role)
-            if alias is None:
-                continue
-            binding = self.bindings.get(alias)
+            binding = self.binding_for(role)
             if binding is None:
-                raise ValueError(f"models.roles.{role} references unknown binding {alias!r}")
+                if (
+                    role in ReasoningEfforts.model_fields
+                    and getattr(self.reasoning_effort, role) is not None
+                ):
+                    raise ValueError(f"models.reasoning_effort.{role} requires models.vlm")
+                continue
             for capability in capabilities:
                 if capability not in binding.capabilities:
-                    raise ValueError(
-                        f"models.roles.{role} requires capability {capability.value!r}"
-                    )
+                    raise ValueError(f"model role {role} requires capability {capability.value!r}")
         return self
 
     def required_unbound_roles(self) -> set[str]:
-        return {role for role in REQUIRED_MODEL_ROLES if getattr(self.roles, role) is None}
+        return {role for role in REQUIRED_MODEL_ROLES if self.binding_for(role) is None}
 
     def binding_for(self, role: str) -> ModelBinding | None:
-        alias = getattr(self.roles, role)
-        return None if alias is None else self.bindings[alias]
+        if role in {"embedding", "reranker"}:
+            return getattr(self, role)
+        if role not in ReasoningEfforts.model_fields:
+            raise ValueError(f"unknown model role {role!r}")
+        return None if getattr(self.reasoning_effort, role) is None else self.vlm
 
 
 class OAMConfig(FrozenModel):
@@ -418,7 +428,7 @@ class OAMConfig(FrozenModel):
 
     def required_unbound_roles(self) -> set[str]:
         return {
-            role for role in self.required_model_roles() if getattr(self.models.roles, role) is None
+            role for role in self.required_model_roles() if self.models.binding_for(role) is None
         }
 
 

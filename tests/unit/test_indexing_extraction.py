@@ -268,16 +268,12 @@ def extraction_models(reply, requests=None, *, config=None):
         update={
             "models": ModelsConfig.model_validate(
                 {
-                    "roles": {"extraction": "chat", "insights": "chat"},
-                    "bindings": {
-                        "chat": {
-                            "protocol": "openai_compatible",
-                            "model": "synthetic-chat",
-                            "endpoint_env": "MODEL_URL",
-                            "capabilities": ["chat", "vision"],
-                            "reasoning_effort": "low",
-                            "thinking": "disabled",
-                        }
+                    "reasoning_effort": {"extraction": "none", "insights": "none"},
+                    "vlm": {
+                        "protocol": "openai_chat",
+                        "model": "synthetic-chat",
+                        "endpoint_env": "MODEL_URL",
+                        "capabilities": ["text", "vision"],
                     },
                 }
             )

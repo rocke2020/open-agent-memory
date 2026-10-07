@@ -311,7 +311,7 @@ class RecallService:
             )
 
         rerank_scores = None
-        if mode != "fast" and self.config.models.roles.reranker:
+        if mode != "fast" and self.config.models.reranker is not None:
             validate_paths()
             rows = read("hydrate", fused_ids())[: tier.rerank_candidates]
             if rows:

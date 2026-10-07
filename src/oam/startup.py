@@ -16,13 +16,13 @@ def validate_model_environment(config: OAMConfig, environment: Mapping[str, str]
         raise ConfigurationError(f"missing required model roles: {', '.join(missing)}")
     roles = set(config.required_model_roles())
     roles.update(
-        role for role in ("reranker", "planner") if getattr(config.models.roles, role) is not None
+        role for role in ("reranker", "planner") if config.models.binding_for(role) is not None
     )
     for role in sorted(roles):
         try:
             binding = resolve_model_binding(config.models, role, environment)
             if binding is not None and any(
-                capability in {ModelCapability.CHAT, ModelCapability.VISION}
+                capability in {ModelCapability.TEXT, ModelCapability.VISION}
                 for capability in ROLE_CAPABILITIES[role]
             ):
                 binding.chat_parameters()

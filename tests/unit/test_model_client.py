@@ -6,25 +6,21 @@ import httpx
 import pytest
 from PIL import Image
 
-from oam.config import ModelBinding, ModelCapability, ModelRoles, ModelsConfig
+from oam.config import ModelBinding, ModelCapability, ModelsConfig, ReasoningEfforts
 from oam.models.bindings import resolve_model_binding
 from oam.models.client import ModelProtocolError, OpenAICompatibleProbeClient
 
 
-def _binding(capability: ModelCapability):
+def _binding(capability: ModelCapability, effort="low"):
     models = ModelsConfig(
-        roles=ModelRoles(extraction="model"),
-        bindings={
-            "model": ModelBinding(
-                protocol="openai_compatible",
-                model="synthetic-model",
-                endpoint_env="MODEL_URL",
-                api_key_env="MODEL_KEY",
-                capabilities=frozenset({ModelCapability.CHAT, ModelCapability.VISION, capability}),
-                reasoning_effort="low",
-                thinking="disabled",
-            )
-        },
+        reasoning_effort=ReasoningEfforts(extraction=effort),
+        vlm=ModelBinding(
+            protocol="openai_chat",
+            model="synthetic-model",
+            endpoint_env="MODEL_URL",
+            api_key_env="MODEL_KEY",
+            capabilities=frozenset({ModelCapability.TEXT, ModelCapability.VISION, capability}),
+        ),
     )
     binding = resolve_model_binding(
         models,
@@ -35,7 +31,8 @@ def _binding(capability: ModelCapability):
     return binding
 
 
-def test_openai_compatible_client_uses_visible_chat_content_and_output_limit() -> None:
+@pytest.mark.parametrize("effort", ["none", "low", "high", "max"])
+def test_openai_compatible_client_uses_visible_chat_content_and_output_limit(effort) -> None:
     seen_payload: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -59,15 +56,19 @@ def test_openai_compatible_client_uses_visible_chat_content_and_output_limit() -
     transport = httpx.MockTransport(handler)
     with httpx.Client(transport=transport) as http:
         result = OpenAICompatibleProbeClient(http=http).probe_chat(
-            _binding(ModelCapability.CHAT), max_output_tokens=1_024
+            _binding(ModelCapability.TEXT, effort), max_output_tokens=1_024
         )
 
     assert result.content == '{"ok":true,"message":"visible"}'
     assert result.reasoning_content == "hidden"
     assert seen_payload["max_tokens"] == 1_024
     assert seen_payload["model"] == "synthetic-model"
-    assert seen_payload["reasoning_effort"] == "low"
-    assert seen_payload["thinking"] == {"type": "disabled"}
+    if effort == "none":
+        assert "reasoning_effort" not in seen_payload
+        assert seen_payload["thinking"] == {"type": "disabled"}
+    else:
+        assert seen_payload["reasoning_effort"] == effort
+        assert seen_payload["thinking"] == {"type": "enabled"}
 
 
 def test_openai_compatible_client_decodes_embedding_and_rerank_responses() -> None:
@@ -150,7 +151,7 @@ def test_chat_client_rejects_non_object_messages_as_protocol_errors(message) -> 
         pytest.raises(ModelProtocolError, match="choices shape"),
     ):
         OpenAICompatibleProbeClient(http=http).probe_chat(
-            _binding(ModelCapability.CHAT), max_output_tokens=1_024
+            _binding(ModelCapability.TEXT), max_output_tokens=1_024
         )
 
 

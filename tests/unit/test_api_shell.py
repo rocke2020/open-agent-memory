@@ -16,10 +16,9 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 async def client(tmp_path):
     config = tmp_path / "unbound.yaml"
     config.write_text(
-        "models:\n  roles:\n"
+        "models:\n  embedding: null\n  reasoning_effort:\n"
         + "".join(
-            f"    {role}: null\n"
-            for role in ("abstract", "embedding", "extraction", "insights", "profile")
+            f"    {role}: null\n" for role in ("abstract", "extraction", "insights", "profile")
         )
     )
     transport = httpx.ASGITransport(app=create_app(config))
@@ -68,10 +67,9 @@ async def test_readiness_fails_when_required_model_roles_are_unbound(
     config_path.write_text(
         "index:\n  insights_enabled: " + str(enable_features).lower() + "\n"
         "profile:\n  enabled: " + str(enable_features).lower() + "\n"
-        "models:\n  roles:\n"
+        "models:\n  embedding: null\n  reasoning_effort:\n"
         + "".join(
-            f"    {role}: null\n"
-            for role in ("abstract", "embedding", "extraction", "insights", "profile")
+            f"    {role}: null\n" for role in ("abstract", "extraction", "insights", "profile")
         )
     )
     transport = httpx.ASGITransport(app=create_app(config_path))
@@ -89,20 +87,24 @@ async def test_readiness_fails_when_required_model_roles_are_unbound(
 async def test_binding_names_alone_cannot_make_the_foundation_ready(tmp_path) -> None:
     config = tmp_path / "oam.yaml"
     config.write_text(
-        "models:\n  roles:\n"
+        "models:\n  reasoning_effort:\n"
         + "".join(
-            f"    {role}: synthetic\n"
+            f"    {role}: none\n"
             for role in (
                 "extraction",
                 "insights",
-                "embedding",
                 "abstract",
                 "profile",
             )
         )
-        + "  bindings:\n    synthetic:\n      protocol: openai_compatible\n"
-        "      model: synthetic\n      endpoint_env: UNSET_SYNTHETIC_ENDPOINT\n"
-        "      capabilities: [chat, vision, embeddings]\n",
+        + "  vlm:\n    protocol: openai_chat\n"
+        "    model: synthetic\n    model_env: null\n"
+        "    endpoint_env: UNSET_SYNTHETIC_ENDPOINT\n    api_key_env: null\n"
+        "    capabilities: [text, vision]\n"
+        "  embedding:\n    protocol: openai_compatible\n"
+        "    model: synthetic\n    model_env: null\n"
+        "    endpoint_env: UNSET_SYNTHETIC_ENDPOINT\n    api_key_env: null\n"
+        "    capabilities: [embeddings]\n",
         encoding="utf-8",
     )
     transport = httpx.ASGITransport(app=create_app(config))

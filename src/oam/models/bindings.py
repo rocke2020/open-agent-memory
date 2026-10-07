@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-from oam.config import ModelCapability, ModelsConfig
+from oam.config import ROLE_CAPABILITIES, ModelCapability, ModelsConfig
 
 
 class ModelBindingResolutionError(ValueError):
@@ -22,8 +22,13 @@ class ResolvedModelBinding:
     capabilities: frozenset[ModelCapability]
     credential_configured: bool
     reasoning_effort: str | None = None
-    thinking: str | None = None
     _api_key: str | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def thinking(self) -> str | None:
+        if self.reasoning_effort is None:
+            return None
+        return "disabled" if self.reasoning_effort == "none" else "enabled"
 
     def redacted(self) -> dict[str, Any]:
         return {
@@ -39,10 +44,12 @@ class ResolvedModelBinding:
         }
 
     def chat_parameters(self) -> dict[str, Any]:
-        if self.reasoning_effort is None or self.thinking is None:
+        if self.reasoning_effort not in {"none", "low", "high", "max"}:
             raise ModelBindingResolutionError(
-                f"model role {self.role!r} requires explicit reasoning_effort and thinking"
+                f"model role {self.role!r} requires explicit reasoning_effort"
             )
+        if self.reasoning_effort == "none":
+            return {"thinking": {"type": "disabled"}}
         return {
             "reasoning_effort": self.reasoning_effort,
             "thinking": {"type": self.thinking},
@@ -54,12 +61,12 @@ def resolve_model_binding(
     role: str,
     environment: Mapping[str, str],
 ) -> ResolvedModelBinding | None:
-    if role not in type(models.roles).model_fields:
+    if role not in ROLE_CAPABILITIES:
         raise ModelBindingResolutionError(f"unknown model role {role!r}")
-    alias = getattr(models.roles, role)
-    if alias is None:
+    binding = models.binding_for(role)
+    if binding is None:
         return None
-    binding = models.bindings[alias]
+    alias = role if role in {"embedding", "reranker"} else "vlm"
     model = binding.model
     if binding.model_env is not None:
         model = environment.get(binding.model_env, "").strip()
@@ -105,7 +112,8 @@ def resolve_model_binding(
         endpoint=endpoint,
         capabilities=binding.capabilities,
         credential_configured=api_key is not None,
-        reasoning_effort=binding.reasoning_effort,
-        thinking=binding.thinking,
+        reasoning_effort=(
+            None if role in {"embedding", "reranker"} else getattr(models.reasoning_effort, role)
+        ),
         _api_key=api_key,
     )
