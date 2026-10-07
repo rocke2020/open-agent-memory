@@ -68,6 +68,11 @@ async def test_readiness_fails_when_required_model_roles_are_unbound(
     config_path.write_text(
         "index:\n  insights_enabled: " + str(enable_features).lower() + "\n"
         "profile:\n  enabled: " + str(enable_features).lower() + "\n"
+        "models:\n  roles:\n"
+        + "".join(
+            f"    {role}: null\n"
+            for role in ("abstract", "embedding", "extraction", "insights", "profile")
+        )
     )
     transport = httpx.ASGITransport(app=create_app(config_path))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

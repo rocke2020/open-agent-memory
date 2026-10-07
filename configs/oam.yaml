@@ -265,7 +265,7 @@ models:
       endpoint_env: OAM_GENERATIVE_ENDPOINT
       api_key_env: OAM_GENERATIVE_API_KEY
       capabilities: [chat, vision]
-      reasoning_effort: high
+      reasoning_effort: low
       thinking: enabled
     embedding_default:
       protocol: openai_compatible

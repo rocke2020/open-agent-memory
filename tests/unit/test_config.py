@@ -43,7 +43,7 @@ def test_canonical_config_freezes_v001_trial_limits_and_model_role_bindings() ->
     }
     assert resolved.config.models.bindings["indexing_low"].reasoning_effort == "low"
     assert resolved.config.models.bindings["indexing_low"].thinking == "enabled"
-    assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "high"
+    assert resolved.config.models.bindings["indexing_high"].reasoning_effort == "low"
     assert resolved.config.models.bindings["indexing_high"].thinking == "enabled"
     assert resolved.config.models.required_unbound_roles() == set()
     assert len(resolved.sha256) == 64
