@@ -590,11 +590,109 @@ def test_extraction_sliding_window_embeds_ready_facts_before_slow_sibling_finish
     )
     assert fact_embedded.is_set()
     assert maximum == 2 and active == 0
-    assert published == [f"Statement {index}." for index in range(9)]
+    assert sorted(published) == sorted(f"Statement {index}." for index in range(9))
     assert [unit["locator"]["message_id"] for unit in store.units] == [
         f"message-{index}" for index in range(9)
     ]
     assert store.finished and store.stages["extraction_coverage"] == "complete"
+
+
+def test_ready_later_extraction_group_publishes_before_slow_earlier_group(monkeypatch):
+    request = {
+        "source_id": "document",
+        "messages": [
+            {
+                "message_id": f"message-{index}",
+                "role": "user",
+                "content": f"Statement {index}.",
+                "event_time": "2026-09-23T00:00:00Z",
+                "learning_eligible": True,
+            }
+            for index in range(2)
+        ],
+    }
+    first_started = Event()
+    release_first = Event()
+    later_fact_embedded = Event()
+
+    class OutOfOrderModels(LocalModels):
+        def generate(self, role, **kwargs):
+            if role != "extraction":
+                return super().generate(role, **kwargs)
+            text = json.loads(kwargs["user"])["center"]["text"]
+            if text == "Statement 0.":
+                first_started.set()
+                assert release_first.wait(2), "slow first extraction was not released"
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "outcome": "facts",
+                        "facts": [{"text": f"Fact for {text}", "quote": text}],
+                    }
+                ),
+                usage=Usage(),
+            )
+
+        def embed(self, texts, **kwargs):
+            if texts == ("Fact for Statement 1.",):
+                later_fact_embedded.set()
+            return super().embed(texts, **kwargs)
+
+    store = MemoryStore(content=json.dumps(request).encode(), input_role="interaction")
+    store.config = store.config.model_copy(
+        update={
+            "provider": store.config.provider.model_copy(update={"llm_concurrency": 2}),
+            "extraction": store.config.extraction.model_copy(
+                update={"group_max_passages": 1, "reference_max_facts": 0}
+            ),
+        }
+    )
+    connection = SimpleNamespace(cursor=lambda: None)
+
+    @contextmanager
+    def connect(*args, **kwargs):
+        yield connection
+
+    monkeypatch.setattr(index_source.psycopg, "connect", connect)
+    monkeypatch.setattr(
+        index_source, "claim_one", lambda *args, **kwargs: SimpleNamespace(stage="index_source")
+    )
+    monkeypatch.setattr(index_source, "IndexStore", lambda *args, **kwargs: store)
+    from oam.indexing import links
+
+    monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
+    published = []
+
+    def publish(_store, owners, result, _vectors, **kwargs):
+        owner = owners[next(iter(owners))][0].message_id
+        published.extend((fact.text, owner) for fact in result.facts)
+        return [fact.text for fact in result.facts]
+
+    monkeypatch.setattr(index_source, "_publish_facts", publish)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        index_source.process_one,
+        store.config,
+        "queue",
+        "content",
+        models=OutOfOrderModels(),
+        worker_id="worker",
+    )
+    try:
+        assert first_started.wait(1), "first extraction did not start"
+        assert later_fact_embedded.wait(1), (
+            "a ready later extraction group waited for the slow earlier group"
+        )
+    finally:
+        release_first.set()
+        assert future.result(timeout=3)
+        executor.shutdown(wait=True)
+
+    assert sorted(published) == [
+        ("Fact for Statement 0.", "message-0"),
+        ("Fact for Statement 1.", "message-1"),
+    ]
 
 
 def test_interaction_pipeline_overlaps_next_extraction_with_previous_publish(monkeypatch):

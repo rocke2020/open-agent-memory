@@ -7,8 +7,7 @@ import json
 import math
 import os
 import re
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from uuid import uuid4
 
 import psycopg
@@ -138,7 +137,7 @@ def process_one(
 def _index_interaction(config, store, models, request):
     fact_ids = []
     extraction_diagnostics = []
-    pending_extractions = deque()
+    pending_extractions = []
     extraction_failures = []
     capacity = config.provider.llm_concurrency
     window = EXTRACTION_WINDOW_BATCHES * capacity
@@ -214,14 +213,25 @@ def _index_interaction(config, store, models, request):
         )
         pending_extractions.append((members, group_id, future))
         if len(pending_extractions) >= window:
-            publish_extractions(wait=True)
+            publish_extractions(wait_for_one=True)
 
-    def publish_extractions(*, wait=False):
-        if not pending_extractions or (not wait and not pending_extractions[0][2].done()):
+    def publish_extractions(*, wait_for_one=False):
+        if not pending_extractions:
             return
-        ready = [pending_extractions.popleft()]
-        while pending_extractions and pending_extractions[0][2].done() and len(ready) < capacity:
-            ready.append(pending_extractions.popleft())
+        completed = [item for item in pending_extractions if item[2].done()]
+        if not completed and wait_for_one:
+            wait(
+                [item[2] for item in pending_extractions],
+                return_when=FIRST_COMPLETED,
+            )
+            completed = [item for item in pending_extractions if item[2].done()]
+        ready = completed[:capacity]
+        if not ready:
+            return
+        ready_futures = {item[2] for item in ready}
+        pending_extractions[:] = [
+            item for item in pending_extractions if item[2] not in ready_futures
+        ]
         extracted = []
         for _, group_id, future in ready:
             try:
@@ -395,7 +405,7 @@ def _index_interaction(config, store, models, request):
                 )
             publish_extractions()
         while pending_extractions:
-            publish_extractions(wait=True)
+            publish_extractions(wait_for_one=True)
     except BaseException as error:
         for _, _, future in pending_extractions:
             future.cancel()
