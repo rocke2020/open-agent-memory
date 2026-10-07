@@ -73,9 +73,14 @@ def test_validate_export_command_checks_downloaded_members(tmp_path, capsys) -> 
     assert main(["validate-export", str(tmp_path)]) == 2
 
 
-def test_preflight_fails_closed_and_names_every_missing_required_role(tmp_path, capsys) -> None:
+@pytest.mark.parametrize("enable_features", [False, True], ids=["disabled", "enabled"])
+def test_preflight_fails_closed_and_names_every_missing_required_role(
+    tmp_path, capsys, enable_features
+) -> None:
     config = tmp_path / "unbound.yaml"
     config.write_text(
+        "index:\n  insights_enabled: " + str(enable_features).lower() + "\n"
+        "profile:\n  enabled: " + str(enable_features).lower() + "\n"
         "models:\n  roles:\n"
         + "".join(
             f"    {role}: null\n"
@@ -93,9 +98,8 @@ def test_preflight_fails_closed_and_names_every_missing_required_role(tmp_path, 
             "abstract",
             "embedding",
             "extraction",
-            "insights",
-            "profile",
-        ],
+        ]
+        + (["insights", "profile"] if enable_features else []),
         "ready": False,
     }
     assert {role["status"] for role in payload["roles"]} == {"disabled"}
@@ -125,6 +129,7 @@ def test_api_command_uses_memory_ui_default_port(monkeypatch) -> None:
         launched.update(host=host, port=port)
 
     monkeypatch.setattr(uvicorn, "run", capture_run)
+    monkeypatch.setattr(cli, "validate_startup_environment", lambda *args, **kwargs: None)
 
     assert main(["api", "--config", str(REPOSITORY_ROOT / "configs" / "oam.yaml")]) == 0
     assert launched == {"host": "127.0.0.1", "port": 17333}

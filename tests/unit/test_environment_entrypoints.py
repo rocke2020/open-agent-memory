@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from oam import startup
 from oam.auth import bootstrap
 from oam.db import migrations
 from oam.workers import runner
@@ -22,6 +23,7 @@ def local_worker_capacity(monkeypatch):
             pass
 
     monkeypatch.setattr(runner, "PostgresCapacity", Capacity)
+    monkeypatch.setattr(startup, "validate_startup_environment", lambda *args, **kwargs: None)
 
 
 def test_migrate_entrypoint_fails_closed_when_configured_dsn_is_missing(

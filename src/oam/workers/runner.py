@@ -15,6 +15,7 @@ import httpx
 
 from oam.capacity import PostgresCapacity
 from oam.config import ConfigurationError, OAMConfig, load_config
+from oam.db.readiness import postgres_connection_ready
 from oam.models.runtime import RuntimeModels
 from oam.workers.index_source import process_one
 
@@ -77,6 +78,9 @@ class WorkerRunner:
             and not self.stop_event.is_set()
             and all(not future.done() for future in self._futures)
         )
+
+    def databases_ready(self) -> bool:
+        return all(postgres_connection_ready(dsn) for dsn in (self.queue_dsn, self.content_dsn))
 
     @property
     def failed(self) -> bool:
@@ -190,12 +194,15 @@ class WorkerRunner:
 
 def run_worker_from_environment(config_path: str | Path, *, once: bool = False) -> int:
     """Resolve worker resources; install process signals only in this entrypoint."""
+    from oam.startup import validate_startup_environment
+
     try:
         config = load_config(config_path).config
     except ConfigurationError:
         print("invalid OAM configuration", file=sys.stderr)
         return 2
     try:
+        validate_startup_environment(config, os.environ, command="worker")
         worker = WorkerRunner.from_environment(config)
     except ConfigurationError as error:
         print(str(error), file=sys.stderr)

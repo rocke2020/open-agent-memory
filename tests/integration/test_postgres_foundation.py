@@ -197,7 +197,7 @@ def test_legacy_asserted_v12_upgrades_and_restricts_function(tmp_path) -> None:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(version,) for version in range(1, 24)]
+        assert versions == [(version,) for version in range(1, 26)]
         owner, api_can_execute, public_can_execute = connection.execute(
             "SELECT pg_get_userbyid(p.proowner),"
             "has_function_privilege('oam_api',p.oid,'EXECUTE'),"

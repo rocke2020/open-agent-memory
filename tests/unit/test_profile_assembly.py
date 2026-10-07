@@ -10,6 +10,9 @@ from oam.profiles import assembly
 def test_recall_includes_the_whole_stored_document_by_default(monkeypatch) -> None:
     content = "## Main content\n\nThe user likes short answers [1].\n\n## References\n\n1. Chat"
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={"profile": config.profile.model_copy(update={"enabled": True})}
+    )
 
     class Profile:
         def __init__(self, _config, _pool):
@@ -35,6 +38,9 @@ def test_recall_includes_the_whole_stored_document_by_default(monkeypatch) -> No
 
 def test_explicit_profile_opt_out_skips_profile_read(monkeypatch) -> None:
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={"profile": config.profile.model_copy(update={"enabled": True})}
+    )
 
     class NoProfileRead:
         def __init__(self, *_args):

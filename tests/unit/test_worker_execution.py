@@ -6,6 +6,7 @@ from threading import Event, Lock
 import httpx
 import pytest
 
+from oam import startup
 from oam.workers import index_source, runner
 
 CONFIG_PATH = Path(__file__).parents[2] / "configs" / "oam.yaml"
@@ -24,6 +25,7 @@ def local_worker_capacity(monkeypatch):
             pass
 
     monkeypatch.setattr(runner, "PostgresCapacity", Capacity)
+    monkeypatch.setattr(startup, "validate_startup_environment", lambda *args, **kwargs: None)
 
 
 def test_cleanup_claim_runs_without_loading_deleted_original(monkeypatch):
