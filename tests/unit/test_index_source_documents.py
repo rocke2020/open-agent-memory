@@ -271,13 +271,7 @@ def test_caller_annotated_pdf_keeps_legacy_page_text_locator_and_annotation(monk
         role="date_reference",
         start="2026-10-07T00:00:00Z",
         end="2026-10-08T00:00:00Z",
-        instant=False,
-        granularity="day",
-        meaning="duration",
-        reference_timezone="UTC",
         quote="Dose 5 mg",
-        span_start=0,
-        span_end=9,
     )
     metadata = store.resource_metadata().model_copy(update={"temporal_annotations": [annotation]})
     monkeypatch.setattr(store, "resource_metadata", lambda: metadata)
