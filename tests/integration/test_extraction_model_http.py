@@ -211,15 +211,16 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
             rows = connection.execute(
                 "SELECT e.content_text,s.span FROM support s "
                 "JOIN evidence e USING(tenant_id,user_id,evidence_id) "
-                "WHERE s.tenant_id=%s ORDER BY e.evidence_id,(s.span->>'start')::int",
+                "JOIN search_units u ON (u.tenant_id,u.user_id,u.unit_id)="
+                "(s.tenant_id,s.user_id,s.memory_id) "
+                "WHERE s.tenant_id=%s ORDER BY e.evidence_id,u.ordinal",
                 (tenant,),
             ).fetchall()
             assert len(rows) == 4
             for text in texts:
-                spans = sorted(
-                    (span for source, span in rows if source == text), key=lambda s: s["start"]
-                )
-                assert "".join(text[s["start"] : s["end"]] for s in spans) == text
+                spans = [span for source, span in rows if source == text]
+                assert "".join(span["quote"] for span in spans) == text
+                assert all({"start", "end"}.isdisjoint(span) for span in spans)
     finally:
         provider.shutdown()
         provider.server_close()

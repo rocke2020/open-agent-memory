@@ -2,6 +2,7 @@
 
 import json
 
+from oam.quotes import unique_quote
 from oam.tokens import estimate_units, estimated_tokens
 
 
@@ -104,13 +105,15 @@ def _supported_passage_id(item: dict, passages: dict[str, dict]) -> str | None:
     if passage is None or len(passage["citations"]) != 1:
         return None
     locator = passage["citations"][0]
-    identity = ("source_id", "source_version", "message_id", "message_index", "role")
+    identity = (
+        "source_id",
+        "source_version",
+        "message_id",
+        "message_index",
+        "role",
+        "passage_index",
+    )
     if any(locator.get(key) is None for key in identity):
-        return None
-    start, end = locator.get("start"), locator.get("end")
-    if type(start) is not int or type(end) is not int:
-        return None
-    if start < 0 or end - start != len(passage["text"]):
         return None
     for citation in item["citations"]:
         span = citation.get("span", {})
@@ -118,13 +121,7 @@ def _supported_passage_id(item: dict, passages: dict[str, dict]) -> str | None:
             return None
         if any(span.get(key) != locator[key] for key in identity):
             return None
-        first, last, quote = span.get("start"), span.get("end"), span.get("quote")
-        if type(first) is not int or type(last) is not int or not isinstance(quote, str):
-            return None
-        if (
-            not start <= first < last <= end
-            or passage["text"][first - start : last - start] != quote
-        ):
+        if not unique_quote(passage["text"], span.get("quote")):
             return None
     return passage["unit_id"]
 
@@ -274,7 +271,7 @@ def source_window_ids(seed_items: list[dict], passage_locators: list[dict]) -> l
         group.sort(
             key=lambda row: (
                 row["locator"]["message_index"],
-                row["locator"].get("start", 0),
+                row["locator"].get("passage_index", 0),
                 row["unit_id"],
             )
         )
@@ -304,7 +301,7 @@ def source_window_ids(seed_items: list[dict], passage_locators: list[dict]) -> l
         group.sort(
             key=lambda row: (
                 row["locator"]["message_index"],
-                row["locator"].get("start", 0),
+                row["locator"].get("passage_index", 0),
                 row["unit_id"],
             )
         )

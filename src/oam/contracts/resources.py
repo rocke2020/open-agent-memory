@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import Field, PositiveInt
 
 from oam.config import OAMConfig
-from oam.contracts.evidence import CallerTemporalAnnotation, NonBlank, SourceInputMetadata
+from oam.contracts.evidence import NonBlank, SourceInputMetadata, TemporalAnnotation
 
 
 class ResourceMediaType(StrEnum):
@@ -16,7 +16,7 @@ class ResourceMediaType(StrEnum):
     JPEG = "image/jpeg"
 
 
-class ResourceTemporalAnnotation(CallerTemporalAnnotation):
+class ResourceTemporalAnnotation(TemporalAnnotation):
     locator: NonBlank
 
 
@@ -30,7 +30,7 @@ class EvidenceResourceCreate(SourceInputMetadata):
     resource_type: Literal["evidence"] = "evidence"
     temporal_annotations: list[ResourceTemporalAnnotation] = Field(default_factory=list)
 
-    def validate_source_spans(self, blocks: Mapping[str, str]) -> None:
+    def validate_source_quotes(self, blocks: Mapping[str, str]) -> None:
         for annotation in self.temporal_annotations:
             if annotation.locator not in blocks:
                 raise ValueError("annotation locator does not identify a parsed source block")

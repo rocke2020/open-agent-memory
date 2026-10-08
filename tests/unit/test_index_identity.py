@@ -95,3 +95,12 @@ def test_environment_model_name_is_part_of_index_generation_identity():
     environment["OAM_EMBEDDING_MODEL"] = "embedding-b"
 
     assert first != index_generation(configured, environment)
+
+
+def test_extraction_prompt_revision_invalidates_index_generation(monkeypatch):
+    from oam.indexing import identity
+
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
+    current = identity.index_generation(config, {})
+    monkeypatch.setattr(identity, "INDEX_RECIPE", "oam-source-fact-insight-v24")
+    assert identity.index_generation(config, {}) != current

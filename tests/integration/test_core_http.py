@@ -252,8 +252,6 @@ class SyntheticIndexModels:
                         "text": center["text"],
                         "category": "preference",
                         "quote": center["text"],
-                        "start": center["start"],
-                        "end": center["end"],
                         "entities": ["Lin"],
                         "caused_by": [],
                         "updates": [],

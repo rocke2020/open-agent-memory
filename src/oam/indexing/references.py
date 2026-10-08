@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from psycopg.types.json import Jsonb
 
+from oam.contracts.evidence import TemporalAnnotation
 from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
 from oam.indexing.store import IndexStore, input_digest
 
@@ -89,7 +90,16 @@ def freeze_extraction_references(
                     "text": row[1],
                     "role": row[2],
                     "mentioned_at": row[3].isoformat() if row[3] else None,
-                    "time_qualifiers": row[4] or [],
+                    "time_qualifiers": [
+                        TemporalAnnotation.model_validate(
+                            {
+                                key: detail[key]
+                                for key in TemporalAnnotation.model_fields
+                                if key in detail
+                            }
+                        ).model_dump(mode="json")
+                        for detail in row[4] or []
+                    ],
                 }
                 for row in rows
             )

@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from oam.config import load_config
-from oam.indexing.extraction import InsightInput, TemporalAnnotation
+from oam.contracts.evidence import TemporalAnnotation
+from oam.indexing.extraction import InsightInput
 from oam.indexing.store import IndexStore
 from oam.workers.index_source import _insights
 
@@ -16,13 +17,8 @@ def test_insight_input_preserves_evidence_dates_and_temporal_annotations():
     annotation = TemporalAnnotation(
         role="event",
         start="2019-01-01T00:00:00+00:00",
-        end="2019-01-01T00:00:00+00:00",
-        instant=True,
-        granularity="instant",
-        meaning="instant",
+        end="2020-01-01T00:00:00+00:00",
         quote="in 2019",
-        span_start=10,
-        span_end=18,
     )
 
     fact = InsightInput(

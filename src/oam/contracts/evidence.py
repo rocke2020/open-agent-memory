@@ -7,18 +7,17 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    StrictBool,
     StringConstraints,
     field_validator,
     model_validator,
 )
 
 from oam.config import OAMConfig
+from oam.quotes import unique_quote
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 SourceText = Annotated[str, StringConstraints(min_length=1)]
 SourceVersion = Annotated[int, Field(strict=True, ge=1)]
-SourceOffset = Annotated[int, Field(strict=True, ge=0)]
 
 
 class FrozenContract(BaseModel):
@@ -68,25 +67,11 @@ class SourceInputMetadata(SourceMetadata):
         return self
 
 
-class CallerTemporalAnnotation(FrozenContract):
+class TemporalAnnotation(FrozenContract):
     role: Literal["event", "date_reference"]
     start: datetime
     end: datetime
-    instant: StrictBool
-    granularity: Literal["instant", "day", "month", "year"]
-    meaning: Literal["instant", "duration", "possible_period"]
-    origin: Literal["caller"] = "caller"
-    reference_timezone: NonBlank
     quote: SourceText
-    span_start: SourceOffset
-    span_end: SourceOffset
-    bounds: Literal["[)", "[]", "(]", "()"] | None = None
-
-    @field_validator("reference_timezone")
-    @classmethod
-    def validate_reference_timezone(cls, value: str) -> str:
-        _reference_timezone(value)
-        return value
 
     @field_validator("start", "end", mode="before")
     @classmethod
@@ -96,32 +81,16 @@ class CallerTemporalAnnotation(FrozenContract):
         return value
 
     @model_validator(mode="after")
-    def validate_annotation(self) -> "CallerTemporalAnnotation":
+    def validate_annotation(self) -> "TemporalAnnotation":
         if self.start.utcoffset() is None or self.end.utcoffset() is None:
             raise ValueError("annotation times must be timezone-aware")
-        if self.span_start >= self.span_end:
-            raise ValueError("annotation quote span must be nonempty")
-        bounds = self.bounds or ("[]" if self.instant else "[)")
-        if self.instant:
-            if (
-                self.start != self.end
-                or self.meaning != "instant"
-                or self.granularity != "instant"
-                or bounds != "[]"
-            ):
-                raise ValueError(
-                    "an instant annotation requires equal included bounds and instant meaning"
-                )
-        elif self.start >= self.end or self.meaning == "instant":
-            raise ValueError("annotation duration or possible period must have increasing bounds")
-        if self.meaning == "possible_period" and bounds != "[)":
-            raise ValueError("a possible period must use half-open bounds")
-        object.__setattr__(self, "bounds", bounds)
+        if self.start > self.end:
+            raise ValueError("annotation start must not exceed its end")
         return self
 
     def validate_quote(self, content: str) -> None:
-        if self.span_end > len(content) or content[self.span_start : self.span_end] != self.quote:
-            raise ValueError("annotation quote does not match its exact source span")
+        if not unique_quote(content, self.quote):
+            raise ValueError("annotation quote must occur exactly once in its owning source")
 
 
 class MessageRole(StrEnum):
@@ -137,10 +106,10 @@ class EvidenceMessage(FrozenContract):
     content: SourceText
     event_time: datetime
     learning_eligible: bool = False
-    temporal_annotations: list[CallerTemporalAnnotation] = Field(default_factory=list)
+    temporal_annotations: list[TemporalAnnotation] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_source_spans(self) -> "EvidenceMessage":
+    def validate_source_quotes(self) -> "EvidenceMessage":
         if not self.content.strip():
             raise ValueError("message content must not be blank")
         for annotation in self.temporal_annotations:

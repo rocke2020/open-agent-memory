@@ -114,7 +114,7 @@ def add_fact(
         "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
         "support_kind,span) "
         "VALUES (%s,%s,%s,%s,%s,'quote',%s)",
-        (tenant, scope, node_id, node_id, node_id, Jsonb({"start": 0, "end": 1})),
+        (tenant, scope, node_id, node_id, node_id, Jsonb({"quote": node_id})),
     )
     dimensions = connection.execute("SELECT embedding_dimensions FROM index_settings").fetchone()[0]
     embedding = str(list(vector) + [0.0] * (dimensions - len(vector)))
@@ -325,7 +325,7 @@ def test_temporal_period_gap_treats_touching_and_overlapping_ranges_as_zero(data
                 node_id,
                 START + timedelta(days=start_day),
                 START + timedelta(days=end_day),
-                Jsonb({"meaning": "possible_period"}),
+                Jsonb({}),
             ),
         )
     connection.execute("SET LOCAL ROLE oam_content")

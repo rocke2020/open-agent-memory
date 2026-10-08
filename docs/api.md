@@ -66,6 +66,8 @@ The host posts to `/v1/retain` and supplies every message's role, exact content,
 }
 ```
 
+Optional `temporal_annotations` use exactly four semantic fields: `role` (`event` or `date_reference`), timezone-aware `start` and `end`, and one unchanged exact `quote`. The quote must occur exactly once in its owning message; use a longer quote to distinguish repeated dates. Equal bounds represent a source-supported point; minute/hour/day or other periods use increasing bounds. Precision, uncertainty and duration wording remain in fact text and quote. The server stores points with `[]` and periods with `[)`, derives origin, and retains the source/request `reference_timezone` as provenance metadata. It accepts no per-annotation instant, granularity, meaning, bounds, origin, reference timezone or character coordinates. Resource annotations additionally name their parsed `locator`, with a quote unique within that block. Returned passage citations identify source/version/message and passage index; fact citations add the canonical passage ID and exact quote. Inspection, export, Insights and Profiles consume the same support identity.
+
 ### Text or File Document
 
 A document posts to `/v1/users/lin/resources` with a stable `document_id` within its tenant/user pair and an explicit `update_mode`. Text `replace` supplies the full body; text `append` supplies only the new text for an existing text document. Append concatenates exactly, without inserting whitespace or separators, and allocates the next immutable revision atomically. Include any desired separator in the supplied text.

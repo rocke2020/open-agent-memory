@@ -74,7 +74,7 @@ def add_fact(connection, authority, node_id, text, *, eligible=True, direction=1
         "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
         "support_kind,span) "
         "VALUES (%s,%s,%s,%s,%s,'quote',%s)",
-        (tenant, scope, node_id, node_id, node_id, Jsonb({"start": 0, "end": len(text)})),
+        (tenant, scope, node_id, node_id, node_id, Jsonb({"quote": text})),
     )
     dimensions = connection.execute("SELECT embedding_dimensions FROM index_settings").fetchone()[0]
     vector = str([direction, math.sqrt(1 - direction * direction)] + [0.0] * (dimensions - 2))
@@ -92,7 +92,7 @@ def add_fact(connection, authority, node_id, text, *, eligible=True, direction=1
             node_id,
             node_id,
             text,
-            Jsonb({"source_id": node_id, "start": 0, "end": len(text)}),
+            Jsonb({"source_id": node_id, "passage_id": node_id, "quote": text}),
             vector,
             text.lower(),
             streams.english,
@@ -198,7 +198,7 @@ def test_supported_fact_ids_selects_next_eligible_user_fact(recall_database):
                 authority.tenant_id,
                 authority.user_id,
                 memory_id,
-                Jsonb({"role": "user", "start": 0, "end": len(source_text)}),
+                Jsonb({"role": "user", "quote": source_text}),
             ),
         )
     connection.execute(
@@ -245,7 +245,7 @@ def test_candidate_eligibility_matches_full_source_and_support_policy(recall_dat
     connection.execute(
         "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
         "support_kind,span) VALUES (%s,%s,'mixed','hidden','hidden','quote',%s)",
-        (authority.tenant_id, authority.user_id, Jsonb({"start": 0, "end": 6})),
+        (authority.tenant_id, authority.user_id, Jsonb({"quote": "source"})),
     )
     connection.execute(
         "UPDATE source_versions SET status='superseded' WHERE tenant_id=%s AND user_id=%s "
@@ -777,7 +777,7 @@ def test_hydrated_insight_orders_shared_passage_support_by_memory_id(recall_data
     connection.execute(
         "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
         "support_kind,span) VALUES (%s,%s,'a','z','z','quote',%s)",
-        (authority.tenant_id, authority.user_id, Jsonb({"start": 1, "end": 3})),
+        (authority.tenant_id, authority.user_id, Jsonb({"quote": " c"})),
     )
     add_insight(connection, authority, "parent", ("z", "a"))
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
@@ -786,9 +786,9 @@ def test_hydrated_insight_orders_shared_passage_support_by_memory_id(recall_data
 
     citations = repository.hydrate(("parent",))[0]["citations"]
     assert [(item["source_id"], item["passage_id"], item["span"]) for item in citations] == [
-        ("a", "a", {"start": 0, "end": 7}),
-        ("z", "z", {"start": 1, "end": 3}),
-        ("z", "z", {"start": 0, "end": 7}),
+        ("a", "a", {"quote": "a claim"}),
+        ("z", "z", {"quote": " c"}),
+        ("z", "z", {"quote": "z claim"}),
     ]
 
 

@@ -411,7 +411,7 @@ class RecallService:
                     ),
                     key=lambda row: (
                         row["locator"].get("message_index", float("inf")),
-                        row["locator"].get("start", 0),
+                        row["locator"].get("passage_index", 0),
                         row["unit_id"],
                     ),
                 )

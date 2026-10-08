@@ -19,6 +19,7 @@ from oam.indexing.extraction import (
     pack_reference_facts,
     retry_split_extractions,
     validate_fact_output,
+    validate_passage_support,
 )
 from oam.models.runtime import ModelOutputTooLongError
 
@@ -146,7 +147,7 @@ def extract_group(
             if chunks is None:
                 raise
             halves = tuple((replace(passages[0], chunk=chunk),) for chunk in chunks)
-        return retry_split_extractions(
+        result = retry_split_extractions(
             tuple(
                 partial(
                     extract_group,
@@ -163,6 +164,7 @@ def extract_group(
             error,
             check_retry_claim,
         )
+        return validate_passage_support(result, {p.passage_id: p.chunk for p in passages})
     passages_by_alias = {f"p{index}": passage for index, passage in enumerate(passages)}
     result = validate_fact_output(
         body,

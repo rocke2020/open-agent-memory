@@ -170,7 +170,7 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision():
         assert locator["document_id"] == "document"
         assert locator["revision"] == 3
         assert locator["block"] == f"text:{index}"
-        assert text[locator["start"] : locator["end"]] == unit["text"]
+        assert {"start", "end"}.isdisjoint(locator)
         assert len(unit["text"]) <= store.config.chunk.ingestion.max_estimated_tokens * 4
     evidence_values = [
         parameters
@@ -755,8 +755,6 @@ def test_interaction_pipeline_overlaps_next_extraction_with_previous_publish(mon
                                     {
                                         "text": "The user made a concrete statement.",
                                         "quote": center["text"],
-                                        "start": center["start"],
-                                        "end": center["end"],
                                     }
                                 ],
                             }
@@ -809,3 +807,58 @@ def test_interaction_pipeline_overlaps_next_extraction_with_previous_publish(mon
     assert overlap.is_set()
     assert 2 <= max_active_calls <= 3
     assert active_calls == 0
+
+
+def test_caller_quote_crossing_chunks_preserves_passage_time_without_coordinates():
+    from oam.contracts.evidence import EvidenceAppendRequest
+
+    content = "Apple harvest\nwas in 2025."
+    request = EvidenceAppendRequest(
+        source_id="document",
+        messages=[
+            {
+                "message_id": "m",
+                "role": "user",
+                "content": content,
+                "event_time": "2026-01-01T00:00:00Z",
+                "learning_eligible": True,
+                "temporal_annotations": [
+                    {
+                        "role": "event",
+                        "start": "2025-01-01T00:00:00Z",
+                        "end": "2026-01-01T00:00:00Z",
+                        "quote": "harvest\nwas in 2025",
+                    }
+                ],
+            }
+        ],
+    )
+    store = MemoryStore(content=b"", input_role="interaction")
+    store.config = store.config.model_copy(
+        update={
+            "chunk": store.config.chunk.model_copy(
+                update={
+                    "ingestion": store.config.chunk.ingestion.model_copy(
+                        update={
+                            "target_estimated_tokens": 4,
+                            "max_estimated_tokens": 5,
+                        }
+                    ),
+                }
+            ),
+            "extraction": store.config.extraction.model_copy(update={"reference_max_facts": 0}),
+        }
+    )
+    recorded = []
+    store.insert_annotation = lambda connection, unit_id, annotation, **kwargs: recorded.append(
+        (unit_id, annotation.model_dump(mode="json"))
+    )
+    index_source._index_interaction(store.config, store, LocalModels(), request)
+    assert len(recorded) >= 2
+    assert all(detail["quote"] == "harvest\nwas in 2025" for _, detail in recorded)
+    assert all({"span_start", "span_end"}.isdisjoint(detail) for _, detail in recorded)
+    assert "".join(unit["text"] for unit in store.units) == content
+    assert [unit["locator"]["passage_index"] for unit in store.units] == list(
+        range(len(store.units))
+    )
+    assert all({"start", "end"}.isdisjoint(unit["locator"]) for unit in store.units)

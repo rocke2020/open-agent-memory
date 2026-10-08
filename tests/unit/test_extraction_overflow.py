@@ -53,7 +53,7 @@ def test_group_overflow_recursively_splits_and_preserves_passage_ownership_and_u
     assert result.usage.total_tokens == 100
 
 
-def test_single_passage_overflow_preserves_exact_source_offsets_and_whitespace():
+def test_single_passage_overflow_preserves_exact_source_quotes_and_whitespace():
     text = "a" * 300 + ". " + "b" * 300 + ". "
     requests = []
 
@@ -80,7 +80,7 @@ def test_single_passage_overflow_preserves_exact_source_offsets_and_whitespace()
             timeout_seconds=1,
         )
     assert "".join(f.quote for f in result.facts) == text
-    assert [(f.start, f.end) for f in result.facts] == [(50, 352), (352, 654)]
+    assert all({"start", "end"}.isdisjoint(f.model_dump()) for f in result.facts)
     assert [f.output_index for f in result.facts] == [0, 1]
     assert len(requests) == 3
     assert result.usage.total_tokens == 60
@@ -207,3 +207,29 @@ def test_overflow_incomplete_usage_remains_partial():
     assert result.usage.output_tokens is None
     assert result.usage.total_tokens is None
     assert result.usage.coverage == "partial"
+
+
+def test_split_quotes_remain_unique_in_canonical_owner():
+    repeated = "a" * 300 + ". "
+    text = repeated * 2
+
+    def respond(request):
+        center = json.loads(json.loads(request.content)["messages"][1]["content"])["center"]
+        if len(center["text"]) > 500:
+            return response("", "length")
+        return response(
+            json.dumps(
+                {"outcome": "facts", "facts": [{"text": "An occurrence.", "quote": center["text"]}]}
+            )
+        )
+
+    with extraction_models(respond) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=TextChunk(text, 0, len(text), "", 151),
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert result.facts == ()
+    assert result.outcome == "partial"

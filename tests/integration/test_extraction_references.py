@@ -175,9 +175,12 @@ async def test_public_reference_path_preserves_occurrences_and_concurrent_suppor
         "role": "event",
         "start": "2020-01-01T00:00:00Z",
         "end": "2021-01-01T00:00:00Z",
-        "instant": False,
-        "granularity": "year",
-        "meaning": "duration",
+        "quote": "I prefer tea.",
+    }
+    persisted_qualifier = {
+        **event_qualifier,
+        "origin": "caller",
+        "reference_timezone": "UTC",
     }
     evidence = {"provider": "deterministic_fake", "operations": [], "recalls": {}}
     for key, texts, models in (
@@ -216,7 +219,7 @@ async def test_public_reference_path_preserves_occurrences_and_concurrent_suppor
                     "role,time_span,detail) SELECT tenant_id,user_id,'old-event',"
                     "unit_id,'event',tstzrange('2020-01-01','2021-01-01','[)'),%s "
                     "FROM search_units WHERE tenant_id=%s AND kind='fact'",
-                    (Jsonb(event_qualifier), tenant),
+                    (Jsonb(persisted_qualifier), tenant),
                 )
         if key == "new":
             assert len(models.inputs) == 2
@@ -266,6 +269,12 @@ async def test_public_reference_path_preserves_occurrences_and_concurrent_suppor
             ).fetchone()[0]
             == 0
         )
+    with psycopg.connect(dsn) as connection:
+        stored = connection.execute(
+            "SELECT detail FROM unit_times WHERE tenant_id=%s AND annotation_id='old-event'",
+            (tenant,),
+        ).fetchone()[0]
+    assert stored == persisted_qualifier
     (tmp_path / "reference-http.json").write_text(
         json.dumps(evidence, ensure_ascii=False, indent=2)
     )
@@ -405,6 +414,22 @@ async def test_short_source_uses_one_call_and_keeps_mixed_message_citations(
     await retain(client, "old", ["I prefer tea."])
     assert run_source(dsn, config, ReferenceModels())
 
+    semantic_time = {
+        "role": "event",
+        "start": "2020-01-01T00:00:00Z",
+        "end": "2021-01-01T00:00:00Z",
+        "quote": "I prefer tea.",
+    }
+    persisted_time = {**semantic_time, "origin": "caller", "reference_timezone": "UTC"}
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "INSERT INTO unit_times(tenant_id,user_id,annotation_id,unit_id,role,time_span,detail) "
+            "SELECT tenant_id,user_id,'old-group-event',unit_id,'event',"
+            "tstzrange('2020-01-01','2021-01-01','[)'),%s FROM search_units "
+            "WHERE tenant_id=%s AND kind='fact'",
+            (Jsonb(persisted_time), tenant),
+        )
+
     class GroupModels(ReferenceModels):
         def generate(self, role, **kwargs):
             envelope = json.loads(kwargs["user"])
@@ -460,6 +485,7 @@ async def test_short_source_uses_one_call_and_keeps_mixed_message_citations(
     assert run_source(dsn, config, models)
     assert models.generation_calls == ["extraction"]
     assert len(models.inputs[0]["passages"]) == 3
+    assert models.inputs[0]["reference_facts"][0]["time_qualifiers"] == [semantic_time]
     assert [ref["text"] for ref in models.inputs[0]["reference_facts"]] == ["I prefer tea."]
     app.state.runtime.models = models
     recalls = {}

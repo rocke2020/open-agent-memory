@@ -22,8 +22,7 @@ def evidence_rows():
         "message_id": "0",
         "message_index": 0,
         "role": "user",
-        "start": 0,
-        "end": len(text),
+        "passage_index": 0,
     }
     common = {"origin": "memory", "time_evidence": [], "locator": {}}
     return [
@@ -139,7 +138,7 @@ def test_grouped_context_preserves_facts_and_shows_source_once(evidence_rows, mo
         ("message_index", 2),
         ("role", "assistant"),
         ("quote", "unsupported text"),
-        ("start", 1),
+        ("passage_index", 1),
     ],
 )
 def test_inconsistent_support_keeps_fact(evidence_rows, field, value):
@@ -191,17 +190,16 @@ def test_grouping_neither_fetches_nor_backfills_beyond_item_cap(evidence_rows, c
     assert ("Source: [original]" in result["context"]) == (cap == 3)
 
 
-@pytest.mark.parametrize("correct_offset", [True, False])
-def test_coverage_checks_exact_unicode_slice_at_nonzero_offset(evidence_rows, correct_offset):
+@pytest.mark.parametrize("correct_quote", [True, False])
+def test_coverage_checks_exact_unicode_quote(evidence_rows, correct_quote):
     passage = evidence_rows[2]
     passage["text"] = "开始。检修完成。"
-    passage["citations"][0].update(start=100, end=108)
-    evidence_rows[0]["citations"][0]["span"].update(
-        start=103 if correct_offset else 100, end=108 if correct_offset else 105, quote="检修完成。"
+    evidence_rows[0]["citations"][0]["span"]["quote"] = (
+        "检修完成。" if correct_quote else "检修完成!"
     )
     result = SourceService(evidence_rows).search(object(), SearchRequest(query="检修"))
     assert "fact" in {row["unit_id"] for row in result["items"]}
-    assert ("Source: [original]" in result["context"]) is correct_offset
+    assert ("Source: [original]" in result["context"]) is correct_quote
 
 
 def test_one_uncovered_support_prevents_grouping(evidence_rows):
@@ -216,10 +214,9 @@ def test_one_uncovered_support_prevents_grouping(evidence_rows):
 def test_resolved_subject_and_date_survive_an_ambiguous_source(evidence_rows):
     source = "She missed it yesterday."
     evidence_rows[2]["text"] = source
-    evidence_rows[2]["citations"][0]["end"] = len(source)
     fact = evidence_rows[0]
     fact["text"] = "Maya missed the workshop on June 3."
-    fact["citations"][0]["span"].update(quote=source, end=len(source))
+    fact["citations"][0]["span"].update(quote=source)
     result = SourceService(evidence_rows).search(
         object(), SearchRequest(query="Who missed the workshop?")
     )

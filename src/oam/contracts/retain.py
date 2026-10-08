@@ -7,12 +7,12 @@ from pydantic import Field, StrictBool, TypeAdapter, model_validator
 
 from oam.config import OAMConfig
 from oam.contracts.evidence import (
-    CallerTemporalAnnotation,
     FrozenContract,
     MessageRole,
     NonBlank,
     SourceMetadata,
     SourceText,
+    TemporalAnnotation,
 )
 from oam.contracts.resources import ResourceTemporalAnnotation
 from oam.contracts.search import SearchRequest
@@ -31,7 +31,7 @@ class RetainMessage(FrozenContract):
     content: SourceText
     event_time: datetime
     learning_eligible: StrictBool
-    temporal_annotations: list[CallerTemporalAnnotation] = Field(default_factory=list)
+    temporal_annotations: list[TemporalAnnotation] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_evidence(self):

@@ -293,7 +293,7 @@ def _index_interaction(config, store, models, request):
             fact_ids.extend(
                 _publish_facts(
                     store,
-                    {item[0]: (item[2], item[3], item[4]) for item in members},
+                    {item[0]: (item[2], item[3], item[4], item[1]) for item in members},
                     result,
                     embedded["vectors"],
                     metadata=request,
@@ -315,9 +315,9 @@ def _index_interaction(config, store, models, request):
             message.message_id,
         )
         chunks = chunk_text(message.content, config.chunk.ingestion, previous_context=previous)
-        for chunk in chunks:
-            passage_id = stable_id("passage", evidence_id, chunk.start, chunk.end)
-            prepared.append((passage_id, chunk, message, evidence_id, message_index))
+        for passage_index, chunk in enumerate(chunks):
+            passage_id = stable_id("passage", evidence_id, passage_index)
+            prepared.append((passage_id, chunk, message, evidence_id, message_index, passage_index))
         previous = message.content
     by_passage = {
         item[0]: ExtractionPassage(
@@ -332,7 +332,7 @@ def _index_interaction(config, store, models, request):
     try:
         for offset in range(0, len(prepared), PASSAGE_EMBED_BATCH_SIZE):
             batch = prepared[offset : offset + PASSAGE_EMBED_BATCH_SIZE]
-            texts = tuple(chunk.text for _, chunk, _, _, _ in batch)
+            texts = tuple(chunk.text for _, chunk, _, _, _, _ in batch)
             batch_id = stable_id("passage_batch", [item[0] for item in batch])
             embedded = checkpoint(
                 "passage:" + batch_id,
@@ -341,17 +341,21 @@ def _index_interaction(config, store, models, request):
                     texts, timeout_seconds=config.model.attempt_timeout_seconds
                 ),
             )
-            for (passage_id, chunk, message, evidence_id, message_index), vector in zip(
-                batch, embedded["vectors"], strict=True
-            ):
+            for (
+                passage_id,
+                chunk,
+                message,
+                evidence_id,
+                message_index,
+                passage_index,
+            ), vector in zip(batch, embedded["vectors"], strict=True):
                 locator = {
                     "source_id": store.source["source_id"],
                     "source_version": store.source["source_version"],
                     "message_id": message.message_id,
                     "message_index": message_index,
                     "role": message.role.value,
-                    "start": chunk.start,
-                    "end": chunk.end,
+                    "passage_index": passage_index,
                 }
                 with store.transaction() as connection:
                     store.guard(connection)
@@ -397,12 +401,18 @@ def _index_interaction(config, store, models, request):
                         mentioned_at=message.event_time,
                         source_created_at=request.source_created_at,
                         source_updated_at=request.source_updated_at,
-                        ordinal=chunk.start,
+                        ordinal=passage_index,
                     )
                     for index, annotation in enumerate(message.temporal_annotations):
-                        if annotation.span_start < chunk.end and chunk.start < annotation.span_end:
+                        first = message.content.index(annotation.quote)
+                        if first < chunk.end and chunk.start < first + len(annotation.quote):
                             store.insert_annotation(
-                                connection, passage_id, annotation, origin="caller", ordinal=index
+                                connection,
+                                passage_id,
+                                annotation,
+                                origin="caller",
+                                ordinal=index,
+                                reference_timezone=request.reference_timezone,
                             )
                     store.readiness(connection, source_searchable=True)
                 extraction_input = {
@@ -475,10 +485,6 @@ def _resource(store, models):
             ParsedBlock(locator=f"text:{index}", text=chunk.text)
             for index, chunk in enumerate(chunks)
         )
-        spans = {
-            block.locator: {"start": chunk.start, "end": chunk.end}
-            for block, chunk in zip(blocks, chunks, strict=True)
-        }
     elif original.media_type is ResourceMediaType.PDF:
         pages = inspect_pdf(original, store.config.resource)
         blocks = []
@@ -574,7 +580,7 @@ def _resource(store, models):
             raise processing_error
         raise ResourceParseError("Resource contains no extractable detail")
     metadata = store.resource_metadata()
-    metadata.validate_source_spans({block.locator: block.text for block in blocks})
+    metadata.validate_source_quotes({block.locator: block.text for block in blocks})
     evidence_id = stable_id(
         "resource_evidence",
         store.generation_id,
@@ -648,7 +654,12 @@ def _resource(store, models):
             for index, annotation in enumerate(metadata.temporal_annotations):
                 if annotation.locator == block.locator:
                     store.insert_annotation(
-                        connection, passage_id, annotation, origin="caller", ordinal=index
+                        connection,
+                        passage_id,
+                        annotation,
+                        origin="caller",
+                        ordinal=index,
+                        reference_timezone=metadata.reference_timezone,
                     )
             readiness = {"source_searchable": True, "abstract_state": "pending"}
             if original.media_type is ResourceMediaType.PDF:
@@ -798,7 +809,7 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
         eligible_ids = eligible_reference_ids(connection, store.generation_id, offered_ids)
         for fact, vector in zip(result.facts, vectors, strict=True):
             passage_id = fact.passage_id or singleton_id
-            message, evidence_id, locator = owners[passage_id]
+            message, evidence_id, locator, chunk = owners[passage_id]
             if any(target not in eligible_ids for target in fact.related_existing_ids):
                 diagnostics.append(
                     {
@@ -809,7 +820,7 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                     }
                 )
             memory_id = identifiers[fact.output_index]
-            support_locator = {**locator, "start": fact.start, "end": fact.end, "quote": fact.quote}
+            support_locator = {**locator, "passage_id": passage_id, "quote": fact.quote}
             connection.execute(
                 "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,assertion_kind,"
                 "category,generation_id,visible_from) VALUES (%s,%s,%s,%s,'stated',%s,%s,%s) "
@@ -847,26 +858,35 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                     "INSERT INTO unit_entities VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                     (*store.key, memory_id, entity.casefold().strip()),
                 )
+            support_first = chunk.start + chunk.text.index(fact.quote)
+            support_last = support_first + len(fact.quote)
             for index, annotation in enumerate(message.temporal_annotations):
-                if fact.start <= annotation.span_start and annotation.span_end <= fact.end:
+                first = message.content.index(annotation.quote)
+                if support_first <= first and first + len(annotation.quote) <= support_last:
                     store.insert_annotation(
-                        connection, memory_id, annotation, origin="caller", ordinal=index
+                        connection,
+                        memory_id,
+                        annotation,
+                        origin="caller",
+                        ordinal=index,
+                        reference_timezone=metadata.reference_timezone,
                     )
             for index, annotation in enumerate(fact.annotations):
                 authoritative = [
                     supplied
                     for supplied in message.temporal_annotations
-                    if annotation.span_start < supplied.span_end
-                    and supplied.span_start < annotation.span_end
+                    if support_first + fact.quote.index(annotation.quote)
+                    < message.content.index(supplied.quote) + len(supplied.quote)
+                    and message.content.index(supplied.quote)
+                    < support_first + fact.quote.index(annotation.quote) + len(annotation.quote)
                 ]
                 if authoritative:
-                    fields = ("role", "start", "end", "instant", "granularity", "meaning")
+                    fields = ("role", "start", "end")
                     if any(
                         any(
                             getattr(annotation, field) != getattr(supplied, field)
                             for field in fields
                         )
-                        or supplied.bounds != ("[]" if annotation.instant else "[)")
                         for supplied in authoritative
                     ):
                         diagnostics.append(
@@ -1057,7 +1077,7 @@ def _insights(store, models, new_fact_ids):
 
 
 def _insight_temporal_annotation(value):
-    from oam.indexing.extraction import TemporalAnnotation
+    from oam.contracts.evidence import TemporalAnnotation
 
     if not isinstance(value, dict):
         raise ValueError("invalid persisted Insight temporal annotation")

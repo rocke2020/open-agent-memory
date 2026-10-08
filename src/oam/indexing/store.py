@@ -474,7 +474,7 @@ class IndexStore:
         self, connection, unit_id, annotation, *, origin, ordinal, reference_timezone=None
     ):
         detail = {**annotation.model_dump(mode="json"), "origin": origin}
-        bounds = detail.get("bounds") or ("[]" if annotation.instant else "[)")
+        bounds = "[]" if annotation.start == annotation.end else "[)"
         if reference_timezone is not None:
             detail.setdefault("reference_timezone", reference_timezone)
         identifier = (

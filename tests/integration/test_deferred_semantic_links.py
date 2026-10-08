@@ -115,7 +115,7 @@ def test_every_support_must_remain_eligible(direct_store, invalid):
         connection.execute(
             "INSERT INTO support(tenant_id,user_id,memory_id,evidence_id,passage_id,"
             "support_kind,span) VALUES (%s,'scope','seed','a','a','quote',%s)",
-            (fixture.tenant, Jsonb({"start": 0, "end": 1})),
+            (fixture.tenant, Jsonb({"quote": "x"})),
         )
 
     def eligible():

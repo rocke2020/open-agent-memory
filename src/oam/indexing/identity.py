@@ -9,7 +9,7 @@ from oam.models.bindings import resolve_model_binding
 from oam.retrieval.fts import FTS_RECIPE
 from oam.tokens import ESTIMATOR
 
-INDEX_RECIPE = "oam-source-fact-insight-v24"
+INDEX_RECIPE = "oam-source-fact-insight-v27"
 
 
 def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:

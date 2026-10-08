@@ -19,8 +19,7 @@ def test_chat_fact_citations_keep_distinct_messages_and_exact_quotes():
                     "message_id": message,
                     "message_index": index,
                     "role": "user",
-                    "start": 0,
-                    "end": 19,
+                    "passage_index": 0,
                     "quote": "under my bed\n床下",
                 },
             }
@@ -55,8 +54,7 @@ def test_chat_passage_and_unknown_citation_formats():
                 "message_id": "turn-5",
                 "message_index": 5,
                 "role": "user",
-                "start": 0,
-                "end": 20,
+                "passage_index": 0,
             }
         ],
         "time_evidence": [],

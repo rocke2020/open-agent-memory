@@ -57,8 +57,6 @@ def fake_provider(monkeypatch):
                                 "text": center["text"],
                                 "category": "preference",
                                 "quote": center["text"],
-                                "start": center["start"],
-                                "end": center["end"],
                                 "entities": [],
                                 "caused_by": [],
                                 "updates": [],
