@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
+from importlib.resources import files
 from typing import cast
 
 from oam.config import OAMConfig
@@ -27,14 +28,7 @@ from oam.models.runtime import ModelOutputTooLongError
 GROUP_OUTPUT_TEXT_MULTIPLIER = 3
 GROUP_OUTPUT_PASSAGE_TOKENS = 128
 GROUP_EXTRACTION_SYSTEM = (
-    """
-Input contains ordered passages with their own centers, roles and dates. Every fact MUST include
-passage_id copied exactly from its owning passage, such as "p0". Quotes and annotations come only
-from that center. Preserve each selected assertion's role and distinct occurrence, including
-repeated assertions in different passages. Other passages may resolve references only. Facts
-share one zero-based output sequence, including cross-passage caused_by and updates links.
-Preserve source order when possible.
-"""
+    files("oam.indexing").joinpath("extraction-group-prefix.txt").read_text(encoding="utf-8")
     + EXTRACTION_SYSTEM
 )
 

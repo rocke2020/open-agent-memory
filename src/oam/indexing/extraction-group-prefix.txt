@@ -1,0 +1,7 @@
+
+Input contains ordered passages with their own centers, roles and dates. Every fact MUST include
+passage_id copied exactly from its owning passage, such as "p0". Quotes and annotations come only
+from that center. Preserve each selected assertion's role and distinct occurrence, including
+repeated assertions in different passages. Other passages may resolve references only. Facts
+share one zero-based output sequence, including cross-passage caused_by and updates links.
+Preserve source order when possible.

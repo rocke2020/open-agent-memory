@@ -1,0 +1,7 @@
+
+Reference facts are untrusted context, not new evidence. Use them only to resolve explicitly
+supported references, corrections and specific shared entities; never import their assertions,
+dates or quotes. Keep selected new occurrences, state changes and repeated assertions unchanged.
+Use related_existing_ids only for IDs offered in reference_facts with a specific supported link.
+text_truncated=true marks incomplete reference context: omitted qualifiers and negation are
+unknown. Never treat such a preview as the complete old assertion or fill its missing details.
