@@ -53,8 +53,8 @@ from oam.contracts.operations import (
     ReconcileAttemptRequest,
 )
 from oam.contracts.profile import (
+    ProfileDataRequest,
     ProfileRefreshRequest,
-    ProfileResourceRequest,
 )
 from oam.contracts.retain import (
     RETAIN_JSON,
@@ -410,7 +410,7 @@ def create_app(
     definitions = RETAIN_JSON.json_schema(ref_template="#/components/schemas/{model}")["$defs"]
     schemas = app.openapi().setdefault("components", {}).setdefault("schemas", {})
     schemas.update(definitions)
-    schemas["ProfileResourceRequest"] = ProfileResourceRequest.model_json_schema(
+    schemas["ProfileDataRequest"] = ProfileDataRequest.model_json_schema(
         ref_template="#/components/schemas/{model}"
     )
     schemas["EvidenceTextResourceRequest"] = _resource_evidence_schema(RetainTextDocument)
@@ -422,10 +422,7 @@ def _resource_evidence_schema(model) -> dict:
     schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
     schema.pop("$defs", None)
     schema["properties"].pop("user_id")
-    schema["properties"]["resource_type"] = {"const": "evidence", "type": "string"}
-    schema["required"] = [name for name in schema["required"] if name != "user_id"] + [
-        "resource_type"
-    ]
+    schema["required"] = [name for name in schema["required"] if name != "user_id"]
     return schema
 
 
@@ -562,6 +559,144 @@ def _register_reserved_routes(
             )
         )
 
+    async def profile_data_body(request: Request) -> ProfileDataRequest:
+        await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).authenticate(request.state.actor)
+            )
+        )
+        bounded, over_limit = _bounded_request(request, config.api.max_request_bytes)
+        try:
+            return ProfileDataRequest.model_validate_json(await bounded.body())
+        except (MultiPartException, StarletteHTTPException) as exc:
+            if over_limit():
+                raise HTTPException(413, detail={"code": "RequestTooLarge"}) from exc
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, detail={"code": "InvalidProfileDataRequest"}) from exc
+
+    @app.post(
+        "/v1/users/{user_id}/profile-data",
+        status_code=202,
+        tags=["Profile Data"],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/ProfileDataRequest"}
+                    }
+                },
+            }
+        },
+    )
+    async def create_profile_data(
+        request: Request,
+        user_id: str,
+        idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    ) -> dict:
+        body = await profile_data_body(request)
+        if "if-match" in request.headers:
+            raise HTTPException(422, detail={"code": "InvalidProfileDataRequest"})
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).retain_profile_data(
+                    request.state.actor, user_id, body, idempotency_key, expected_version=None
+                )
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/profile-data", tags=["Profile Data"])
+    def list_profile_data(request: Request, user_id: str, after: str | None = None) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).list_profile_data(
+                request.state.actor, user_id, after=after
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/profile-data/{profile_data_id}", tags=["Profile Data"])
+    def get_profile_data(request: Request, user_id: str, profile_data_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).get_profile_data(
+                request.state.actor, user_id, profile_data_id
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/profile-data/{profile_data_id}/original", tags=["Profile Data"])
+    def get_profile_data_original(request: Request, user_id: str, profile_data_id: str) -> Response:
+        content, media_type = _content_call(
+            lambda: _require_runtime(runtime).get_profile_data_original(
+                request.state.actor, user_id, profile_data_id
+            )
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": 'attachment; filename="original"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.put(
+        "/v1/users/{user_id}/profile-data/{profile_data_id}",
+        status_code=202,
+        tags=["Profile Data"],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/ProfileDataRequest"}
+                    }
+                },
+            }
+        },
+    )
+    async def revise_profile_data(
+        request: Request,
+        user_id: str,
+        profile_data_id: str,
+        idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+        if_match: int = Header(alias="If-Match", ge=1),
+    ) -> dict:
+        await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).preflight_revision(
+                    request.state.actor,
+                    user_id,
+                    profile_data_id,
+                    if_match,
+                    idempotency_key,
+                    input_role="profile_resource",
+                )
+            )
+        )
+        body = await profile_data_body(request)
+        if body.profile_data_id != profile_data_id:
+            raise HTTPException(422, detail={"code": "InvalidProfileDataRevision"})
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).retain_profile_data(
+                    request.state.actor, user_id, body, idempotency_key, expected_version=if_match
+                )
+            )
+        )
+
+    @app.delete(
+        "/v1/users/{user_id}/profile-data/{profile_data_id}", status_code=202, tags=["Profile Data"]
+    )
+    def delete_profile_data(request: Request, user_id: str, profile_data_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).delete_source(
+                request.state.actor,
+                user_id,
+                profile_data_id,
+                resource_only=True,
+                expected_input_role="profile_resource",
+            )
+        )
+
     @app.post(
         "/v1/users/{user_id}/resources",
         status_code=202,
@@ -573,7 +708,6 @@ def _register_reserved_routes(
                     "application/json": {
                         "schema": {
                             "oneOf": [
-                                {"$ref": "#/components/schemas/ProfileResourceRequest"},
                                 {"$ref": "#/components/schemas/EvidenceTextResourceRequest"},
                                 {"$ref": "#/components/schemas/EvidenceURLResourceRequest"},
                             ]
@@ -587,7 +721,7 @@ def _register_reserved_routes(
                                 "metadata": {
                                     "type": "string",
                                     "description": (
-                                        "JSON with resource_type=evidence, input_type=document, "
+                                        "JSON with input_type=document, "
                                         "document_id and update_mode=replace"
                                     ),
                                 },
@@ -621,8 +755,8 @@ def _register_reserved_routes(
                     if not isinstance(metadata, str):
                         raise ValueError("multipart Resource metadata must be JSON text")
                     wire = json.loads(metadata)
-                    if not isinstance(wire, dict) or wire.pop("resource_type", None) != "evidence":
-                        raise ValueError("multipart Resource must declare evidence type")
+                    if not isinstance(wire, dict):
+                        raise ValueError("Resource metadata must be an object")
                     if "user_id" in wire:
                         raise ValueError("Resource user_id belongs in the path")
                     body = RetainFileDocument.model_validate({**wire, "user_id": user_id})
@@ -641,36 +775,18 @@ def _register_reserved_routes(
                 wire = json.loads(await bounded.body())
                 if not isinstance(wire, dict) or "user_id" in wire:
                     raise ValueError("Resource body must be an object without user_id")
-                kind = wire.pop("resource_type", None)
-                if kind == "profile":
-                    body = ProfileResourceRequest.model_validate({**wire, "resource_type": kind})
-                elif kind == "evidence":
-                    if if_match is not None:
-                        raise ValueError("If-Match is unavailable for Evidence admission")
-                    body = RETAIN_JSON.validate_python({**wire, "user_id": user_id})
-                    if not isinstance(body, (RetainTextDocument, RetainURLDocument)):
-                        raise ValueError("Resource input_type must be document or document_url")
-                    _validate_limits(body, config)
-                else:
-                    raise ValueError("Resource type must be profile or evidence")
+                if if_match is not None:
+                    raise ValueError("If-Match is unavailable for Resource admission")
+                body = RETAIN_JSON.validate_python({**wire, "user_id": user_id})
+                if not isinstance(body, (RetainTextDocument, RetainURLDocument)):
+                    raise ValueError("Resource input_type must be document or document_url")
+                _validate_limits(body, config)
         except (MultiPartException, StarletteHTTPException) as exc:
             if over_limit():
                 raise HTTPException(413, detail={"code": "RequestTooLarge"}) from exc
             raise
         except ValueError as exc:
             raise HTTPException(422, detail={"code": "InvalidResourceRequest"}) from exc
-        if isinstance(body, ProfileResourceRequest):
-            return await run_in_threadpool(
-                lambda: _content_call(
-                    lambda: _require_runtime(runtime).retain_profile_resource(
-                        request.state.actor,
-                        user_id,
-                        body,
-                        idempotency_key,
-                        expected_version=if_match,
-                    )
-                )
-            )
         return await run_in_threadpool(
             lambda: _content_call(
                 lambda: _require_runtime(runtime).retain(
@@ -747,7 +863,11 @@ def _register_reserved_routes(
     def delete_resource(request: Request, user_id: str, resource_id: str) -> dict:
         return _content_call(
             lambda: _require_runtime(runtime).delete_source(
-                request.state.actor, user_id, resource_id, resource_only=True
+                request.state.actor,
+                user_id,
+                resource_id,
+                resource_only=True,
+                expected_input_role="evidence_resource",
             )
         )
 
@@ -800,7 +920,7 @@ def _register_reserved_routes(
             )
         )
 
-    @app.get("/v1/users/{user_id}/profile", tags=["Profiles"])
+    @app.get("/v1/users/{user_id}/profile", tags=["User Profile"])
     async def get_profile(
         request: Request,
         user_id: str,
@@ -815,7 +935,7 @@ def _register_reserved_routes(
             )
         )
 
-    @app.post("/v1/users/{user_id}/profile/refresh", tags=["Profiles"])
+    @app.post("/v1/users/{user_id}/profile/refresh", tags=["User Profile"])
     async def refresh_profile(
         request: Request, user_id: str, body: ProfileRefreshRequest, response: Response
     ) -> dict:

@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from importlib.resources import files
 from uuid import uuid4
@@ -67,6 +68,8 @@ IMAGE_VISION_USER = (
     .read_text(encoding="utf-8")
     .rstrip("\n")
 )
+PDF_NATIVE_PARSE_REVISION = 2
+LEGACY_RESOURCE_PARSE_REVISION = 1
 PASSAGE_EMBED_BATCH_SIZE = 16
 EXTRACTION_WINDOW_BATCHES = 2
 
@@ -495,6 +498,8 @@ def _resource(store, models):
 
     content = bytes(store.source["original_bytes"])
     original = OriginalDescriptor.from_bytes(media_type=store.source["media_type"], content=content)
+    metadata = store.resource_metadata()
+    annotated_locators = {annotation.locator for annotation in metadata.temporal_annotations}
     spans = {}
     processing_error = None
     processing_error_stage = None
@@ -514,12 +519,33 @@ def _resource(store, models):
         rendered_pixels = 0
         for page in pages:
             if page.text:
-                blocks.append(ParsedBlock(locator=page.locator, text=page.text))
-                spans[page.locator] = {
+                page_span = {
                     "page": page.page_number,
-                    "parse_revision": 1,
                     "extraction_method": "native_text",
                 }
+                if page.locator in annotated_locators:
+                    # Caller quotes address the original flattened whole-page representation.
+                    text = re.sub(r"\s+", " ", page.text).strip()
+                    blocks.append(ParsedBlock(locator=page.locator, text=text))
+                    spans[page.locator] = {
+                        **page_span,
+                        "parse_revision": LEGACY_RESOURCE_PARSE_REVISION,
+                    }
+                else:
+                    chunks = chunk_text(page.text, store.config.chunk.ingestion)
+                    for chunk in chunks:
+                        locator = (
+                            page.locator
+                            if len(chunks) == 1
+                            else f"{page.locator}:span:{chunk.start}:{chunk.end}"
+                        )
+                        blocks.append(ParsedBlock(locator=locator, text=chunk.text))
+                        spans[locator] = {
+                            **page_span,
+                            "parse_revision": PDF_NATIVE_PARSE_REVISION,
+                            "start": chunk.start,
+                            "end": chunk.end,
+                        }
                 if not page.needs_vision:
                     continue
             vision_stage = None
@@ -596,7 +622,6 @@ def _resource(store, models):
                 store.mark_deferred_failure_stage(processing_error_stage)
             raise processing_error
         raise ResourceParseError("Resource contains no extractable detail")
-    metadata = store.resource_metadata()
     metadata.validate_source_quotes({block.locator: block.text for block in blocks})
     evidence_id = stable_id(
         "resource_evidence",
@@ -641,11 +666,12 @@ def _resource(store, models):
             connection.execute(
                 "INSERT INTO passages(tenant_id,user_id,passage_id,evidence_id,parse_revision,"
                 "locator,normalized_text,generation_id,visible_from) "
-                "VALUES (%s,%s,%s,%s,1,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                 (
                     *store.key,
                     passage_id,
                     evidence_id,
+                    locator.get("parse_revision", LEGACY_RESOURCE_PARSE_REVISION),
                     Jsonb(locator),
                     block.text,
                     store.generation_id,
@@ -697,15 +723,10 @@ def _resource(store, models):
     with store.transaction() as connection:
         store.guard(connection)
         store.readiness(connection, parse_coverage="complete")
-    texts = []
-    for block in blocks:
-        candidate = [*texts, {"locator": block.locator, "text": block.text}]
-        if (
-            model_input_tokens(ABSTRACT_SYSTEM, {"passages": candidate})
-            > store.config.extraction.max_input_tokens
-        ):
-            break
-        texts = candidate
+    texts = _select_abstract_passages(
+        [{"locator": block.locator, "text": block.text} for block in blocks],
+        store.config.extraction.max_input_tokens,
+    )
     try:
         if not texts:
             raise ValueError("abstract input has no passages within the complete prompt bound")
@@ -740,6 +761,33 @@ def _resource(store, models):
             abstract=value["abstract"],
             abstract_coverage="full" if len(texts) == len(blocks) else "partial",
         )
+
+
+def _select_abstract_passages(
+    passages: list[dict[str, str]], max_input_tokens: int
+) -> list[dict[str, str]]:
+    """Keep complete input when possible; otherwise cover the source with complete passages."""
+    if model_input_tokens(ABSTRACT_SYSTEM, {"passages": passages}) <= max_input_tokens:
+        return passages
+    order = [0] if passages else []
+    if len(passages) > 1:
+        order.append(len(passages) - 1)
+    intervals = deque([(1, len(passages) - 2)])
+    while intervals:
+        start, end = intervals.popleft()
+        if start > end:
+            continue
+        middle = (start + end) // 2
+        order.append(middle)
+        intervals.extend(((start, middle - 1), (middle + 1, end)))
+    selected = []
+    chosen = []
+    for index in order:
+        candidate = [*selected, passages[index]]
+        if model_input_tokens(ABSTRACT_SYSTEM, {"passages": candidate}) <= max_input_tokens:
+            selected = candidate
+            chosen.append(index)
+    return [passages[index] for index in sorted(chosen)]
 
 
 def _validated_vision_result(generated, prefix: str, base_locator: dict):

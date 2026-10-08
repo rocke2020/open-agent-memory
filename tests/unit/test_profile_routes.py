@@ -53,17 +53,15 @@ async def test_unchanged_profile_refresh_returns_200_without_operation() -> None
     assert response.json()["generation_calls"] == 0
 
 
-async def test_user_resources_dispatch_evidence_and_profile_by_declared_type() -> None:
+async def test_profile_data_and_document_resources_have_separate_admission() -> None:
     accepted = []
 
     class Runtime:
         def authenticate(self, actor):
             pass
 
-        def retain_profile_resource(
-            self, actor, user_id, body, idempotency_key, *, expected_version
-        ):
-            accepted.append(("profile", user_id, body.resource_id, expected_version))
+        def retain_profile_data(self, actor, user_id, body, idempotency_key, *, expected_version):
+            accepted.append(("profile", user_id, body.profile_data_id, expected_version))
             return {"operation_id": "op_profile", "revision": 1}
 
         def retain(self, actor, body, idempotency_key, **upload):
@@ -77,18 +75,17 @@ async def test_user_resources_dispatch_evidence_and_profile_by_declared_type() -
         headers={"Authorization": "Bearer synthetic", "Idempotency-Key": "resource-1"},
     ) as client:
         profile = await client.post(
-            "/v1/users/alice/resources",
+            "/v1/users/alice/profile-data",
             json={
-                "resource_id": "basic",
-                "resource_type": "profile",
+                "profile_data_id": "basic",
                 "subtype": "basic-profile/v1",
                 "content": {"date_of_birth": "1990-05-10"},
             },
         )
+        assert profile.status_code == 202, profile.text
         evidence = await client.post(
             "/v1/users/alice/resources",
             json={
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "report",
                 "update_mode": "replace",
@@ -96,7 +93,7 @@ async def test_user_resources_dispatch_evidence_and_profile_by_declared_type() -
             },
         )
         old_resource = await client.post(
-            "/v1/resources",
+            "/v1/users/alice/resources",
             json={
                 "resource_id": "basic",
                 "resource_type": "profile",
@@ -119,7 +116,6 @@ async def test_user_resources_dispatch_evidence_and_profile_by_declared_type() -
             data={
                 "metadata": json.dumps(
                     {
-                        "resource_type": "evidence",
                         "input_type": "document",
                         "document_id": "report-file",
                         "update_mode": "replace",
@@ -136,7 +132,7 @@ async def test_user_resources_dispatch_evidence_and_profile_by_declared_type() -
 
     assert profile.status_code == 202
     assert evidence.status_code == 202
-    assert old_resource.status_code == 404
+    assert old_resource.status_code == 422
     assert old_evidence.status_code == 422
     assert evidence_with_revision.status_code == 422
     assert metadata_as_file.status_code == 422

@@ -38,9 +38,8 @@ class ProfileRefreshAccepted(FrozenContract):
     operation_id: str = Field(min_length=1)
 
 
-class ProfileResourceRequest(FrozenContract):
-    resource_id: str = Field(min_length=1, max_length=256)
-    resource_type: Literal["profile"]
+class ProfileDataRequest(FrozenContract):
+    profile_data_id: str = Field(min_length=1, max_length=256)
     subtype: Literal["basic-profile/v1", "preferences/v1"]
     source_revision: str | None = None
     as_of: str | None = None

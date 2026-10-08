@@ -21,6 +21,7 @@ from oam.operations.repository import OperationRepository
 from oam.profiles.document import render_stored_profile_fields
 from oam.profiles.inputs import ProfileInputs, load_profile_inputs
 from oam.profiles.prompt import PROFILE_SYSTEM
+from oam.profiles.resources import public_profile_data_support
 from oam.tokens import estimate_units, estimated_tokens
 
 
@@ -115,6 +116,17 @@ def _view(
     }
 
 
+def _public_view(config, inputs, snapshot, max_tokens) -> dict[str, Any]:
+    result = _view(config, inputs, snapshot, max_tokens)
+    result["references"] = [
+        public_profile_data_support(reference)
+        if reference.get("kind") == "profile_resource"
+        else reference
+        for reference in result["references"]
+    ]
+    return result
+
+
 class ProfileService:
     def __init__(self, config: OAMConfig, pool):
         self.config = config
@@ -136,7 +148,7 @@ class ProfileService:
             if generation is None:
                 generation = index_generation(self.config, os.environ)
             inputs = load_profile_inputs(connection, authority, generation)
-            result = _view(self.config, inputs, snapshot, max_tokens)
+            result = _public_view(self.config, inputs, snapshot, max_tokens)
             SourceInspector._check_policy(connection, authority, inputs.policy_epoch)
             return result
 
@@ -203,7 +215,7 @@ class ProfileService:
             ):
                 return {
                     "status": "unchanged",
-                    **_view(
+                    **_public_view(
                         self.config,
                         inputs,
                         snapshot,

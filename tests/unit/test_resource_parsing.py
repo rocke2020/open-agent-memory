@@ -158,6 +158,18 @@ def test_pdf_text_layer_quality_distinguishes_legible_from_corrupt_text() -> Non
     assert not native_text_usable("")
 
 
+def test_native_pdf_preserves_lines_indentation_and_usable_formatting() -> None:
+    text = "Release procedure\n    run --safe\n\nException\nDo not restart."
+    original = OriginalDescriptor.from_bytes(ResourceMediaType.PDF, _pdf_bytes((text,)))
+
+    parsed = parse_pdf(original, _limits(max_bytes=10_000))
+
+    assert parsed.pages[0].text == text
+    assert native_text_usable("A\nB\nC\nD\nE\nF\nG\nH")
+    assert native_text_usable("x\t1\ny\t2\nz\t3")
+    assert not native_text_usable(" \n\t ")
+
+
 def test_image_inspection_reports_format_dimensions_and_stable_locators() -> None:
     images = (
         OriginalDescriptor.from_bytes(ResourceMediaType.PNG, _image_bytes(10, 10)),

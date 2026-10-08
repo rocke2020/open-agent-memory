@@ -167,7 +167,6 @@ async def test_embedded_runner_accepts_indexes_and_recalls_both_origins(
             data={
                 "metadata": json.dumps(
                     {
-                        "resource_type": "evidence",
                         "input_type": "document",
                         "document_id": "lab",
                         "update_mode": "replace",

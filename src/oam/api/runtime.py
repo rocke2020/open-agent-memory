@@ -41,7 +41,7 @@ from oam.contracts.credentials import (
 from oam.contracts.debug import ReplayRequest
 from oam.contracts.evidence import EvidenceAppendRequest
 from oam.contracts.operations import ReconcileAttemptRequest
-from oam.contracts.profile import ProfileResourceRequest
+from oam.contracts.profile import ProfileDataRequest
 from oam.contracts.resources import EvidenceResourceCreate, ResourceMediaType
 from oam.contracts.retain import (
     RetainFileDocument,
@@ -61,7 +61,7 @@ from oam.indexing.identity import index_generation
 from oam.models.runtime import RuntimeModels
 from oam.operations.repository import OperationNotFound, OperationRecord, OperationRepository
 from oam.paths import default_migration_directory
-from oam.profiles.resources import map_profile_resource
+from oam.profiles.resources import map_profile_data
 from oam.resources.url_fetch import fetch_resource_url, safe_source_url
 
 
@@ -83,7 +83,19 @@ class APIRuntime(Protocol):
         resource_id: str,
         expected_version: int,
         idempotency_key: str,
+        *,
+        input_role: str = "evidence_resource",
     ) -> None: ...
+
+    def list_profile_data(
+        self, actor: RequestActor, user_id: str, *, after: str | None
+    ) -> dict: ...
+
+    def get_profile_data(self, actor: RequestActor, user_id: str, profile_data_id: str) -> dict: ...
+
+    def get_profile_data_original(
+        self, actor: RequestActor, user_id: str, profile_data_id: str
+    ) -> tuple[bytes, str]: ...
 
     def list_resources(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict: ...
 
@@ -127,14 +139,20 @@ class APIRuntime(Protocol):
     ) -> dict: ...
 
     def delete_source(
-        self, actor: RequestActor, user_id: str, source_id: str, *, resource_only: bool
-    ) -> dict: ...
-
-    def retain_profile_resource(
         self,
         actor: RequestActor,
         user_id: str,
-        body: ProfileResourceRequest,
+        source_id: str,
+        *,
+        resource_only: bool,
+        expected_input_role: str | None = None,
+    ) -> dict: ...
+
+    def retain_profile_data(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        body: ProfileDataRequest,
         idempotency_key: str,
         *,
         expected_version: int | None,
@@ -306,11 +324,18 @@ class DatabaseRuntime:
         resource_id: str,
         expected_version: int,
         idempotency_key: str,
+        *,
+        input_role: str = "evidence_resource",
     ) -> None:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "resource:write")
             SourceRepository().require_active_resource_version(
-                connection, authority, resource_id, expected_version, idempotency_key
+                connection,
+                authority,
+                resource_id,
+                expected_version,
+                idempotency_key,
+                input_role=input_role,
             )
 
     def search(self, actor: RequestActor, user_id: str, request: SearchRequest) -> dict:
@@ -344,6 +369,35 @@ class DatabaseRuntime:
         return ProfileService(self.config, self.pool).refresh(
             authority, instruction, reset_instruction=reset_instruction
         )
+
+    def list_profile_data(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            return SourceInspector().list_resources(
+                connection, authority, after=after, input_role="profile_resource"
+            )
+
+    def get_profile_data(self, actor: RequestActor, user_id: str, profile_data_id: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            result = SourceInspector().get_resource(
+                connection, authority, profile_data_id, input_role="profile_resource"
+            )
+        if result is None:
+            raise SourceNotFound(profile_data_id)
+        return result
+
+    def get_profile_data_original(
+        self, actor: RequestActor, user_id: str, profile_data_id: str
+    ) -> tuple[bytes, str]:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            result = SourceInspector().get_original(
+                connection, authority, profile_data_id, input_role="profile_resource"
+            )
+        if result is None:
+            raise SourceNotFound(profile_data_id)
+        return result
 
     def list_resources(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict:
         with self.pool.connection() as connection:
@@ -654,7 +708,13 @@ class DatabaseRuntime:
         )
 
     def delete_source(
-        self, actor: RequestActor, user_id: str, source_id: str, *, resource_only: bool
+        self,
+        actor: RequestActor,
+        user_id: str,
+        source_id: str,
+        *,
+        resource_only: bool,
+        expected_input_role: str | None = None,
     ) -> dict:
         from oam.db.sources import SourceRepository
 
@@ -665,6 +725,7 @@ class DatabaseRuntime:
                 authority,
                 source_id=source_id,
                 resource_only=resource_only,
+                expected_input_role=expected_input_role,
                 operation_id=f"op_{secrets.token_hex(16)}",
                 work_unit_id=f"work_{secrets.token_hex(16)}",
                 attempts_remaining=self.config.retry.max_attempts,
@@ -699,11 +760,11 @@ class DatabaseRuntime:
             "readiness": {"accepted": True},
         }
 
-    def retain_profile_resource(
+    def retain_profile_data(
         self,
         actor: RequestActor,
         user_id: str,
-        body: ProfileResourceRequest,
+        body: ProfileDataRequest,
         idempotency_key: str,
         *,
         expected_version: int | None,
@@ -713,12 +774,12 @@ class DatabaseRuntime:
             resource = body.model_dump(mode="json", exclude_none=True)
             # Exact fields are a deterministic read view of the active original.
             # Validate all mappings before atomic source-version activation.
-            map_profile_resource(resource, resource_version=1)
+            map_profile_data(resource, resource_version=1)
             original = json.dumps(
                 resource, sort_keys=True, ensure_ascii=False, separators=(",", ":")
             ).encode()
             if len(original) > self.config.resource.max_bytes:
-                raise ValueError("Profile Resource exceeds byte limit")
+                raise ValueError("Profile Data exceeds byte limit")
             request_hash = hashlib.sha256(
                 json.dumps(
                     {"resource": resource, "expected_version": expected_version},
@@ -732,7 +793,7 @@ class DatabaseRuntime:
                 connection,
                 authority,
                 AcceptSource(
-                    source_id=body.resource_id,
+                    source_id=body.profile_data_id,
                     source_version=None,
                     input_role="profile_resource",
                     resource_type="profile",

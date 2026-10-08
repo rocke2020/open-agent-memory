@@ -88,10 +88,9 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
             assert created.status_code == 201, created.text
             user_key = created.json()["secret"]
             profile_resource = await client.post(
-                "/v1/users/lin/resources",
+                "/v1/users/lin/profile-data",
                 json={
-                    "resource_id": "profile-basic",
-                    "resource_type": "profile",
+                    "profile_data_id": "profile-basic",
                     "subtype": "basic-profile/v1",
                     "content": {"date_of_birth": "1990-05-10"},
                 },

@@ -40,10 +40,9 @@ async def test_public_export_includes_eligible_profile_fields(core_database, tmp
     ):
         await use_created_user_key(client, "lin")
         created = await client.post(
-            "/v1/users/lin/resources",
+            "/v1/users/lin/profile-data",
             json={
-                "resource_id": "basic",
-                "resource_type": "profile",
+                "profile_data_id": "basic",
                 "subtype": "basic-profile/v1",
                 "content": {"date_of_birth": "1990-05-10"},
             },
@@ -98,7 +97,7 @@ async def test_public_export_includes_eligible_profile_fields(core_database, tmp
         assert exported_profile["references"][0]["resource_id"] == "basic"
         assert validate_directory(tmp_path)["profile"] == 1
 
-        deleted = await client.delete("/v1/users/lin/resources/basic")
+        deleted = await client.delete("/v1/users/lin/profile-data/basic")
         assert deleted.status_code == 202, deleted.text
         assert deleted.json()["excluded_versions"] == [1]
         assert (await client.get(f"/v1/users/lin/exports/{export_id}")).status_code == 409

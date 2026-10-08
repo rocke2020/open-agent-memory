@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from io import BytesIO
 
 from pypdf import PdfReader
@@ -68,13 +67,17 @@ def parse_pdf(
 
 
 def _normalize_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+    return value.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
 
 
 def native_text_usable(text: str) -> bool:
     """Reject empty or visibly damaged text layers before selecting native extraction."""
-    return bool(text) and (
-        sum(character == "\ufffd" or ord(character) < 32 for character in text) / len(text)
+    return bool(text.strip()) and (
+        sum(
+            character == "\ufffd" or (ord(character) < 32 and character not in "\n\r\t")
+            for character in text
+        )
+        / len(text)
         < CORRUPT_TEXT_FRACTION
     )
 

@@ -11,7 +11,7 @@ from psycopg.rows import dict_row
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_SUPPORT, ELIGIBLE_UNITS
-from oam.profiles.resources import map_profile_resource
+from oam.profiles.resources import map_profile_data
 
 PROFILE_INPUT_SCHEMA_VERSION = 4
 MAX_PROMPT_UNITS = 64
@@ -163,14 +163,17 @@ def _exact_fields(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
     exact: list[dict[str, Any]] = []
     for row in rows:
         if row["media_type"] != "application/json":
-            raise ValueError("Profile Resource original must be JSON")
+            raise ValueError("Profile Data original must be JSON")
         try:
             resource = json.loads(bytes(row["original_bytes"]))
         except (TypeError, UnicodeError, json.JSONDecodeError) as exc:
-            raise ValueError("Profile Resource original is invalid JSON") from exc
-        if not isinstance(resource, dict) or resource.get("resource_id") != row["source_id"]:
-            raise ValueError("Profile Resource identity does not match its source")
-        mapped = map_profile_resource(resource, resource_version=row["source_version"])
+            raise ValueError("Profile Data original is invalid JSON") from exc
+        if (
+            not isinstance(resource, dict)
+            or resource.get("profile_data_id", resource.get("resource_id")) != row["source_id"]
+        ):
+            raise ValueError("Profile Data identity does not match its source")
+        mapped = map_profile_data(resource, resource_version=row["source_version"])
         for field in mapped:
             support = field.support
             exact.append(

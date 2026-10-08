@@ -64,20 +64,19 @@ async def test_asserted_user_can_manage_profile_resource(auth_database, tmp_path
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
     ):
         created = await client.post(
-            "/v1/users/alice/resources",
+            "/v1/users/alice/profile-data",
             headers={**headers, "Idempotency-Key": "asserted-profile"},
             json={
-                "resource_id": "basic",
-                "resource_type": "profile",
+                "profile_data_id": "basic",
                 "subtype": "basic-profile/v1",
                 "content": {"date_of_birth": "1990-05-10"},
             },
         )
         assert created.status_code == 202, created.text
         assert (
-            await client.get("/v1/users/alice/resources/basic", headers=headers)
+            await client.get("/v1/users/alice/profile-data/basic", headers=headers)
         ).status_code == 200
-        deleted = await client.delete("/v1/users/alice/resources/basic", headers=headers)
+        deleted = await client.delete("/v1/users/alice/profile-data/basic", headers=headers)
         assert deleted.status_code == 202, deleted.text
 
 
@@ -128,7 +127,6 @@ async def test_local_trusted_identity_registers_user_without_key_and_cannot_swit
             "/v1/users/alice/resources",
             headers={**alice_headers, "Idempotency-Key": "trusted-alice"},
             json={
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "private",
                 "update_mode": "replace",
@@ -146,7 +144,6 @@ async def test_local_trusted_identity_registers_user_without_key_and_cannot_swit
                 "/v1/users/bob/resources",
                 headers={**alice_headers, "Idempotency-Key": "user-mismatch"},
                 json={
-                    "resource_type": "evidence",
                     "input_type": "document",
                     "document_id": "wrong-user",
                     "update_mode": "replace",
@@ -252,7 +249,6 @@ async def test_dev_mode_accepts_local_identity_without_key_and_disables_admin(
             "/v1/users/alice/resources",
             headers={**headers, "Idempotency-Key": "dev-alice"},
             json={
-                "resource_type": "evidence",
                 "input_type": "document",
                 "document_id": "private",
                 "update_mode": "replace",
@@ -306,7 +302,6 @@ async def test_nonlocal_trusted_data_requires_root_key_for_asserted_tenant(
     app = create_app(config, bind_host="0.0.0.0")
     headers = {"X-OAM-Tenant": tenant, "X-OAM-User": "alice"}
     body = {
-        "resource_type": "evidence",
         "input_type": "document",
         "document_id": "private",
         "update_mode": "replace",

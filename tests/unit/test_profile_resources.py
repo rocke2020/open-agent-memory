@@ -2,11 +2,11 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from oam.profiles.resources import map_profile_resource
+from oam.profiles.resources import map_profile_data
 
 
 def test_basic_profile_maps_registered_fields_with_exact_resource_support() -> None:
-    fields = map_profile_resource(
+    fields = map_profile_data(
         {
             "resource_id": "user-basic-profile",
             "resource_type": "profile",
@@ -43,7 +43,7 @@ def test_basic_profile_maps_registered_fields_with_exact_resource_support() -> N
 
 
 def test_preference_domain_qualifies_exact_language_value() -> None:
-    fields = map_profile_resource(
+    fields = map_profile_data(
         {
             "resource_id": "user-preference-examples",
             "resource_type": "profile",
@@ -88,7 +88,7 @@ def test_basic_profile_rejects_unregistered_or_malformed_input(change: dict, mes
     resource.update(change)
 
     with pytest.raises(ValueError, match=message):
-        map_profile_resource(resource, resource_version=1)
+        map_profile_data(resource, resource_version=1)
 
 
 def test_profile_resource_rejects_invalid_version() -> None:
@@ -102,4 +102,4 @@ def test_profile_resource_rejects_invalid_version() -> None:
     }
 
     with pytest.raises(ValueError, match="resource_version"):
-        map_profile_resource(resource, resource_version=0)
+        map_profile_data(resource, resource_version=0)
