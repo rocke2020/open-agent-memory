@@ -1,1 +1,1 @@
-"""Stored user Profile inputs, projection, refresh and recall assembly."""
+"""Stored user Profile inputs, projection and explicit refresh."""

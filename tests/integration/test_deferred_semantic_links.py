@@ -700,7 +700,6 @@ async def test_direct_ready_operation_defers_semantic_links_under_same_operation
                 json={
                     "user_id": "scope",
                     "query": "Lin morning explanations",
-                    "include_profile": False,
                     "recall_level": mode,
                     "allow_partial": True,
                 },

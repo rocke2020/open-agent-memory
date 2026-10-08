@@ -325,7 +325,7 @@ def test_database_runtime_authorizes_batch_once_before_search(monkeypatch) -> No
         result = runtime.search_many(
             "caller",
             "lin",
-            SearchManyRequest(queries=["current city", "preferred style"], include_profile=False),
+            SearchManyRequest(queries=["current city", "preferred style"]),
         )
     finally:
         runtime._http.close()

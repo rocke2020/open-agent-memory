@@ -88,7 +88,7 @@ Neither retain format accepts caller-managed `source_id`, `message_id`, `source_
 
 ### Recall
 
-The minimal body is `{"user_id":"lin","query":"How should I summarize the checkup?"}`. The host selects `"recall_level":"fast"` explicitly for pre-agent retrieval and may set `max_context_tokens`; later agent calls may select any preset independently. Omitted `include_profile` is `true`; `"include_profile":false` excludes the stored Profile. An included Profile shares the context budget with Memory and Evidence and is omitted intact if its full document cannot fit. `allow_partial` defaults to false.
+The minimal body is `{"user_id":"lin","query":"How should I summarize the checkup?"}`. The host selects `"recall_level":"fast"` explicitly for pre-agent retrieval and may set `max_context_tokens`; later agent calls may select any preset independently. Recall returns query-relevant Memory and Evidence only, never reads or injects the stored Profile, and gives retrieval the full requested context budget. The shared recall, batch and planned-search request contracts reject the removed `include_profile` field with `422` for either boolean value. `allow_partial` defaults to false. Applications that need personalization separately call `GET /v1/users/{user_id}/profile`, inspect content and freshness, and compose the two inputs using their own final model-input budget. Profiles being disabled does not disable retrieval; Profile read and refresh remain separate capabilities.
 
 ### Profile Resources and Refresh
 

@@ -219,6 +219,13 @@ async def test_http_admission_uses_selected_config_limits(
     assert response.status_code == expected_status
 
 
+async def test_openapi_search_contracts_exclude_profile_selection(client) -> None:
+    schemas = (await client.get("/openapi.json")).json()["components"]["schemas"]
+    for name in ("RecallRequest", "SearchRequest", "SearchManyRequest"):
+        assert "include_profile" not in schemas[name]["properties"]
+        assert schemas[name]["additionalProperties"] is False
+
+
 async def test_capabilities_publish_limits_without_secrets(client) -> None:
     response = await client.get("/v1/capabilities")
 

@@ -962,7 +962,6 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
                     "query": "Lin brief glucose 92 mg/dL",
                     "recall_level": mode,
                     "max_context_tokens": 2048,
-                    "include_profile": False,
                 },
             )
             assert recalled.status_code == 200, recalled.text
@@ -1049,7 +1048,6 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
             json={
                 "user_id": "scope",
                 "query": "Lin morning explanations",
-                "include_profile": False,
             },
         )
         assert recalled.status_code == 200, recalled.text
@@ -1076,7 +1074,6 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
                 "user_id": "scope",
                 "query": "Lin morning preference",
                 "recall_level": "fast",
-                "include_profile": False,
                 "time_basis": "mentioned",
                 "time_window": {
                     "start": "2026-09-02T00:00:00Z",
@@ -1135,7 +1132,6 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
             json={
                 "user_id": "scope",
                 "query": "Lin morning explanations",
-                "include_profile": False,
             },
         )
         assert any(item["kind"] == "insight" for item in recalled.json()["items"])
@@ -1206,9 +1202,7 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
     assert models.generation_calls == ["extraction", "insights"]
 
 
-async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
-    core_database, tmp_path
-):
+async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_path, monkeypatch):
     from oam.config import load_config
     from oam.exports.validation import validate_directory
     from oam.models.runtime import ModelResult, Usage
@@ -1240,14 +1234,18 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
                 for field in prompt["exact_fields"]
                 if field["key"] == "date_of_birth"
             )
-            fact = next(item for item in prompt["inputs"] if item["kind"] == "fact")
+            fact = next(
+                item
+                for item in prompt["inputs"]
+                if item["kind"] == "fact" and "brief explanations" in item["text"]
+            )
             support_id = "report-only" if self.fail_profile else fact["id"]
             body = (
                 json.dumps(
                     {"summary": "The user prefers brief replies.", "date_of_birth": birth_date}
                 )
                 if prompt["instruction"]
-                else "The user prefers brief replies [1]."
+                else "The user prefers brief replies. Profile-only portrait [1]."
             )
             return ModelResult(
                 content=json.dumps(
@@ -1311,6 +1309,9 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         )
         assert chat.status_code == 202, chat.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-chat")
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-chat-links"
+        )
         with psycopg.connect(dsn) as connection:
             connection.execute(
                 "UPDATE work_units SET available_at=clock_timestamp() WHERE stage='consolidate'"
@@ -1393,17 +1394,84 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         assert unchanged.json()["generation_calls"] == 0
         assert len(models.generation_calls) == calls
         app.state.runtime.models = models
+        for path, body in (
+            ("/v1/recall", {"user_id": "scope", "query": "brief explanations"}),
+            (
+                "/v1/users/scope/search-many",
+                {"queries": ["brief explanations"]},
+            ),
+            ("/v1/users/scope/decompose-and-search", {"query": "brief explanations"}),
+        ):
+            for selection in (True, False):
+                rejected = await client.post(path, json={**body, "include_profile": selection})
+                assert rejected.status_code == 422, rejected.text
+                assert any(
+                    error["loc"] == ["body", "include_profile"]
+                    and error["type"] == "extra_forbidden"
+                    for error in rejected.json()["detail"]
+                )
         recalled = await client.post(
             "/v1/recall",
             json={
                 "user_id": "scope",
                 "query": "brief explanations",
-                "include_profile": True,
             },
         )
         assert recalled.status_code == 200, recalled.text
-        assert "brief" in recalled.json()["profile"]["content"]
+        assert "profile" not in recalled.json()
+        assert "brief explanations" in recalled.json()["context"]
+        assert "Profile-only portrait" not in recalled.json()["context"]
+        assert "1990-05-10" not in recalled.json()["context"]
+        assert recalled.json()["context_tokens"] <= config.context.default_tokens
         assert recalled.json()["diagnostics"]["generative_calls"] == 0
+        assert len(models.generation_calls) == calls
+        assert "Profile-only portrait" in payload["content"]
+        assert payload["generation_calls"] == 0
+        over_budget = await client.get("/v1/users/scope/profile?max_tokens=0")
+        assert over_budget.status_code == 200, over_budget.text
+        assert over_budget.json()["content"] is None
+        assert {"reason": "budget"} in over_budget.json()["omitted"]
+
+        from oam.profiles.service import ProfileService
+
+        def no_profile_read(*args, **kwargs):
+            raise AssertionError("Recall must not read the stored Profile")
+
+        with monkeypatch.context() as separation:
+            separation.setattr(ProfileService, "get", no_profile_read)
+            for enabled in (True, False):
+                app.state.runtime.config = config.model_copy(
+                    update={"profile": config.profile.model_copy(update={"enabled": enabled})}
+                )
+                independent = await client.post(
+                    "/v1/recall",
+                    json={
+                        "user_id": "scope",
+                        "query": "brief explanations",
+                        "recall_level": "fast",
+                        "max_context_tokens": 1024,
+                    },
+                )
+                assert independent.status_code == 200, independent.text
+                assert "brief explanations" in independent.json()["context"]
+                assert "profile" not in independent.json()
+                assert "Profile-only portrait" not in independent.json()["context"]
+                assert independent.json()["context_tokens"] <= 1024
+                assert independent.json()["diagnostics"]["generative_calls"] == 0
+                batch = await client.post(
+                    "/v1/users/scope/search-many",
+                    json={"queries": ["brief explanations", "short examples"]},
+                )
+                assert batch.status_code == 200, batch.text
+                assert all(row["status"] == "ok" for row in batch.json()["results"])
+                assert all("profile" not in row["result"] for row in batch.json()["results"])
+                if not enabled:
+                    disabled_read = await client.get("/v1/users/scope/profile")
+                    disabled_refresh = await client.post("/v1/users/scope/profile/refresh", json={})
+                    for response in (disabled_read, disabled_refresh):
+                        assert response.status_code == 503, response.text
+                        assert response.json()["detail"]["code"] == "CapabilityUnavailable"
+            app.state.runtime.config = config
         assert len(models.generation_calls) == calls
 
         superseded = await client.post(
@@ -1516,6 +1584,9 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         )
         assert more_chat.status_code == 202
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="more-chat")
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="more-chat-links"
+        )
         pending = await client.get("/v1/users/scope/profile")
         assert pending.json()["freshness"] == "dirty"
         assert models.generation_calls.count("profile") == profile_calls_before_new_chat
@@ -1528,6 +1599,21 @@ async def test_profile_refresh_stores_eligible_fields_and_recall_reads_them(
         after_l2 = await client.get("/v1/users/scope/profile")
         assert after_l2.json()["freshness"] == "dirty"
         assert models.generation_calls.count("profile") == profile_calls_before_new_chat
+        changed = await client.post("/v1/users/scope/profile/refresh", json={})
+        assert changed.status_code == 202, changed.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-changed-inputs"
+        )
+        changed_operation = await client.get(
+            f"/v1/users/scope/operations/{changed.json()['operation_id']}"
+        )
+        assert changed_operation.json()["status"] == "succeeded"
+        updated = await client.get("/v1/users/scope/profile")
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["freshness"] == "current"
+        assert updated.json()["profile_revision"] > after_l2.json()["profile_revision"]
+        assert "brief" in updated.json()["content"]
+        assert updated.json()["generation_calls"] == 0
         deleted_chat = await client.delete(f"/v1/users/scope/evidence/{chat.json()['source_id']}")
         assert deleted_chat.status_code == 202, deleted_chat.text
         assert deleted_chat.json()["status"] == "excluded"
@@ -2227,14 +2313,9 @@ async def test_profile_main_builds_dated_age_career_and_family_from_user_facts(c
         assert len(profile.json()["references"]) == 3
 
 
-@pytest.mark.parametrize("surface", ["profile", "recall"])
-async def test_profile_response_rejects_resource_revision_during_assembly(
-    core_database, monkeypatch, surface
-):
+async def test_profile_read_withholds_superseded_resource_support(core_database):
     from oam.config import load_config
     from oam.contracts.profile import ProfileResourceRequest
-    from oam.profiles import service as profile_service
-    from oam.retrieval.service import RecallService
     from oam.workers.index_source import process_one
 
     dsn, _, headers = core_database
@@ -2267,11 +2348,7 @@ async def test_profile_response_rejects_resource_revision_during_assembly(
         refresh = await client.post("/v1/users/scope/profile/refresh", json={})
         assert refresh.status_code == 202, refresh.text
         assert process_one(
-            config,
-            queue_dsn,
-            content_dsn,
-            models=object(),
-            worker_id="profile-before-race",
+            config, queue_dsn, content_dsn, models=object(), worker_id="profile-before-race"
         )
         secret = client.headers["Authorization"].removeprefix("Bearer ")
 
@@ -2282,35 +2359,22 @@ async def test_profile_response_rejects_resource_revision_during_assembly(
                 ProfileResourceRequest.model_validate(
                     {**resource, "content": {"date_of_birth": "1991-06-11"}}
                 ),
-                "profile-during-assembly",
+                "profile-during-read",
                 expected_version=1,
             )
             assert receipt["revision"] == 2
 
-        if surface == "profile":
-            original_view = profile_service._view
+        current = await client.get("/v1/users/scope/profile")
+        assert current.status_code == 200, current.text
+        assert "1990-05-10" in current.json()["content"]
+        assert current.json()["generation_calls"] == 0
 
-            def view_then_revise(*args, **kwargs):
-                result = original_view(*args, **kwargs)
-                assert "1990-05-10" in result["content"]
-                revise()
-                return result
-
-            monkeypatch.setattr(profile_service, "_view", view_then_revise)
-            response = await client.get("/v1/users/scope/profile")
-        else:
-
-            def recall_after_revision(self, *args, **kwargs):
-                revise()
-                return {"context": "", "context_tokens": 0, "items": []}
-
-            monkeypatch.setattr(RecallService, "search", recall_after_revision)
-            response = await client.post(
-                "/v1/recall", json={"user_id": "scope", "query": "date of birth"}
-            )
-        assert response.status_code == 503, response.text
-        assert response.json()["detail"]["code"] == "SourcePolicyChanged"
-        assert "1990-05-10" not in response.text
+        revise()
+        superseded = await client.get("/v1/users/scope/profile")
+        assert superseded.status_code == 200, superseded.text
+        assert superseded.json()["content"] is None
+        assert superseded.json()["freshness"] == "stale"
+        assert superseded.json()["generation_calls"] == 0
 
 
 async def test_new_profile_instruction_cancels_running_generation(core_database):

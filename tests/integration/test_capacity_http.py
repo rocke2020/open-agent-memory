@@ -208,7 +208,6 @@ async def test_embedded_runner_accepts_indexes_and_recalls_both_origins(
                     "user_id": "alice",
                     "query": "glucose short explanations",
                     "recall_level": mode,
-                    "include_profile": False,
                 },
             )
             assert response.status_code == 200, response.text

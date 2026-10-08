@@ -62,7 +62,6 @@ class SearchOutputOptions(FrozenContract):
     recall_level: RecallLevel = RecallLevel.MID
     max_context_tokens: PositiveInt | None = None
     include: SearchIncludeOptions = Field(default_factory=SearchIncludeOptions)
-    include_profile: bool = True
     allow_partial: bool = False
     deadline_at: datetime | None = None
 

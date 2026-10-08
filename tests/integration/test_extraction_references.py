@@ -239,7 +239,6 @@ async def test_public_reference_path_preserves_occurrences_and_concurrent_suppor
                 "user_id": "lin",
                 "query": "tea coffee",
                 "recall_level": mode,
-                "include_profile": False,
             },
         )
         assert recall.status_code == 200, recall.text
@@ -471,7 +470,6 @@ async def test_short_source_uses_one_call_and_keeps_mixed_message_citations(
                 "user_id": "lin",
                 "query": "tea coffee",
                 "recall_level": mode,
-                "include_profile": False,
             },
         )
         assert recall.status_code == 200, recall.text

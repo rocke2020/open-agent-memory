@@ -1,6 +1,7 @@
 """Step 8.1 public routes over an explicitly isolated PostgreSQL test database."""
 
 from pathlib import Path
+from typing import Any
 
 import httpx
 import psycopg
@@ -20,9 +21,10 @@ ROOT = Path(__file__).parents[2]
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.parametrize("profiles_enabled", [False, True])
 @pytest.mark.parametrize("delegated", [False, True])
 async def test_public_batch_and_planned_search_use_current_authorized_index(
-    core_database, monkeypatch, tmp_path, delegated
+    core_database, monkeypatch, tmp_path, delegated, profiles_enabled
 ) -> None:
     dsn, tenant, root_headers = core_database
     config_path = ROOT / "configs/oam.yaml"
@@ -42,6 +44,14 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
             encoding="utf-8",
         )
     config = load_config(config_path).config
+    config = config.model_copy(
+        update={"profile": config.profile.model_copy(update={"enabled": profiles_enabled})}
+    )
+
+    def no_profile_read(*args, **kwargs):
+        raise AssertionError("Batch retrieval must not read the stored Profile")
+
+    monkeypatch.setattr("oam.profiles.service.ProfileService.get", no_profile_read)
 
     class LocalModels(FixedModels):
         def generate(self, role, **kwargs):
@@ -104,19 +114,18 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
                 add_fact(connection, authority, "pear", "Lin grows pear trees in an orchard.")
 
             client.headers["Authorization"] = f"Bearer {user_key}"
+            body: dict[str, Any]
             if delegated:
                 path = "/v1/users/lin/decompose-and-search"
                 body = {
                     "query": "What fruit does Lin grow?",
                     "recall_level": "fast",
-                    "include_profile": False,
                 }
             else:
                 path = "/v1/users/lin/search-many"
                 body = {
                     "queries": ["apple orchard", "pear orchard"],
                     "recall_level": "fast",
-                    "include_profile": False,
                 }
             root_response = await client.post(path, json=body, headers=root_headers)
             assert root_response.status_code == 404

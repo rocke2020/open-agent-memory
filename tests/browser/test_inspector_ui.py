@@ -10,6 +10,8 @@ from urllib.request import urlopen
 
 import pytest
 
+from oam.contracts.retain import RecallRequest
+
 playwright = pytest.importorskip("playwright.sync_api")
 WEB = Path(__file__).parents[2] / "src" / "oam" / "web"
 
@@ -40,7 +42,17 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
         nonlocal profile_missing, profile_failed, profile_blocked, profile_indexing
         path = route.request.url
         calls.append((route.request.method, path, route.request.post_data))
-        if path.endswith("/memories"):
+        if path.endswith("/recall"):
+            request = RecallRequest.model_validate_json(route.request.post_data)
+            assert request.user_id == "alice"
+            assert request.query == "brief replies"
+            data = {
+                "items": [],
+                "context": "Please keep replies brief.",
+                "context_tokens": 7,
+                "diagnostics": {"generative_calls": 0},
+            }
+        elif path.endswith("/memories"):
             data = {
                 "items": [
                     {
@@ -142,6 +154,13 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 page.locator("#item-list button").nth(1).click()
                 assert detail.get_by_text("Subtype", exact=True).is_visible()
                 assert detail.get_by_text("preferences", exact=True).is_visible()
+
+                page.locator("#query").fill("brief replies")
+                page.locator("#search-form button").click()
+                detail.get_by_text("Current search context", exact=True).wait_for()
+                assert "Please keep replies brief." in detail.locator("pre").inner_text()
+                assert not any("/profile" in call[1] for call in calls)
+                assert "include_profile" not in json.loads(calls[-1][2])
 
                 page.locator('[data-view="profiles"]').click()
                 detail.get_by_text("Read-only Profile", exact=True).wait_for()

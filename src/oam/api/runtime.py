@@ -319,16 +319,7 @@ class DatabaseRuntime:
         return self._search_authorized(authority, request, deadline_at=request.deadline_at)
 
     def _search_authorized(self, authority, request, *, deadline_at=None) -> dict:
-        from oam.profiles.assembly import search_with_profile
-
-        return search_with_profile(
-            self.config,
-            self.pool,
-            self._recall_service(),
-            authority,
-            request,
-            deadline_at=deadline_at,
-        )
+        return self._recall_service().search(authority, request, deadline_at=deadline_at)
 
     def get_profile(self, actor: RequestActor, user_id: str, max_tokens: int) -> dict:
         from oam.profiles.service import ProfileService

@@ -748,7 +748,7 @@ async def test_retry_reuses_completed_fact_vectors_when_ready_group_batching_cha
     client._transport.app.state.runtime.models = models
     recalled = await client.post(
         "/v1/recall",
-        json={"user_id": "lin", "query": "Lin updates", "include_profile": False},
+        json={"user_id": "lin", "query": "Lin updates"},
     )
     assert recalled.status_code == 200, recalled.text
     facts = [item for item in recalled.json()["items"] if item["kind"] == "fact"]

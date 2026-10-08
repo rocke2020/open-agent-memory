@@ -5,17 +5,33 @@ import pytest
 from pydantic import ValidationError
 
 from oam.config import load_config
+from oam.contracts.retain import RecallRequest
 from oam.contracts.search import RecallLevel, SearchManyRequest, SearchRequest
 
 
-def test_search_defaults_to_mid_with_profile_inclusion() -> None:
+def test_search_defaults_to_mid_without_profile_selection() -> None:
     request = SearchRequest(query="What changed?")
     batch = SearchManyRequest(queries=["What changed?"])
 
     assert request.recall_level is RecallLevel.MID
     assert batch.recall_level is RecallLevel.MID
-    assert request.include_profile is True
     assert request.allow_partial is False
+    assert "include_profile" not in SearchRequest.model_json_schema()["properties"]
+    assert "include_profile" not in SearchManyRequest.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize("profile_selection", [True, False])
+@pytest.mark.parametrize(
+    ("request_type", "query"),
+    [
+        (RecallRequest, {"user_id": "alice", "query": "q"}),
+        (SearchRequest, {"query": "What changed?"}),
+        (SearchManyRequest, {"queries": ["q"]}),
+    ],
+)
+def test_search_rejects_removed_profile_selection(request_type, query, profile_selection) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        request_type(**query, include_profile=profile_selection)
 
 
 def test_search_rejects_blank_query() -> None:

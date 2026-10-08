@@ -774,7 +774,7 @@
       const result = await json("/v1/recall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: state.user, query, recall_level: "fast", include_profile: false, allow_partial: true }),
+        body: JSON.stringify({ user_id: state.user, query, recall_level: "fast", allow_partial: true }),
       });
       if (!current(generation)) return;
       const detail = byId("detail");

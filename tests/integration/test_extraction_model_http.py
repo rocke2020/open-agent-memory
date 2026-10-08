@@ -175,7 +175,6 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
                                 "user_id": "overflow",
                                 "query": "Glucose",
                                 "recall_level": mode,
-                                "include_profile": False,
                             },
                         )
                         assert recalled.status_code == 200, recalled.text
