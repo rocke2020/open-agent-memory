@@ -1,0 +1,1 @@
+Return one JSON object with ok=true and a short non-empty message. Do not return markdown.

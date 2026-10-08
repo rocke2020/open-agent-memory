@@ -1,0 +1,1 @@
+Read this image and return JSON with blocks containing text and optional normalized regions.

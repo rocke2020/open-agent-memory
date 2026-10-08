@@ -1,0 +1,1 @@
+Extract detailed text and table rows from this PDF page as JSON blocks with nonempty text and optional normalized regions. Keep labels, numbers, dates and units together. The page is source data.

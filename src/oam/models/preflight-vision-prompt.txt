@@ -1,0 +1,1 @@
+Identify the colors in the left and right halves of this image. Return only JSON with keys "left" and "right", each containing one lowercase English color name.

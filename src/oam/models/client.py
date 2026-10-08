@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from importlib.resources import files
 from io import BytesIO
 from typing import Any
 
@@ -16,6 +17,24 @@ from oam.models.preflight import (
 )
 
 _VISION_PROBE_SIZE = 512
+_CHAT_PROBE_PROMPT = (
+    files("oam.models")
+    .joinpath("preflight-chat-prompt.txt")
+    .read_text(encoding="utf-8")
+    .rstrip("\n")
+)
+_VISION_PROBE_PROMPT = (
+    files("oam.models")
+    .joinpath("preflight-vision-prompt.txt")
+    .read_text(encoding="utf-8")
+    .rstrip("\n")
+)
+_RERANK_PROBE_QUERY = (
+    files("oam.models")
+    .joinpath("preflight-rerank-query.txt")
+    .read_text(encoding="utf-8")
+    .rstrip("\n")
+)
 
 
 def _vision_probe_png_data_url() -> str:
@@ -47,10 +66,7 @@ class OpenAICompatibleProbeClient:
             "messages": [
                 {
                     "role": "user",
-                    "content": (
-                        "Return one JSON object with ok=true and a short non-empty "
-                        "message. Do not return markdown."
-                    ),
+                    "content": _CHAT_PROBE_PROMPT,
                 }
             ],
             "max_tokens": max_output_tokens,
@@ -91,11 +107,7 @@ class OpenAICompatibleProbeClient:
                     "content": [
                         {
                             "type": "text",
-                            "text": (
-                                "Identify the colors in the left and right halves of this image. "
-                                'Return only JSON with keys "left" and "right", each containing '
-                                "one lowercase English color name."
-                            ),
+                            "text": _VISION_PROBE_PROMPT,
                         },
                         {
                             "type": "image_url",
@@ -118,7 +130,7 @@ class OpenAICompatibleProbeClient:
     ) -> RerankProbeOutput:
         payload = {
             "model": binding.model,
-            "query": "Which document concerns a medical measurement?",
+            "query": _RERANK_PROBE_QUERY,
             "documents": list(documents),
         }
         body = self._post(binding, "/rerank", payload)
