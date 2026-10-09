@@ -18,7 +18,7 @@ from psycopg_pool import ConnectionPool
 
 from oam.config import OAMConfig
 from oam.contracts.evidence import EvidenceAppendRequest
-from oam.governance.cleanup import cleanup_claim
+from oam.governance.cleanup import cleanup_claim, cleanup_removal_claim
 from oam.indexing.chunker import chunk_text
 from oam.indexing.extraction import (
     FactExtraction,
@@ -99,11 +99,17 @@ def process_one(
         )
     if claim is None:
         return False
-    if claim.stage == "cleanup_source":
+    if claim.stage in {"cleanup_source", "cleanup_memory", "cleanup_insight"}:
         if content_pool is None:
-            cleanup_claim(content_dsn, claim, worker_id)
+            if claim.stage == "cleanup_source":
+                cleanup_claim(content_dsn, claim, worker_id)
+            else:
+                cleanup_removal_claim(content_dsn, claim, worker_id)
         else:
-            cleanup_claim(content_dsn, claim, worker_id, pool=content_pool)
+            if claim.stage == "cleanup_source":
+                cleanup_claim(content_dsn, claim, worker_id, pool=content_pool)
+            else:
+                cleanup_removal_claim(content_dsn, claim, worker_id, pool=content_pool)
         return True
     if claim.stage == "refresh_profile":
         from oam.profiles.worker import process_profile_claim
@@ -132,6 +138,14 @@ def process_one(
             process_semantic_claim(store)
             return True
         if claim.stage == "consolidate":
+            from oam.governance.repair import repair_insights
+
+            if repair_insights(store, models):
+                with store.transaction() as connection:
+                    store.guard(connection)
+                    store.readiness(connection, insights_ready=True)
+                store.finish()
+                return True
             with store.transaction() as connection:
                 store.guard(connection)
                 rows = connection.execute(
@@ -885,6 +899,15 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                     }
                 )
             memory_id = identifiers[fact.output_index]
+            excluded = connection.execute(
+                "SELECT 1 FROM memories WHERE tenant_id=%s AND user_id=%s AND memory_id=%s "
+                "AND lifecycle_state='excluded' UNION ALL SELECT 1 FROM operations "
+                "WHERE tenant_id=%s AND user_id=%s AND removal_target_kind='memory' "
+                "AND removal_target_id=%s LIMIT 1",
+                (*store.key, memory_id, *store.key, memory_id),
+            ).fetchone()
+            if excluded:
+                continue
             support_locator = {**locator, "passage_id": passage_id, "quote": fact.quote}
             connection.execute(
                 "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,assertion_kind,"
@@ -975,8 +998,20 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
             for kind in ("caused_by", "updates"):
                 for target in getattr(fact, kind):
                     connection.execute(
-                        "INSERT INTO unit_links VALUES (%s,%s,%s,%s,%s,1) ON CONFLICT DO NOTHING",
-                        (*store.key, identifiers[fact.output_index], identifiers[target], kind),
+                        "INSERT INTO unit_links SELECT %s,%s,%s,%s,%s,1 "
+                        "WHERE EXISTS(SELECT 1 FROM search_units WHERE tenant_id=%s "
+                        "AND user_id=%s AND unit_id=%s) AND EXISTS(SELECT 1 FROM search_units "
+                        "WHERE tenant_id=%s AND user_id=%s AND unit_id=%s) ON CONFLICT DO NOTHING",
+                        (
+                            *store.key,
+                            identifiers[fact.output_index],
+                            identifiers[target],
+                            kind,
+                            *store.key,
+                            identifiers[fact.output_index],
+                            *store.key,
+                            identifiers[target],
+                        ),
                     )
     return list(identifiers.values())
 
@@ -1099,6 +1134,14 @@ def _insights(store, models, new_fact_ids):
             identifier = stable_id("insight", store.generation_id, digest.hex())
             with store.transaction() as connection:
                 store.guard(connection)
+                removed = connection.execute(
+                    "SELECT 1 FROM operations WHERE tenant_id=%s AND user_id=%s "
+                    "AND removal_target_kind='insight' AND removal_target_id=%s",
+                    (*store.key, identifier),
+                ).fetchone()
+                if removed:
+                    store.mark_l2_group(connection, examined_group, result.outcome)
+                    continue
                 eligible = connection.execute(
                     f"WITH eligible AS ({ELIGIBLE_UNITS}) "
                     "SELECT unit_id FROM eligible WHERE unit_id=ANY(%s)",

@@ -1,0 +1,15 @@
+{
+  "method": "DELETE",
+  "path": "/v1/users/lin/memories/memory-selected",
+  "required_capability": "source:delete",
+  "response_status": 202,
+  "response": {
+    "target_kind": "memory",
+    "memory_id": "memory-selected",
+    "status": "excluded",
+    "policy_epoch": 1,
+    "operation_id": "op_remove_example",
+    "cleanup_status": "accepted",
+    "reused": false
+  }
+}

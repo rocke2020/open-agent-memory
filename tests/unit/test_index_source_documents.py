@@ -49,6 +49,10 @@ class MemoryStore:
 
     def execute(self, query, parameters):
         self.statements.append((query, parameters))
+        if "lifecycle_state='excluded'" in query:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(fetchone=lambda: None)
 
     def guard(self, connection):
         pass

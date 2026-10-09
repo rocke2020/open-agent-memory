@@ -14,6 +14,7 @@ from oam.api.app import create_app
 from oam.api.runtime import DatabaseRuntime
 from oam.cli import main
 from oam.config import load_config
+from oam.db.migrations import load_migrations
 from oam.startup import validate_startup_environment
 
 
@@ -157,9 +158,13 @@ class ReadinessConnection:
         if query == "SET TRANSACTION READ ONLY" or "set_config('statement_timeout'" in query:
             return SimpleNamespace(fetchone=lambda: (None,))
         if query == "SELECT version FROM schema_migrations":
+            versions = [
+                migration.version
+                for migration in load_migrations(Path(__file__).parents[2] / "migrations")
+            ]
             return SimpleNamespace(
                 fetchall=lambda: [
-                    (version,) for version in range(1, 26) if version != self.missing_migration
+                    (version,) for version in versions if version != self.missing_migration
                 ]
             )
         raise AssertionError(f"unexpected readiness query: {query}")

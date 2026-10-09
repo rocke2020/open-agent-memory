@@ -356,7 +356,8 @@
     const list = byId("item-list");
     list.replaceChildren();
     for (const item of state.items) {
-      const id = state.view === "resources" ? item.resource_id : state.view === "profile-data" ? item.profile_data_id : item.unit_id;
+      const id = state.view === "resources" ? item.resource_id : state.view === "profile-data" ? item.profile_data_id
+        : item.kind === "insight" ? item.insight_id : item.memory_id;
       const kind = state.view === "resources" ? "Resource" : state.view === "profile-data" ? "Profile Data"
         : item.kind === "insight" && item.subtype ? `insight · ${item.subtype}` : item.kind;
       const caption = ["resources", "profile-data"].includes(state.view) ? `${item.media_type} · version ${item.active_version}` : item.text;
@@ -391,23 +392,41 @@
   async function showMemory(item, generation, requestId) {
     const detail = byId("detail");
     const citations = item.citations || [];
+    const isInsight = item.kind === "insight";
+    const targetId = isInsight ? item.insight_id : item.memory_id;
+    const revision = item.insight_revision ?? item.memory_revision ?? item.revision;
     const sourceMessages = element("div");
     sourceMessages.append(element("h4", "Source messages"));
     if (citations.length) sourceMessages.append(element("p", "Loading source messages…"));
     else sourceMessages.append(element("p", "No source messages available."));
     detail.replaceChildren(
       element("span", item.kind === "insight" ? "Insight" : "L1 Memory", "badge"),
-      element("h3", item.unit_id),
+      element("h3", targetId),
       element("h4", item.kind === "insight" ? "Insight" : "Extracted fact"),
       element("p", item.text, "source-text"),
       sourceMessages,
       labelValue("Origin", item.origin),
+      labelValue("Canonical ID", targetId),
+      labelValue("Revision", revision),
     );
-    if (item.kind === "insight" && item.subtype) detail.append(labelValue("Subtype", item.subtype));
+    if (isInsight && item.subtype) detail.append(labelValue("Subtype", item.subtype));
+    detail.append(element("h4", "Supporting memories"));
     if (item.supports?.length) {
-      detail.append(element("h4", "Supporting memories"));
-      for (const support of item.supports) detail.append(element("p", support.memory_id));
+      for (const support of item.supports) {
+        detail.append(labelValue("Memory", support.memory_id));
+        if (support.support_revision !== undefined) detail.append(labelValue("Support revision", support.support_revision));
+      }
+    } else {
+      detail.append(element("p", "No supporting memories recorded."));
     }
+    const affected = item.affected_insight_ids || [];
+    detail.append(element("h4", "Affected dependent Insights"));
+    if (affected.length) for (const insightId of affected) detail.append(element("p", insightId));
+    else detail.append(element("p", "No dependent Insights are affected."));
+    detail.append(element("div", undefined, "actions"));
+    detail.lastElementChild.append(
+      button(isInsight ? "Remove Insight" : "Remove Memory Unit", () => removeMemoryUnit(item)),
+    );
     detail.append(element("h4", "Source provenance"));
     for (const citation of citations) {
       const row = element("div", undefined, "citation");
@@ -440,6 +459,42 @@
       sourceMessages.append(group);
     }
     if (!sources.length) sourceMessages.append(element("p", "No source messages available."));
+  }
+
+  async function removeMemoryUnit(item) {
+    const isInsight = item.kind === "insight";
+    const targetId = isInsight ? item.insight_id : item.memory_id;
+    const target = isInsight ? `Insight ${targetId}` : `Memory Unit ${targetId}`;
+    if (!targetId) {
+      status("This item has no canonical removal ID.", true);
+      return;
+    }
+    if (!window.confirm(`Remove ${target}? The selected ${isInsight ? "Insight" : "Memory Unit"} will be excluded without deleting its source.`)) return;
+    const generation = state.generation;
+    try {
+      const endpoint = isInsight ? `insights/${encodeURIComponent(targetId)}` : `memories/${encodeURIComponent(targetId)}`;
+      const receipt = await json(route(endpoint), { method: "DELETE" });
+      if (!current(generation)) return;
+      const removalGeneration = ++state.generation;
+      state.detailRequest += 1;
+      state.items = [];
+      state.nextAfter = null;
+      byId("item-list").replaceChildren();
+      byId("load-more").hidden = true;
+      try {
+        await loadList(false);
+      } catch (error) {
+        if (current(removalGeneration)) {
+          showReceipt(receipt.operation_id, receipt);
+          status(`${target} excluded; list refresh failed: ${error.message}`, true);
+        }
+        return;
+      }
+      if (current(removalGeneration)) {
+        showReceipt(receipt.operation_id, receipt);
+        status(`${target} excluded. Cleanup is ${receipt.cleanup_status}.`);
+      }
+    } catch (error) { if (current(generation)) showError(error); }
   }
 
   async function inspectSource(sourceId) {

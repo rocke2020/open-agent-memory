@@ -1,0 +1,35 @@
+{
+  "method": "POST",
+  "path": "/v1/users/lin/operations/op_remove_example/recover",
+  "required_capability": "source:delete",
+  "response_status": 200,
+  "response": {
+    "operation_id": "op_remove_example",
+    "source_id": null,
+    "revision": null,
+    "kind": "remove_memory",
+    "status": "pending",
+    "readiness": {
+      "accepted": true,
+      "source_searchable": false,
+      "memory_ready": false,
+      "links_ready": false,
+      "temporal_links_ready": false,
+      "insights_ready": false,
+      "profile_current": false
+    },
+    "error": null,
+    "stage_state": {
+      "target_kind": "memory",
+      "target_id": "memory-selected",
+      "policy_epoch": 1,
+      "cleanup_status": "pending",
+      "affected_insight_ids": [],
+      "repair_inputs": {},
+      "repair_status": "none",
+      "model_calls": 0
+    },
+    "usage": {},
+    "embedding_usage": {}
+  }
+}

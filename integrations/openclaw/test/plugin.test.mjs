@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
 
 let server;
 let baseUrl;
 const requests = [];
 let stallRecall = false;
+let removalResponse;
 
 before(async () => {
   server = createServer(async (request, response) => {
     let body = '';
     for await (const part of request) body += part;
-    requests.push({ path: request.url, headers: request.headers, body: JSON.parse(body) });
+    requests.push({ method: request.method, path: request.url, headers: request.headers, body: JSON.parse(body || '{}') });
     response.setHeader('content-type', 'application/json');
     if (request.url === '/v1/recall') {
       if (stallRecall) {
@@ -25,6 +27,14 @@ before(async () => {
     } else if (request.url === '/v1/retain') {
       response.statusCode = 202;
       response.end(JSON.stringify({ operation_id: 'op1', source_id: 's1', revision: 1, readiness: { accepted: true } }));
+    } else if (request.method === 'DELETE' && /^\/v1\/users\/u1\/(?:memories\/mem_42|insights\/ins_7)$/.test(request.url)) {
+      const insight = request.url.includes('/insights/');
+      response.statusCode = removalResponse?.status ?? 202;
+      response.end(JSON.stringify(removalResponse?.body ?? {
+        target_kind: insight ? 'insight' : 'memory',
+        [insight ? 'insight_id' : 'memory_id']: insight ? 'ins_7' : 'mem_42',
+        status: 'excluded', policy_epoch: 8, operation_id: 'op_remove', cleanup_status: 'accepted',
+      }));
     } else {
       response.statusCode = 404;
       response.end('{}');
@@ -40,6 +50,7 @@ async function installedPlugin(pluginConfig = {}, registrationMode = 'full') {
   const { default: plugin } = await import('../index.ts');
   const hooks = {};
   let tool;
+  let removeTool;
   const api = {
     registrationMode,
     pluginConfig: {
@@ -51,12 +62,22 @@ async function installedPlugin(pluginConfig = {}, registrationMode = 'full') {
     },
     logger: { info() {}, warn() {}, error() {} },
     registerMemoryCapability() {},
-    registerTool(factory) { tool = factory; },
+    registerTool(factory, options) {
+      if (options.name === 'memory_remove') removeTool = factory;
+      else tool = factory;
+    },
     on(name, callback) { hooks[name] = callback; },
   };
   plugin.register(api);
-  return { hooks, tool };
+  return { hooks, tool, removeTool };
 }
+
+test('plugin manifest declares every registered memory tool', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../openclaw.plugin.json', import.meta.url), 'utf8'));
+  const { tool, removeTool } = await installedPlugin();
+  assert.ok(tool && removeTool);
+  assert.deepEqual(manifest.contracts.tools, ['memory_search', 'memory_remove']);
+});
 
 test('offline inspection registers schemas with a SecretRef but full runtime rejects it', async () => {
   const apiKey = { source: 'env', provider: 'default', id: 'OAM_USER_API_KEY' };
@@ -401,6 +422,131 @@ test('last user message with internal provenance is not captured', async () => {
   assert.equal(requests.length, 0);
 });
 
+test('removal and control user messages are retained as ineligible evidence', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin();
+  await hooks.agent_end({ success: true, messages: [
+    { role: 'user', content: 'Remember this ordinary message.', timestamp: 1780000000000, idempotencyKey: 'ordinary' },
+    { role: 'user', content: '/reset', timestamp: 1780000000001, idempotencyKey: 'reset', command: true },
+  ] }, route);
+  await hooks.agent_end({ success: true, messages: [
+    { role: 'user', content: 'Forget this memory.', timestamp: 1780000000002, idempotencyKey: 'forget' },
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'remove-1', name: 'memory_remove', arguments: { memory_id: 'mem_42' } }] },
+  ] }, route);
+  assert.deepEqual(requests.map(({ path, body }) => ({ path, messages: body.messages })), [
+    { path: '/v1/retain', messages: [{ role: 'user', content: '/reset', event_time: '2026-05-28T20:26:40.001Z', learning_eligible: false }] },
+    { path: '/v1/retain', messages: [{ role: 'user', content: 'Forget this memory.', event_time: '2026-05-28T20:26:40.002Z', learning_eligible: false }] },
+  ]);
+});
+
+test('host-dispatched removal results make only their current user turn ineligible', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin();
+  const user = { role: 'user', content: 'Please remove that memory.', timestamp: 1780000000000, idempotencyKey: 'host-remove' };
+  for (const isError of [false, true]) {
+    await hooks.agent_end({ success: true, messages: [user, {
+      role: 'toolResult', toolName: 'tool_call', isError,
+      details: { tool: { id: 'openclaw:oam-openclaw:memory_remove', name: 'memory_remove', source: 'openclaw' } },
+      content: [{ type: 'text', text: isError ? 'Unavailable.' : 'Removed.' }],
+    }] }, route);
+  }
+  await hooks.agent_end({ success: true, messages: [user, {
+    role: 'toolResult', toolName: 'tool_call', details: {
+      tool: { id: 'openclaw:oam-openclaw:memory_remove', name: 'memory_remove', source: 'openclaw' },
+    },
+  }, { ...user, content: 'I prefer concise answers.', idempotencyKey: 'next-turn' }] }, route);
+  assert.deepEqual(requests.map(({ body }) => body.messages[0].learning_eligible), [false, false, true]);
+});
+
+test('ordinary prose and slash paths still capture after an earlier removal turn', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin();
+  for (const content of ['Forget deadlines sometimes; I use reminders.', '/home is my working directory.']) {
+    await hooks.agent_end({ success: true, messages: [
+      { role: 'user', content: 'Remove an old memory.', timestamp: 1780000000000, idempotencyKey: 'old-remove' },
+      { role: 'assistant', content: [{ type: 'toolCall', id: 'old-call', name: 'memory_remove', arguments: { memory_id: 'mem_42' } }] },
+      { role: 'user', content, timestamp: 1780000000001, idempotencyKey: content },
+    ] }, route);
+  }
+  assert.deepEqual(requests.map(({ method, body }) => ({ method, content: body.messages[0].content })), [
+    { method: 'POST', content: 'Forget deadlines sometimes; I use reminders.' },
+    { method: 'POST', content: '/home is my working directory.' },
+  ]);
+});
+
+test('marked control turns and failed removal results retain the latest user message as ineligible', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin();
+  const message = { role: 'user', content: 'That one, please.', timestamp: 1780000000000, idempotencyKey: 'control' };
+  await hooks.agent_end({ success: true, messages: [{ ...message, learning_eligible: false }] }, route);
+  await hooks.agent_end({ success: true, messages: [message,
+    { role: 'toolResult', toolCallId: 'remove-failed', toolName: 'memory_remove', isError: true,
+      content: [{ type: 'text', text: 'Removal unavailable.' }] },
+  ] }, route);
+  assert.equal(requests.length, 2);
+  for (const { path, body } of requests) {
+    assert.equal(path, '/v1/retain');
+    assert.deepEqual(body.messages, [{ role: 'user', content: 'That one, please.', event_time: '2026-05-28T20:26:40.000Z', learning_eligible: false }]);
+  }
+  assert.deepEqual(requests[0].body, requests[1].body);
+  assert.equal(requests[0].headers['idempotency-key'], requests[1].headers['idempotency-key']);
+});
+
+test('known current control and typed removal requests skip automatic recall', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin();
+  for (const [content, metadata] of [
+    ['/reset', { command: true }],
+    ['Which candidate?', { learning_eligible: false }],
+    ['memory_remove(memory_id=mem_42)', {}],
+    ['memory_remove(insight_id="ins_7")', {}],
+  ]) {
+    const message = { role: 'user', content, timestamp: 1780000000000, idempotencyKey: content, ...metadata };
+    assert.equal(await hooks.before_prompt_build({ prompt: content, messages: [message] }, route), undefined);
+    await hooks.agent_end({ success: true, messages: [message] }, route);
+  }
+  assert.deepEqual(requests.map(({ path, body }) => ({ path, eligible: body.messages[0].learning_eligible })), [
+    { path: '/v1/retain', eligible: false }, { path: '/v1/retain', eligible: false },
+    { path: '/v1/retain', eligible: false }, { path: '/v1/retain', eligible: false },
+  ]);
+});
+
+test('old control history and typed ID mentions do not suppress ordinary recall or capture', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin();
+  const old = { role: 'user', content: '/reset', command: true, timestamp: 1780000000000, idempotencyKey: 'old-control' };
+  for (const content of ['What does memory_id=mem_42 mean?', 'Explain memory_remove(memory_id=mem_42).']) {
+    const recalled = await hooks.before_prompt_build({ prompt: content, currentUserMessage: content, messages: [old] }, route);
+    assert.match(recalled.prependContext, /Lin prefers concise answers/);
+    await hooks.agent_end({ success: true, messages: [old,
+      { role: 'user', content, timestamp: 1780000000001, idempotencyKey: content },
+    ] }, route);
+  }
+  assert.deepEqual(requests.map(({ path }) => path), ['/v1/recall', '/v1/retain', '/v1/recall', '/v1/retain']);
+  assert.ok(requests.filter(({ path }) => path === '/v1/retain').every(({ body }) => body.messages[0].learning_eligible === true));
+});
+
+test('local control recall suppression preserves owner admission and frozen capture eligibility', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ allowLocalMainAgent: true, allowedDirectConversations: [] });
+  const content = 'That one, please.';
+  const context = { agentId: 'main', runId: 'local-control', sessionKey: 'agent:main:main', sessionId: 'local-session',
+    channel: 'webchat', chatId: 'webchat', trigger: 'user', toolAuthority: route.toolAuthority, hookInvocation: route.hookInvocation };
+  const message = { role: 'user', content, timestamp: 1780000000000 };
+  assert.equal(await hooks.before_prompt_build({ prompt: content, messages: [{ ...message, learning_eligible: false }] }, context), undefined);
+  await hooks.before_agent_run({ senderIsOwner: true }, context);
+  await hooks.agent_end({ success: true, messages: [message] }, context);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, '/v1/retain');
+  assert.equal(requests[0].body.messages[0].learning_eligible, false);
+  requests.length = 0;
+  const denied = { ...context, runId: 'local-denied' };
+  await hooks.before_prompt_build({ prompt: content, messages: [{ ...message, command: true }] }, denied);
+  await hooks.before_agent_run({ senderIsOwner: false }, denied);
+  await hooks.agent_end({ success: true, messages: [message] }, denied);
+  assert.equal(requests.length, 0);
+});
+
 test('explicit search uses the fixed user and defaults to mid recall', async () => {
   requests.length = 0;
   const { tool } = await installedPlugin();
@@ -414,6 +560,85 @@ test('explicit search uses the fixed user and defaults to mid recall', async () 
   assert.equal(requests[0].body.user_id, 'u1');
   assert.equal(requests[0].body.recall_level, 'mid');
   assert.equal(requests[0].body.query, 'Lin preference');
+  assert.equal('include_profile' in requests[0].body, false);
+});
+
+test('memory_remove deletes exactly one memory or Insight ID through its typed route', async () => {
+  requests.length = 0;
+  const { removeTool } = await installedPlugin();
+  assert.ok(removeTool);
+  const remove = removeTool.create({
+    agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7',
+    conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {},
+  });
+  assert.equal(remove.name, 'memory_remove');
+  assert.equal(remove.parameters.additionalProperties, false);
+  const memoryResult = await remove.execute('remove-memory', { memory_id: ' mem_42 ' });
+  const insightResult = await remove.execute('remove-insight', { insight_id: 'ins_7' });
+  assert.equal(memoryResult.isError, undefined);
+  assert.match(memoryResult.content[0].text, /mem_42/);
+  assert.equal(insightResult.isError, undefined);
+  assert.match(insightResult.content[0].text, /ins_7/);
+  assert.deepEqual(requests.map(({ method, path, body }) => ({ method, path, body })), [
+    { method: 'DELETE', path: '/v1/users/u1/memories/mem_42', body: {} },
+    { method: 'DELETE', path: '/v1/users/u1/insights/ins_7', body: {} },
+  ]);
+});
+
+test('memory_remove rejects missing, duplicate, blank, and malformed IDs without a request', async () => {
+  requests.length = 0;
+  const { removeTool } = await installedPlugin();
+  assert.ok(removeTool);
+  const remove = removeTool.create({
+    agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7',
+    conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {},
+  });
+  for (const params of [{}, { memory_id: 'mem_42', insight_id: 'ins_7' },
+    { memory_id: '   ' }, { insight_id: '../ins_7' }, { memory_id: 42 },
+    { memory_id: 'mem_42', insight_id: '' }, { memory_id: 'mem_42', user_id: 'other' }]) {
+    const result = await remove.execute('invalid-remove', params);
+    assert.equal(result.isError, true);
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('memory_remove rejects non-202 responses and malformed or mismatched receipts', async () => {
+  const { removeTool } = await installedPlugin();
+  const remove = removeTool.create({
+    agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7',
+    conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {},
+  });
+  const receipt = { target_kind: 'memory', memory_id: 'mem_42', status: 'excluded',
+    policy_epoch: 8, operation_id: 'op_remove', cleanup_status: 'accepted' };
+  try {
+    for (const response of [{ status: 200, body: receipt }, { status: 404, body: {} },
+      { status: 202, body: {} }, { status: 202, body: { ...receipt, memory_id: 'other' } },
+      { status: 202, body: { ...receipt, target_kind: 'insight' } },
+      { status: 202, body: { ...receipt, operation_id: '' } }]) {
+      removalResponse = response;
+      assert.equal((await remove.execute('remove-invalid-receipt', { memory_id: 'mem_42' })).isError, true);
+    }
+  } finally {
+    removalResponse = undefined;
+  }
+});
+
+test('memory_remove preserves approved conversation and current invocation requirements', async () => {
+  requests.length = 0;
+  const { removeTool } = await installedPlugin({ allowLocalMainAgent: true });
+  const direct = { agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7',
+    conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {} };
+  for (const context of [{ ...direct, agentId: 'other' }, { ...direct, requesterSenderId: 'other' },
+    { ...direct, conversationReadOrigin: 'delegated' }, { ...direct, assertInvocationCurrent: undefined },
+    { agentId: 'main', sessionKey: 'agent:main:main', messageChannel: 'webchat', senderIsOwner: false,
+      assertInvocationCurrent() {} }]) {
+    assert.equal(removeTool.create(context), null);
+  }
+  assert.ok(removeTool.create({ agentId: 'main', sessionKey: 'agent:main:main',
+    messageChannel: 'webchat', senderIsOwner: true, assertInvocationCurrent() {} }));
+  const revoked = removeTool.create({ ...direct, assertInvocationCurrent() { throw new Error('revoked'); } });
+  assert.equal((await revoked.execute('revoked-remove', { memory_id: 'mem_42' })).isError, true);
+  assert.equal(requests.length, 0);
 });
 
 test('missing tool origin is delegated and cannot read an approved route', async () => {

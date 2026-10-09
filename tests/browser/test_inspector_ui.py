@@ -64,7 +64,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
             data = {
                 "items": [
                     {
-                        "unit_id": "fact-1",
+                        "memory_id": "fact-1",
                         "kind": "fact",
                         "origin": "chat",
                         "text": "Prefers concise replies.",
@@ -74,7 +74,8 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                         ],
                     },
                     {
-                        "unit_id": "insight-1",
+                        "insight_id": "insight-1",
+                        "insight_revision": 1,
                         "kind": "insight",
                         "subtype": "preferences",
                         "origin": "memory",
@@ -365,6 +366,200 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert json.loads(rendered)["occupation"] == "Engineer"
                 assert detail.locator("script").count() == 0
                 assert page.locator("#status").inner_text() == "User Profile loaded."
+            finally:
+                context.close()
+                browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+@pytest.mark.parametrize("target_kind", ["memory", "insight"])
+def test_unit_removal_preserves_sources_and_invalidates_pending_reads(tmp_path, target_kind):
+    with socket.socket() as probe:
+        if probe.connect_ex(("127.0.0.1", 9222)):
+            pytest.skip("Existing debug Chrome is unavailable")
+    with urlopen("http://127.0.0.1:9222/json/version", timeout=5) as response:
+        websocket_url = json.load(response)["webSocketDebuggerUrl"]
+    (tmp_path / "ui").symlink_to(WEB, target_is_directory=True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(tmp_path)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    calls = []
+    memory_present = True
+    insight_present = True
+    paused_reads = []
+    pause_reads = False
+    memory = {
+        "unit_id": "search-fact-42",
+        "memory_id": "mem-42",
+        "kind": "fact",
+        "origin": "chat",
+        "text": "Prefers concise replies.",
+        "supports": [],
+        "affected_insight_ids": ["insight-7"],
+        "citations": [{"source_id": "chat-1", "source_version": 1, "passage_id": "p1"}],
+    }
+    insight = {
+        "unit_id": "search-insight-7-revision-4",
+        "insight_id": "insight-7",
+        "insight_revision": 4,
+        "kind": "insight",
+        "subtype": "preferences",
+        "origin": "memory",
+        "text": "The user prefers brief replies.",
+        "supports": [{"memory_id": "mem-42", "support_revision": 3}],
+        "affected_insight_ids": [],
+        "citations": [],
+    }
+
+    def fulfill(route, data):
+        route.fulfill(
+            status=202 if route.request.method == "DELETE" else 200,
+            content_type="application/json",
+            body=json.dumps(data),
+        )
+
+    def respond(route):
+        nonlocal memory_present, insight_present
+        path = route.request.url
+        calls.append((route.request.method, path, route.request.post_data))
+        if path.endswith("/memories"):
+            data = {
+                "items": ([memory] if memory_present else [])
+                + ([insight] if insight_present else []),
+                "next_after": None,
+            }
+            if pause_reads:
+                paused_reads.append((route, data))
+                return
+        elif path.endswith("/recall"):
+            paused_reads.append(
+                (
+                    route,
+                    {
+                        "items": [memory, insight],
+                        "context": "Stale pre-removal context",
+                        "context_tokens": 5,
+                        "diagnostics": {},
+                    },
+                )
+            )
+            return
+        elif path.endswith("/evidence/chat-1"):
+            data = {
+                "original": {
+                    "messages": [{"role": "user", "content": "Please keep replies brief."}]
+                }
+            }
+        elif path.endswith("/memories/mem-42") and route.request.method == "DELETE":
+            memory_present = False
+            insight_present = False
+            data = {
+                "target_kind": "memory",
+                "memory_id": "mem-42",
+                "status": "excluded",
+                "operation_id": "remove-op",
+                "policy_epoch": 8,
+                "cleanup_status": "queued",
+                "reused": False,
+            }
+        elif path.endswith("/insights/insight-7") and route.request.method == "DELETE":
+            insight_present = False
+            data = {
+                "target_kind": "insight",
+                "insight_id": "insight-7",
+                "status": "excluded",
+                "operation_id": "remove-insight-op",
+                "policy_epoch": 9,
+                "cleanup_status": "accepted",
+                "reused": False,
+            }
+        elif path.endswith("/resources"):
+            data = {"items": [], "next_after": None}
+        else:
+            raise AssertionError(f"Unexpected request: {path}")
+        fulfill(route, data)
+
+    try:
+        with playwright.sync_playwright() as api:
+            browser = api.chromium.connect_over_cdp(websocket_url)
+            context = browser.new_context()
+            page = context.new_page()
+            page.set_default_timeout(5000)
+            page.add_init_script("""
+                const originalFetch = window.fetch;
+                window.completedReads = 0;
+                window.fetch = async (...args) => {
+                    const response = await originalFetch(...args);
+                    const originalJson = response.json.bind(response);
+                    response.json = async () => {
+                        const result = await originalJson();
+                        window.completedReads += 1;
+                        return result;
+                    };
+                    return response;
+                };
+            """)
+            page.route("**/v1/**", respond)
+            try:
+                page.goto(f"http://127.0.0.1:{server.server_port}/ui/")
+                page.locator("#user").fill("alice")
+                page.locator("#connect-form button").click()
+                page.locator("#item-list button").nth(0 if target_kind == "memory" else 1).click()
+                detail = page.locator("#detail")
+                target_id = "mem-42" if target_kind == "memory" else "insight-7"
+                action = "Remove Memory Unit" if target_kind == "memory" else "Remove Insight"
+                operation_id = "remove-op" if target_kind == "memory" else "remove-insight-op"
+                endpoint = "/memories/mem-42" if target_kind == "memory" else "/insights/insight-7"
+                detail.get_by_role("heading", name=target_id, exact=True).wait_for()
+                assert detail.get_by_text("Canonical ID", exact=True).is_visible()
+                if target_kind == "memory":
+                    assert detail.get_by_text("insight-7", exact=True).is_visible()
+                else:
+                    assert detail.get_by_text("4", exact=True).is_visible()
+                    assert detail.get_by_text("mem-42", exact=True).is_visible()
+                    assert detail.get_by_text("3", exact=True).is_visible()
+
+                page.once("dialog", lambda dialog: dialog.dismiss())
+                detail.get_by_role("button", name=action, exact=True).click()
+                assert not any(method == "DELETE" for method, _, _ in calls)
+
+                pause_reads = True
+                with page.expect_request("**/memories"):
+                    page.locator("#refresh-list").click()
+                page.locator("#query").fill("brief replies")
+                with page.expect_request("**/recall"):
+                    page.locator("#search-form button").click()
+                page.wait_for_function("window.completedReads >= 2")
+                assert len(paused_reads) == 2
+                pause_reads = False
+                page.once("dialog", lambda dialog: dialog.accept())
+                detail.get_by_role("button", name=action, exact=True).click()
+                detail.get_by_text(f'"operation_id": "{operation_id}"', exact=False).wait_for()
+                receipt = json.loads(detail.locator("pre").inner_text())
+                assert receipt["target_kind"] == target_kind
+                assert receipt[f"{target_kind}_id"] == target_id
+                assert receipt["status"] == "excluded"
+                assert receipt["policy_epoch"] == (8 if target_kind == "memory" else 9)
+                assert receipt["reused"] is False
+                deletes = [path for method, path, _ in calls if method == "DELETE"]
+                assert len(deletes) == 1
+                assert deletes[0].endswith(endpoint)
+
+                completed = page.evaluate("window.completedReads")
+                for route, data in paused_reads:
+                    fulfill(route, data)
+                page.wait_for_function(f"window.completedReads === {completed + 2}")
+                page.evaluate("() => new Promise(requestAnimationFrame)")
+                assert json.loads(detail.locator("pre").inner_text()) == receipt
+                assert page.locator("#item-list button").count() == (
+                    0 if target_kind == "memory" else 1
+                )
+                if target_kind == "insight":
+                    page.locator("#item-list button").first.click()
+                    detail.get_by_text("Please keep replies brief.", exact=True).wait_for()
             finally:
                 context.close()
                 browser.close()
