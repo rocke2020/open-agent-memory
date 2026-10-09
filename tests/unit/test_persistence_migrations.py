@@ -160,6 +160,17 @@ def test_migration_file_does_not_record_a_placeholder_checksum() -> None:
     assert "recorded-by-migration-runner" not in _initial_sql()
 
 
+def test_memory_removal_migration_has_scoped_target_operations() -> None:
+    path = Path(__file__).parents[2] / "migrations" / "0026_memory_removal.sql"
+    sql = path.read_text(encoding="utf-8").lower()
+
+    assert "alter table operations add column removal_target_kind text" in sql
+    assert "alter table operations add column removal_target_id text" in sql
+    assert "check ((removal_target_kind is null) = (removal_target_id is null))" in sql
+    assert "create unique index operations_removal_target_idx" in sql
+    assert "where removal_target_kind is not null" in sql
+
+
 def test_migration_loader_orders_versions_and_checksums_bytes(tmp_path: Path) -> None:
     (tmp_path / "0002_second.sql").write_text("select 2;\n", encoding="utf-8")
     (tmp_path / "0001_first.sql").write_text("select 1;\n", encoding="utf-8")

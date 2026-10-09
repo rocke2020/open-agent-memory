@@ -113,6 +113,17 @@ WHERE s.tenant_id=%s AND s.user_id=%s
           (s.tenant_id,s.user_id,s.source_id,s.active_version)
       AND o.kind IN ('index_interaction','consolidate') AND o.status='succeeded'
       AND o.stage_state->>'insights_ready'='true' AND w.generation_id=%s
+      AND NOT EXISTS (
+        SELECT 1 FROM operations repair JOIN work_units repair_work
+          USING(tenant_id,user_id,operation_id)
+        WHERE (repair.tenant_id,repair.user_id,repair.source_id,repair.source_version)=
+              (o.tenant_id,o.user_id,o.source_id,o.source_version)
+          AND repair.kind='consolidate' AND repair.stage_state->>'insight_repairs' IS NOT NULL
+          AND repair_work.generation_id=w.generation_id
+          AND ((repair.status IN ('accepted','running')
+                AND repair_work.status IN ('queued','running','retry_wait'))
+               OR repair_work.status IN ('failed_terminal','cancelled'))
+      )
   )
 ORDER BY s.source_id
 """.strip()

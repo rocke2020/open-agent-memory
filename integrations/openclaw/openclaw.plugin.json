@@ -4,7 +4,7 @@
   "description": "Personal memory through an OAM service",
   "kind": "memory",
   "categories": ["memory"],
-  "contracts": { "tools": ["memory_search"] },
+  "contracts": { "tools": ["memory_search", "memory_remove"] },
   "configContracts": {
     "secretInputs": {
       "paths": [{ "path": "apiKey", "expected": "string", "ownerKind": "capability" }]

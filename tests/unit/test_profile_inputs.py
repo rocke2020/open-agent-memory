@@ -29,16 +29,16 @@ def test_profile_coverage_recognizes_only_current_source_insight_retry(
             "CREATE TABLE evidence(tenant_id,user_id,source_id,source_version,status,"
             "learning_eligible,evidence_id);"
             "CREATE TABLE operations(tenant_id,user_id,operation_id,source_id,source_version,"
-            "kind,status,stage_state);"
+            "kind,status,stage_state,created_at);"
             "CREATE TABLE work_units(tenant_id,user_id,operation_id,generation_id,status);"
             "INSERT INTO sources VALUES('tenant','alice','chat',1,'interaction','active');"
             "INSERT INTO source_versions VALUES('tenant','alice','chat',1,'active');"
             "INSERT INTO evidence VALUES('tenant','alice','chat',1,'active',1,'evidence');"
             "INSERT INTO operations VALUES('tenant','alice','index','chat',1,"
-            "'index_interaction','succeeded','{}');"
+            "'index_interaction','succeeded','{}',0);"
             "INSERT INTO work_units VALUES('tenant','alice','index','gen','succeeded');"
             "INSERT INTO operations VALUES('tenant','alice','failed','chat',1,"
-            "'consolidate','partial_failed','{}');"
+            "'consolidate','partial_failed','{}',0);"
             "INSERT INTO work_units VALUES('tenant','alice','failed','gen','failed_terminal');"
         )
         query = PENDING_PROFILE_INPUTS_SQL.replace("%s", "?")
@@ -47,7 +47,7 @@ def test_profile_coverage_recognizes_only_current_source_insight_retry(
         # PostgreSQL's ->> yields text; use its literal text value in this SQL boundary fixture.
         connection.execute(
             "INSERT INTO operations VALUES('tenant','alice','retry','chat',?,"
-            "'consolidate','succeeded',?)",
+            "'consolidate','succeeded',?,1)",
             (retry_version, json.dumps({"insights_ready": ready})),
         )
         connection.execute(
@@ -55,6 +55,104 @@ def test_profile_coverage_recognizes_only_current_source_insight_retry(
             (retry_generation,),
         )
         assert connection.execute(query, parameters).fetchall() == expected
+
+
+@pytest.mark.parametrize(
+    ("repair", "expected"),
+    [
+        ({}, [("chat", 1, "pending")]),
+        ({"operation_status": "running", "work_status": "running"}, [("chat", 1, "pending")]),
+        ({"work_status": "retry_wait"}, [("chat", 1, "pending")]),
+        (
+            {"operation_status": "partial_failed", "work_status": "failed_terminal"},
+            [("chat", 1, "failed")],
+        ),
+        (
+            {"operation_status": "cancelled", "work_status": "cancelled"},
+            [("chat", 1, "failed")],
+        ),
+        ({"operation_status": "succeeded", "work_status": "succeeded"}, []),
+        ({"created_at": 0}, [("chat", 1, "pending")]),
+        ({"generation": "old"}, []),
+        ({"version": 2}, []),
+        ({"tenant": "other"}, []),
+        ({"user": "other"}, []),
+        ({"source": "other"}, []),
+        ({"independent_success": True}, [("chat", 1, "pending")]),
+        (
+            {
+                "independent_success": True,
+                "operation_status": "partial_failed",
+                "work_status": "failed_terminal",
+            },
+            [("chat", 1, "failed")],
+        ),
+    ],
+)
+def test_profile_coverage_preserves_each_unresolved_repair(repair, expected) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            "CREATE TABLE sources(tenant_id,user_id,source_id,active_version,input_role,status);"
+            "CREATE TABLE source_versions(tenant_id,user_id,source_id,source_version,status);"
+            "CREATE TABLE evidence(tenant_id,user_id,source_id,source_version,status,"
+            "learning_eligible,evidence_id);"
+            "CREATE TABLE operations(tenant_id,user_id,operation_id,source_id,source_version,"
+            "kind,status,stage_state,created_at);"
+            "CREATE TABLE work_units(tenant_id,user_id,operation_id,generation_id,status);"
+            "INSERT INTO sources VALUES('tenant','alice','chat',1,'interaction','active');"
+            "INSERT INTO source_versions VALUES('tenant','alice','chat',1,'active');"
+            "INSERT INTO evidence VALUES('tenant','alice','chat',1,'active',1,'evidence');"
+            "INSERT INTO operations VALUES('tenant','alice','historical','chat',1,"
+            "'consolidate','succeeded','{\"insights_ready\":\"true\"}',1);"
+            "INSERT INTO work_units VALUES('tenant','alice','historical','gen','succeeded');"
+        )
+        tenant, user = repair.get("tenant", "tenant"), repair.get("user", "alice")
+        connection.execute(
+            "INSERT INTO operations VALUES(?,?,'repair',?,?,'consolidate',?,?,?)",
+            (
+                tenant,
+                user,
+                repair.get("source", "chat"),
+                repair.get("version", 1),
+                repair.get("operation_status", "accepted"),
+                json.dumps({"insight_repairs": [{"insight_id": "insight-a"}]}),
+                repair.get("created_at", 2),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO work_units VALUES(?,?,'repair',?,?)",
+            (tenant, user, repair.get("generation", "gen"), repair.get("work_status", "queued")),
+        )
+        if repair.get("independent_success"):
+            connection.execute(
+                "INSERT INTO operations VALUES('tenant','alice','repair-b','chat',1,"
+                "'consolidate','succeeded',?,3)",
+                (
+                    json.dumps(
+                        {"insights_ready": "true", "insight_repairs": [{"insight_id": "insight-b"}]}
+                    ),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO work_units VALUES('tenant','alice','repair-b','gen','succeeded')"
+            )
+        query = PENDING_PROFILE_INPUTS_SQL.replace("%s", "?")
+        parameters = ("gen", "gen", "gen", "tenant", "alice", "gen", "gen")
+        assert connection.execute(query, parameters).fetchall() == expected
+        if repair.get("independent_success"):
+            connection.execute(
+                "UPDATE operations SET status='succeeded',stage_state=? "
+                "WHERE operation_id='repair'",
+                (
+                    json.dumps(
+                        {"insights_ready": "true", "insight_repairs": [{"insight_id": "insight-a"}]}
+                    ),
+                ),
+            )
+            connection.execute(
+                "UPDATE work_units SET status='succeeded' WHERE operation_id='repair'"
+            )
+            assert connection.execute(query, parameters).fetchall() == []
 
 
 class ProfileCursor:

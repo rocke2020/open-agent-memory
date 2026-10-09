@@ -37,6 +37,65 @@ async def test_delete_source_returns_exclusion_and_cleanup_receipt():
     assert response.json()["cleanup_operation_id"] == "op_cleanup"
 
 
+async def test_delete_memory_uses_typed_exact_id_route_and_receipt():
+    class Runtime:
+        def delete_memory(self, actor, user_id, memory_id):
+            assert (user_id, memory_id) == ("lin", "mem_42")
+            return {
+                "target_kind": "memory",
+                "memory_id": memory_id,
+                "status": "excluded",
+                "policy_epoch": 8,
+                "operation_id": "op_remove_memory",
+                "cleanup_status": "accepted",
+            }
+
+    app = create_app(ROOT / "configs/oam.yaml", runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.delete(
+            "/v1/users/lin/memories/mem_42",
+            headers={"Authorization": "Bearer synthetic"},
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "target_kind": "memory",
+        "memory_id": "mem_42",
+        "status": "excluded",
+        "policy_epoch": 8,
+        "operation_id": "op_remove_memory",
+        "cleanup_status": "accepted",
+    }
+
+
+async def test_delete_insight_uses_typed_exact_id_route_and_receipt():
+    class Runtime:
+        def delete_insight(self, actor, user_id, insight_id):
+            assert (user_id, insight_id) == ("lin", "ins_7")
+            return {
+                "target_kind": "insight",
+                "insight_id": insight_id,
+                "status": "excluded",
+                "policy_epoch": 9,
+                "operation_id": "op_remove_insight",
+                "cleanup_status": "accepted",
+            }
+
+    app = create_app(ROOT / "configs/oam.yaml", runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.delete(
+            "/v1/users/lin/insights/ins_7",
+            headers={"Authorization": "Bearer synthetic"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["insight_id"] == "ins_7"
+
+
 async def test_resource_revision_requires_expected_active_version():
     class Runtime:
         def authenticate(self, actor):

@@ -20,6 +20,9 @@ class Cursor:
     def fetchone(self) -> tuple[object, ...] | None:
         return next(self.rows)
 
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return [row for row in self.rows if row is not None]
+
 
 class Connection:
     def __init__(self, rows: list[tuple[object, ...] | None]) -> None:

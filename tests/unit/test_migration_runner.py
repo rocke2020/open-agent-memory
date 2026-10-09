@@ -8,7 +8,9 @@ from oam.db import migrations
 
 def test_repository_migrations_have_unique_versions() -> None:
     repository_migrations = migrations.load_migrations(Path(__file__).parents[2] / "migrations")
-    assert [migration.version for migration in repository_migrations] == list(range(1, 26))
+    assert [migration.version for migration in repository_migrations] == list(
+        range(1, len(repository_migrations) + 1)
+    )
 
 
 class MigrationCursor:

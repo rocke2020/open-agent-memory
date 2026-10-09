@@ -8,9 +8,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
+from psycopg.types.json import Jsonb
+
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
-from oam.db.queue_admission import require_queue_capacity
+from oam.db.queue_admission import PENDING_ROOTS_SQL, QueueAdmissionFull, require_queue_capacity
 from oam.operations.state import OperationStatus
 
 
@@ -24,6 +26,10 @@ class OperationNotCancellable(RuntimeError):
 
 class OperationNotRetryable(RuntimeError):
     """Only terminal failed/cancelled operations can create a linked retry."""
+
+
+class RemovalRecoveryConflict(RuntimeError):
+    """Removal maintenance cannot be recovered without violating its saved identity."""
 
 
 class OperationIdempotencyConflict(RuntimeError):
@@ -58,6 +64,8 @@ class Cursor(Protocol):
     def execute(self, query: str, parameters: tuple[object, ...] = ()) -> object: ...
 
     def fetchone(self) -> tuple[object, ...] | None: ...
+
+    def fetchall(self) -> list[tuple[object, ...]]: ...
 
 
 class Connection(Protocol):
@@ -106,6 +114,7 @@ class OperationRepository:
                 "cancellation_revision = cancellation_revision + 1, "
                 "updated_at = clock_timestamp() "
                 "WHERE tenant_id = %s AND user_id = %s AND operation_id = %s "
+                "AND kind NOT IN ('remove_memory', 'remove_insight') "
                 "AND status IN ('accepted', 'running') "
                 f"RETURNING {_FIELDS}",
                 (authority.tenant_id, authority.user_id, operation_id),
@@ -156,7 +165,9 @@ class OperationRepository:
                 (authority.tenant_id, authority.user_id, original_operation_id),
             )
             original_row = cursor.fetchone()
-            if original_row is None or OperationStatus(original_row[2]) not in {
+            if original_row is None or original_row[1] in {"remove_memory", "remove_insight"}:
+                raise OperationNotRetryable(original_operation_id)
+            if OperationStatus(original_row[2]) not in {
                 OperationStatus.PARTIAL_FAILED,
                 OperationStatus.FAILED_TERMINAL,
                 OperationStatus.CANCELLED,
@@ -230,6 +241,145 @@ class OperationRepository:
                 ),
             )
             return self._record(retry_row)
+
+    def recover_removal(
+        self,
+        connection: Connection,
+        authority: AuthorizedUser,
+        operation_id: str,
+        *,
+        attempts_remaining: int,
+        generation_id: str,
+        max_pending_per_user: int,
+    ) -> OperationRecord:
+        """Rearm failed removal maintenance without replaying removal or extraction."""
+        self._require(authority, "source:delete")
+        if attempts_remaining <= 0:
+            raise ValueError("attempts_remaining must be positive")
+        key = (authority.tenant_id, authority.user_id)
+        with connection.transaction():  # type: ignore[attr-defined]
+            cursor = connection.cursor()
+            bind_user(cursor, authority)
+            cursor.execute(
+                "SELECT index_generation_id FROM users WHERE tenant_id=%s AND user_id=%s "
+                "AND state='active' FOR UPDATE",
+                key,
+            )
+            user = cursor.fetchone()
+            if user is None:
+                raise OperationNotFound(operation_id)
+            cursor.execute(
+                f"SELECT {_FIELDS} FROM operations "  # noqa: S608
+                "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s FOR UPDATE",
+                (*key, operation_id),
+            )
+            original = cursor.fetchone()
+            if original is None:
+                raise OperationNotFound(operation_id)
+            if original[1] not in {"remove_memory", "remove_insight"}:
+                raise RemovalRecoveryConflict(
+                    "only original removal operations can recover maintenance"
+                )
+            linked = (original[11] or {}).get("consolidation_operation_ids", [])
+            operation_ids = list(dict.fromkeys([operation_id, *linked]))
+            cursor.execute(
+                f"SELECT {_FIELDS} FROM operations "  # noqa: S608
+                "WHERE tenant_id=%s AND user_id=%s AND operation_id=ANY(%s) "
+                "ORDER BY operation_id FOR UPDATE",
+                (*key, operation_ids),
+            )
+            records = {row[0]: self._record(row) for row in cursor.fetchall()}
+            cursor.execute(
+                "SELECT work_unit_id,operation_id,stage,status,generation_id,dependency_ids "
+                "FROM work_units WHERE tenant_id=%s AND user_id=%s AND operation_id=ANY(%s) "
+                "ORDER BY work_unit_id FOR UPDATE",
+                (*key, operation_ids),
+            )
+            work = cursor.fetchall()
+            failed = [row for row in work if row[3] == "failed_terminal"]
+            if not failed:
+                if any(row[3] == "cancelled" for row in work):
+                    raise RemovalRecoveryConflict("cancelled maintenance is not resumed")
+                return self._record(original)
+            cleanup_ids = [row[0] for row in work if row[1] == operation_id]
+            for _unit_id, owner_id, stage, _, unit_generation, dependencies in failed:
+                record = records[owner_id]
+                if record.cancellation_revision:
+                    raise RemovalRecoveryConflict("cancelled maintenance is not resumed")
+                if owner_id == operation_id:
+                    if stage != "cleanup_" + original[1].removeprefix("remove_"):
+                        raise RemovalRecoveryConflict("removal cleanup identity does not match")
+                    continue
+                repairs = record.stage_state.get("insight_repairs", [])
+                if (
+                    record.kind != "consolidate"
+                    or stage != "consolidate"
+                    or dependencies != cleanup_ids
+                    or not repairs
+                    or any(item.get("removal_operation_id") != operation_id for item in repairs)
+                ):
+                    raise RemovalRecoveryConflict("linked repair identity does not match")
+                if unit_generation != generation_id or user[0] != generation_id:
+                    raise RemovalRecoveryConflict("repair generation is no longer current")
+                cursor.execute(
+                    "SELECT 1 FROM sources s JOIN source_versions v "
+                    "USING(tenant_id,user_id,source_id) WHERE s.tenant_id=%s AND s.user_id=%s "
+                    "AND s.source_id=%s AND s.status='active' AND s.active_version=%s "
+                    "AND v.source_version=%s AND v.status='active'",
+                    (*key, record.source_id, record.source_version, record.source_version),
+                )
+                if cursor.fetchone() is None:
+                    raise RemovalRecoveryConflict("repair source is no longer eligible")
+            selected_ids = [row[0] for row in failed]
+            cursor.execute(
+                "SELECT 1 FROM attempts WHERE tenant_id=%s AND user_id=%s "
+                "AND work_unit_id=ANY(%s) AND disposition='unknown_external_outcome' LIMIT 1",
+                (*key, selected_ids),
+            )
+            if cursor.fetchone() is not None:
+                raise RemovalRecoveryConflict("reconcile unknown external outcomes before recovery")
+            cursor.execute(PENDING_ROOTS_SQL, key)
+            before = cursor.fetchone()[0]
+            cursor.execute(
+                "UPDATE work_units SET status='queued',attempts_remaining=%s,available_at=now(),"
+                "fence=fence+1,owner_id=NULL,lease_expires_at=NULL,updated_at=now() "
+                "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=ANY(%s) "
+                "AND status='failed_terminal'",
+                (attempts_remaining, *key, selected_ids),
+            )
+            for owner_id in dict.fromkeys(row[1] for row in failed):
+                state = dict(records[owner_id].stage_state)
+                state.pop("error", None)
+                state.pop("error_detail", None)
+                if owner_id == operation_id:
+                    state["cleanup_status"] = "pending"
+                else:
+                    state.update(insights_ready=False, consolidation_status="pending")
+                cursor.execute(
+                    "UPDATE operations SET status='accepted',stage_state=%s,updated_at=now() "
+                    "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
+                    (Jsonb(state), *key, owner_id),
+                )
+                if owner_id != operation_id and state.get("source_operation_id"):
+                    cursor.execute(
+                        "UPDATE operations SET stage_state=stage_state||%s::jsonb "
+                        "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
+                        (
+                            Jsonb({"insights_ready": False, "consolidation_status": "pending"}),
+                            *key,
+                            state["source_operation_id"],
+                        ),
+                    )
+            cursor.execute(PENDING_ROOTS_SQL, key)
+            after = cursor.fetchone()[0]
+            if after > before and after > max_pending_per_user:
+                raise QueueAdmissionFull("user queue capacity is full")
+            cursor.execute(
+                f"SELECT {_FIELDS} FROM operations "  # noqa: S608
+                "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
+                (*key, operation_id),
+            )
+            return self._record(cursor.fetchone())
 
     def reconcile_attempt(
         self,

@@ -87,3 +87,47 @@ def test_index_store_pool_checkout_is_bounded_by_pool_timeout():
     with pytest.raises(RuntimeError, match="stop after checkout"), store.transaction():
         pass
     assert checkout_timeouts == [5]
+
+
+def test_completed_model_response_is_saved_before_policy_retry():
+    from contextlib import contextmanager
+    from threading import Lock
+
+    from oam.indexing.store import StaleConsolidationPolicy
+
+    queries = []
+
+    class Connection:
+        def execute(self, query, params=()):
+            queries.append(query)
+            return SimpleNamespace(fetchone=lambda: None)
+
+    connection = Connection()
+
+    @contextmanager
+    def transaction():
+        yield connection
+
+    store = guarded_store("consolidate")
+    store.config = SimpleNamespace(lease=SimpleNamespace(seconds=30))
+    store.claim.attempt_id = "attempt"
+    store._model_stage_lock = Lock()
+    store._unsettled_model_stages = set()
+    store.transaction = transaction
+    completed = False
+
+    def guard(connection, *, allow_policy_change=False):
+        if completed and not allow_policy_change:
+            raise StaleConsolidationPolicy("changed")
+
+    store.guard = guard
+
+    def produce():
+        nonlocal completed
+        completed = True
+        return {"text": "known result", "usage": {}}
+
+    with pytest.raises(StaleConsolidationPolicy):
+        store.checkpoint("repair:ins:3:1:synthesis", ["fact"], produce)
+    assert any(q.startswith("INSERT INTO index_stage_results") for q in queries)
+    assert store._unsettled_model_stages == set()

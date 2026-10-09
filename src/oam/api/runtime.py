@@ -57,6 +57,7 @@ from oam.db.readiness import DATABASE_READINESS_TIMEOUT_SECONDS
 from oam.db.sources import AcceptanceReceipt, AcceptSource, SourceNotFound, SourceRepository
 from oam.debug.traces import TraceRepository
 from oam.exports.repository import ExportRepository
+from oam.governance.removal import RemovalRepository
 from oam.indexing.identity import index_generation
 from oam.models.runtime import RuntimeModels
 from oam.operations.repository import OperationNotFound, OperationRecord, OperationRepository
@@ -106,6 +107,10 @@ class APIRuntime(Protocol):
     ) -> tuple[bytes, str]: ...
 
     def list_memories(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict: ...
+
+    def delete_memory(self, actor: RequestActor, user_id: str, memory_id: str) -> dict: ...
+
+    def delete_insight(self, actor: RequestActor, user_id: str, insight_id: str) -> dict: ...
 
     def get_evidence(self, actor: RequestActor, user_id: str, source_id: str) -> dict: ...
 
@@ -193,6 +198,8 @@ class APIRuntime(Protocol):
         operation_id: str,
         idempotency_key: str,
     ) -> OperationRecord: ...
+
+    def recover(self, actor: RequestActor, user_id: str, operation_id: str) -> OperationRecord: ...
 
     def reconcile(
         self,
@@ -426,6 +433,30 @@ class DatabaseRuntime:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
             return SourceInspector().list_memories(connection, authority, after=after)
+
+    def delete_memory(self, actor: RequestActor, user_id: str, memory_id: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "source:delete")
+            receipt = RemovalRepository().remove(
+                connection,
+                authority,
+                target_kind="memory",
+                target_id=memory_id,
+                attempts_remaining=self.config.retry.max_attempts,
+            )
+        return receipt.as_dict()
+
+    def delete_insight(self, actor: RequestActor, user_id: str, insight_id: str) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "source:delete")
+            receipt = RemovalRepository().remove(
+                connection,
+                authority,
+                target_kind="insight",
+                target_id=insight_id,
+                attempts_remaining=self.config.retry.max_attempts,
+            )
+        return receipt.as_dict()
 
     def get_evidence(self, actor: RequestActor, user_id: str, source_id: str) -> dict:
         with self.pool.connection() as connection:
@@ -877,6 +908,18 @@ class DatabaseRuntime:
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
                 attempts_remaining=self.config.retry.max_attempts,
+                max_pending_per_user=self.config.queue.max_pending_per_user,
+            )
+
+    def recover(self, actor: RequestActor, user_id: str, operation_id: str) -> OperationRecord:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "source:delete")
+            return self._operations.recover_removal(
+                connection,
+                authority,
+                operation_id,
+                attempts_remaining=self.config.retry.max_attempts,
+                generation_id=index_generation(self.config, os.environ),
                 max_pending_per_user=self.config.queue.max_pending_per_user,
             )
 

@@ -33,6 +33,10 @@ class StaleIndexWork(RuntimeError):
     """The claim or accepted source no longer permits publication."""
 
 
+class StaleConsolidationPolicy(StaleIndexWork):
+    """Consolidation must restart from the current eligible support policy."""
+
+
 def stable_id(prefix: str, *parts: object) -> str:
     value = json.dumps(parts, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return prefix + "_" + hashlib.sha256(value.encode()).hexdigest()[:32]
@@ -164,7 +168,7 @@ class IndexStore:
             with self.pool.connection(timeout=timeout) as connection:
                 yield connection
 
-    def guard(self, connection):
+    def guard(self, connection, *, allow_policy_change=False):
         if self.claim.stage == "index_semantic_links":
             connection.execute("SET LOCAL jit = off")
         user = connection.execute(
@@ -188,7 +192,6 @@ class IndexStore:
             user is None
             or user[0] != "active"
             or user[2] != self.generation_id
-            or (self.claim.stage == "consolidate" and user[1] != self.source["policy_epoch"])
             or row is None
             or row[:5] != (self.worker_id, self.claim.fence, "running", True, 0)
             or row[5] not in {"accepted", "running"}
@@ -203,6 +206,12 @@ class IndexStore:
             or bytes(row[13]) != bytes(self.source["input_digest"])
         ):
             raise StaleIndexWork("claim, policy, or source is no longer eligible")
+        if (
+            not allow_policy_change
+            and self.claim.stage == "consolidate"
+            and user[1] != self.source["policy_epoch"]
+        ):
+            raise StaleConsolidationPolicy("consolidation policy changed")
 
     def check_retry_claim(self):
         """Recheck cancellation and renew the fenced lease before a split child call."""
@@ -272,9 +281,15 @@ class IndexStore:
         if hasattr(output, "model_dump"):
             output = output.model_dump(mode="json")
         usage = output.get("usage", {})
+        policy_error = None
         with self._model_stage_lock:
             with self.transaction() as connection:
-                self.guard(connection)
+                try:
+                    self.guard(connection)
+                except StaleConsolidationPolicy as error:
+                    # Persist a known completed response before restarting under new policy.
+                    self.guard(connection, allow_policy_change=True)
+                    policy_error = error
                 connection.execute(
                     "INSERT INTO index_stage_results(tenant_id,user_id,source_id,source_version,"
                     "generation_id,stage_key,input_digest,output,usage,work_unit_id,attempt_id) "
@@ -289,6 +304,8 @@ class IndexStore:
                 )
                 self._record_model_stage_state(connection, stage, completed=(stage,))
             self._unsettled_model_stages.remove(stage)
+        if policy_error is not None:
+            raise policy_error
         return output
 
     def checkpoints(self, stages):
@@ -698,6 +715,10 @@ class IndexStore:
         retryable = not_dispatched or (
             isinstance(error, ExtractionError) and known_usage is not None and error.retryable
         )
+        policy_changed = (
+            isinstance(error, StaleConsolidationPolicy) and not self._unsettled_model_stages
+        )
+        retryable = retryable or policy_changed
         # The source coordinator drains all producers before failure settlement.
         # One error cannot settle several stages with unsaved outcomes.
         if len(self._unsettled_model_stages) > 1:
@@ -714,10 +735,16 @@ class IndexStore:
                 "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND owner_id=%s "
                 "AND fence=%s AND status='running' AND lease_expires_at>clock_timestamp() "
                 "RETURNING status",
-                (retryable, *self.key, self.claim.work_unit_id, self.worker_id, self.claim.fence),
+                (
+                    retryable,
+                    *self.key,
+                    self.claim.work_unit_id,
+                    self.worker_id,
+                    self.claim.fence,
+                ),
             ).fetchone()
             if owned:
-                if not_dispatched or semantic:
+                if not_dispatched or semantic or policy_changed:
                     connection.execute(
                         "UPDATE attempts SET disposition='failed',usage=NULL,response_ref=NULL,"
                         "finished_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
@@ -839,6 +866,7 @@ class IndexStore:
         passage_id=None,
         memory_id=None,
         insight_id=None,
+        insight_revision=1,
         mentioned_at=None,
         source_created_at=None,
         source_updated_at=None,
@@ -876,7 +904,7 @@ class IndexStore:
                 passage_id,
                 memory_id,
                 insight_id,
-                1 if insight_id else None,
+                insight_revision if insight_id else None,
                 self.generation_id,
                 text,
                 Jsonb(locator),

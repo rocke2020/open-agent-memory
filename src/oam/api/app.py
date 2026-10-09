@@ -71,6 +71,7 @@ from oam.db.queue_admission import QueueAdmissionFull
 from oam.db.sources import IdempotencyConflict, SourceNotFound, SourceVersionConflict
 from oam.debug.traces import TraceNotFound
 from oam.exports.repository import ExportNotFound, ExportPolicyChanged
+from oam.governance.removal import RemovalNotFound
 from oam.indexing.identity import index_generation
 from oam.operations.repository import (
     AttemptOwnershipMismatch,
@@ -79,6 +80,7 @@ from oam.operations.repository import (
     OperationNotFound,
     OperationNotRetryable,
     OperationRecord,
+    RemovalRecoveryConflict,
     RetryRequiresPlanning,
 )
 from oam.operations.state import OperationStatus as StoredOperationStatus
@@ -893,6 +895,20 @@ def _register_reserved_routes(
             )
         )
 
+    @app.delete("/v1/users/{user_id}/memories/{memory_id}", status_code=202, tags=["Memory"])
+    def delete_memory(request: Request, user_id: str, memory_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).delete_memory(request.state.actor, user_id, memory_id)
+        )
+
+    @app.delete("/v1/users/{user_id}/insights/{insight_id}", status_code=202, tags=["Memory"])
+    def delete_insight(request: Request, user_id: str, insight_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).delete_insight(
+                request.state.actor, user_id, insight_id
+            )
+        )
+
     @app.post("/v1/recall", tags=["Recall"])
     def search(request: Request, body: RecallRequest) -> dict:
         _validate_limits(body, config)
@@ -1000,6 +1016,21 @@ def _register_reserved_routes(
                 operation_id,
                 idempotency_key,
             )
+        )
+
+    @app.post(
+        "/v1/users/{user_id}/operations/{operation_id}/recover",
+        response_model=OperationResponse,
+        tags=["Operations"],
+    )
+    def recover_removal_operation(
+        request: Request,
+        user_id: str,
+        operation_id: str,
+    ) -> OperationResponse:
+        active_runtime = _require_runtime(runtime)
+        return _operation_call(
+            lambda: active_runtime.recover(request.state.actor, user_id, operation_id)
         )
 
     @app.post(
@@ -1176,6 +1207,8 @@ def _content_call(call):
         raise HTTPException(409, detail={"code": type(exc).__name__}) from exc
     except SourceNotFound as exc:
         raise HTTPException(404, detail={"code": "SourceUnavailable"}) from exc
+    except RemovalNotFound as exc:
+        raise HTTPException(404, detail={"code": "MemoryUnavailable"}) from exc
     except TraceNotFound as exc:
         raise HTTPException(404, detail={"code": "TraceUnavailable"}) from exc
     except ExportNotFound as exc:
@@ -1266,6 +1299,7 @@ def _operation_call(call) -> OperationResponse:
         OperationNotRetryable,
         OperationIdempotencyConflict,
         RetryRequiresPlanning,
+        RemovalRecoveryConflict,
         AttemptOwnershipMismatch,
     ) as exc:
         raise HTTPException(
