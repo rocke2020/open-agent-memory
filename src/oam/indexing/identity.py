@@ -48,7 +48,9 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
         "chunk": config.chunk.ingestion.model_dump(mode="json"),
         "extraction": extraction,
         "resource_max_output_tokens": config.resource.max_output_tokens,
-        "index": config.index.model_dump(mode="json"),
+        "index": config.index.model_dump(
+            mode="json", exclude={"insight_consolidation_delay_seconds"}
+        ),
         "roles": roles,
     }
     return (

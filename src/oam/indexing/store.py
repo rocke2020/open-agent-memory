@@ -24,7 +24,6 @@ from oam.db.context import bind_user
 from oam.workers.claims import RENEW_LEASE_SQL, ClaimedWork
 
 MEMORY_REVISION = 1
-CONSOLIDATION_DELAY_SECONDS = 8 * 60 * 60
 _INDEXING_CONNECTION_SLOTS: dict[tuple[str, int], BoundedSemaphore] = {}
 _INDEXING_CONNECTION_SLOTS_LOCK = Lock()
 
@@ -640,7 +639,7 @@ class IndexStore:
                         consolidation_id,
                         self.source["input_digest"],
                         self.generation_id,
-                        CONSOLIDATION_DELAY_SECONDS,
+                        self.config.index.insight_consolidation_delay_seconds,
                         self.config.retry.max_attempts,
                         l2_priority_at,
                     ),

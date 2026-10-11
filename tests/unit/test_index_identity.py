@@ -36,6 +36,18 @@ def test_default_grouping_uses_a_distinct_generation_from_singletons():
     assert index_generation(config, {}) != index_generation(singleton, {})
 
 
+def test_insight_consolidation_delay_does_not_invalidate_indexed_content():
+    from oam.indexing.identity import index_generation
+
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
+    tuned = config.model_copy(
+        update={
+            "index": config.index.model_copy(update={"insight_consolidation_delay_seconds": 7200})
+        }
+    )
+    assert index_generation(config, {}) == index_generation(tuned, {})
+
+
 def test_resource_completion_budget_invalidates_generated_resource_checkpoints():
     from oam.indexing.identity import index_generation
 

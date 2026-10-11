@@ -3,6 +3,7 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 from threading import Event
 from time import perf_counter
@@ -514,19 +515,28 @@ def test_semantic_settlement_preserves_direct_usage_with_completed_consolidation
         assert after == before
 
 
-@pytest.mark.parametrize("direct_store", [{"insights_enabled": True}], indirect=True)
-def test_semantic_completion_preserves_scheduled_consolidation(direct_store):
+@pytest.mark.parametrize(
+    ("direct_store", "expected_delay_seconds"),
+    [
+        ({"insights_enabled": True}, 86400),
+        ({"insights_enabled": True, "insight_consolidation_delay_seconds": 7200}, 7200),
+    ],
+    indirect=["direct_store"],
+)
+def test_semantic_completion_preserves_scheduled_consolidation(
+    direct_store, expected_delay_seconds
+):
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"], schedule_consolidation=True)
     with psycopg.connect(fixture.dsn) as connection:
+        before = connection.execute("SELECT clock_timestamp()").fetchone()[0]
+        fixture.store.finish(semantic_seed_ids=["seed"], schedule_consolidation=True)
+        after = connection.execute("SELECT clock_timestamp()").fetchone()[0]
         child = connection.execute(
             "SELECT operation_id,available_at,status FROM work_units WHERE stage='consolidate'"
         ).fetchone()
         assert child[2] == "queued"
-        assert connection.execute(
-            "SELECT available_at>clock_timestamp()+interval '7 hours' FROM work_units "
-            "WHERE stage='consolidate'"
-        ).fetchone()[0]
+        delay = timedelta(seconds=expected_delay_seconds)
+        assert before + delay <= child[1] <= after + delay
     assert run_semantic(fixture)
     with psycopg.connect(fixture.dsn) as connection:
         assert connection.execute(

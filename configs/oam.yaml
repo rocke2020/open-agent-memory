@@ -124,6 +124,8 @@ search:
 index:
   # L2 Insight synthesis is independently configurable; Profile may consume L2 when enabled.
   insights_enabled: true
+  # Delay from direct L1 completion to newly queued L2 consolidation (24 hours).
+  insight_consolidation_delay_seconds: 86400
   embedding_dimensions: 1024
   # Create index-time semantic links only above this cosine similarity.
   semantic_link_min_similarity: 0.7
