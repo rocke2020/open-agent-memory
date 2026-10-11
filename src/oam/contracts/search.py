@@ -60,10 +60,21 @@ class SearchIncludeOptions(FrozenContract):
 
 class SearchOutputOptions(FrozenContract):
     recall_level: RecallLevel = RecallLevel.MID
+    fast_graph: bool = Field(
+        default=False,
+        strict=True,
+        description="Opt in to stored entity/alias and causal graph expansion in fast mode.",
+    )
     max_context_tokens: PositiveInt | None = None
     include: SearchIncludeOptions = Field(default_factory=SearchIncludeOptions)
     allow_partial: bool = False
     deadline_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def require_fast_for_graph_option(self) -> "SearchOutputOptions":
+        if self.fast_graph and self.recall_level != RecallLevel.FAST:
+            raise ValueError("fast_graph requires recall_level=fast")
+        return self
 
     @field_validator("deadline_at")
     @classmethod

@@ -48,7 +48,7 @@ Step 8.3 inspection requires authorized L1/L2 support and Resource original/loca
 
 ## 6. Complete Release Gate
 
-v0.0.1 extends the completed core, Evidence and L3 gates to batch/planner integration over the fast/mid/deep core, source revision/deletion, explain/diff/recorded replay, portable export, browser/API parity, multi-API/multi-worker recovery, and external OAMB screening. The final candidate image is built for Linux AMD64 and ARM64 and the complete matrix reruns against its immutable digest before source/image publication.
+v0.0.1 extends the completed core, Evidence and L3 gates to batch/planner integration over the fast/mid/deep core, source revision/deletion, explain/diff/recorded replay, portable export, browser/API parity, multi-API/multi-worker recovery, and external benchmark screening. The final candidate image is built for Linux AMD64 and ARM64 and the complete matrix reruns against its immutable digest before source/image publication.
 
 LME-60 alone does not complete release evaluation. BEAM 10M is an additional required gate: index all ten official complete conversations and evaluate all 200 questions through public OAM fast recall using a versioned answer-generation and rubric-scoring protocol. Freeze input, evaluator, product, model and configuration identities; preserve source dates and the approved single date imputation. Disable Insights and Profiles only in the isolated benchmark configuration and use a 15,000 estimated-token recall request budget. Their separate positive product gates remain required.
 

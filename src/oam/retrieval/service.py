@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -16,7 +16,9 @@ from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.contracts.search import SearchRequest, TimeBasis
 from oam.retrieval.algorithms import (
+    GraphEdge,
     TimeRange,
+    ordinary_graph_activation,
     reciprocal_rank_fusion,
     select_temporal_seeds,
     temporal_spread,
@@ -26,6 +28,7 @@ from oam.retrieval.context import (
     assemble_context,
     pack_ranked,
     render_context,
+    render_item,
     source_diverse_seed_order,
     source_window_ids,
 )
@@ -55,7 +58,16 @@ class RecallService:
             connection.transaction(),
         ):
             yield RecallRepository(
-                connection, authority, self.config, deadline=deadline, request=request
+                connection,
+                authority,
+                self.config,
+                deadline=deadline,
+                request=request,
+                read_committed=(
+                    request.recall_level.value == "fast"
+                    and not request.allow_partial
+                    and request.time_window is None
+                ),
             )
 
     def search(
@@ -65,6 +77,10 @@ class RecallService:
         *,
         deadline_at: datetime | None = None,
     ) -> dict:
+        with ExitStack() as sql_phase:
+            return self._search(authority, request, deadline_at=deadline_at, sql_phase=sql_phase)
+
+    def _search(self, authority, request, *, deadline_at, sql_phase: ExitStack) -> dict:
         request.validate_limits(self.config)
         if request.include.chunks is not None:
             raise NotImplementedError("separate recalled chunks are unavailable")
@@ -72,6 +88,7 @@ class RecallService:
             raise ValueError("query exceeds configured token limit")
         started = time.monotonic()
         mode = request.recall_level.value
+        fast_graph = mode == "fast" and request.fast_graph
         deadline = started + getattr(self.config.recall, f"{mode}_deadline_seconds")
         if deadline_at is not None:
             if deadline_at.utcoffset() is None:
@@ -99,8 +116,22 @@ class RecallService:
                 )
         timing["query_time"] = (time.monotonic() - time_started) * 1000
         _remaining(deadline)
+        shared_repository = None
+        sql_phase_ready = False
 
         def read(method, *args):
+            nonlocal shared_repository
+            if (
+                sql_phase_ready
+                and mode == "fast"
+                and not request.allow_partial
+                and request.time_window is None
+            ):
+                if shared_repository is None:
+                    shared_repository = sql_phase.enter_context(
+                        self._repository(authority, request, deadline)
+                    )
+                return getattr(shared_repository, method)(*args)
             with self._repository(authority, request, deadline) as repository:
                 return getattr(repository, method)(*args)
 
@@ -148,6 +179,7 @@ class RecallService:
                 lambda: self.models.embed((request.query,), timeout_seconds=_remaining(deadline)),
             )
             lexical, anchors = text_future.result(timeout=_remaining(deadline))
+        sql_phase_ready = True
         arms["lexical"] = tuple(
             dict.fromkeys(
                 (*[row["unit_id"] for row in anchors], *[row["unit_id"] for row in lexical])
@@ -159,7 +191,7 @@ class RecallService:
             usage["embedding"] = embedding.usage.model_dump(mode="json")
             pool_limit = (
                 tier.channel_candidates
-                if mode == "fast"
+                if mode == "fast" and not fast_graph
                 else max(tier.channel_candidates, self.config.search.graph_seed_max)
             )
             dense_pool = stage("dense", lambda: read("dense", vector, pool_limit)) or []
@@ -171,6 +203,13 @@ class RecallService:
                 if row["kind"] == "fact"
                 and row["score"] >= self.config.search.graph_seed_min_similarity
             )[: self.config.search.graph_seed_max]
+            if fast_graph and seeds:
+                expansion = stage("graph", lambda: read("fast_graph", seeds, vector))
+                if expansion is not None:
+                    ranks, evidence = expansion
+                    arms["graph"] = ranks
+                    for node_id, node_paths in evidence.items():
+                        paths.setdefault(node_id, []).extend(node_paths)
             if mode != "fast":
 
                 def record_expansion(name, result):
@@ -283,19 +322,52 @@ class RecallService:
                 path["arm"]
                 for node_id, group in paths.items()
                 for path in group
-                if path not in current[node_id]
+                if not any(
+                    {key: value for key, value in path.items() if key != "alias_witnesses"}
+                    == {key: value for key, value in checked.items() if key != "alias_witnesses"}
+                    for checked in current[node_id]
+                )
             }
             if changed:
                 if not request.allow_partial:
                     raise RecallUnavailable("graph support changed during recall")
                 for name in changed:
-                    arms.pop(name, None)
+                    arms[name] = tuple(
+                        node_id
+                        for node_id in arms.get(name, ())
+                        if any(path["arm"] == name for path in current.get(node_id, ()))
+                    )
                     degraded.append(f"{name}_revalidation")
-                current = {
-                    node_id: [path for path in group if path["arm"] not in changed]
-                    for node_id, group in current.items()
-                }
             paths = current
+            if "graph" in changed:
+                rescore_graph_paths()
+
+        def rescore_graph_paths():
+            groups = {
+                node: [path for path in paths.get(node, ()) if path["arm"] == "graph"]
+                for node in arms.get("graph", ())
+            }
+            activation = ordinary_graph_activation(
+                seeds,
+                entity_matches={
+                    node: {path["entity"] for path in group if path["relation"] == "entity"}
+                    for node, group in groups.items()
+                },
+                semantic_edges=tuple(
+                    GraphEdge(path["nodes"][0], node, path["score"])
+                    for node, group in groups.items()
+                    for path in group
+                    if path["relation"] == "semantic"
+                ),
+                causal_edges=(),
+            )
+            scores = {candidate.node_id: candidate.score for candidate in activation}
+            for node, group in groups.items():
+                scores[node] = scores.get(node, 0) + max(
+                    (path["score"] for path in group if path["relation"] == "caused_by"),
+                    default=0,
+                )
+            arms["graph"] = tuple(sorted(scores, key=lambda node: (-scores[node], node)))
 
         def fused_ids():
             weights = (
@@ -311,6 +383,18 @@ class RecallService:
             )
 
         rerank_scores = None
+
+        def final_order():
+            identifiers = fused_ids()
+            if rerank_scores is not None:
+                identifiers = tuple(
+                    sorted(
+                        (node for node in identifiers if node in rerank_scores),
+                        key=lambda node: (-rerank_scores[node], node),
+                    )
+                )
+            return identifiers
+
         if mode != "fast" and self.config.models.reranker is not None:
             validate_paths()
             rows = read("hydrate", fused_ids())[: tier.rerank_candidates]
@@ -329,14 +413,7 @@ class RecallService:
                     )
                     usage["rerank"] = scored.usage.model_dump(mode="json")
         validate_paths()
-        final_ids = fused_ids()
-        if rerank_scores is not None:
-            final_ids = tuple(
-                sorted(
-                    (node for node in final_ids if node in rerank_scores),
-                    key=lambda node: (-rerank_scores[node], node),
-                )
-            )
+        final_ids = final_order()
         related = (
             stage("related_user_fact", lambda: read("related_user_fact", final_ids))
             if vector is not None and final_ids and len(final_ids) < tier.fused_candidates
@@ -352,12 +429,31 @@ class RecallService:
         if index_state["parse_partial"] and not request.allow_partial:
             raise RecallUnavailable("PDF parse became incomplete during recall")
         hydrated = read("hydrate", final_ids)
+        hydrated_passages = {row["unit_id"]: row for row in hydrated if row["kind"] == "passage"}
         budget = request.max_context_tokens or self.config.context.default_tokens
         candidates = []
+        alias_budget_changed = False
         for row in hydrated:
             item = {key: value for key, value in row.items() if key != "locator"}
             item["paths"] = paths.get(item["unit_id"], [])
+            if any(path.get("alias_witnesses") for path in item["paths"]) and (
+                estimated_tokens(estimate_units(render_item(item))) > budget
+            ):
+                item["paths"] = [path for path in item["paths"] if not path.get("alias_witnesses")]
+                paths[item["unit_id"]] = item["paths"]
+                if not any(path["arm"] == "graph" for path in item["paths"]):
+                    arms["graph"] = tuple(
+                        node for node in arms.get("graph", ()) if node != item["unit_id"]
+                    )
+                alias_budget_changed = True
             candidates.append(item)
+        if alias_budget_changed:
+            rescore_graph_paths()
+            final_ids = final_order()
+            if related_tail_id is not None and related_tail_id not in final_ids:
+                final_ids = (*final_ids, related_tail_id)
+            by_id = {item["unit_id"]: item for item in candidates}
+            candidates = [by_id[node] for node in final_ids if node in by_id]
         seed_budget = min(budget, self.config.context.source_seed_tokens)
         context_costs = ContextUnitCosts()
         seed_limit = min(tier.source_seed_results, tier.max_results)
@@ -439,7 +535,15 @@ class RecallService:
                 expanded_detail_ids = expanded_detail_ids[: len(RELATED_SOURCE_WINDOW_OFFSETS)]
                 detail_ids = list(dict.fromkeys((*expanded_detail_ids, *original_detail_ids)))
             if detail_ids:
-                for row in read("hydrate", detail_ids):
+                missing_ids = [node for node in detail_ids if node not in hydrated_passages]
+                if missing_ids:
+                    hydrated_passages.update(
+                        (row["unit_id"], row) for row in read("hydrate", missing_ids)
+                    )
+                for node in detail_ids:
+                    row = hydrated_passages.get(node)
+                    if row is None:
+                        continue
                     item = {key: value for key, value in row.items() if key != "locator"}
                     item["paths"] = paths.get(item["unit_id"], [])
                     source_passages.append(item)
@@ -525,8 +629,6 @@ class RecallService:
         if context_tokens > budget:
             raise RecallUnavailable("rendered context exceeds requested token estimate")
         _remaining(deadline)
-        if read("user_state")["policy_epoch"] != initial_index_state["policy_epoch"]:
-            raise RecallUnavailable("source policy changed during recall")
         result = {
             "items": items,
             "context": context,
@@ -625,6 +727,7 @@ class RecallService:
             },
             "diagnostics": result["diagnostics"],
         }
+        _remaining(deadline)
         if not read(
             "record_trace", trace_id, initial_index_state["policy_epoch"], decisions, result
         ):

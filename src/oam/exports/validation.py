@@ -8,6 +8,9 @@ from collections import Counter
 from pathlib import Path
 
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+ENTITY_RECORD_KINDS = frozenset(
+    {"entity", "entity_name", "entity_name_support", "entity_membership"}
+)
 
 
 class ExportValidationError(ValueError):
@@ -32,6 +35,125 @@ def _verified_member(root: Path, descriptor: dict, expected_path: str, label: st
     return content
 
 
+def _validate_entity_records(records: list[dict], generation: str | None) -> None:
+    selected = [record for record in records if record["kind"] in ENTITY_RECORD_KINDS]
+    if not selected:
+        return
+    if not isinstance(generation, str) or not generation.strip():
+        raise ExportValidationError("entity generation is missing")
+
+    def indexed(kind: str, field: str) -> dict[str, dict]:
+        result = {}
+        for record in selected:
+            if record["kind"] != kind:
+                continue
+            identifier = record[field]
+            if not isinstance(identifier, str) or not identifier.strip() or identifier in result:
+                raise ExportValidationError("entity record identity is invalid or duplicated")
+            result[identifier] = record
+        return result
+
+    entities = indexed("entity", "entity_id")
+    names = indexed("entity_name", "name_id")
+    indexed("entity_name_support", "support_id")
+    memberships = [record for record in selected if record["kind"] == "entity_membership"]
+    memories = {record["memory_id"]: record for record in records if record["kind"] == "memory"}
+    passages = {record["passage_id"]: record for record in records if record["kind"] == "passage"}
+    fact_support = {
+        (record["memory_id"], record["passage_id"]): record.get("span")
+        for record in records
+        if record["kind"] == "support"
+    }
+    for record in selected:
+        if record["generation_id"] != generation:
+            raise ExportValidationError("entity generation differs from manifest")
+    for entity in entities.values():
+        if not isinstance(entity["canonical_name"], str) or not entity["canonical_name"].strip():
+            raise ExportValidationError("entity canonical name is invalid")
+    for name_record in names.values():
+        if (
+            name_record["entity_id"] not in entities
+            or name_record["name_kind"] not in {"canonical", "alias"}
+            or any(
+                not isinstance(name_record[key], str) or not name_record[key].strip()
+                for key in ("name_text", "name_key")
+            )
+        ):
+            raise ExportValidationError("entity name identity or kind is invalid")
+
+    supported_names = set()
+    for support in selected:
+        if support["kind"] != "entity_name_support":
+            continue
+        name = names.get(support["name_id"])
+        memory = memories.get(support["memory_id"])
+        passage = passages.get(support["passage_id"])
+        quote = support["quote"]
+        span = fact_support.get((support["memory_id"], support["passage_id"]))
+        if (
+            name is None
+            or name["entity_id"] != support["entity_id"]
+            or name["name_kind"] != support["support_kind"]
+            or memory is None
+            or memory.get("generation_id") != generation
+            or (support["memory_id"], support["passage_id"]) not in fact_support
+            or passage is None
+            or not isinstance(passage.get("text"), str)
+            or not isinstance(quote, str)
+            or not quote.strip()
+            or quote not in passage["text"]
+            or not isinstance(span, dict)
+            or not isinstance(span.get("quote"), str)
+            or quote not in span["quote"]
+        ):
+            raise ExportValidationError("entity name support reference or quote is invalid")
+        anchor = support["anchor_name_id"]
+        if support["support_kind"] == "canonical":
+            if anchor is not None:
+                raise ExportValidationError("entity canonical support cannot have an alias anchor")
+        elif (
+            anchor not in names
+            or names[anchor]["name_kind"] != "canonical"
+            or names[anchor]["entity_id"] != support["entity_id"]
+        ):
+            raise ExportValidationError("entity alias anchor is invalid")
+        supported_names.add(support["name_id"])
+    if set(names) != supported_names or set(entities) != {
+        name["entity_id"] for name in names.values()
+    }:
+        raise ExportValidationError("entity name or identity lacks source support")
+
+    seen_memberships = set()
+    for member in memberships:
+        name = names.get(member["name_id"])
+        memory = memories.get(member["memory_id"])
+        identity = (member["unit_id"], member["entity_id"])
+        quote = member["mention_quote"]
+        if (
+            identity in seen_memberships
+            or not isinstance(member["unit_id"], str)
+            or not member["unit_id"].strip()
+            or name is None
+            or name["entity_id"] != member["entity_id"]
+            or memory is None
+            or memory.get("generation_id") != generation
+            or not isinstance(member["observed_mention"], str)
+            or not member["observed_mention"].strip()
+            or not isinstance(quote, str)
+            or not quote.strip()
+            or not any(
+                quote in passages[passage_id].get("text", "")
+                and isinstance(span, dict)
+                and isinstance(span.get("quote"), str)
+                and quote in span["quote"]
+                for (memory_id, passage_id), span in fact_support.items()
+                if memory_id == member["memory_id"] and passage_id in passages
+            )
+        ):
+            raise ExportValidationError("entity membership reference or quote is invalid")
+        seen_memberships.add(identity)
+
+
 def validate_directory(path: str | Path) -> dict[str, int]:
     root = Path(path)
     manifest_path = root / "manifest.json"
@@ -43,7 +165,7 @@ def validate_directory(path: str | Path) -> dict[str, int]:
             raise ExportValidationError("unsupported export format version")
         parts = manifest["parts"]
         originals = manifest["originals"]
-        all_records = []
+        all_records: list[dict] = []
         records_hash = hashlib.sha256()
         for index, descriptor in enumerate(parts):
             if descriptor["index"] != index:
@@ -94,7 +216,7 @@ def validate_directory(path: str | Path) -> dict[str, int]:
             for record in all_records
             if record["kind"] == "support"
         }
-        insight_members = {}
+        insight_members: dict[tuple[str, int], set[str]] = {}
         for record in all_records:
             if record["kind"] == "insight_support":
                 insight_members.setdefault(
@@ -116,8 +238,8 @@ def validate_directory(path: str | Path) -> dict[str, int]:
             "freshness": profiles[0]["freshness"],
         }:
             raise ExportValidationError("Profile manifest does not match records")
-        memory_support = Counter()
-        insight_support = {}
+        memory_support: Counter[str] = Counter()
+        insight_support: dict[tuple[str, int], set[str]] = {}
         for record in all_records:
             if record["kind"] == "source":
                 index = record["original_index"]
@@ -252,12 +374,13 @@ def validate_directory(path: str | Path) -> dict[str, int]:
                                 valid = False
                             if not valid:
                                 raise ExportValidationError("Profile support is missing")
-            elif record["kind"] not in {"memory", "insight"}:
+            elif record["kind"] not in {"memory", "insight"} | ENTITY_RECORD_KINDS:
                 raise ExportValidationError("unsupported export record kind")
         if any(memory_support[memory_id] == 0 for memory_id in memory_ids):
             raise ExportValidationError("memory support is missing")
         if any(len(insight_support.get(insight_id, ())) < 2 for insight_id in insight_ids):
             raise ExportValidationError("Insight support is incomplete")
+        _validate_entity_records(all_records, manifest.get("generation_id"))
         return counts
     except (KeyError, TypeError, UnicodeError, json.JSONDecodeError, OSError) as exc:
         raise ExportValidationError("export manifest or records are invalid") from exc

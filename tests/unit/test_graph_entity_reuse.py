@@ -1,28 +1,36 @@
-"""Graph entity candidates are shared across seeds before per-seed exclusion."""
+"""Each stored entity identity supplies at most one shared-entity signal."""
 
-import time
 from pathlib import Path
 
 from oam.config import load_config
-from oam.contracts.search import SearchRequest
 from oam.retrieval.repository import RecallRepository
 
 
-def test_graph_reads_each_distinct_entity_candidate_set_once():
-    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+def test_repeated_alias_paths_do_not_outvote_two_distinct_shared_entity_ids():
     repository = object.__new__(RecallRepository)
-    repository.config = config
-    repository.request = SearchRequest(query="Where is my book?", recall_level="mid")
-    repository.deadline = time.monotonic() + 5
+    repository.config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     repository._has_insights = False
     repository._eligible = lambda **kwargs: "WITH filtered AS (SELECT 1) "
-    statements = []
-    repository._execute = lambda sql, parameters: statements.append(sql) or []
+    graph_rows = []
+    for seed, target, entity, names in (
+        ("seed_a", "one_entity", "entity_1", ["full_name", "abbreviation"]),
+        ("seed_b", "one_entity", "entity_1", ["abbreviation", "abbreviation"]),
+        ("seed_a", "two_entities", "entity_2", ["name_2", "name_2"]),
+        ("seed_b", "two_entities", "entity_3", ["name_3", "name_3"]),
+    ):
+        graph_rows.append(
+            {
+                "source": "entity",
+                "seed_id": seed,
+                "unit_id": target,
+                "entity_key": entity,
+                "entity_evidence": {"name_ids": names, "alias_witnesses": []},
+            }
+        )
+    repository._execute = lambda sql, parameters: graph_rows
 
-    assert repository.ordinary(("seed_a", "seed_b"), (1.0,)) == ((), {})
-    statement = statements[0]
-    assert "seed_entities AS MATERIALIZED" in statement
-    assert "entity_candidates AS MATERIALIZED" in statement
-    assert "SELECT DISTINCT entity_key FROM seed_entities" in statement
-    assert "LIMIT %(per_entity)s+1" in statement
-    assert "c.unit_id<>s.seed_id" in statement
+    ranked, paths = repository.ordinary(("seed_a", "seed_b"), (1.0,))
+
+    assert ranked == ("two_entities", "one_entity")
+    assert {path["entity"] for path in paths["one_entity"]} == {"entity_1"}
+    assert len(paths["one_entity"]) == 2

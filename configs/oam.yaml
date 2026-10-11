@@ -141,6 +141,15 @@ search:
     max_results: 96
 
 index:
+  # Maximum UTF-8 bytes for both the original entity name and its normalized lookup key.
+  entity_name_max_bytes: 1024
+  # Maximum existing entities proposed by name matching for extraction references.
+  entity_resolution_candidates: 32
+  # Supported names/aliases offered per entity during candidate selection and reference assembly.
+  entity_search_names_per_entity: 4
+  # Entity-name rank normalization: 0 = none, 1 = divide by 1 + log(name length),
+  # 2 = divide by name length; length is indexed text length, not UTF-8 bytes.
+  entity_search_rank_normalization: 0
   # L2 Insight synthesis is independently configurable; Profile may consume L2 when enabled.
   insights_enabled: true
   # Vector length required from the embedding model; must match the database schema.

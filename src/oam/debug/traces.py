@@ -7,12 +7,31 @@ import hashlib
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
+from oam.db.entity_eligibility import ELIGIBLE_ENTITY_NAME_SUPPORT
 from oam.retrieval.context import render_context
 from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 
 class TraceNotFound(LookupError):
     """No retained trace is available to this user."""
+
+
+def recorded_alias_witnesses(result: dict) -> list[dict]:
+    return [
+        witness
+        for item in result.get("items", ())
+        for path in item.get("paths", ())
+        for witness in path.get("alias_witnesses", ())
+    ]
+
+
+def recorded_path_nodes(result: dict) -> set[str]:
+    return {
+        node
+        for item in result.get("items", ())
+        for path in item.get("paths", ())
+        for node in path.get("nodes", ())
+    }
 
 
 class TraceRepository:
@@ -55,6 +74,7 @@ class TraceRepository:
                 item_id for ids in decisions.get("arms", {}).values() for item_id in ids
             }
             candidate_ids.update(item["unit_id"] for item in result.get("items", []))
+            candidate_ids.update(recorded_path_nodes(result))
             if candidate_ids:
                 rows = connection.execute(
                     f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}) "
@@ -62,6 +82,20 @@ class TraceRepository:
                     (list(candidate_ids),),
                 ).fetchall()
                 if {item[0] for item in rows} != candidate_ids:
+                    return {"trace_id": trace_id, "status": "policy_redacted"}
+            witnesses = recorded_alias_witnesses(result)
+            if witnesses:
+                rows = connection.execute(
+                    f"WITH bindings AS NOT MATERIALIZED ({ELIGIBLE_ENTITY_NAME_SUPPORT}) "
+                    "SELECT jsonb_build_object('support_id',support_id,'name_id',name_id,"
+                    "'entity_id',entity_id,'quote',quote,'citation',jsonb_build_object("
+                    "'source_id',source_id,'source_version',source_version,"
+                    "'span',locator||jsonb_build_object('quote',quote))) FROM bindings "
+                    "WHERE support_id=ANY(%s) AND support_kind='alias'",
+                    ([witness["support_id"] for witness in witnesses],),
+                ).fetchall()
+                current = {row[0]["support_id"]: row[0] for row in rows}
+                if any(current.get(witness["support_id"]) != witness for witness in witnesses):
                     return {"trace_id": trace_id, "status": "policy_redacted"}
             final = connection.execute(
                 "SELECT policy_epoch FROM users WHERE tenant_id=%s AND user_id=%s "

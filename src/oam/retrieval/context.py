@@ -1,22 +1,51 @@
 """Deterministic context rendering shared by recall and recorded replay."""
 
 import json
+from datetime import datetime
 
 from oam.quotes import unique_quote
 from oam.tokens import estimate_units, estimated_tokens
 
 
 def render_context(items: list[dict]) -> str:
-    """Render all admitted facts beside their selected originals, retaining metadata ownership."""
-    blocks = []
+    """Render compact references within conservative standalone packing costs."""
+    references = {item["unit_id"]: str(index) for index, item in enumerate(items, 1)}
+    sources = {}
+    for item in items:
+        for citation in item["citations"]:
+            if isinstance(source := citation.get("source_id"), str):
+                sources.setdefault(source, f"S{len(sources) + 1}")
+    blocks, compact_blocks = [], []
     for group in _source_groups(items):
         passage = group[-1] if len(group) > 1 and group[-1]["kind"] == "passage" else None
         source_id = passage["unit_id"] if passage is not None else None
         ordered = [passage, *group[:-1]] if passage is not None else group
-        blocks.extend(
-            render_item(item, source_id if item["kind"] == "fact" else None) for item in ordered
-        )
-    return "\n\n".join(blocks)
+        for item in ordered:
+            fact_source = source_id if item["kind"] == "fact" else None
+            blocks.append(render_item(item, fact_source))
+            compact_blocks.append(
+                _render_compact_item(item, references, sources, passage if fact_source else None)
+            )
+    legacy = "\n\n".join(blocks)
+    compact = "\n\n".join(compact_blocks)
+    return compact if estimate_units(compact) <= estimate_units(legacy) else legacy
+
+
+def _render_compact_item(item, references, sources, passage):
+    header = f"[{references[item['unit_id']]}] {item['kind']} {item['origin']}"
+    inherited_time = bool(
+        passage and item["time_evidence"] and item["time_evidence"] == passage["time_evidence"]
+    )
+    if passage:
+        header += f" source=[{references[passage['unit_id']]}]"
+    if inherited_time:
+        header += " time=source"
+    rendered = header + "\n" + item["text"]
+    if passage is None:
+        rendered += "\n" + _render_citations(item["citations"], sources)
+    if item["time_evidence"] and not inherited_time:
+        rendered += "\n" + _render_time(item["time_evidence"], compact=True)
+    return rendered + _render_aliases(item, sources)
 
 
 def render_item(item: dict, source_id: str | None = None) -> str:
@@ -26,10 +55,23 @@ def render_item(item: dict, source_id: str | None = None) -> str:
     rendered = f"[{item['unit_id']}] {item['kind']} {item['origin']}\n{item['text']}\n{reference}"
     if item["time_evidence"]:
         rendered += "\n" + _render_time(item["time_evidence"])
+    return rendered + _render_aliases(item)
+
+
+def _render_aliases(item: dict, sources: dict | None = None) -> str:
+    rendered = ""
+    witnesses = {}
+    for path in item.get("paths", ()):
+        for witness in path.get("alias_witnesses", ()):
+            witnesses.setdefault(witness["support_id"], witness)
+    for witness in witnesses.values():
+        rendered += (
+            f"\nAlias: {witness['quote']!r} ({_render_citations([witness['citation']], sources)})"
+        )
     return rendered
 
 
-def _render_citations(citations: list[dict]) -> str:
+def _render_citations(citations: list[dict], sources: dict | None = None) -> str:
     chat = []
     for citation in citations:
         locator = citation.get("span", citation)
@@ -42,8 +84,9 @@ def _render_citations(citations: list[dict]) -> str:
             or ("span" in citation and not isinstance(locator.get("quote"), str))
         ):
             break
+        source_id = (sources or {}).get(citation["source_id"], citation["source_id"])
         reference = (
-            f"{citation['source_id']}@{citation['source_version']} "
+            f"{source_id}@{citation['source_version']} "
             f"{locator['role']} message:{locator['message_id']}"
         )
         if "span" in citation:
@@ -56,25 +99,42 @@ def _render_citations(citations: list[dict]) -> str:
     )
 
 
-def _render_time(entries: list[dict]) -> str:
+def _render_time(entries: list[dict], *, compact: bool = False) -> str:
     if any(
         not isinstance(entry, dict) or not isinstance(entry.get("role"), str) for entry in entries
     ):
         return "Time: " + json.dumps(
             entries, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
-    return "Time: " + "; ".join(
-        " ".join(
-            [
-                entry["role"],
-                *(f"{key}={_time_value(value)}" for key, value in entry.items() if key != "role"),
-            ]
-        )
-        for entry in entries
-    )
+    parts = []
+    for entry in entries:
+        if compact and set(entry) == {"role", "at"}:
+            parts.append(f"{entry['role']}={_time_value(entry['at'], utc=True)}")
+        else:
+            parts.append(
+                " ".join(
+                    [
+                        entry["role"],
+                        *(
+                            f"{key}={_time_value(value, utc=compact and key == 'at')}"
+                            for key, value in entry.items()
+                            if key != "role"
+                        ),
+                    ]
+                )
+            )
+    return "Time: " + "; ".join(parts)
 
 
-def _time_value(value: object) -> str:
+def _time_value(value: object, *, utc: bool = False) -> str:
+    if utc and isinstance(value, str) and value.endswith("+00:00"):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            pass
+        else:
+            if parsed.tzinfo is not None and parsed.utcoffset().total_seconds() == 0:
+                value = value[:-6] + "Z"
     if isinstance(value, str) and not any(ch.isspace() or ch == ";" for ch in value):
         return value
     return repr(value)
@@ -140,7 +200,7 @@ class ContextUnitCosts:
 
 
 class ContextUnits:
-    """Maintain the exact rendered estimate while ranked items are appended."""
+    """Maintain the conservative standalone estimate while ranked items are appended."""
 
     def __init__(
         self, initial: list[dict], pool: list[dict], costs: ContextUnitCosts | None = None

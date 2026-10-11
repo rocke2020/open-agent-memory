@@ -10,20 +10,102 @@ from psycopg_pool import ConnectionPool
 
 from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
+from oam.db.entity_eligibility import (
+    ELIGIBLE_ENTITY_MEMBERSHIPS,
+    ELIGIBLE_ENTITY_NAME_SUPPORT,
+)
+from oam.debug.traces import recorded_alias_witnesses, recorded_path_nodes
 from oam.indexing.store import input_digest
 from oam.workers.claims import ClaimedWork
 
 
-def affected_trace_ids(rows, removed_unit_ids):
+def affected_trace_ids(rows, removed_unit_ids, removed_support_ids=()):
     removed = set(removed_unit_ids)
+    removed_support = set(removed_support_ids)
     affected = []
-    for trace_id, decisions in rows:
+    for row in rows:
+        trace_id, decisions = row[:2]
         candidates = set(decisions.get("result_ids", ()))
         for arm_ids in decisions.get("arms", {}).values():
             candidates.update(arm_ids)
-        if candidates & removed:
+        candidates.update(recorded_path_nodes(row[2] or {}) if len(row) > 2 else ())
+        witnesses = recorded_alias_witnesses(row[2] or {}) if len(row) > 2 else ()
+        if candidates & removed or any(w["support_id"] in removed_support for w in witnesses):
             affected.append(trace_id)
     return affected
+
+
+def _entity_cleanup_inputs(connection, key, memory_ids, unit_ids):
+    entity_ids = [
+        row[0]
+        for row in connection.execute(
+            "SELECT n.entity_id FROM entity_names n JOIN entity_name_support sp "
+            "USING(tenant_id,user_id,name_id) WHERE n.tenant_id=%s AND n.user_id=%s "
+            "AND sp.memory_id=ANY(%s) UNION SELECT entity_id FROM unit_entities "
+            "WHERE tenant_id=%s AND user_id=%s AND unit_id=ANY(%s) AND entity_id IS NOT NULL",
+            (*key, memory_ids, *key, unit_ids),
+        ).fetchall()
+    ]
+    support_ids = {
+        row[0]
+        for row in connection.execute(
+            "SELECT sp.support_id FROM entity_name_support sp JOIN entity_names n "
+            "USING(tenant_id,user_id,name_id) WHERE n.tenant_id=%s AND n.user_id=%s "
+            "AND n.entity_id=ANY(%s)",
+            (*key, entity_ids),
+        ).fetchall()
+    }
+    return entity_ids, support_ids
+
+
+def _prune_entities(connection, key, entity_ids, prior_support_ids):
+    if not entity_ids:
+        return set()
+    support_ids = {
+        row[0]
+        for row in connection.execute(
+            f"SELECT DISTINCT support_id FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) binding "
+            "WHERE entity_id=ANY(%s)",
+            (entity_ids,),
+        ).fetchall()
+    }
+    connection.execute(
+        "DELETE FROM entity_name_support sp USING entity_names n "
+        "WHERE (sp.tenant_id,sp.user_id,sp.name_id)=(n.tenant_id,n.user_id,n.name_id) "
+        "AND n.tenant_id=%s AND n.user_id=%s AND n.entity_id=ANY(%s) "
+        "AND NOT sp.support_id=ANY(%s)",
+        (*key, entity_ids, list(support_ids)),
+    )
+    connection.execute(
+        "DELETE FROM unit_entities membership WHERE tenant_id=%s AND user_id=%s "
+        "AND entity_id=ANY(%s) AND NOT EXISTS (SELECT 1 FROM ("
+        + ELIGIBLE_ENTITY_MEMBERSHIPS
+        + ") eligible WHERE "
+        "(eligible.tenant_id,eligible.user_id,eligible.unit_id,eligible.entity_id,"
+        "eligible.name_id,eligible.generation_id)=(membership.tenant_id,membership.user_id,"
+        "membership.unit_id,membership.entity_id,membership.name_id,membership.generation_id))",
+        (*key, entity_ids),
+    )
+    connection.execute(
+        "DELETE FROM entity_names n WHERE tenant_id=%s AND user_id=%s "
+        "AND entity_id=ANY(%s) AND NOT EXISTS (SELECT 1 FROM entity_name_support sp "
+        "WHERE (sp.tenant_id,sp.user_id,sp.name_id)=(n.tenant_id,n.user_id,n.name_id))",
+        (*key, entity_ids),
+    )
+    connection.execute(
+        "DELETE FROM entity_units e WHERE tenant_id=%s AND user_id=%s "
+        "AND entity_id=ANY(%s) AND NOT EXISTS (SELECT 1 FROM entity_names n "
+        "WHERE (n.tenant_id,n.user_id,n.entity_id)=(e.tenant_id,e.user_id,e.entity_id))",
+        (*key, entity_ids),
+    )
+    connection.execute(
+        "UPDATE entity_units e SET canonical_name=(SELECT name_text FROM entity_names n "
+        "WHERE (n.tenant_id,n.user_id,n.entity_id)=(e.tenant_id,e.user_id,e.entity_id) "
+        "AND name_kind='canonical' ORDER BY (name_text=e.canonical_name) DESC,name_id LIMIT 1) "
+        "WHERE e.tenant_id=%s AND e.user_id=%s AND e.entity_id=ANY(%s)",
+        (*key, entity_ids),
+    )
+    return prior_support_ids - support_ids
 
 
 def cleanup_claim(
@@ -81,6 +163,9 @@ def cleanup_claim(
                     (*key, source_id, memory_ids, insight_ids),
                 ).fetchall()
             ]
+            entity_ids, entity_support_ids = _entity_cleanup_inputs(
+                connection, key, memory_ids, unit_ids
+            )
             connection.execute(
                 "DELETE FROM temporal_links WHERE tenant_id=%s AND user_id=%s "
                 "AND (left_id=ANY(%s) OR right_id=ANY(%s))",
@@ -137,12 +222,15 @@ def cleanup_claim(
                 "WHERE tenant_id=%s AND user_id=%s AND source_id=%s",
                 (b"", hashlib.sha256(b"").digest(), *key, source_id),
             )
+            removed_entity_support = _prune_entities(
+                connection, key, entity_ids, entity_support_ids
+            )
             traces = connection.execute(
-                "SELECT trace_id,decisions FROM traces WHERE tenant_id=%s AND user_id=%s "
+                "SELECT trace_id,decisions,content FROM traces WHERE tenant_id=%s AND user_id=%s "
                 "AND content IS NOT NULL",
                 key,
             ).fetchall()
-            redacted = affected_trace_ids(traces, unit_ids)
+            redacted = affected_trace_ids(traces, unit_ids, removed_entity_support)
             if redacted:
                 connection.execute(
                     "UPDATE traces SET content=NULL,decisions='{}'::jsonb WHERE tenant_id=%s "
@@ -257,6 +345,9 @@ def cleanup_removal_claim(
                     (*key, memory_target, insight_target, limits),
                 ).fetchall()
             ]
+            entity_ids, entity_support_ids = _entity_cleanup_inputs(
+                connection, key, [memory_target] if memory_target else [], unit_ids
+            )
             # Admission closes Profiles conservatively. Scrub only those closed copies;
             # a supported explicit refresh published afterwards must survive old cleanup.
             connection.execute(
@@ -288,6 +379,11 @@ def cleanup_removal_claim(
                     (*key, unit_ids),
                 )
             if target_kind == "memory":
+                connection.execute(
+                    "DELETE FROM entity_name_support WHERE tenant_id=%s AND user_id=%s "
+                    "AND memory_id=%s",
+                    (*key, target_id),
+                )
                 if affected:
                     connection.execute(
                         "DELETE FROM insight_support WHERE tenant_id=%s AND user_id=%s "
@@ -319,11 +415,14 @@ def cleanup_removal_claim(
                     "DELETE FROM insights WHERE tenant_id=%s AND user_id=%s AND insight_id=%s",
                     (*key, target_id),
                 )
+            removed_entity_support = _prune_entities(
+                connection, key, entity_ids, entity_support_ids
+            )
             traces = connection.execute(
-                "SELECT trace_id,decisions FROM traces WHERE tenant_id=%s AND user_id=%s",
+                "SELECT trace_id,decisions,content FROM traces WHERE tenant_id=%s AND user_id=%s",
                 key,
             ).fetchall()
-            redacted = affected_trace_ids(traces, unit_ids)
+            redacted = affected_trace_ids(traces, unit_ids, removed_entity_support)
             if redacted:
                 connection.execute(
                     "UPDATE traces SET content=NULL,decisions='{}'::jsonb WHERE tenant_id=%s "

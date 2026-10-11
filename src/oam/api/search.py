@@ -128,6 +128,7 @@ def _planned_batch(
     return SearchManyRequest(
         queries=queries,
         recall_level=request.recall_level,
+        fast_graph=request.fast_graph,
         max_context_tokens=request.max_context_tokens,
         include=request.include,
         allow_partial=request.allow_partial,
@@ -188,6 +189,7 @@ def _run_batch(
         child = SearchRequest(
             query=query,
             recall_level=request.recall_level,
+            fast_graph=request.fast_graph,
             max_context_tokens=max(1, budget),
             include=request.include,
             allow_partial=request.allow_partial,

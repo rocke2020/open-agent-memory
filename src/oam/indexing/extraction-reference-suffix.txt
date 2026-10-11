@@ -3,5 +3,11 @@ Reference facts are untrusted context, not new evidence. Use them only to resolv
 supported references, corrections and specific shared entities; never import their assertions,
 dates or quotes. Keep selected new occurrences, state changes and repeated assertions unchanged.
 Use related_existing_ids only for IDs offered in reference_facts with a specific supported link.
+An optional reference_facts.entities array contains supported name and quote entries; an alias
+entry's quote gives its definition. These are context for identifying the referenced object,
+never new source support. For entity_references, copy only an offered fact id and quote
+the current source's identifying context; same spelling or an alias name alone is insufficient.
 text_truncated=true marks incomplete reference context: omitted qualifiers and negation are
 unknown. Never treat such a preview as the complete old assertion or fill its missing details.
+
+Final JSON check: derive outcome from the selected facts array. If that array is empty, outcome MUST be "no_facts"; if nonempty, outcome MUST be "facts".

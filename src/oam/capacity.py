@@ -5,12 +5,14 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from threading import Event
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg import Pipeline
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
@@ -95,12 +97,14 @@ class PostgresCapacity:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise CapacityUnavailable("capacity database wait exhausted the caller deadline")
-            connection.execute(
-                "SELECT set_config('statement_timeout',%s,true)",
-                (str(max(1, int(remaining * 1000))),),
-            )
-            actual_params = params(remaining) if callable(params) else params
-            row = connection.execute(query, actual_params).fetchone()
+            with connection.pipeline() if Pipeline.is_supported() else nullcontext():
+                connection.execute(
+                    "SELECT set_config('statement_timeout',%s,true)",
+                    (str(max(1, int(remaining * 1000))),),
+                )
+                actual_params = params(remaining) if callable(params) else params
+                cursor = connection.execute(query, actual_params)
+            row = cursor.fetchone()
             if time.monotonic() >= deadline:
                 raise CapacityUnavailable("capacity query exceeded the caller deadline")
             if row is None:
@@ -117,12 +121,14 @@ class PostgresCapacity:
         connection = psycopg.connect(self.dsn, autocommit=True, connect_timeout=3)
         try:
             timeout_ms = max(1, int(self.config.database.pool_acquire_timeout_seconds * 1000))
-            connection.execute(
-                "SELECT set_config('statement_timeout',%s,false)", (str(timeout_ms),)
-            )
-            row = connection.execute(
-                "SELECT oam_http_admit(%s,%s)", (write, Jsonb(self.limits))
-            ).fetchone()
+            with connection.pipeline() if Pipeline.is_supported() else nullcontext():
+                connection.execute(
+                    "SELECT set_config('statement_timeout',%s,false)", (str(timeout_ms),)
+                )
+                cursor = connection.execute(
+                    "SELECT oam_http_admit(%s,%s)", (write, Jsonb(self.limits))
+                )
+            row = cursor.fetchone()
             if row is None:
                 raise CapacityUnavailable("request admission returned no result")
             slot = row[0]

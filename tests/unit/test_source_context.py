@@ -120,9 +120,9 @@ def test_grouped_context_preserves_facts_and_shows_source_once(evidence_rows, mo
         "second_event",
     ]
     assert evidence_rows[0]["text"] in result["context"]
-    assert "Source: [original]" in result["context"]
-    assert result["context"].index("[original] passage") < result["context"].index("[fact]")
-    assert result["context"].index("[fact]") < result["context"].index("[other]")
+    assert "source=[3]" in result["context"]
+    assert result["context"].index("[3] passage") < result["context"].index("[1] fact")
+    assert result["context"].index("[1] fact") < result["context"].index("[2] fact")
     assert result["context"].count(evidence_rows[2]["text"]) == 1
     assert "June 10" in result["context"]
     assert result["items"][0]["citations"] == evidence_rows[0]["citations"]
@@ -150,7 +150,7 @@ def test_inconsistent_support_keeps_fact(evidence_rows, field, value):
         "original",
         "second_event",
     }
-    assert "Source: [original]" not in result["context"]
+    assert "source=[3]" not in result["context"]
 
 
 @pytest.mark.parametrize("unique_evidence", ["time", "path"])
@@ -168,7 +168,7 @@ def test_unique_time_and_graph_evidence_remain_on_the_fact(evidence_rows, unique
     assert fact["time_evidence"] == evidence_rows[0]["time_evidence"]
     assert original["paths"] == []
     assert original["time_evidence"] == []
-    assert "Source: [original]" in result["context"]
+    assert "source=[3]" in result["context"]
     assert result["context"].count(evidence_rows[2]["text"]) == 1
 
 
@@ -187,7 +187,7 @@ def test_grouping_neither_fetches_nor_backfills_beyond_item_cap(evidence_rows, c
         object(), SearchRequest(query="workshops")
     )
     assert [row["unit_id"] for row in result["items"]] == expected
-    assert ("Source: [original]" in result["context"]) == (cap == 3)
+    assert ("source=[3]" in result["context"]) == (cap == 3)
 
 
 @pytest.mark.parametrize("correct_quote", [True, False])
@@ -199,7 +199,7 @@ def test_coverage_checks_exact_unicode_quote(evidence_rows, correct_quote):
     )
     result = SourceService(evidence_rows).search(object(), SearchRequest(query="检修"))
     assert "fact" in {row["unit_id"] for row in result["items"]}
-    assert ("Source: [original]" in result["context"]) is correct_quote
+    assert ("source=[3]" in result["context"]) is correct_quote
 
 
 def test_one_uncovered_support_prevents_grouping(evidence_rows):
@@ -208,7 +208,7 @@ def test_one_uncovered_support_prevents_grouping(evidence_rows):
     evidence_rows[0]["citations"].append(other)
     result = SourceService(evidence_rows).search(object(), SearchRequest(query="workshops"))
     assert "fact" in {row["unit_id"] for row in result["items"]}
-    assert "Source: [original]" not in result["context"]
+    assert "source=[3]" not in result["context"]
 
 
 def test_resolved_subject_and_date_survive_an_ambiguous_source(evidence_rows):
@@ -239,7 +239,7 @@ def test_multiple_facts_share_one_source_without_losing_metadata(evidence_rows):
 
     assert evidence_rows == before
     assert {row["unit_id"] for row in result["items"]} == {row["unit_id"] for row in before}
-    assert result["context"].count("Source: [original]") == 2
+    assert result["context"].count("source=[4]") == 2
     assert result["context"].count(before[3]["text"]) == 1
     shift = next(row for row in result["items"] if row["unit_id"] == "shift")
     assert shift["paths"] == [path]
@@ -276,6 +276,67 @@ def test_recall_recovers_adjacent_user_source_before_tail_candidates(evidence_ro
     assert "The user missed the workshop on June 3." in result["context"]
     assert "On June 10, I missed another workshop" in result["context"]
     assert result["context_tokens"] <= 2048
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_source_windows_reuse_hydrated_passages_and_fetch_only_missing_rows(evidence_rows, mixed):
+    hydrations = []
+
+    class TrackingRepository(SourceRepository):
+        def lexical(self, query, limit):
+            ids = ("fact", "original") if mixed else tuple(self.rows)
+            return [{"unit_id": unit_id} for unit_id in ids]
+
+        def hydrate(self, unit_ids):
+            hydrations.append(list(unit_ids))
+            return super().hydrate(unit_ids)
+
+    class TrackingService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield TrackingRepository(request, self.rows, self.graph_paths)
+
+    result = TrackingService(evidence_rows).search(object(), SearchRequest(query="workshops"))
+
+    assert "June 3" in result["context"] and "June 10" in result["context"]
+    if mixed:
+        assert hydrations == [["fact", "original"], ["second_event"]]
+        assert [item["unit_id"] for item in result["items"]] == [
+            "fact",
+            "original",
+            "second_event",
+        ]
+    else:
+        assert hydrations == [["fact", "other", "original", "second_event"]]
+        assert [item["unit_id"] for item in result["items"]] == list(
+            ("fact", "other", "original", "second_event")
+        )
+
+
+def test_source_policy_change_during_passage_reuse_rejects_result(evidence_rows):
+    from oam.retrieval.service import RecallUnavailable
+
+    class RevisedRepository(SourceRepository):
+        epoch = 1
+
+        def user_state(self):
+            return {**super().user_state(), "policy_epoch": self.epoch}
+
+        def source_passage_locators(self, source_ids):
+            rows = super().source_passage_locators(source_ids)
+            RevisedRepository.epoch = 2
+            return rows
+
+        def record_trace(self, trace_id, policy_epoch, decisions, result):
+            return policy_epoch == self.epoch
+
+    class RevisedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RevisedRepository(request, self.rows, self.graph_paths)
+
+    with pytest.raises(RecallUnavailable, match="source policy changed before trace publication"):
+        RevisedService(evidence_rows).search(object(), SearchRequest(query="workshops"))
 
 
 def test_recall_keeps_related_user_fact_with_its_source_dialogue(evidence_rows):
@@ -617,7 +678,7 @@ def test_related_source_keeps_companion_from_original_source_window(evidence_row
     assert "companion" in {item["unit_id"] for item in result["items"]}
 
 
-def test_incremental_context_cost_matches_grouped_rendering(evidence_rows):
+def test_incremental_context_cost_bounds_compact_rendering(evidence_rows):
     from oam.retrieval.context import ContextUnits, render_context
 
     evidence_rows[0]["text"] = "用户在 June 3 错过 workshop 👋。"
@@ -629,9 +690,9 @@ def test_incremental_context_cost_matches_grouped_rendering(evidence_rows):
         selected = []
         for item in order:
             selected.append(item)
-            assert counter.candidate_units(item) == estimate_units(render_context(selected))
+            assert counter.candidate_units(item) >= estimate_units(render_context(selected))
             counter.add(item)
-            assert counter.units == estimate_units(render_context(selected))
+            assert counter.units >= estimate_units(render_context(selected))
 
 
 def test_context_assembly_estimates_each_item_variant_once(evidence_rows, monkeypatch):
@@ -729,7 +790,7 @@ def test_seed_packing_represents_other_sources_before_repeating_one_source():
         "a4",
     ]
     selected = context.pack_ranked(seed_order(ranked), 2048, 3)
-    assert "[b1]" in context.render_context(selected)
+    assert "[2] fact memory\nEvidence b1" in context.render_context(selected)
     assert [item["unit_id"] for item in seed_order(ranked[:4])] == [
         "a1",
         "a2",

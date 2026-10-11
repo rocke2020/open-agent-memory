@@ -10,7 +10,7 @@ from oam.retrieval.repository import RecallRepository
 
 class _Connection:
     def execute(self, statement, parameters):
-        assert statement.startswith("SELECT set_config('hnsw.iterative_scan'")
+        raise AssertionError("dense setup must be sent with its candidate query")
 
 
 def test_larger_dense_pools_order_user_vectors_before_eligibility():
@@ -23,7 +23,7 @@ def test_larger_dense_pools_order_user_vectors_before_eligibility():
         repository.request = SearchRequest(query="Where is my book?", recall_level=mode)
         repository.deadline = time.monotonic() + 5
         repository._eligible = lambda **kwargs: "WITH filtered AS (SELECT 1) "
-        repository._execute = lambda sql, parameters, key=(mode, limit): (
+        repository._execute = lambda sql, parameters, key=(mode, limit), **options: (
             statements.setdefault(key, sql) and []
         )
         repository.dense((1.0,), limit)
