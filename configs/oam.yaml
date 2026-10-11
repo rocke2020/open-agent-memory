@@ -1,10 +1,11 @@
 # Public API contract version; only 0.0.1 is supported.
+# Size comments use 1024-based KB and MB; numeric *_bytes values are in bytes.
 contract_version: "0.0.1"
 
 resource:
   # Resource abstracts and vision keep a separate completion budget from learned-memory extraction.
   max_output_tokens: 4096
-  # Accepted original bytes per Resource; 104857600 bytes = 100 MiB.
+  # Maximum original file size per Resource: 100 MB, combined when there are multiple images.
   max_bytes: 104857600
   # Total URL-fetch deadline, including DNS, connection and body transfer.
   url_fetch_timeout_seconds: 30
@@ -14,18 +15,19 @@ resource:
   max_pdf_pages: 100
   # Maximum image originals per Resource; the public image upload currently accepts one image.
   max_images: 20
-  # Hard original-image pixel limit checked before full decoding; oversized originals are rejected.
+  # Maximum original image: 100 million pixels, e.g., 10000 x 10000; larger originals are rejected before full decoding.
   max_input_pixels_per_image: 100000000
-  # Maximum pixels per vision copy or PDF render; larger images are automatically downscaled.
+  # Maximum vision copy or rendered PDF page: 40 million pixels, e.g., 8000 x 5000; larger images are downscaled.
   max_pixels_per_image: 40000000
-  # Hard total original-image or rendered-PDF pixel budget per Resource; exhaustion is rejected.
+  # Maximum total original-image or rendered-PDF pixels per Resource: 250 million; exceeding this rejects the Resource.
+  # For example, 10 photos at 6000 x 4000 use 240 million pixels; 11 exceed the budget. Image-count and file-size limits also apply.
   max_total_pixels: 250000000
 
 api:
   # Admission limits shared across API replicas; writes also consume request slots.
   max_concurrent_requests: 10
   max_concurrent_writes: 6
-  # HTTP request-body cap, including upload framing; 134217728 bytes = 128 MiB.
+  # HTTP request-body cap, including upload framing: 128 MB.
   max_request_bytes: 134217728
 
 chunk:
@@ -182,7 +184,7 @@ context:
 
 profile:
   enabled: true
-  # UTF-8 byte cap on the accepted Profile content, separate from the model's token cap.
+  # Maximum accepted UTF-8 Profile content: 16 KB; separate from the model's token cap.
   max_content_bytes: 16384
   # Completion-token cap for Profile refresh generation.
   max_output_tokens: 2048
@@ -254,7 +256,7 @@ auth:
   credential_page_size: 50
 
 ingest:
-  # Combined UTF-8 message-content bytes per interaction retain request; excludes JSON framing.
+  # Maximum combined UTF-8 message content per interaction retain request: 128 KB; excludes JSON structure and metadata.
   max_bytes: 131072
   # Maximum messages accepted in one interaction retain request.
   max_messages: 128
