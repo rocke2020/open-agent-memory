@@ -46,6 +46,29 @@ def test_resource_completion_budget_invalidates_generated_resource_checkpoints()
     assert index_generation(config, {}) != index_generation(tuned, {})
 
 
+def test_vision_pixel_target_invalidates_resource_projection_generation():
+    from oam.indexing.identity import index_generation
+
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
+    tuned = config.model_copy(
+        update={"resource": config.resource.model_copy(update={"max_pixels_per_image": 20_000_000})}
+    )
+
+    assert index_generation(config, {}) != index_generation(tuned, {})
+
+
+def test_vision_preprocessing_recipe_invalidates_resource_projection_generation(monkeypatch):
+    from oam.indexing import identity
+
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
+    current = identity.index_generation(config, {})
+    monkeypatch.setattr(
+        identity, "RESOURCE_VISION_RECIPE", "legacy-original-image-input", raising=False
+    )
+
+    assert identity.index_generation(config, {}) != current
+
+
 def test_recall_tuning_does_not_invalidate_indexed_content_but_model_change_does():
     from oam.indexing.identity import index_generation
 

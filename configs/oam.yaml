@@ -1,26 +1,40 @@
+# Public API contract version; only 0.0.1 is supported.
 contract_version: "0.0.1"
 
 resource:
   # Resource abstracts and vision keep a separate completion budget from learned-memory extraction.
   max_output_tokens: 4096
-  max_bytes: 20971520
+  # Accepted original bytes per Resource; 104857600 bytes = 100 MiB.
+  max_bytes: 104857600
+  # Total URL-fetch deadline, including DNS, connection and body transfer.
   url_fetch_timeout_seconds: 30
+  # Kill isolated PDF processing if the child process exceeds this deadline.
   pdf_child_timeout_seconds: 30
-  max_pdf_pages: 20
+  # Maximum physical pages accepted in one PDF Resource, including native-text pages.
+  max_pdf_pages: 100
+  # Maximum image originals per Resource; the public image upload currently accepts one image.
   max_images: 20
+  # Hard original-image pixel limit checked before full decoding; oversized originals are rejected.
+  max_input_pixels_per_image: 100000000
+  # Maximum pixels per vision copy or PDF render; larger images are automatically downscaled.
   max_pixels_per_image: 40000000
-  max_total_pixels: 100000000
+  # Hard total original-image or rendered-PDF pixel budget per Resource; exhaustion is rejected.
+  max_total_pixels: 250000000
 
 api:
+  # Admission limits shared across API replicas; writes also consume request slots.
   max_concurrent_requests: 10
   max_concurrent_writes: 6
-  max_request_bytes: 25165824
+  # HTTP request-body cap, including upload framing; 134217728 bytes = 128 MiB.
+  max_request_bytes: 134217728
 
 chunk:
   # Split each message/document into passages before indexing, in either extraction mode.
   # These are per-passage limits using the local token estimate, not batch group sizes.
   ingestion:
+    # Preferred passage size measured with the local token estimate.
     target_estimated_tokens: 2048
+    # Maximum passage size measured with the local token estimate.
     max_estimated_tokens: 4096
     # Source spans never overlap, so each extracted fact has one owning passage.
     extractable_overlap_estimated_tokens: 0
@@ -41,6 +55,7 @@ extraction:
   # Generation completion cap, leaving room for reasoning and visible JSON.
   # This is separate from the group-planning estimate above.
   max_output_tokens: 64000
+  # Maximum extracted facts in one model response, shared by all passages in the group.
   max_facts_per_group: 64
   # Adjacent eligible passages within one source share a bounded call by default.
   # This is a passage cap, not a turn count; 1 restores one call per passage.
@@ -52,7 +67,9 @@ extraction:
   reference_max_input_tokens: 2048
 
 search:
+  # Per-query limit measured with the local token estimate.
   max_query_tokens: 512
+  # Maximum queries in a batch or generated decomposition plan.
   max_queries: 4
   # Parallel searches within one batch request.
   query_concurrency: 2
@@ -72,8 +89,9 @@ search:
     temporal: 1.0
   # Only sufficiently similar dense fact hits become graph expansion seeds.
   graph_seed_min_similarity: 0.3
+  # Maximum sufficiently similar dense fact hits used as graph-expansion seeds.
   graph_seed_max: 12
-  # Ordinary causal expansion currently follows two outward hops.
+  # Outgoing causal expansion uses exactly two hops; only 2 is supported.
   relation_hops: 2
   # Maximum graph-arm results after entity, semantic, and causal expansion.
   relation_candidates: 32
@@ -83,8 +101,9 @@ search:
   entities_per_seed: 8
   # Cap each semantic direction and causal hop at this many links.
   links_per_seed: 16
-  # Deep-mode limits for L2 parents of each seed and related child facts.
+  # Maximum L2 parent Insights expanded per dense fact seed in deep mode.
   hierarchy_parents_per_seed: 2
+  # Maximum related child facts expanded per L2 parent in deep mode.
   hierarchy_children_per_parent: 8
   # Maximum temporal seeds selected before spreading.
   temporal_seed_max: 10
@@ -124,13 +143,17 @@ search:
 index:
   # L2 Insight synthesis is independently configurable; Profile may consume L2 when enabled.
   insights_enabled: true
+  # Vector length required from the embedding model; must match the database schema.
   embedding_dimensions: 1024
   # Create index-time semantic links only above this cosine similarity.
   semantic_link_min_similarity: 0.7
+  # Maximum outgoing semantic neighbors stored per fact, including existing links.
   semantic_link_max_neighbors: 20
-  # Index-time ANN budgets are independent of recall tuning.
+  # Index-time semantic-link ANN scan mode, independent of recall; only strict_order is supported.
   semantic_link_ann_iterative_scan: strict_order
+  # Maximum tuples visited by each index-time semantic-link ANN scan.
   semantic_link_ann_scan_max_tuples: 20000
+  # Maximum temporal neighbors selected per new fact for each time basis.
   temporal_link_max_neighbors: 20
   # Only facts within this many seconds can receive temporal links at indexing.
   temporal_link_horizon_seconds: 86400
@@ -138,12 +161,17 @@ index:
 recall:
   # Shared trusted-turn deadline; the mode deadline also applies to each request.
   turn_deadline_seconds: 10
+  # Maximum fast-search duration; caller and trusted-turn deadlines may shorten it.
   fast_deadline_seconds: 3
+  # Maximum mid-search duration; caller and trusted-turn deadlines may shorten it.
   mid_deadline_seconds: 5
+  # Maximum deep-search duration; caller and trusted-turn deadlines may shorten it.
   deep_deadline_seconds: 10
 
 context:
+  # Returned context budget when the caller omits max_context_tokens.
   default_tokens: 2048
+  # Largest context budget a caller may request; measured with the local token estimate.
   max_tokens: 15000
   # Maximum budget for initial ranked seeds and their source detail.
   source_seed_tokens: 8192
@@ -154,22 +182,31 @@ context:
 
 profile:
   enabled: true
+  # UTF-8 byte cap on the accepted Profile content, separate from the model's token cap.
   max_content_bytes: 16384
+  # Completion-token cap for Profile refresh generation.
   max_output_tokens: 2048
+  # Per-call generation timeout for Profile refresh, overriding model.attempt_timeout_seconds.
   attempt_timeout_seconds: 180
 
 planner:
+  # Decompose-and-search permits at most one generative planner call; only 1 is supported.
   max_calls: 1
+  # Planner input budget, including instructions and the question; not an output limit.
   max_context_tokens: 2048
 
 request:
+  # One shared deadline for all searches in a search-many request.
   batch_deadline_seconds: 10
+  # One shared deadline for planning and all resulting searches in decompose-and-search.
   delegated_deadline_seconds: 10
 
 model:
+  # Default model-call timeout, including capacity wait; request deadlines may shorten it.
   attempt_timeout_seconds: 60
 
 retry:
+  # Total durable work attempts, including the first attempt; not extra retries per model call.
   max_attempts: 3
 
 worker:
@@ -179,18 +216,21 @@ worker:
   max_tasks: 10
 
 lease:
-  # A work claim expires unless renewed at the heartbeat interval.
+  # Work-claim lifetime unless renewed by worker heartbeats.
   seconds: 90
+  # Interval between worker claim renewals.
   heartbeat_seconds: 20
   # Time to wait for in-flight tasks during worker shutdown.
   shutdown_seconds: 90
 
 database:
+  # Environment-variable names holding DSNs for schema migrations and API access.
   migration_dsn_env: OAM_MIGRATION_DSN
   api_dsn_env: OAM_API_DSN
   # Worker queue admission and content access use separate database roles.
   worker_queue_dsn_env: OAM_WORKER_QUEUE_DSN
   worker_content_dsn_env: OAM_WORKER_CONTENT_DSN
+  # Maximum PostgreSQL connections in each API process's pool, not across the deployment.
   api_pool_max: 10
   # Minimum connections kept by each process-local pool.
   pool_min_size: 1
@@ -202,68 +242,102 @@ database:
   indexing_concurrency: 4
 
 auth:
-  # null selects the mode from root-key and database bootstrap state.
+  # Authentication mode: dev, api_key or trusted; null selects from root-key/bootstrap state.
   mode: null
+  # Environment variable holding the root API credential for bootstrap and administration.
   root_key_env: OAM_ROOT_API_KEY
+  # Process-local credential-cache lifetime; bounds cached revocation delay.
   cache_ttl_seconds: 30
+  # Maximum credentials retained in each process-local cache.
   cache_max_entries: 4096
+  # Default and maximum page size for credential-listing requests.
   credential_page_size: 50
 
 ingest:
+  # Combined UTF-8 message-content bytes per interaction retain request; excludes JSON framing.
   max_bytes: 131072
+  # Maximum messages accepted in one interaction retain request.
   max_messages: 128
 
 queue:
+  # Pending root work per user, shared across replicas; dependent child work is not counted.
   max_pending_per_user: 1000
 
 provider:
+  # Simultaneous generative model calls admitted across replicas.
   llm_concurrency: 32
+  # Simultaneous embedding calls admitted across replicas.
   embedding_concurrency: 8
   # Keep this many embedding permits available to foreground search.
   embedding_search_reserved: 0
+  # Simultaneous reranker calls per model-client instance; no shared deployment permit.
   rerank_concurrency: 4
 
 user:
+  # Reserved per-user report-count limit; not currently enforced.
   max_reports: 100
+  # Reserved per-user chat-count limit; not currently enforced.
   max_chats: 1000
   # Concurrent worker claims allowed for one user, across replicas.
   concurrency: 2
 
 trace:
+  # Age after which recorded context and replay artifacts are unavailable; no automatic purge.
   content_retention_days: 7
+  # Lifetime of the trace record for lookup; no automatic database deletion.
   metadata_retention_days: 30
 
 evidence:
+  # Reserved default Evidence retention policy; automatic expiry is not implemented.
   default_retention_days: 365
 
 audit:
+  # Reserved audit-record retention policy; automatic expiry is not implemented.
   retention_days: 90
 
 export:
+  # Download/access lifetime of a generated export; expiry does not purge stored parts.
   retention_hours: 24
 
 backup:
+  # Reserved backup retention policy; OAM does not yet create or expire backups automatically.
   retention_days: 30
 
 models:
   # Every generative role uses this one VLM and OpenAI Chat protocol.
   vlm:
+    # Generative wire protocol; only OpenAI Chat completions is supported.
     protocol: openai_chat
+    # Environment variable holding the shared generative model identifier.
     model_env: OAM_GENERATIVE_MODEL
+    # Environment variable holding the API base URL; /chat/completions is appended.
     endpoint_env: OAM_GENERATIVE_ENDPOINT
+    # Environment variable holding the required Bearer API credential.
     api_key_env: OAM_GENERATIVE_API_KEY
+    # Declared model capabilities validated against enabled generative roles.
     capabilities: [text, vision]
   # none disables thinking; low/high/max enable it. null disables the role.
   reasoning_effort:
+    # Reasoning setting for source-backed fact extraction.
     extraction: none
+    # Reasoning setting for L2 Insight synthesis.
     insights: high
+    # Reasoning setting for Resource abstract generation.
     abstract: low
+    # Reasoning setting for explicit Profile refresh generation.
     profile: low
+    # Reasoning setting for query decomposition; null disables this role.
     planner: null
   embedding:
+    # Embedding wire protocol; only OpenAI-compatible embeddings is supported.
     protocol: openai_compatible
+    # Environment variable holding the embedding model identifier.
     model_env: OAM_EMBEDDING_MODEL
+    # Environment variable holding the API base URL; /embeddings is appended.
     endpoint_env: OAM_EMBEDDING_URL
+    # Environment variable holding the required Bearer API credential.
     api_key_env: OAM_EMBEDDING_KEY
+    # Declared capabilities; embedding roles require embeddings.
     capabilities: [embeddings]
+  # null disables the optional reranking stage; a binding enables it for mid/deep search.
   reranker: null

@@ -504,7 +504,7 @@ def _index_interaction(config, store, models, request):
 def _resource(store, models):
     from oam.contracts.resources import ResourceMediaType
     from oam.resources.html import parse_html
-    from oam.resources.images import inspect_images
+    from oam.resources.images import prepare_image_for_vision
     from oam.resources.limits import enforce_byte_limit
     from oam.resources.originals import OriginalDescriptor
     from oam.resources.pdf_isolated import inspect_pdf, render_page
@@ -574,7 +574,11 @@ def _resource(store, models):
                 vision_stage = "vision:" + page.locator
                 generated = store.checkpoint(
                     vision_stage,
-                    {"sha256": original.sha256, "page": page.page_number},
+                    {
+                        "sha256": original.sha256,
+                        "page": page.page_number,
+                        "vision_sha256": hashlib.sha256(image).hexdigest(),
+                    },
                     lambda image=image, current_page=page: _validated_vision_result(
                         models.generate_vision(
                             image,
@@ -605,13 +609,16 @@ def _resource(store, models):
         blocks = tuple(blocks)
         source_text = "\n".join(block.text for block in blocks)
     elif original.media_type in {ResourceMediaType.PNG, ResourceMediaType.JPEG}:
-        inspect_images((original,), store.config.resource)
+        vision_content = prepare_image_for_vision(original, store.config.resource)
         generated = store.checkpoint(
             "vision:image:0001",
-            {"sha256": original.sha256},
+            {
+                "sha256": original.sha256,
+                "vision_sha256": hashlib.sha256(vision_content).hexdigest(),
+            },
             lambda: _validated_vision_result(
                 models.generate_vision(
-                    content,
+                    vision_content,
                     media_type=original.media_type.value,
                     system=IMAGE_VISION_SYSTEM,
                     user=IMAGE_VISION_USER,

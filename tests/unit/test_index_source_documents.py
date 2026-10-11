@@ -383,6 +383,33 @@ def test_image_resource_indexes_vision_text_with_region_citation():
     assert models.embedded == ["Subject SYN-001", "Glucose 92 mg/dL"]
 
 
+@pytest.mark.parametrize("image_format,media_type", [("PNG", "image/png"), ("JPEG", "image/jpeg")])
+def test_image_resource_downscales_vision_input_and_preserves_original_and_regions(
+    image_format, media_type
+):
+    output = BytesIO()
+    Image.new("RGB", (20, 10), color=(17, 91, 140)).save(output, format=image_format)
+    original = output.getvalue()
+    store = MemoryStore(content=original, media_type=media_type)
+    store.config = store.config.model_copy(
+        update={"resource": store.config.resource.model_copy(update={"max_pixels_per_image": 100})}
+    )
+    received = []
+
+    class InspectingModels(LocalModels):
+        def generate_vision(self, image, **kwargs):
+            with Image.open(BytesIO(image)) as decoded:
+                received.append((decoded.size, decoded.format, kwargs["media_type"]))
+            return super().generate_vision(image, **kwargs)
+
+    index_source._resource(store, InspectingModels())
+
+    assert received == [((14, 7), image_format, media_type)]
+    assert store.source["original_bytes"] == original
+    assert store.units[1]["locator"]["region"] == [0.1, 0.2, 0.9, 0.8]
+    assert store.stages["source_searchable"] is True
+
+
 def test_fact_completion_cap_does_not_raise_resource_vision_or_abstract_budgets():
     original = base64.b64decode(
         (MEDICAL_FIXTURES / "synthetic-lab-report.png.b64").read_text(encoding="ascii")

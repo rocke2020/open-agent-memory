@@ -1,9 +1,12 @@
 """Local PDF libraries run in a bounded child, never in the durable worker."""
 
 import subprocess
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
+from pypdf import PdfWriter
 
 from oam.config import load_config
 from oam.contracts.resources import ResourceMediaType
@@ -41,6 +44,26 @@ def test_scanned_page_is_rendered_in_child_with_bounded_pixels():
     assert inspected[0].needs_vision is True
     assert image.startswith(b"\x89PNG\r\n\x1a\n")
     assert 0 < pixels <= LIMITS.max_pixels_per_image
+
+
+@pytest.mark.parametrize("width,height", [(100.25, 50.75), (1000, 1)])
+def test_pdf_child_downscales_before_rendering_and_counts_actual_pixels(width, height):
+    writer = PdfWriter()
+    writer.add_blank_page(width=width, height=height)
+    output = BytesIO()
+    writer.write(output)
+    original = OriginalDescriptor.from_bytes(ResourceMediaType.PDF, output.getvalue())
+    limits = LIMITS.model_copy(update={"max_pixels_per_image": 100})
+
+    image, pixels = render_page(original, 1, limits, remaining_pixels=100)
+
+    with Image.open(BytesIO(image)) as decoded:
+        assert decoded.width * decoded.height == pixels
+        assert 0 < pixels <= 100
+        assert decoded.width > decoded.height
+
+    with pytest.raises(ResourceLimitError):
+        render_page(original, 1, limits, remaining_pixels=pixels - 1)
 
 
 def test_hung_pdf_child_becomes_parse_failure_without_fallback(monkeypatch):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from io import BytesIO
 
 from pypdf import PdfReader
@@ -7,7 +8,7 @@ from pypdf.errors import PdfReadError
 
 from oam.config import ResourceConfig
 from oam.contracts.resources import ResourceMediaType
-from oam.resources.limits import enforce_byte_limit
+from oam.resources.limits import downscaled_dimensions, enforce_byte_limit
 from oam.resources.originals import OriginalDescriptor
 from oam.resources.types import (
     PageRenderingMetadata,
@@ -101,11 +102,21 @@ def render_pdf_page(
             page = document[page_number - 1]
             try:
                 width, height = page.get_size()
-                pixels = round(width * PDF_VISION_SCALE) * round(height * PDF_VISION_SCALE)
+                scale = float(PDF_VISION_SCALE)
+                render_width, render_height = math.ceil(width * scale), math.ceil(height * scale)
+                if render_width * render_height > limits.max_pixels_per_image:
+                    target_width, target_height = downscaled_dimensions(
+                        render_width, render_height, limits.max_pixels_per_image
+                    )
+                    scale = math.nextafter(min(target_width / width, target_height / height), 0.0)
+                pixels = math.ceil(width * scale) * math.ceil(height * scale)
                 if pixels > limits.max_pixels_per_image or pixels > remaining_pixels:
                     raise ResourceLimitError("PDF rendered page exceeds Resource pixel limit")
-                bitmap = page.render(scale=PDF_VISION_SCALE)
+                bitmap = page.render(scale=scale)
                 try:
+                    pixels = bitmap.width * bitmap.height
+                    if pixels > limits.max_pixels_per_image or pixels > remaining_pixels:
+                        raise ResourceLimitError("PDF rendered page exceeds Resource pixel limit")
                     output = BytesIO()
                     bitmap.to_pil().save(output, format="PNG")
                     return output.getvalue(), pixels

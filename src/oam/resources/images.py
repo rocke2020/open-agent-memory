@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from io import BytesIO
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from oam.config import ResourceConfig
 from oam.contracts.resources import ResourceMediaType
-from oam.resources.limits import enforce_byte_limit
+from oam.resources.limits import downscaled_dimensions, enforce_byte_limit
 from oam.resources.originals import OriginalDescriptor
 from oam.resources.types import (
     ImageInspection,
@@ -48,10 +48,10 @@ def inspect_images(
                 actual_format = image.format
                 width, height = image.size
                 pixels = width * height
-                if pixels > limits.max_pixels_per_image:
+                if pixels > limits.max_input_pixels_per_image:
                     raise ResourceLimitError(
-                        "Resource per-image pixel limit is "
-                        f"{limits.max_pixels_per_image}; received {pixels}"
+                        "Resource original-image pixel limit is "
+                        f"{limits.max_input_pixels_per_image}; received {pixels}"
                     )
                 total_pixels += pixels
                 if total_pixels > limits.max_total_pixels:
@@ -83,3 +83,27 @@ def inspect_images(
             )
         )
     return ImageInspection(images=tuple(results), total_pixels=total_pixels)
+
+
+def prepare_image_for_vision(original: OriginalDescriptor, limits: ResourceConfig) -> bytes:
+    """Validate originals and resize only the model-input copy, retaining its format."""
+    metadata = inspect_images((original,), limits).images[0]
+    if metadata.pixels <= limits.max_pixels_per_image:
+        return original.content
+    try:
+        with (
+            Image.open(BytesIO(original.content)) as image,
+            ImageOps.exif_transpose(image) as oriented,
+        ):
+            dimensions = downscaled_dimensions(*oriented.size, limits.max_pixels_per_image)
+            has_alpha = "A" in oriented.getbands() or "transparency" in oriented.info
+            mode = "RGBA" if metadata.format == "PNG" and has_alpha else "RGB"
+            with (
+                oriented.convert(mode) as converted,
+                converted.resize(dimensions, Image.Resampling.LANCZOS) as resized,
+            ):
+                output = BytesIO()
+                resized.save(output, format=metadata.format)
+                return output.getvalue()
+    except (Image.DecompressionBombError, OSError, SyntaxError, ValueError) as exc:
+        raise ResourceParseError("image Resource could not be downscaled") from exc

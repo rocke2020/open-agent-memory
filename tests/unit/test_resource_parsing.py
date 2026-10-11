@@ -1,17 +1,20 @@
 from dataclasses import FrozenInstanceError
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from oam.config import ResourceConfig
+from oam.config import ResourceConfig, load_config
 from oam.contracts.resources import ResourceMediaType
+from oam.resources import images as image_processing
 from oam.resources.html import parse_html
 from oam.resources.images import inspect_images
 from oam.resources.originals import OriginalDescriptor
 from oam.resources.pdf import native_text_usable, parse_pdf
+from oam.resources.pdf_isolated import inspect_pdf
 from oam.resources.types import ResourceLimitError, ResourceParseError
 
 
@@ -23,6 +26,7 @@ def _limits(**overrides: int) -> ResourceConfig:
         "pdf_child_timeout_seconds": 30,
         "max_pdf_pages": 2,
         "max_images": 2,
+        "max_input_pixels_per_image": 1000,
         "max_pixels_per_image": 100,
         "max_total_pixels": 150,
     }
@@ -152,6 +156,24 @@ def test_pdf_parser_rejects_page_limit_before_text_extraction() -> None:
         parse_pdf(original, _limits(max_bytes=10_000, max_pdf_pages=1))
 
 
+@pytest.mark.parametrize("page_count", [100, 101])
+def test_default_pdf_policy_accepts_100_complete_pages_and_rejects_101(page_count: int) -> None:
+    limits = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config.resource
+    texts = tuple(f"Page {number} source evidence" for number in range(1, page_count + 1))
+    original = OriginalDescriptor.from_bytes(ResourceMediaType.PDF, _pdf_bytes(texts))
+
+    if page_count == 101:
+        with pytest.raises(ResourceLimitError):
+            inspect_pdf(original, limits)
+        return
+
+    pages = inspect_pdf(original, limits)
+
+    assert [page.page_number for page in pages] == list(range(1, 101))
+    assert tuple(page.text for page in pages) == texts
+    assert all(not page.needs_vision for page in pages)
+
+
 def test_pdf_text_layer_quality_distinguishes_legible_from_corrupt_text() -> None:
     assert native_text_usable("Sodium 140 mmol/L with one �")
     assert not native_text_usable("�\x00�\x00�\x00�\x00�\x00")
@@ -196,8 +218,8 @@ def test_image_limits_reject_count_each_image_and_total_pixels() -> None:
 
     with pytest.raises(ResourceLimitError, match="image count limit.*1"):
         inspect_images((small, second), _limits(max_bytes=10_000, max_images=1))
-    with pytest.raises(ResourceLimitError, match="per-image pixel limit.*100"):
-        inspect_images((oversized,), _limits(max_bytes=10_000))
+    with pytest.raises(ResourceLimitError, match="original-image pixel limit.*100"):
+        inspect_images((oversized,), _limits(max_bytes=10_000, max_input_pixels_per_image=100))
     with pytest.raises(ResourceLimitError, match="total pixel limit.*120"):
         inspect_images(
             (small, second),
@@ -224,3 +246,45 @@ def test_image_inspection_normalizes_corrupt_payload_to_resource_parse_error() -
 
     with pytest.raises(ResourceParseError, match="malformed or unreadable"):
         inspect_images((original,), _limits(max_bytes=10_000))
+
+
+def test_downscaled_jpeg_preserves_displayed_orientation_and_original_bytes() -> None:
+    output = BytesIO()
+    image = Image.new("RGB", (20, 10), color=(17, 91, 140))
+    exif = Image.Exif()
+    exif[274] = 6
+    image.save(output, format="JPEG", exif=exif)
+    original = OriginalDescriptor.from_bytes(ResourceMediaType.JPEG, output.getvalue())
+    content = original.content
+
+    resized = image_processing.prepare_image_for_vision(
+        original, _limits(max_bytes=10_000, max_total_pixels=1000)
+    )
+
+    with Image.open(BytesIO(resized)) as decoded:
+        assert decoded.size == (7, 14)
+        assert decoded.getexif().get(274, 1) == 1
+    assert original.content == content
+
+
+def test_downscaled_palette_png_preserves_transparency() -> None:
+    output = BytesIO()
+    image = Image.new("P", (20, 10), color=0)
+    image.putpalette([17, 91, 140] + [0] * 765)
+    image.save(output, format="PNG", transparency=0)
+    original = OriginalDescriptor.from_bytes(ResourceMediaType.PNG, output.getvalue())
+
+    resized = image_processing.prepare_image_for_vision(
+        original, _limits(max_bytes=10_000, max_total_pixels=1000)
+    )
+
+    with Image.open(BytesIO(resized)) as decoded:
+        assert decoded.size == (14, 7)
+        assert decoded.mode == "RGBA"
+        assert decoded.getchannel("A").getextrema() == (0, 0)
+
+
+def test_small_vision_image_is_not_upscaled_or_reencoded() -> None:
+    original = OriginalDescriptor.from_bytes(ResourceMediaType.PNG, _image_bytes(5, 5))
+
+    assert image_processing.prepare_image_for_vision(original, _limits()) == original.content
