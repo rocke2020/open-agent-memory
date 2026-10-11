@@ -12,10 +12,10 @@ def test_evidence_resource_rejects_bytes_over_the_release_limit() -> None:
         resource_id="report-1",
         media_type=ResourceMediaType.PDF,
         filename="report.pdf",
-        byte_length=20 * 1024 * 1024 + 1,
+        byte_length=100 * 1024 * 1024 + 1,
         sha256="0" * 64,
     )
-    with pytest.raises(ValueError, match="20971520"):
+    with pytest.raises(ValueError, match="104857600"):
         resource.validate_limits(config)
 
 
@@ -24,12 +24,13 @@ def test_evidence_resource_accepts_exact_limit_and_never_exposes_learning_flag()
         resource_id="report-1",
         media_type="application/pdf",
         filename="report.pdf",
-        byte_length=20 * 1024 * 1024,
+        byte_length=100 * 1024 * 1024,
         sha256="a" * 64,
     )
 
     assert resource.resource_type == "evidence"
     assert "learning_eligible" not in resource.model_dump()
+    resource.validate_limits(load_config(Path(__file__).parents[2] / "configs/oam.yaml").config)
 
 
 @pytest.mark.parametrize("limit", [10, 30_000_000])

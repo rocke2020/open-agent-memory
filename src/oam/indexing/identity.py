@@ -10,6 +10,7 @@ from oam.retrieval.fts import FTS_RECIPE
 from oam.tokens import ESTIMATOR
 
 INDEX_RECIPE = "oam-source-fact-insight-v28"
+RESOURCE_VISION_RECIPE = "oam-vision-downscale-v1"
 
 
 def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
@@ -48,6 +49,10 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
         "chunk": config.chunk.ingestion.model_dump(mode="json"),
         "extraction": extraction,
         "resource_max_output_tokens": config.resource.max_output_tokens,
+        "resource_vision": {
+            "recipe": RESOURCE_VISION_RECIPE,
+            "max_pixels_per_image": config.resource.max_pixels_per_image,
+        },
         "index": config.index.model_dump(
             mode="json", exclude={"insight_consolidation_delay_seconds"}
         ),

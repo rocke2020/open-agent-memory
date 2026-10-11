@@ -40,6 +40,7 @@ class ResourceConfig(FrozenModel):
     pdf_child_timeout_seconds: PositiveInt
     max_pdf_pages: PositiveInt
     max_images: PositiveInt
+    max_input_pixels_per_image: PositiveInt
     max_pixels_per_image: PositiveInt
     max_total_pixels: PositiveInt
 

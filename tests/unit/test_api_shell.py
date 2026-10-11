@@ -231,7 +231,7 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["contract_version"] == "0.0.1"
-    assert payload["limits"]["resource"]["max_bytes"] == 20 * 1024 * 1024
+    assert payload["limits"]["resource"]["max_bytes"] == 100 * 1024 * 1024
     assert payload["limits"]["chunk"]["ingestion"]["max_estimated_tokens"] == 4096
     assert payload["limits"]["chunk"]["recall"]["max_tokens"] == 8192
     assert payload["features"]["source_lifecycle"] is True

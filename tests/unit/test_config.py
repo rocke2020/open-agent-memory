@@ -28,11 +28,13 @@ def test_canonical_config_freezes_v001_trial_limits_and_model_role_bindings() ->
     resolved = load_config(REPOSITORY_ROOT / "configs" / "oam.yaml")
 
     assert resolved.config.contract_version == "0.0.1"
-    assert resolved.config.resource.max_bytes == 20 * 1024 * 1024
-    assert resolved.config.resource.max_pdf_pages == 20
+    assert resolved.config.resource.max_bytes == 100 * 1024 * 1024
+    assert resolved.config.resource.max_pdf_pages == 100
     assert resolved.config.resource.max_images == 20
     assert resolved.config.resource.max_pixels_per_image == 40_000_000
-    assert resolved.config.resource.max_total_pixels == 100_000_000
+    assert resolved.config.resource.max_input_pixels_per_image == 100_000_000
+    assert resolved.config.resource.max_total_pixels == 250_000_000
+    assert resolved.config.api.max_request_bytes == 128 * 1024 * 1024
     assert resolved.config.user.max_reports == 100
     assert resolved.config.user.max_chats == 1_000
     assert resolved.config.api.max_concurrent_requests == 10
