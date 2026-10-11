@@ -279,6 +279,10 @@ class IndexConfig(FrozenModel):
     semantic_link_ann_scan_max_tuples: PositiveInt
     temporal_link_max_neighbors: PositiveInt
     temporal_link_horizon_seconds: PositiveFloat
+    entity_name_max_bytes: PositiveInt
+    entity_resolution_candidates: PositiveInt
+    entity_search_names_per_entity: PositiveInt
+    entity_search_rank_normalization: Literal[0, 1, 2]
 
 
 class TraceConfig(FrozenModel):

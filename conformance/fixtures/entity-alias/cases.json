@@ -1,0 +1,454 @@
+[
+  {
+    "id": "zh-numeric-floor",
+    "language": "zh",
+    "purpose": "whole-text numeric/unit equivalence without an explicit name alias",
+    "sessions": [
+      {
+        "session_id": "zh-numeric-floor-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "我住在梧桐大厦10 楼，书房的第二个抽屉里放着备用门禁卡。",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "zh-numeric-floor-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "同事小刘住在云杉大厦十层，他把备用门禁卡放在厨房的蓝色盒子里。",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "zh-numeric-floor-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "我的备用门禁卡没有搬动，仍放在梧桐大厦书房。",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "我在梧桐大厦十层的备用门禁卡放在哪里？",
+    "answer": "书房的第二个抽屉里。",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "第二个抽屉"
+    ],
+    "wrong_answer_markers": [
+      "云杉大厦",
+      "蓝色盒子"
+    ]
+  },
+  {
+    "id": "zh-org-bilingual",
+    "language": "zh",
+    "purpose": "supported Chinese/English abbreviation and continuity",
+    "sessions": [
+      {
+        "session_id": "zh-org-bilingual-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "我加入了北斗研究中心，它的英文名字是 Beidou Research Center，大家也简称它 BRC。",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "zh-org-bilingual-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "BRC 就是我之前提到的北斗研究中心。BRC 给我分配了 C-217 工位，导师是周岚。",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "zh-org-bilingual-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "我周末去过南星研究中心，它的工位编号是 D-103。",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "我在北斗研究中心的导师和工位编号是什么？",
+    "answer": "导师是周岚，工位编号是 C-217。",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "周岚",
+      "C-217"
+    ],
+    "wrong_answer_markers": [
+      "D-103"
+    ]
+  },
+  {
+    "id": "zh-homonym-causal",
+    "language": "zh",
+    "purpose": "distinct shared alias plus explicitly supported project cause",
+    "sessions": [
+      {
+        "session_id": "zh-homonym-causal-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "青松项目的内部代号是“松果”，该项目的负责人是张颖。",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "zh-homonym-causal-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "松果咖啡店与青松项目无关。咖啡店因装修延期，负责人是李江。",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "zh-homonym-causal-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "我说的松果项目就是之前的青松项目。项目的安全审批没有通过，所以青松项目的试运行延期了。",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "青松项目为什么延期，负责人是谁？",
+    "answer": "因为安全审批没有通过，负责人是张颖。",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "安全审批",
+      "张颖"
+    ],
+    "wrong_answer_markers": [
+      "装修",
+      "李江"
+    ]
+  },
+  {
+    "id": "en-nova-abbreviation",
+    "language": "en",
+    "purpose": "Nova Research explicit abbreviation and cross-source continuation",
+    "sessions": [
+      {
+        "session_id": "en-nova-abbreviation-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "My employer is Nova Research, also called NR. I joined its laboratory last spring.",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-nova-abbreviation-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "NR is the Nova Research organization I mentioned earlier. NR assigned me bench B-12 and Dr Priya Shah as my supervisor.",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-nova-abbreviation-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "I visited Vega Research yesterday. Its laboratory supervisor is Dr Morgan Lee and the bench is V-9.",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "Who supervises me at Nova Research, and which laboratory bench was assigned to me?",
+    "answer": "Dr Priya Shah supervises me, and my bench is B-12.",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "Priya Shah",
+      "B-12"
+    ],
+    "wrong_answer_markers": [
+      "Morgan Lee",
+      "V-9"
+    ]
+  },
+  {
+    "id": "en-nova-former-name",
+    "language": "en",
+    "purpose": "Nova Research source-supported former name plus update",
+    "sessions": [
+      {
+        "session_id": "en-nova-former-name-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Northstar Labs renamed itself Nova Research. The company is the same legal organization, and my employer.",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-nova-former-name-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Nova Research, the former Northstar Labs I mentioned, first scheduled my training for Oslo in April.",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-nova-former-name-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "The training for my employer Northstar Labs, now Nova Research, was moved from Oslo to Riga in May. Riga in May is the current plan.",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "What is the current city and month for my Northstar Labs training?",
+    "answer": "The current training plan is Riga in May.",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "Riga",
+      "May"
+    ],
+    "wrong_answer_markers": [
+      "Oslo in April"
+    ]
+  },
+  {
+    "id": "en-person-nickname",
+    "language": "en",
+    "purpose": "explicit person initials and witnessed continuity",
+    "sessions": [
+      {
+        "session_id": "en-person-nickname-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "My research mentor is Dr Elena Morales. Our team calls her EM; EM and Dr Elena Morales are the same person.",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-person-nickname-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "EM, my mentor I mentioned, asked me to send the revised microscopy figures by Thursday at 16:00.",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-person-nickname-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Dr Evelyn Moore is a different scientist at another institution. Her figures are due on Monday at 09:00.",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "When did Dr Elena Morales ask me to send the revised microscopy figures?",
+    "answer": "Thursday at 16:00.",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "Thursday",
+      "16:00"
+    ],
+    "wrong_answer_markers": [
+      "Monday",
+      "09:00"
+    ]
+  },
+  {
+    "id": "en-homonym-abbreviation",
+    "language": "en",
+    "purpose": "two unrelated organizations share an abbreviation",
+    "sessions": [
+      {
+        "session_id": "en-homonym-abbreviation-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Orion Biotech, abbreviated OBT, is my employer. Its audit contact is Marcus Vale.",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-homonym-abbreviation-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Oakbridge Transit also uses OBT as its abbreviation. It is unrelated to Orion Biotech. Its audit contact is Dana Fox.",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-homonym-abbreviation-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "The OBT I work for is Orion Biotech, the organization I mentioned earlier. Its audit is on October 21.",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "Who is the audit contact for my employer Orion Biotech, and when is its audit?",
+    "answer": "Marcus Vale is the audit contact, and the audit is on October 21.",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "Marcus Vale",
+      "October 21"
+    ],
+    "wrong_answer_markers": [
+      "Dana Fox"
+    ]
+  },
+  {
+    "id": "en-place-abbreviation",
+    "language": "en",
+    "purpose": "stored place alias with spatial evidence",
+    "sessions": [
+      {
+        "session_id": "en-place-abbreviation-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "I refer to Grand Central Terminal as GCT. GCT and Grand Central Terminal mean the same station in my notes.",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-place-abbreviation-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "At GCT, the station I mentioned, I left my green umbrella at the east information desk.",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-place-abbreviation-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "At Penn Station I left a red scarf at the west ticket office.",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "Where did I leave my green umbrella at Grand Central Terminal?",
+    "answer": "At the east information desk.",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "east information desk"
+    ],
+    "wrong_answer_markers": [
+      "west ticket office"
+    ]
+  },
+  {
+    "id": "en-product-causal",
+    "language": "en",
+    "purpose": "product alias and explicit effect-to-cause chain",
+    "sessions": [
+      {
+        "session_id": "en-product-causal-1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "My laptop is an Aurora Notebook 14. I abbreviate its name as AN14.",
+            "event_time": "2026-09-01T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-product-causal-2",
+        "messages": [
+          {
+            "role": "user",
+            "content": "AN14, the laptop I mentioned, has a swollen battery. The swollen battery pushed up the trackpad, so I sent my Aurora Notebook 14 for repair.",
+            "event_time": "2026-09-02T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      },
+      {
+        "session_id": "en-product-causal-3",
+        "messages": [
+          {
+            "role": "user",
+            "content": "The repair center gave me a loaner ZenithBook. That different machine had a broken hinge.",
+            "event_time": "2026-09-03T00:00:00+00:00",
+            "learning_eligible": true
+          }
+        ]
+      }
+    ],
+    "question": "Why did I send my AN14 for repair?",
+    "answer": "Its battery was swollen and pushed up the trackpad.",
+    "question_date": "2026-10-01T12:00:00+00:00",
+    "required_context": [
+      "swollen battery",
+      "trackpad"
+    ],
+    "wrong_answer_markers": [
+      "broken hinge"
+    ]
+  }
+]

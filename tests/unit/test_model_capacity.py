@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from threading import Event
 from time import sleep
 
@@ -13,6 +13,9 @@ def test_model_admission_rejects_a_permit_after_pool_checkout_exhausts_deadline(
     from oam.capacity import CapacityUnavailable, PostgresCapacity
 
     class Connection:
+        def pipeline(self):
+            return nullcontext()
+
         def execute(self, query, parameters=()):
             return self
 
@@ -39,6 +42,9 @@ def test_model_admission_rolls_back_if_query_finishes_after_deadline():
     rolled_back = []
 
     class Connection:
+        def pipeline(self):
+            return nullcontext()
+
         def execute(self, query, parameters=()):
             statements.append(query)
             if "oam_model_permit_acquire" in query:
@@ -73,6 +79,9 @@ def test_model_admission_bounds_cleanup_if_pool_return_finishes_after_deadline()
     checkout_timeouts = []
 
     class Connection:
+        def pipeline(self):
+            return nullcontext()
+
         def __init__(self):
             self.acquired = False
 
@@ -295,6 +304,9 @@ def test_capacity_pool_checkout_is_bounded_by_configured_pool_timeout():
     checkout_timeouts = []
 
     class Connection:
+        def pipeline(self):
+            return nullcontext()
+
         def execute(self, query, parameters=()):
             return self
 
@@ -324,6 +336,9 @@ def test_http_admission_applies_configured_statement_timeout(monkeypatch):
     statements = []
 
     class Connection:
+        def pipeline(self):
+            return nullcontext()
+
         def execute(self, query, parameters=()):
             statements.append((query, parameters))
             return self
@@ -348,3 +363,117 @@ def test_http_admission_applies_configured_statement_timeout(monkeypatch):
         "SELECT set_config('statement_timeout',%s,false)",
         ("250",),
     )
+
+
+@pytest.mark.parametrize("http_admission", [False, True])
+def test_capacity_setup_and_query_drain_before_result_consumption(monkeypatch, http_admission):
+    from oam.capacity import PostgresCapacity
+
+    monkeypatch.setattr("oam.capacity.Pipeline.is_supported", staticmethod(lambda: True))
+    events = []
+
+    class Connection:
+        @contextmanager
+        def pipeline(self):
+            events.append("pipeline")
+            yield
+            events.append("drained")
+
+        def execute(self, query, parameters=()):
+            events.append("timeout" if "set_config" in query else "query")
+            return self
+
+        def fetchone(self):
+            assert events[-1] == "drained"
+            events.append("fetch")
+            return (None if http_admission else True,)
+
+        def close(self):
+            events.append("close")
+
+    connection = Connection()
+
+    class Pool:
+        @contextmanager
+        def connection(self, *, timeout):
+            yield connection
+            events.append("committed")
+
+    monkeypatch.setattr("oam.capacity.psycopg.connect", lambda *args, **kwargs: connection)
+    capacity = PostgresCapacity(runtime_config(), "unused", pool=Pool())
+    if http_admission:
+        assert capacity.try_http(write=False) is None
+        assert events == ["pipeline", "timeout", "query", "drained", "fetch", "close"]
+    else:
+        assert capacity._execute("SELECT true") is True
+        assert events == ["pipeline", "timeout", "query", "drained", "fetch", "committed"]
+
+
+@pytest.mark.parametrize("http_admission", [False, True])
+def test_capacity_setup_failure_rolls_back_or_closes_without_admission(monkeypatch, http_admission):
+    import psycopg
+
+    from oam.capacity import PostgresCapacity
+
+    monkeypatch.setattr("oam.capacity.Pipeline.is_supported", staticmethod(lambda: True))
+    events = []
+
+    class Connection:
+        @contextmanager
+        def pipeline(self):
+            try:
+                yield
+            finally:
+                events.append("drained")
+
+        def execute(self, query, parameters=()):
+            assert "set_config" in query
+            events.append("setup")
+            raise psycopg.ProgrammingError("injected setup failure")
+
+        def close(self):
+            events.append("closed")
+
+    connection = Connection()
+
+    class Pool:
+        @contextmanager
+        def connection(self, *, timeout):
+            try:
+                yield connection
+            except psycopg.Error:
+                events.append("rollback")
+                raise
+
+    monkeypatch.setattr("oam.capacity.psycopg.connect", lambda *args, **kwargs: connection)
+    capacity = PostgresCapacity(runtime_config(), "unused", pool=Pool())
+    with pytest.raises(psycopg.ProgrammingError):
+        if http_admission:
+            capacity.try_http(write=False)
+        else:
+            capacity._execute("SELECT true")
+    assert events == ["setup", "drained", "closed" if http_admission else "rollback"]
+
+
+def test_capacity_uses_serial_transport_when_pipeline_is_unavailable(monkeypatch):
+    from oam.capacity import PostgresCapacity
+
+    events = []
+
+    class Connection:
+        def execute(self, query, parameters=()):
+            events.append("timeout" if "set_config" in query else "query")
+            return self
+
+        def fetchone(self):
+            events.append("fetch")
+            return (True,)
+
+    class Pool:
+        @contextmanager
+        def connection(self, *, timeout):
+            yield Connection()
+
+    monkeypatch.setattr("oam.capacity.Pipeline.is_supported", staticmethod(lambda: False))
+    assert PostgresCapacity(runtime_config(), "unused", pool=Pool())._execute("SELECT true")
+    assert events == ["timeout", "query", "fetch"]

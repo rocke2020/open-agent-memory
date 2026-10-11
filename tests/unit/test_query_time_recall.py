@@ -111,6 +111,9 @@ def test_recall_rejects_policy_change_after_hydration():
             service.epoch = 1
             return result
 
+        def record_trace(self, trace_id, policy_epoch, decisions, result):
+            return policy_epoch == service.epoch
+
     class ChangedService(RecallService):
         epoch = 0
 

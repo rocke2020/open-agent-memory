@@ -7,7 +7,9 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Sequence
+from contextlib import nullcontext
 
+from psycopg import Pipeline
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -22,6 +24,11 @@ from oam.db.eligibility import (
     ELIGIBLE_UNITS_CANDIDATE,
     ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS,
 )
+from oam.db.entity_eligibility import (
+    ELIGIBLE_ENTITY_MEMBERSHIPS,
+    ELIGIBLE_ENTITY_NAME_SUPPORT,
+    ENTITY_PROJECTIONS_FROM_SEED_ENTITIES,
+)
 from oam.retrieval.algorithms import (
     GraphEdge,
     TemporalEdge,
@@ -30,6 +37,113 @@ from oam.retrieval.algorithms import (
     reciprocal_rank_fusion,
 )
 from oam.retrieval.fts import QueryTerms, query_terms
+
+
+def _causal_ctes() -> str:
+    """Existing eligible outgoing links, bounded separately at each of two hops."""
+    return (
+        "first_edges AS (SELECT s.unit_id AS seed_id,l.* FROM seeds s "
+        "CROSS JOIN LATERAL (SELECT l.* FROM unit_links l JOIN filtered u ON "
+        "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
+        "WHERE (l.tenant_id,l.user_id,l.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
+        "AND l.kind='caused_by' AND u.kind='fact' "
+        "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) l), "
+        "causal_rows AS (SELECT source_id,target_id,weight,"
+        "ARRAY[source_id,target_id] AS nodes,weight AS path_score FROM first_edges "
+        "UNION ALL SELECT e.source_id,e.target_id,e.weight,"
+        "ARRAY[f.seed_id,e.source_id,e.target_id],f.weight*e.weight "
+        "FROM first_edges f CROSS JOIN LATERAL (SELECT l.* FROM unit_links l "
+        "JOIN filtered u ON "
+        "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
+        "WHERE (l.tenant_id,l.user_id,l.source_id)=(f.tenant_id,f.user_id,f.target_id) "
+        "AND l.kind='caused_by' AND u.kind='fact' AND l.target_id<>f.seed_id "
+        "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) e)"
+    )
+
+
+def _fact_only_eligible() -> str:
+    return (
+        "WITH filtered AS NOT MATERIALIZED (SELECT * FROM ("
+        + ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
+        + ") eligible WHERE kind='fact') "
+    )
+
+
+def _graph_fact_eligibility(*, include_semantic: bool) -> str:
+    eligible = _fact_only_eligible()
+    seed_gate = (
+        ""
+        if include_semantic
+        else (
+            " AND EXISTS ("
+            + eligible
+            + "SELECT 1 FROM filtered other WHERE other.unit_id<>ALL(%(seeds)s))"
+        )
+    )
+    candidates = [
+        "SELECT unit_id FROM seeds",
+        "SELECT ue.unit_id FROM unit_entities ue JOIN raw_seed_entities r "
+        "USING(tenant_id,user_id,entity_id)",
+        "SELECT u.unit_id FROM raw_seed_entities r JOIN entity_names n "
+        "USING(tenant_id,user_id,entity_id) JOIN entity_name_support ns "
+        "USING(tenant_id,user_id,name_id) JOIN search_units u "
+        "USING(tenant_id,user_id,memory_id)",
+        "SELECT l.target_id FROM seeds s JOIN unit_links l ON "
+        "(l.tenant_id,l.user_id,l.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
+        "WHERE l.kind='caused_by'",
+        "SELECT second.target_id FROM seeds s JOIN unit_links first ON "
+        "(first.tenant_id,first.user_id,first.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
+        "JOIN unit_links second ON (second.tenant_id,second.user_id,second.source_id)="
+        "(first.tenant_id,first.user_id,first.target_id) "
+        "WHERE first.kind='caused_by' AND second.kind='caused_by'",
+    ]
+    if include_semantic:
+        for source, target in (("source_id", "target_id"), ("target_id", "source_id")):
+            candidates.append(
+                f"SELECT l.{target} AS unit_id FROM seeds s JOIN unit_links l ON "
+                f"(l.tenant_id,l.user_id,l.{source})=(s.tenant_id,s.user_id,s.unit_id) "
+                "WHERE l.kind='semantic'"
+            )
+    candidate_eligible = eligible.replace(
+        "FROM search_units u",
+        "FROM (SELECT * FROM search_units "
+        "WHERE tenant_id=current_setting('oam.tenant_id',true) "
+        "AND user_id=current_setting('oam.user_id',true) AND kind='fact' "
+        "AND unit_id IN (SELECT unit_id FROM graph_candidate_ids) "
+        "AND unit_id<>ALL(%(seeds)s) OFFSET 0) u",
+        1,
+    )
+    # Stored identities and links provide an uncapped superset. Validate seeds
+    # before identity reads, retain nonseed name anchors, and apply every support
+    # predicate before the ordinary graph's existing ranking and branch limits.
+    return (
+        "WITH seeds AS MATERIALIZED ("
+        + eligible
+        + "SELECT * FROM filtered WHERE unit_id=ANY(%(seeds)s)"
+        + seed_gate
+        + "), raw_seed_entities AS MATERIALIZED ("
+        "SELECT DISTINCT s.tenant_id,s.user_id,ue.entity_id FROM seeds s "
+        "JOIN unit_entities ue USING(tenant_id,user_id,unit_id,generation_id) "
+        "WHERE ue.entity_id IS NOT NULL), graph_candidate_ids AS MATERIALIZED ("
+        + " UNION ".join(candidates)
+        + "), filtered AS MATERIALIZED (SELECT * FROM seeds UNION ALL "
+        "SELECT * FROM (" + candidate_eligible + "SELECT * FROM filtered) candidate_facts) "
+    )
+
+
+def _causal_paths(rows):
+    paths = defaultdict(list)
+    for row in rows:
+        paths[row["target_id"]].append(
+            {
+                "arm": "graph",
+                "relation": "caused_by",
+                "nodes": row["nodes"],
+                "score": row["path_score"],
+            }
+        )
+    return paths
+
 
 _ANCHOR = re.compile(r'"([^"\n]+)"|\b([A-Za-z][A-Za-z0-9]*-\d+[A-Za-z0-9-]*|[\w]+_[\w-]+)\b')
 EXACT_USER_ORDER_MIN_CANDIDATES = 64
@@ -116,6 +230,7 @@ class RecallRepository:
         *,
         deadline: float,
         request: SearchRequest | None = None,
+        read_committed: bool = False,
     ):
         if not authority.allows("memory:read"):
             raise PermissionError("memory:read is required")
@@ -125,10 +240,16 @@ class RecallRepository:
         self.deadline = deadline
         self.request = request
         self.time_parameters = {}
-        connection.execute(
-            SET_USER_CONTEXT_SQL + ", set_config('jit','off',true)",
-            (authority.tenant_id, authority.user_id),
-        )
+        # Scoped cardinality depends on current_setting; pooled generic plans can
+        # retain another user's small-history estimates for large fact collections.
+        with connection.pipeline() if read_committed and Pipeline.is_supported() else nullcontext():
+            if read_committed:
+                connection.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            connection.execute(
+                SET_USER_CONTEXT_SQL + ", set_config('jit','off',true), "
+                "set_config('plan_cache_mode','force_custom_plan',true)",
+                (authority.tenant_id, authority.user_id),
+            )
         self._has_insights: bool | None = None
 
     @property
@@ -191,24 +312,36 @@ class RecallRepository:
             f"filtered AS NOT MATERIALIZED (SELECT u.* FROM eligible u WHERE {predicate}) "
         )
 
-    def _execute(self, sql: str, parameters=()):
+    def _execute(self, sql: str, parameters=(), *, configure_ann: bool = False):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("recall deadline exhausted")
-        self.connection.execute(
-            "SELECT set_config('statement_timeout',%s,true)", (str(max(1, int(remaining * 1000))),)
-        )
         cursor = self.connection.cursor(row_factory=dict_row)
         if isinstance(parameters, dict):
             parameters = {**self.time_parameters, **parameters}
-        cursor.execute(sql, parameters)
+        settings = "SELECT set_config('statement_timeout',%s,true)"
+        setting_parameters = (str(max(1, int(remaining * 1000))),)
+        if configure_ann:
+            settings += (
+                ", set_config('hnsw.iterative_scan',%s,true), "
+                "set_config('hnsw.max_scan_tuples',%s,true)"
+            )
+            setting_parameters += (
+                self.config.search.ann_iterative_scan,
+                str(self.config.search.ann_scan_max_tuples),
+            )
+        # Preserve backend command order while sending setup and query together.
+        # Exit drains results before fetch or the owning transaction's rollback.
+        with self.connection.pipeline() if Pipeline.is_supported() else nullcontext():
+            self.connection.execute(settings, setting_parameters)
+            cursor.execute(sql, parameters)
         return cursor.fetchall()
 
     def user_generation(self) -> str | None:
         return self.user_state()["index_generation_id"]
 
     def record_trace(self, trace_id: str, policy_epoch: int, decisions: dict, result: dict) -> bool:
-        row = self.connection.execute(
+        rows = self._execute(
             "INSERT INTO traces(tenant_id,user_id,trace_id,read_seq,generation_id,"
             "policy_epoch,decisions,content,expires_at) "
             "SELECT tenant_id,user_id,%s,published_seq,index_generation_id,policy_epoch,"
@@ -224,11 +357,35 @@ class RecallRepository:
                 self.authority.user_id,
                 policy_epoch,
             ),
-        ).fetchone()
-        return row is not None
+        )
+        return bool(rows)
 
     def user_state(self) -> dict:
         rows = self._execute(
+            "WITH active_user AS MATERIALIZED ("
+            "SELECT tenant_id,user_id,index_generation_id,policy_epoch FROM users "
+            "WHERE tenant_id=%s AND user_id=%s AND state='active'), "
+            "current_sources AS MATERIALIZED ("
+            "SELECT s.tenant_id,s.user_id,s.source_id,s.active_version "
+            "FROM active_user sc JOIN sources s ON "
+            "(s.tenant_id,s.user_id)=(sc.tenant_id,sc.user_id) "
+            "WHERE s.status='active' AND s.input_role IN ('interaction','evidence_resource')), "
+            "current_operations AS MATERIALIZED ("
+            "SELECT DISTINCT w.tenant_id,w.user_id,w.operation_id "
+            "FROM active_user sc JOIN work_units w ON "
+            "(w.tenant_id,w.user_id,w.generation_id)="
+            "(sc.tenant_id,sc.user_id,sc.index_generation_id)), "
+            "latest_operations AS MATERIALIZED ("
+            "SELECT DISTINCT ON (o.tenant_id,o.user_id,o.source_id,o.source_version) "
+            "o.tenant_id,o.user_id,o.source_id,o.source_version,o.status,o.stage_state "
+            "FROM current_sources s JOIN operations o ON "
+            "(o.tenant_id,o.user_id,o.source_id,o.source_version)="
+            "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
+            "JOIN current_operations w ON "
+            "(w.tenant_id,w.user_id,w.operation_id)=(o.tenant_id,o.user_id,o.operation_id) "
+            "WHERE o.kind<>'consolidate' "
+            "ORDER BY o.tenant_id,o.user_id,o.source_id,o.source_version,"
+            "o.created_at DESC,o.operation_id DESC) "
             "SELECT sc.index_generation_id,sc.policy_epoch,"
             "COALESCE(bool_or(base.stage_state->>'parse_coverage'='partial'),false) "
             "AS parse_partial,CASE "
@@ -237,18 +394,11 @@ class RecallRepository:
             "OR base.stage_state ? 'error') "
             "THEN 'partial' WHEN bool_or(s.source_id IS NOT NULL AND "
             "(base.status IS NULL OR base.status IN ('accepted','running'))) "
-            "THEN 'pending' ELSE 'ready' END AS readiness FROM users sc "
-            "LEFT JOIN sources s ON (s.tenant_id,s.user_id)=(sc.tenant_id,sc.user_id) "
-            "AND s.status='active' AND s.input_role IN ('interaction','evidence_resource') "
-            "LEFT JOIN LATERAL (SELECT o.status,o.stage_state FROM operations o WHERE "
-            "(o.tenant_id,o.user_id,o.source_id,o.source_version)="
+            "THEN 'pending' ELSE 'ready' END AS readiness FROM active_user sc "
+            "LEFT JOIN current_sources s ON (s.tenant_id,s.user_id)=(sc.tenant_id,sc.user_id) "
+            "LEFT JOIN latest_operations base ON "
+            "(base.tenant_id,base.user_id,base.source_id,base.source_version)="
             "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
-            "AND o.kind<>'consolidate' AND EXISTS ("
-            "SELECT 1 FROM work_units w WHERE "
-            "(w.tenant_id,w.user_id,w.operation_id,w.generation_id)="
-            "(o.tenant_id,o.user_id,o.operation_id,sc.index_generation_id)) "
-            "ORDER BY o.created_at DESC,o.operation_id DESC LIMIT 1) base ON true "
-            "WHERE sc.tenant_id=%s AND sc.user_id=%s AND sc.state='active' "
             "GROUP BY sc.index_generation_id,sc.policy_epoch",
             (self.authority.tenant_id, self.authority.user_id),
         )
@@ -359,11 +509,6 @@ class RecallRepository:
         )
 
     def dense(self, vector: Sequence[float], limit: int) -> list[dict]:
-        self.connection.execute(
-            "SELECT set_config('hnsw.iterative_scan',%s,true), "
-            "set_config('hnsw.max_scan_tuples',%s,true)",
-            (self.config.search.ann_iterative_scan, str(self.config.search.ann_scan_max_tuples)),
-        )
         scope = (
             "u.tenant_id=current_setting('oam.tenant_id',true) "
             "AND u.user_id=current_setting('oam.user_id',true) "
@@ -392,6 +537,7 @@ class RecallRepository:
             "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
             f"ORDER BY {distance} LIMIT %(limit)s",
             {"vector": json.dumps(tuple(vector)), "limit": limit},
+            configure_ann=True,
         )
 
     def related_user_fact(self, unit_ids: Sequence[str]) -> dict | None:
@@ -406,22 +552,33 @@ class RecallRepository:
             "(sp.tenant_id,sp.user_id,sp.memory_id)=(u.tenant_id,u.user_id,u.memory_id) "
             "AND sp.span->>'role'='user') "
         )
+        eligible = (
+            "(SELECT true FROM filtered f WHERE "
+            "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
+        )
         rows = self._execute(
             self._eligible(candidate_facts=True)
-            + ", seed AS MATERIALIZED (SELECT u.unit_id,u.embedding FROM filtered u "
-            "WHERE u.unit_id=ANY(%(ids)s) AND "
+            + ", seed AS MATERIALIZED (SELECT u.unit_id,u.embedding FROM ("
+            "SELECT u.tenant_id,u.user_id,u.unit_id,u.embedding,"
+            "array_position(%(ids)s,u.unit_id) AS position FROM search_units u WHERE "
+            + scope
+            + "AND "
             + user_fact
-            + "ORDER BY array_position(%(ids)s,u.unit_id) LIMIT 1), "
+            + "AND u.unit_id=ANY(%(ids)s) ORDER BY position OFFSET 0) u WHERE "
+            + eligible
+            + "ORDER BY u.position LIMIT 1), "
             "ranked AS MATERIALIZED (SELECT u.tenant_id,u.user_id,u.unit_id,"
+            "u.source_id,u.source_version,u.distance FROM seed s CROSS JOIN LATERAL ("
+            "SELECT u.* FROM (SELECT u.tenant_id,u.user_id,u.unit_id,u.memory_id,"
             "u.source_id,u.source_version,u.embedding <=> s.embedding AS distance "
-            "FROM seed s JOIN search_units u ON "
+            "FROM search_units u WHERE "
             + scope
             + "AND "
             + user_fact
             + "AND u.unit_id<>s.unit_id AND u.source_id IS NOT NULL "
-            "AND EXISTS (SELECT 1 FROM filtered f WHERE "
-            "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) "
-            "ORDER BY distance,u.unit_id LIMIT 1) "
+            "ORDER BY distance,u.unit_id OFFSET 0) u WHERE "
+            + eligible
+            + "ORDER BY u.distance,u.unit_id LIMIT 1) u) "
             "SELECT s.unit_id AS seed_id,u.unit_id,u.source_id,u.source_version "
             "FROM seed s JOIN ranked u ON true",
             {"ids": list(unit_ids)},
@@ -533,7 +690,28 @@ class RecallRepository:
             },
         )
 
-    def ordinary(self, seed_ids: Sequence[str], vector: Sequence[float]):
+    def fast_graph(self, seed_ids: Sequence[str], vector: Sequence[float]):
+        """Stored entity/alias and causal expansion; no semantic or L2 discovery."""
+        if not seed_ids:
+            return (), {}
+        # A negative raw-superset check proves the existing nonseed eligibility
+        # gate cannot admit any seed. A positive check keeps the full graph proof.
+        if not self._execute(
+            "SELECT unit_id FROM search_units WHERE tenant_id=%(tenant)s "
+            "AND user_id=%(user)s AND kind='fact' "
+            "AND unit_id<>ALL(%(seeds)s::text[]) LIMIT 1",
+            {
+                "tenant": self.authority.tenant_id,
+                "user": self.authority.user_id,
+                "seeds": list(seed_ids),
+            },
+        ):
+            return (), {}
+        return self.ordinary(seed_ids, vector, include_semantic=False)
+
+    def ordinary(
+        self, seed_ids: Sequence[str], vector: Sequence[float], *, include_semantic: bool = True
+    ):
         config = self.config.search
         parameters = {
             "seeds": list(seed_ids),
@@ -542,12 +720,9 @@ class RecallRepository:
             "per_entity": config.entity_candidates_per_entity,
             "links": config.links_per_seed,
         }
-        eligible = self._eligible(candidate_facts=not self.has_insights)
-        if self.has_insights:
-            eligible = eligible.replace("filtered AS NOT MATERIALIZED", "filtered AS MATERIALIZED")
         prefix = (
-            eligible + ", seeds AS MATERIALIZED (SELECT * FROM filtered WHERE kind='fact' "
-            "AND unit_id=ANY(%(seeds)s)) "
+            _graph_fact_eligibility(include_semantic=include_semantic)
+            + ENTITY_PROJECTIONS_FROM_SEED_ENTITIES
         )
         directions = []
         for source, target in (("source_id", "target_id"), ("target_id", "source_id")):
@@ -559,48 +734,54 @@ class RecallRepository:
                 "LIMIT %(links)s)"
             )
         graph = self._execute(
-            prefix.rstrip() + ", first_edges AS (SELECT s.unit_id AS seed_id,l.* FROM seeds s "
-            "CROSS JOIN LATERAL (SELECT l.* FROM unit_links l JOIN filtered u ON "
-            "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
-            "WHERE (l.tenant_id,l.user_id,l.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
-            "AND l.kind='caused_by' AND u.kind='fact' "
-            "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) l), "
-            "seed_entities AS MATERIALIZED (SELECT s.unit_id AS seed_id,e.entity_key FROM seeds s "
-            "CROSS JOIN LATERAL (SELECT entity_key FROM unit_entities ue WHERE "
+            prefix.rstrip() + ", " + _causal_ctes() + ", "
+            "seed_entities AS MATERIALIZED (SELECT s.unit_id AS seed_id,e.entity_id,e.name_id "
+            "FROM seeds s CROSS JOIN LATERAL (SELECT entity_id,name_id FROM memberships ue WHERE "
             "(ue.tenant_id,ue.user_id,ue.unit_id)=(s.tenant_id,s.user_id,s.unit_id) "
-            "ORDER BY entity_key LIMIT %(entities)s) e), "
+            "ORDER BY entity_id LIMIT %(entities)s) e), "
             "entity_candidates AS MATERIALIZED ("
-            "SELECT e.entity_key,c.unit_id,c.distance "
-            "FROM (SELECT DISTINCT entity_key FROM seed_entities) e "
-            "CROSS JOIN LATERAL (SELECT u.unit_id,u.embedding <=> %(vector)s::vector "
-            "AS distance FROM filtered u JOIN unit_entities ue "
+            "SELECT e.entity_id,c.unit_id,c.name_id,c.distance "
+            "FROM (SELECT DISTINCT entity_id FROM seed_entities) e "
+            "CROSS JOIN LATERAL (SELECT u.unit_id,ue.name_id,u.embedding <=> %(vector)s::vector "
+            "AS distance FROM filtered u JOIN memberships ue "
             "USING(tenant_id,user_id,unit_id) WHERE u.kind='fact' "
-            "AND ue.entity_key=e.entity_key "
+            "AND ue.entity_id=e.entity_id "
             "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id "
             "LIMIT %(per_entity)s+1) c), "
-            "entity_rows AS (SELECT s.seed_id,s.entity_key,c.unit_id FROM seed_entities s "
-            "CROSS JOIN LATERAL (SELECT unit_id FROM entity_candidates c "
-            "WHERE c.entity_key=s.entity_key AND c.unit_id<>s.seed_id "
-            "ORDER BY c.distance,c.unit_id LIMIT %(per_entity)s) c), "
-            "semantic_rows AS (SELECT e.* FROM seeds s CROSS JOIN LATERAL ("
-            + " UNION ALL ".join(directions)
-            + ") e), "
-            "causal_rows AS (SELECT source_id,target_id,weight,"
-            "ARRAY[source_id,target_id] AS nodes FROM first_edges "
-            "UNION ALL SELECT e.source_id,e.target_id,e.weight,"
-            "ARRAY[f.seed_id,e.source_id,e.target_id] "
-            "FROM first_edges f CROSS JOIN LATERAL (SELECT l.* FROM unit_links l "
-            "JOIN filtered u ON "
-            "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
-            "WHERE (l.tenant_id,l.user_id,l.source_id)=(f.tenant_id,f.user_id,f.target_id) "
-            "AND l.kind='caused_by' AND u.kind='fact' AND l.target_id<>f.seed_id "
-            "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) e) "
-            "SELECT 'entity' AS source,seed_id,entity_key,unit_id,NULL::text AS source_id,"
-            "NULL::text AS target_id,NULL::double precision AS weight,NULL::text[] AS nodes "
-            "FROM entity_rows UNION ALL SELECT 'semantic',NULL::text,NULL::text,NULL::text,"
-            "source_id,target_id,weight,NULL::text[] FROM semantic_rows "
-            "UNION ALL SELECT 'causal',NULL::text,NULL::text,NULL::text,"
-            "source_id,target_id,weight,nodes FROM causal_rows "
+            "entity_rows AS (SELECT s.seed_id,s.entity_id,s.name_id AS seed_name_id,"
+            "c.name_id AS target_name_id,c.unit_id FROM seed_entities s "
+            "CROSS JOIN LATERAL (SELECT unit_id,name_id FROM entity_candidates c "
+            "WHERE c.entity_id=s.entity_id AND c.unit_id<>s.seed_id "
+            "ORDER BY c.distance,c.unit_id LIMIT %(per_entity)s) c) "
+            + (
+                ", semantic_rows AS (SELECT e.* FROM seeds s CROSS JOIN LATERAL ("
+                + " UNION ALL ".join(directions)
+                + ") e) "
+                if include_semantic
+                else ""
+            )
+            + "SELECT 'entity' AS source,seed_id,entity_id AS entity_key,unit_id,"
+            "NULL::text AS source_id,NULL::text AS target_id,NULL::double precision AS weight,"
+            "NULL::text[] AS nodes,NULL::double precision AS path_score,"
+            "jsonb_build_object('name_ids',"
+            "ARRAY[seed_name_id,target_name_id],'alias_witnesses',COALESCE(w.witnesses,'[]')) "
+            "AS entity_evidence FROM entity_rows e LEFT JOIN LATERAL ("
+            "SELECT jsonb_agg(jsonb_build_object('support_id',support_id,'name_id',name_id,"
+            "'entity_id',entity_id,'quote',quote,'citation',jsonb_build_object("
+            "'source_id',source_id,'source_version',source_version,"
+            "'span',locator||jsonb_build_object('quote',quote))) ORDER BY name_id) AS witnesses "
+            "FROM (SELECT DISTINCT ON(name_id) * FROM name_support ns "
+            "WHERE ns.entity_id=e.entity_id AND ns.name_id=ANY("
+            "ARRAY[e.seed_name_id,e.target_name_id]) AND ns.support_kind='alias' "
+            "ORDER BY name_id,support_id) ns) w ON true "
+            + (
+                "UNION ALL SELECT 'semantic',NULL::text,NULL::text,NULL::text,"
+                "source_id,target_id,weight,NULL::text[],weight,NULL::jsonb FROM semantic_rows "
+                if include_semantic
+                else ""
+            )
+            + "UNION ALL SELECT 'causal',NULL::text,NULL::text,NULL::text,"
+            "source_id,target_id,weight,nodes,path_score,NULL::jsonb FROM causal_rows "
             "ORDER BY source,source_id,target_id,seed_id,unit_id",
             parameters,
         )
@@ -617,6 +798,7 @@ class RecallRepository:
                     "relation": "entity",
                     "nodes": [row["seed_id"], row["unit_id"]],
                     "entity": row["entity_key"],
+                    **row["entity_evidence"],
                 }
             )
         for row in semantic:
@@ -624,12 +806,15 @@ class RecallRepository:
             if target in seed_ids:
                 source, target = target, source
             paths[target].append(
-                {"arm": "graph", "relation": "semantic", "nodes": [source, target]}
+                {
+                    "arm": "graph",
+                    "relation": "semantic",
+                    "nodes": [source, target],
+                    "score": row["path_score"],
+                }
             )
-        for row in causal:
-            paths[row["target_id"]].append(
-                {"arm": "graph", "relation": "caused_by", "nodes": row["nodes"]}
-            )
+        for node, group in _causal_paths(causal).items():
+            paths[node].extend(group)
         ranked = ordinary_graph_activation(
             seed_ids,
             entity_matches=matches,
@@ -844,8 +1029,13 @@ class RecallRepository:
         node_ids = sorted(
             {node for group in paths.values() for path in group for node in path["nodes"]}
         )
+        fact_only = all(
+            path.get("relation") in {"caused_by", "entity"}
+            for group in paths.values()
+            for path in group
+        )
         rows = self._execute(
-            self._eligible(candidate_facts=True)
+            (_fact_only_eligible() if fact_only else self._eligible(candidate_facts=True))
             + "SELECT unit_id FROM filtered WHERE unit_id=ANY(%(ids)s)",
             {"ids": node_ids},
         )
@@ -868,13 +1058,71 @@ class RecallRepository:
             valid_edges = {
                 row["edge_id"] for row in self._temporal_edges(node_ids, vector, edge_ids=edge_ids)
             }
+        entity_paths = self._entity_path_witnesses(paths)
         return {
             node_id: [
-                path
+                entity_paths[id(path)] if path.get("relation") == "entity" else path
                 for path in group
                 if set(path["nodes"]) <= eligible
                 and (path["arm"] != "temporal" or set(path["nodes"]) <= temporal_eligible)
                 and set(path.get("edge_ids", ())) <= valid_edges
+                and (path.get("relation") != "entity" or id(path) in entity_paths)
             ]
             for node_id, group in paths.items()
         }
+
+    def _entity_path_witnesses(self, paths: dict[str, list[dict]]) -> dict[int, dict]:
+        entity_paths = [
+            path for group in paths.values() for path in group if path.get("relation") == "entity"
+        ]
+        if not entity_paths:
+            return {}
+        parameters = {
+            "nodes": sorted({node for path in entity_paths for node in path["nodes"]}),
+            "entities": sorted({path["entity"] for path in entity_paths}),
+            "names": sorted({name for path in entity_paths for name in path.get("name_ids", ())}),
+        }
+        members = self._execute(
+            "SELECT unit_id,entity_id,name_id FROM ("
+            + ELIGIBLE_ENTITY_MEMBERSHIPS
+            + ") membership WHERE unit_id=ANY(%(nodes)s) AND entity_id=ANY(%(entities)s)",
+            parameters,
+        )
+        membership_keys = {(row["unit_id"], row["entity_id"], row["name_id"]) for row in members}
+        supports = self._execute(
+            "SELECT DISTINCT ON(entity_id,name_id) * FROM ("
+            + ELIGIBLE_ENTITY_NAME_SUPPORT
+            + ") binding WHERE entity_id=ANY(%(entities)s) AND name_id=ANY(%(names)s) "
+            "ORDER BY entity_id,name_id,support_id",
+            parameters,
+        )
+        by_name = {(row["entity_id"], row["name_id"]): row for row in supports}
+        current = {}
+        for path in entity_paths:
+            names = path.get("name_ids", ())
+            if len(names) != len(path["nodes"]) or not all(
+                (node, path["entity"], name) in membership_keys
+                for node, name in zip(path["nodes"], names, strict=True)
+            ):
+                continue
+            bindings = [by_name.get((path["entity"], name)) for name in dict.fromkeys(names)]
+            if any(binding is None for binding in bindings):
+                continue
+            witnesses = []
+            for binding in bindings:
+                if binding["support_kind"] == "alias":
+                    witnesses.append(
+                        {
+                            "support_id": binding["support_id"],
+                            "name_id": binding["name_id"],
+                            "entity_id": binding["entity_id"],
+                            "quote": binding["quote"],
+                            "citation": {
+                                "source_id": binding["source_id"],
+                                "source_version": binding["source_version"],
+                                "span": {**binding["locator"], "quote": binding["quote"]},
+                            },
+                        }
+                    )
+            current[id(path)] = {**path, "alias_witnesses": witnesses}
+        return current

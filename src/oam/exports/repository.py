@@ -16,6 +16,10 @@ from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
+from oam.db.entity_eligibility import (
+    ELIGIBLE_ENTITY_MEMBERSHIPS,
+    ELIGIBLE_ENTITY_NAME_SUPPORT,
+)
 from oam.indexing.identity import index_generation
 from oam.profiles.inputs import load_profile_inputs
 from oam.profiles.service import _current_snapshot, _view
@@ -323,6 +327,7 @@ class ExportRepository:
             )
             for row in cursor.fetchall():
                 records.append({"kind": "support", **dict(row)})
+            records.extend(ExportRepository._entity_records(cursor))
             cursor.execute(
                 f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}) "
                 "SELECT i.insight_id,i.revision,i.synthesis_text,i.subtype,i.recipe_id,"
@@ -354,6 +359,76 @@ class ExportRepository:
             for row in cursor.fetchall():
                 if (row["insight_id"], row["insight_revision"]) in insight_keys:
                     records.append({"kind": "insight_support", **dict(row)})
+        return records
+
+    @staticmethod
+    def _entity_records(cursor) -> list[dict]:
+        cursor.execute(
+            f"WITH bindings AS NOT MATERIALIZED ({ELIGIBLE_ENTITY_NAME_SUPPORT}) "
+            "SELECT DISTINCT b.entity_id,b.generation_id,e.canonical_name,b.name_id,"
+            "b.name_text,b.name_key,b.name_kind,b.support_id,b.memory_id,b.passage_id,"
+            "b.quote,b.support_kind,b.anchor_name_id FROM bindings b JOIN entity_units e "
+            "USING(tenant_id,user_id,entity_id,generation_id) "
+            "ORDER BY b.entity_id,b.name_id,b.support_id"
+        )
+        records = []
+        entities, names = set(), set()
+        for row in cursor.fetchall():
+            if row["entity_id"] not in entities:
+                entities.add(row["entity_id"])
+                records.append(
+                    {
+                        "kind": "entity",
+                        **{
+                            key: row[key]
+                            for key in ("entity_id", "generation_id", "canonical_name")
+                        },
+                    }
+                )
+            if row["name_id"] not in names:
+                names.add(row["name_id"])
+                records.append(
+                    {
+                        "kind": "entity_name",
+                        **{
+                            key: row[key]
+                            for key in (
+                                "name_id",
+                                "entity_id",
+                                "generation_id",
+                                "name_text",
+                                "name_key",
+                                "name_kind",
+                            )
+                        },
+                    }
+                )
+            records.append(
+                {
+                    "kind": "entity_name_support",
+                    **{
+                        key: row[key]
+                        for key in (
+                            "support_id",
+                            "name_id",
+                            "entity_id",
+                            "generation_id",
+                            "memory_id",
+                            "passage_id",
+                            "quote",
+                            "support_kind",
+                            "anchor_name_id",
+                        )
+                    },
+                }
+            )
+        cursor.execute(
+            f"WITH members AS NOT MATERIALIZED ({ELIGIBLE_ENTITY_MEMBERSHIPS}) "
+            "SELECT m.unit_id,f.memory_id,m.entity_id,m.name_id,m.generation_id,"
+            "m.observed_mention,m.mention_quote FROM members m JOIN search_units f "
+            "USING(tenant_id,user_id,unit_id,generation_id) ORDER BY m.unit_id,m.entity_id"
+        )
+        records.extend({"kind": "entity_membership", **dict(row)} for row in cursor.fetchall())
         return records
 
     def _current_manifest(self, connection, authority: AuthorizedUser, export_id: str):

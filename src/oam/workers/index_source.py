@@ -241,6 +241,8 @@ def _index_interaction(config, store, models, request):
                     "vectors": tuple(item[-1] for item in members),
                 }
             )
+            # Offer identity context using existing passage vectors; recall ranking
+            # and answer-context assembly are separate consumers of stored evidence.
             references = freeze_extraction_references(
                 store, group_id, vector, extraction_input, **options
             )
@@ -880,6 +882,8 @@ def _visual_blocks(content: str, prefix: str, base_locator: dict):
 
 
 def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
+    from oam.indexing.entities import EntityRepository
+
     singleton_id = next(iter(owners))
     identifiers = {
         fact.output_index: stable_id(
@@ -887,6 +891,20 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
         )
         for fact in result.facts
     }
+    prepared_entities = {}
+    if any(fact.entities or fact.entity_aliases for fact in result.facts):
+        with store.transaction() as connection:
+            entity_repository = EntityRepository(
+                connection, store.config, generation_id=store.generation_id, key=store.key
+            )
+            prepared_entities = {
+                fact.output_index: entity_repository.prepare_fact(
+                    fact.entities,
+                    tuple(alias.model_dump() for alias in fact.entity_aliases),
+                    tuple(reference.model_dump() for reference in fact.entity_references),
+                )
+                for fact in result.facts
+            }
     with store.transaction() as connection:
         store.guard(connection)
         offered_ids = list(
@@ -948,10 +966,28 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                 source_updated_at=metadata.source_updated_at,
                 ordinal=fact.output_index,
             )
-            for entity in fact.entities:
-                connection.execute(
-                    "INSERT INTO unit_entities VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                    (*store.key, memory_id, entity.casefold().strip()),
+            if fact.entities or fact.entity_aliases:
+                entity_repository = EntityRepository(
+                    connection, store.config, generation_id=store.generation_id, key=store.key
+                )
+                entity_repository.publish_fact(
+                    memory_id,
+                    fact.entities,
+                    fact.quote,
+                    aliases=tuple(alias.model_dump() for alias in fact.entity_aliases),
+                    references=tuple(
+                        reference.model_dump() for reference in fact.entity_references
+                    ),
+                    prepared=prepared_entities[fact.output_index],
+                )
+                diagnostics.extend(
+                    {
+                        "passage_id": passage_id,
+                        "output_index": fact.output_index,
+                        "field": "entities",
+                        "code": code,
+                    }
+                    for code in dict.fromkeys(entity_repository.diagnostics)
                 )
             support_first = chunk.start + chunk.text.index(fact.quote)
             support_last = support_first + len(fact.quote)

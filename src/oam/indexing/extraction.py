@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime
 from importlib.resources import files
 from typing import Annotated, Literal
 
+import jieba
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -24,6 +26,7 @@ from pydantic import (
 from oam.config import OAMConfig
 from oam.contracts.evidence import TemporalAnnotation
 from oam.indexing.chunker import TextChunk, split_chunk_for_output_retry
+from oam.indexing.entity_names import entity_name_key
 from oam.models.runtime import ModelOutputTooLongError, RuntimeModels, Usage
 from oam.quotes import unique_quote
 from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimate_units, estimated_tokens
@@ -60,12 +63,26 @@ class FrozenProjection(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class EntityAlias(FrozenProjection):
+    canonical_name: str = Field(strict=True, min_length=1)
+    alias: str = Field(strict=True, min_length=1)
+    quote: str = Field(strict=True, min_length=1)
+
+
+class EntityReference(FrozenProjection):
+    name: str = Field(strict=True, min_length=1)
+    reference_id: str = Field(strict=True, min_length=1)
+    quote: str = Field(strict=True, min_length=1)
+
+
 class Fact(FrozenProjection):
     output_index: Offset
     text: NonBlank
     category: Literal["fact", "preference", "experience"] = "fact"
     quote: str = Field(min_length=1)
     entities: tuple[NonBlank, ...] = ()
+    entity_aliases: tuple[EntityAlias, ...] = ()
+    entity_references: tuple[EntityReference, ...] = ()
     caused_by: tuple[Offset, ...] = ()
     updates: tuple[Offset, ...] = ()
     annotations: tuple[TemporalAnnotation, ...] = ()
@@ -75,6 +92,10 @@ class Fact(FrozenProjection):
     @model_serializer(mode="wrap")
     def omit_absent_identifiers(self, serialize):
         output = serialize(self)
+        if not self.entity_aliases:
+            output.pop("entity_aliases", None)
+        if not self.entity_references:
+            output.pop("entity_references", None)
         if not self.related_existing_ids:
             output.pop("related_existing_ids", None)
         if self.passage_id is None:
@@ -239,6 +260,14 @@ def pack_reference_facts(
     selected = references[: config.extraction.reference_max_facts]
     metadata = [{**reference, "text": ""} for reference in selected]
     metadata_units = estimate_units(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
+    while (
+        selected and metadata_units > config.extraction.reference_max_input_tokens * UNITS_PER_TOKEN
+    ):
+        selected = selected[:-1]
+        metadata = metadata[:-1]
+        metadata_units = estimate_units(
+            json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        )
     text_units = [estimate_units(reference["text"]) for reference in selected]
     total_text_units = sum(text_units)
     available_units = max(
@@ -479,7 +508,11 @@ def validate_fact_output(
             if valid_ids:
                 raw["related_existing_ids"] = valid_ids
             annotations = raw.pop("annotations", [])
-            if not isinstance(annotations, list):
+            aliases = raw.pop("entity_aliases", [])
+            entity_references = raw.pop("entity_references", [])
+            if not all(
+                isinstance(value, list) for value in (annotations, aliases, entity_references)
+            ):
                 raise ValueError
             fact = Fact.model_validate({**raw, "output_index": index})
             if not unique_quote(chunk.text, fact.quote):
@@ -489,6 +522,20 @@ def validate_fact_output(
                 ExtractionDiagnostic(output_index=index, field="fact", code="invalid_fact")
             )
             continue
+        valid_entities = []
+        for name in fact.entities:
+            try:
+                entity_name_key(name, max_bytes=config.index.entity_name_max_bytes)
+                if not _grounded_source_names(chunk.text, fact, fact.quote, (name,)):
+                    raise ValueError("entity name requires a whole mention in its own support")
+                valid_entities.append(name)
+            except ValueError:
+                diagnostics.append(
+                    ExtractionDiagnostic(
+                        output_index=index, field="entities", code="invalid_entity_name"
+                    )
+                )
+        fact = fact.model_copy(update={"entities": tuple(valid_entities)})
         valid_annotations = []
         for raw_annotation in annotations:
             try:
@@ -504,6 +551,50 @@ def validate_fact_output(
                         output_index=index, field="annotations", code="invalid_annotation"
                     )
                 )
+        valid_aliases = []
+        for raw_alias in aliases:
+            try:
+                if not isinstance(raw_alias, dict):
+                    raise ValueError
+                alias = EntityAlias.model_validate(raw_alias)
+                canonical_key = entity_name_key(
+                    alias.canonical_name, max_bytes=config.index.entity_name_max_bytes
+                )
+                alias_key = entity_name_key(
+                    alias.alias, max_bytes=config.index.entity_name_max_bytes
+                )
+                if not _grounded_source_names(
+                    chunk.text, fact, alias.quote, (alias.canonical_name, alias.alias)
+                ):
+                    raise ValueError("alias requires whole names within exact fact support")
+                if canonical_key != alias_key:
+                    valid_aliases.append(alias)
+            except (ValueError, ValidationError):
+                diagnostics.append(
+                    ExtractionDiagnostic(
+                        output_index=index, field="entity_aliases", code="invalid_alias"
+                    )
+                )
+        valid_entity_references = []
+        for raw_reference in entity_references:
+            try:
+                if not isinstance(raw_reference, dict):
+                    raise ValueError
+                reference = EntityReference.model_validate(raw_reference)
+                entity_name_key(reference.name, max_bytes=config.index.entity_name_max_bytes)
+                if reference.reference_id not in offered_ids:
+                    raise ValueError("entity reference requires an offered fact handle")
+                if not _grounded_source_names(chunk.text, fact, reference.quote, (reference.name,)):
+                    raise ValueError("entity reference requires a whole name within fact support")
+                valid_entity_references.append(reference)
+            except (ValueError, ValidationError):
+                diagnostics.append(
+                    ExtractionDiagnostic(
+                        output_index=index,
+                        field="entity_references",
+                        code="invalid_entity_reference",
+                    )
+                )
         relations = {}
         for field in ("caused_by", "updates"):
             supplied = getattr(fact, field)
@@ -516,7 +607,14 @@ def validate_fact_output(
                 )
             relations[field] = valid
         accepted.append(
-            fact.model_copy(update={**relations, "annotations": tuple(valid_annotations)})
+            fact.model_copy(
+                update={
+                    **relations,
+                    "annotations": tuple(valid_annotations),
+                    "entity_aliases": tuple(valid_aliases),
+                    "entity_references": tuple(valid_entity_references),
+                }
+            )
         )
         accepted_indices.add(index)
     return FactExtraction(
@@ -525,6 +623,72 @@ def validate_fact_output(
         diagnostics=tuple(diagnostics),
         usage=usage,
     )
+
+
+def _grounded_source_names(content: str, fact: Fact, quote: str, names: tuple[str, ...]) -> bool:
+    if not unique_quote(fact.quote, quote):
+        return False
+    quote_start = content.index(fact.quote) + fact.quote.index(quote)
+    return all(
+        _whole_source_mention(content, name, quote_start, quote_start + len(quote), fact.entities)
+        for name in names
+    )
+
+
+def _whole_source_mention(
+    content: str,
+    name: str,
+    quote_start: int,
+    quote_end: int,
+    observed_names: tuple[str, ...],
+) -> bool:
+    """Check literal mentions in original context; this does not prove identity."""
+    chinese_boundaries = None
+    for match in re.finditer(re.escape(name), content[quote_start:quote_end]):
+        start, end = quote_start + match.start(), quote_start + match.end()
+        if any(
+            longer != name
+            and name in longer
+            and any(
+                occurrence.start() <= start and end <= occurrence.end()
+                for occurrence in re.finditer(re.escape(longer), content)
+            )
+            for longer in observed_names
+        ):
+            continue
+        valid = True
+        for edge, adjacent in ((start, start - 1), (end, end)):
+            if not 0 <= adjacent < len(content):
+                continue
+            inside = content[start] if edge == start else content[end - 1]
+            outside = content[adjacent]
+            inside_han = "CJK" in unicodedata.name(inside, "")
+            outside_han = "CJK" in unicodedata.name(outside, "")
+            if inside_han and outside_han:
+                if chinese_boundaries is None:
+                    chinese_boundaries = {
+                        boundary
+                        for _, token_start, token_end in jieba.tokenize(content, HMM=False)
+                        for boundary in (token_start, token_end)
+                    }
+                if edge not in chinese_boundaries:
+                    valid = False
+                    break
+            elif (
+                not inside_han
+                and not outside_han
+                and (outside.isalnum() or outside == "_" or unicodedata.category(outside)[0] == "M")
+            ):
+                valid = False
+                break
+            if outside in "-." and not inside_han:
+                beyond = adjacent - 1 if edge == start else adjacent + 1
+                if 0 <= beyond < len(content) and content[beyond].isalnum():
+                    valid = False
+                    break
+        if valid:
+            return True
+    return False
 
 
 def validate_passage_support(

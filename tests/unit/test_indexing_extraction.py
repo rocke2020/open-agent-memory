@@ -922,23 +922,32 @@ def test_prompt_examples_validate_entities_relations_and_time_without_model_offs
     examples = []
     for index, line in enumerate(lines):
         if line.startswith("center: "):
-            examples.append((json.loads(line.removeprefix("center: ")), lines[index + 1]))
+            references = (
+                json.loads(lines[index - 1].removeprefix("reference_facts: "))
+                if index and lines[index - 1].startswith("reference_facts: ")
+                else []
+            )
+            examples.append(
+                (json.loads(line.removeprefix("center: ")), lines[index + 1], references)
+            )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     results = []
-    for text, output in examples:
+    for text, output, references in examples:
         body = json.loads(output.removeprefix("output: "))
         result = validate_fact_output(
             body,
             Usage(input_tokens=1, output_tokens=1, total_tokens=2, coverage="complete"),
             config,
             {None: TextChunk(text, 100, 100 + len(text), "", 1)},
-            set(),
+            {reference["id"] for reference in references},
         )
         assert not result.diagnostics
         for fact in result.facts:
             assert fact.quote in text
         results.append(result)
-    assert len(results) == 3
+    assert len(results) == 5
+    assert len(results[3].facts[0].entity_aliases) == 2
+    assert {ref.reference_id for ref in results[4].facts[0].entity_references} == {"ref-1"}
     assert results[0].facts[1].caused_by == (0,)
     assert "so" in results[0].facts[1].quote
     assert results[0].facts[1].annotations[0].end > results[0].facts[1].annotations[0].start

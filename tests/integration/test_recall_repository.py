@@ -182,6 +182,63 @@ def test_related_user_fact_excludes_seed_and_ineligible_neighbors_before_limit(r
     assert repository.related_user_fact(("seed", "related"))["unit_id"] == "related"
 
 
+def test_related_user_fact_checks_support_in_rank_order_until_first_eligible_match(
+    recall_database,
+):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    for node, direction, eligible in (
+        ("assistant_seed", 1.0, True),
+        ("revoked_seed", 1.0, False),
+        ("seed", 1.0, True),
+        ("hidden_neighbor", 0.99, False),
+        ("assistant_neighbor", 0.98, True),
+        ("a_match", 0.97, True),
+        ("b_match", 0.97, True),
+    ):
+        add_fact(connection, authority, node, node, direction=direction, eligible=eligible)
+    for index in range(24):
+        add_fact(connection, authority, f"distant-{index:02}", "A distant event", direction=0.2)
+    connection.execute(
+        "UPDATE support SET span=span || jsonb_build_object('role',CASE "
+        "WHEN memory_id IN ('assistant_seed','assistant_neighbor') "
+        "THEN 'assistant' ELSE 'user' END) "
+        "WHERE tenant_id=%s AND user_id=%s",
+        (authority.tenant_id, authority.user_id),
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+    plans = []
+    execute = repository._execute
+
+    def explain(query, parameters):
+        plans.append(
+            connection.execute("EXPLAIN (ANALYZE,FORMAT JSON) " + query, parameters).fetchone()[0][
+                0
+            ]["Plan"]
+        )
+        return execute(query, parameters)
+
+    repository._execute = explain
+    result = repository.related_user_fact(("missing", "assistant_seed", "revoked_seed", "seed"))
+    assert result == {
+        "seed_id": "seed",
+        "unit_id": "a_match",
+        "source_id": "a_match",
+        "source_version": 1,
+    }
+
+    def memory_checks(node):
+        own = node.get("Actual Loops", 0) if node.get("Relation Name") == "memories" else 0
+        return own + sum(memory_checks(child) for child in node.get("Plans", ()))
+
+    # Two seed checks and three neighbors (including the revoked seed); distant
+    # facts need no support proof before the first eligible match is selected.
+    assert sum(memory_checks(plan) for plan in plans) <= 5
+
+
 def test_supported_fact_ids_selects_next_eligible_user_fact(recall_database):
     from oam.retrieval.repository import RecallRepository
 
@@ -636,6 +693,99 @@ def test_generation_drift_fails_before_embedding_dispatch(recall_database):
         service.search(authority, SearchRequest(query="apple"))
 
 
+def test_readiness_selects_current_operations_without_rescanning_each_history(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    connection.execute(
+        "INSERT INTO principals(tenant_id,principal_id,role,state) "
+        "VALUES (%s,'reader','service','active')",
+        (authority.tenant_id,),
+    )
+    source_count = 24
+    for index in range(source_count):
+        source_id = f"session-{index:02}"
+        add_fact(connection, authority, source_id, f"History session {index}")
+        connection.execute(
+            "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,source_id,"
+            "source_version,kind,schema_version,status,created_at) "
+            "VALUES (%s,%s,%s,'reader',%s,1,'retain',1,'succeeded','2026-01-01')",
+            (authority.tenant_id, authority.user_id, source_id, source_id),
+        )
+        connection.execute(
+            "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,"
+            "input_digest,generation_id,status,attempts_remaining) "
+            "VALUES (%s,%s,%s,%s,'index',%s,'generation','succeeded',1)",
+            (authority.tenant_id, authority.user_id, source_id, source_id, b"x" * 32),
+        )
+    # Newer operations must not hide the current generation's base indexing result.
+    for operation_id, kind, generation in (
+        ("wrong-generation", "retain", "other"),
+        ("consolidation", "consolidate", "generation"),
+    ):
+        connection.execute(
+            "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,source_id,"
+            "source_version,kind,schema_version,status,stage_state,created_at) "
+            "VALUES (%s,%s,%s,'reader','session-00',1,%s,1,'failed_terminal',%s,'2026-02-01')",
+            (
+                authority.tenant_id,
+                authority.user_id,
+                operation_id,
+                kind,
+                Jsonb({"parse_coverage": "partial", "error": "failed"}),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,"
+            "input_digest,generation_id,status,attempts_remaining) "
+            "VALUES (%s,%s,%s,%s,'index',%s,%s,'failed_terminal',1)",
+            (
+                authority.tenant_id,
+                authority.user_id,
+                operation_id,
+                operation_id,
+                b"x" * 32,
+                generation,
+            ),
+        )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+    plans = []
+    execute = repository._execute
+
+    def explain(query, parameters):
+        plans.append(
+            connection.execute("EXPLAIN (ANALYZE,FORMAT JSON) " + query, parameters).fetchone()[0][
+                0
+            ]["Plan"]
+        )
+        return execute(query, parameters)
+
+    repository._execute = explain
+    assert repository.user_state() == {
+        "index_generation_id": "generation",
+        "policy_epoch": 0,
+        "parse_partial": False,
+        "readiness": "ready",
+    }
+
+    def work_reads(node):
+        own = (
+            (
+                node.get("Actual Rows", 0)
+                + node.get("Rows Removed by Filter", 0)
+                + node.get("Rows Removed by Index Recheck", 0)
+            )
+            * node.get("Actual Loops", 0)
+            if node.get("Relation Name") == "work_units"
+            else 0
+        )
+        return own + sum(work_reads(child) for child in node.get("Plans", ()))
+
+    # Work proportional to the history; repeating all work per source is quadratic.
+    assert work_reads(plans[0]) <= source_count * 4
+
+
 def test_event_window_only_qualifies_temporal_candidates(recall_database):
     from datetime import UTC, datetime
 
@@ -792,16 +942,19 @@ def test_hydrated_insight_orders_shared_passage_support_by_memory_id(recall_data
     ]
 
 
-def test_recall_disables_jit_only_for_its_transaction(recall_database):
+def test_recall_planning_settings_are_transaction_local(recall_database):
     from oam.retrieval.repository import RecallRepository
 
     connection, authority = recall_database
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     connection.execute("SET LOCAL jit=on")
+    connection.execute("SET LOCAL plan_cache_mode=force_generic_plan")
     with connection.transaction(force_rollback=True):
         RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
         assert connection.execute("SHOW jit").fetchone()[0] == "off"
+        assert connection.execute("SHOW plan_cache_mode").fetchone()[0] == "force_custom_plan"
     assert connection.execute("SHOW jit").fetchone()[0] == "on"
+    assert connection.execute("SHOW plan_cache_mode").fetchone()[0] == "force_generic_plan"
 
 
 @pytest.mark.parametrize("mode", ["mid", "deep"])
@@ -1181,11 +1334,21 @@ def test_graph_sql_filters_hidden_neighbors_before_each_direction_cap(recall_dat
         ("z_visible", True),
         ("incoming", True),
     ):
-        add_fact(connection, authority, node, node, eligible=eligible)
+        add_fact(connection, authority, node, node + " garden", eligible=eligible)
+    from oam.indexing.entities import EntityRepository
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    entities = EntityRepository(
+        connection, config, generation_id="generation", key=(authority.tenant_id, authority.user_id)
+    )
     for node in ("seed", "a_hidden", "z_visible"):
-        connection.execute(
-            "INSERT INTO unit_entities VALUES (%s,%s,%s,'garden')",
-            (authority.tenant_id, authority.user_id, node),
+        entities.publish_fact(
+            node,
+            ("garden",),
+            node + " garden",
+            references=()
+            if node == "seed"
+            else ({"name": "garden", "reference_id": "seed", "quote": node + " garden"},),
         )
     for source, target, weight in (("a_hidden", "seed", 1.0), ("incoming", "seed", 0.9)):
         connection.execute(
@@ -1216,7 +1379,12 @@ def test_graph_sql_filters_hidden_neighbors_before_each_direction_cap(recall_dat
     assert len(statements) == 1
     assert set(ranks) == {"incoming", "z_visible"}
     assert paths["incoming"][0]["relation"] == "semantic"
-    assert paths["z_visible"][0]["entity"] == "garden"
+    assert (
+        paths["z_visible"][0]["entity"]
+        == connection.execute(
+            "SELECT entity_id FROM unit_entities WHERE unit_id='seed'"
+        ).fetchone()[0]
+    )
 
 
 def test_temporal_witness_role_is_checked_before_neighbor_cap(recall_database):
@@ -1365,9 +1533,9 @@ def test_hnsw_executes_and_matches_exact_scoped_neighbors(recall_database, monke
     calls = []
     original = repository._execute
 
-    def capture(sql, parameters):
+    def capture(sql, parameters, **options):
         calls.append((sql, parameters))
-        return original(sql, parameters)
+        return original(sql, parameters, **options)
 
     monkeypatch.setattr(repository, "_execute", capture)
     approximate = repository.dense(vector, 5)
@@ -1398,6 +1566,48 @@ def test_hnsw_executes_and_matches_exact_scoped_neighbors(recall_database, monke
         == [row["unit_id"] for row in exact]
         == [f"candidate{index:04d}" for index in range(count - 1, count - 6, -1)]
     )
+
+
+@pytest.mark.parametrize("pipeline_supported", (False, True))
+@pytest.mark.parametrize(
+    ("query", "error"),
+    (
+        ("SELECT 1/0", psycopg.errors.DivisionByZero),
+        ("SELECT pg_sleep(0.25)", psycopg.errors.QueryCanceled),
+    ),
+)
+def test_recall_query_failure_and_deadline_leave_connection_usable(
+    recall_database, monkeypatch, pipeline_supported, query, error
+):
+    from oam.retrieval.repository import RecallRepository
+
+    if pipeline_supported and not psycopg.Pipeline.is_supported():
+        pytest.skip("pipeline transport requires a supported client library")
+    monkeypatch.setattr(psycopg.Pipeline, "is_supported", staticmethod(lambda: pipeline_supported))
+    connection, authority = recall_database
+    add_fact(connection, authority, "visible", "A supported current fact.")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SELECT set_config('oam.user_id','outer-scope',true)")
+    before = connection.execute(
+        "SELECT current_setting('statement_timeout'),current_setting('oam.user_id',true)"
+    ).fetchone()
+    with pytest.raises(error), connection.transaction():
+        repository = RecallRepository(
+            connection, authority, config, deadline=time.monotonic() + 0.05
+        )
+        timeout = repository._execute("SELECT current_setting('statement_timeout') AS value")[0]
+        assert timeout["value"] != "0"
+        repository._execute(query)
+    assert connection.pgconn.pipeline_status == psycopg.pq.PipelineStatus.OFF
+    assert (
+        connection.execute(
+            "SELECT current_setting('statement_timeout'),current_setting('oam.user_id',true)"
+        ).fetchone()
+        == before
+    )
+    with connection.transaction():
+        repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+        assert [row["unit_id"] for row in repository.hydrate(("visible",))] == ["visible"]
 
 
 class TransactionPool:
