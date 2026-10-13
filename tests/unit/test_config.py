@@ -40,7 +40,9 @@ def test_canonical_config_freezes_v001_trial_limits_and_model_role_bindings() ->
     assert resolved.config.api.max_concurrent_requests == 10
     assert resolved.config.models.vlm is not None
     assert resolved.config.models.embedding is not None
-    assert resolved.config.models.vlm.model_env == "OAM_GENERATIVE_MODEL"
+    assert resolved.config.models.vlm.model_env == "VLM_MODEL"
+    assert resolved.config.models.vlm.endpoint_env == "VLM_BASE_URL"
+    assert resolved.config.models.vlm.api_key_env == "VLM_API_KEY"
     assert resolved.config.models.embedding.model_env == "OAM_EMBEDDING_MODEL"
     assert "thinking" not in resolved.config.models.model_dump()["vlm"]
     assert resolved.config.models.required_unbound_roles() == set()

@@ -171,16 +171,14 @@ def process_one(
         if store.source["input_role"] != "interaction":
             raise ValueError("this source processor requires eligible interactions")
         request = EvidenceAppendRequest.model_validate_json(bytes(store.source["original_bytes"]))
+        inline_manifest = _read_inline_semantic_state(store)
+        if inline_manifest is not None:
+            from oam.workers.semantic_links import process_semantic_claim
+
+            process_semantic_claim(store, inline=True)
+            return True
         with store.model_pipeline():
             fact_ids, extraction_diagnostics = _index_interaction(config, store, models, request)
-        with store.transaction() as connection:
-            store.guard(connection)
-            store.readiness(
-                connection,
-                memory_ready=True,
-                extraction_coverage="partial" if extraction_diagnostics else "complete",
-                extraction_diagnostics=extraction_diagnostics,
-            )
         from oam.indexing.links import build_temporal_links
 
         with store.transaction() as connection:
@@ -188,14 +186,54 @@ def process_one(
             links = build_temporal_links(
                 connection, store.authority, config, store.generation_id, fact_ids
             )
-            store.readiness(connection, temporal_links_ready=True, link_coverage=links)
-        store.finish(
-            schedule_consolidation=config.index.insights_enabled, semantic_seed_ids=fact_ids
-        )
+            from oam.indexing.links import SEMANTIC_LINK_RECIPE
+
+            manifest = {
+                "source_id": store.source["source_id"],
+                "source_version": store.source["source_version"],
+                "generation_id": store.generation_id,
+                "seed_ids": sorted(set(fact_ids)),
+                "recipe": SEMANTIC_LINK_RECIPE,
+            }
+            store.summarize_usage(connection)
+            store.readiness(
+                connection,
+                memory_ready=True,
+                extraction_coverage="partial" if extraction_diagnostics else "complete",
+                extraction_diagnostics=extraction_diagnostics,
+                temporal_links_ready=True,
+                link_coverage=links,
+                semantic_link_manifest=manifest,
+                semantic_links_status="running",
+                links_ready=False,
+            )
+        from oam.workers.semantic_links import process_semantic_claim
+
+        process_semantic_claim(store, inline=True)
     except BaseException as error:
         store.fail(error)
         raise
     return True
+
+
+def _read_inline_semantic_state(store):
+    with store.transaction() as connection:
+        store.guard(connection)
+        state = (
+            connection.execute(
+                "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
+                "AND operation_id=%s",
+                (*store.key, store.claim.operation_id),
+            ).fetchone()[0]
+            or {}
+        )
+        if not state.get("memory_ready") or not state.get("temporal_links_ready"):
+            return None
+        # Older source claims committed temporal readiness before the semantic marker.
+        if "semantic_link_manifest" not in state and "semantic_links_status" not in state:
+            return None
+        store.mark_inline_semantic()
+        return store.semantic_seed_manifest(connection)
 
 
 def _index_interaction(config, store, models, request):

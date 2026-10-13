@@ -55,6 +55,7 @@ class IndexStore:
     pool: ConnectionPool | None = None
     _unsettled_model_stages: set[str] = field(default_factory=set, init=False, repr=False)
     _model_stage_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _inline_semantic: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self):
         self.authority = AuthorizedUser(
@@ -226,6 +227,10 @@ class IndexStore:
                     self.claim.fence,
                 ),
             )
+
+    def mark_inline_semantic(self) -> None:
+        """Mark the current source claim as being in its durable semantic phase."""
+        self._inline_semantic = True
 
     @contextmanager
     def model_pipeline(self):
@@ -514,77 +519,33 @@ class IndexStore:
             ),
         )
 
-    def finish(self, *, schedule_consolidation: bool = False, semantic_seed_ids=None):
+    def finish(
+        self,
+        *,
+        schedule_consolidation: bool = False,
+        inline_semantic: bool = False,
+    ):
         with self.transaction() as connection:
-            if self.claim.stage == "index_semantic_links":
+            semantic_completion = self.claim.stage == "index_semantic_links" or inline_semantic
+            if semantic_completion:
                 timeout = min(self.config.lease.seconds, self.config.model.attempt_timeout_seconds)
                 connection.execute(
                     "SELECT set_config('statement_timeout',%s,true)", (str(int(timeout * 1000)),)
                 )
             self.guard(connection)
-            if self.claim.stage != "index_semantic_links":
+            if self.claim.stage != "index_semantic_links" or inline_semantic:
                 self.summarize_usage(connection)
-            seeds = sorted(set(semantic_seed_ids or ()))
-            if semantic_seed_ids is not None:
-                from oam.indexing.links import SEMANTIC_LINK_RECIPE
-
-                if seeds:
-                    manifest = {
-                        "source_id": self.source["source_id"],
-                        "source_version": self.source["source_version"],
-                        "generation_id": self.generation_id,
-                        "seed_ids": seeds,
-                        "recipe": SEMANTIC_LINK_RECIPE,
-                    }
-                    digest = input_digest(manifest)
-                    work_id = stable_id("work_semantic_links", self.claim.operation_id)
-                    connection.execute(
-                        "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,"
-                        "stage,input_digest,generation_id,dependency_ids,status,"
-                        "attempts_remaining) "
-                        "VALUES (%s,%s,%s,%s,'index_semantic_links',%s,%s,%s,'queued',%s) "
-                        "ON CONFLICT DO NOTHING",
-                        (
-                            *self.key,
-                            work_id,
-                            self.claim.operation_id,
-                            digest,
-                            self.generation_id,
-                            [self.claim.work_unit_id],
-                            self.config.retry.max_attempts,
-                        ),
-                    )
-                    existing = connection.execute(
-                        "SELECT input_digest,generation_id,dependency_ids,stage,operation_id "
-                        "FROM work_units WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
-                        (*self.key, work_id),
-                    ).fetchone()
-                    if existing != (
-                        digest,
-                        self.generation_id,
-                        [self.claim.work_unit_id],
-                        "index_semantic_links",
-                        self.claim.operation_id,
-                    ):
-                        raise StaleIndexWork("semantic work identity is incompatible")
-                    self.readiness(connection, semantic_link_manifest=manifest)
-                self.readiness(
-                    connection,
-                    memory_ready=True,
-                    temporal_links_ready=True,
-                    links_ready=not seeds,
-                    semantic_links_status="pending" if seeds else "succeeded",
-                )
-            if self.claim.stage == "index_semantic_links":
+            if semantic_completion:
                 state = connection.execute(
                     "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
                     "AND operation_id=%s",
                     (*self.key, self.claim.operation_id),
                 ).fetchone()[0]
+                manifest = self.semantic_seed_manifest(connection)
                 count = connection.execute(
                     "SELECT count(*) FROM unit_links WHERE tenant_id=%s AND user_id=%s "
                     "AND kind='semantic' AND source_id=ANY(%s)",
-                    (*self.key, state["semantic_link_manifest"]["seed_ids"]),
+                    (*self.key, manifest["seed_ids"]),
                 ).fetchone()[0]
                 self.readiness(
                     connection,
@@ -650,7 +611,7 @@ class IndexStore:
                     consolidation_operation_id=consolidation_id,
                     consolidation_status="pending",
                 )
-            if self.claim.stage == "index_semantic_links":
+            if semantic_completion:
                 self.guard(connection)
             connection.execute(
                 "UPDATE work_units SET status='succeeded',updated_at=clock_timestamp() "
@@ -666,7 +627,11 @@ class IndexStore:
                 "UPDATE operations SET status=%s,updated_at=clock_timestamp(), "
                 "stage_state=stage_state-'error'-'error_detail' "
                 "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
-                ("running" if seeds else "succeeded", *self.key, self.claim.operation_id),
+                (
+                    "succeeded",
+                    *self.key,
+                    self.claim.operation_id,
+                ),
             )
             if self.claim.stage == "consolidate":
                 connection.execute(
@@ -691,7 +656,7 @@ class IndexStore:
                 "WHERE tenant_id=%s AND user_id=%s",
                 (self.source["accepted_seq"], *self.key),
             )
-            if self.claim.stage == "index_semantic_links":
+            if semantic_completion:
                 valid = connection.execute(
                     "SELECT lease_expires_at>clock_timestamp() FROM work_units "
                     "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
@@ -699,6 +664,33 @@ class IndexStore:
                 ).fetchone()
                 if valid is None or not valid[0]:
                     raise StaleIndexWork("semantic completion lease expired")
+
+    def semantic_seed_manifest(self, connection):
+        from oam.indexing.links import SEMANTIC_LINK_RECIPE
+
+        state = (
+            connection.execute(
+                "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
+                "AND operation_id=%s",
+                (*self.key, self.claim.operation_id),
+            ).fetchone()[0]
+            or {}
+        )
+        manifest = state.get("semantic_link_manifest")
+        seeds = manifest.get("seed_ids") if isinstance(manifest, dict) else None
+        if (
+            not state.get("memory_ready")
+            or not state.get("temporal_links_ready")
+            or not isinstance(seeds, list)
+            or any(not isinstance(seed, str) or not seed for seed in seeds)
+            or seeds != sorted(set(seeds))
+            or manifest.get("source_id") != self.source["source_id"]
+            or manifest.get("source_version") != self.source["source_version"]
+            or manifest.get("generation_id") != self.generation_id
+            or manifest.get("recipe") != SEMANTIC_LINK_RECIPE
+        ):
+            raise StaleIndexWork("semantic seed manifest is incompatible")
+        return manifest
 
     def fail(self, error: Exception):
         from oam.indexing.extraction import ExtractionError
@@ -724,7 +716,7 @@ class IndexStore:
             not_dispatched = False
             known_usage = None
             retryable = False
-        semantic = self.claim.stage == "index_semantic_links"
+        semantic = self.claim.stage == "index_semantic_links" or self._inline_semantic
         if semantic:
             retryable = isinstance(error, (psycopg.Error, OSError))
         with self.transaction() as connection:
@@ -769,7 +761,7 @@ class IndexStore:
                     )
                 if retrying:
                     diagnostic["last_retry_error"] = dict(diagnostic)
-                if not semantic:
+                if not semantic or self._inline_semantic:
                     self.summarize_usage(connection)
                 connection.execute(
                     "UPDATE operations SET status=%s,"

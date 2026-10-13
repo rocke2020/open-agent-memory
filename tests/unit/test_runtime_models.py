@@ -23,6 +23,8 @@ def test_canonical_extraction_preserves_reasoning_effort_on_the_wire(effort):
     seen = []
 
     def respond(request):
+        assert str(request.url) == "https://model.example/v1/chat/completions"
+        assert request.headers["authorization"] == "Bearer synthetic"
         seen.append(json.loads(request.content))
         return httpx.Response(
             200,
@@ -40,9 +42,9 @@ def test_canonical_extraction_preserves_reasoning_effort_on_the_wire(effort):
         result = RuntimeModels(
             configured,
             {
-                "OAM_GENERATIVE_MODEL": "structured-model",
-                "OAM_GENERATIVE_ENDPOINT": "https://model.example/v1",
-                "OAM_GENERATIVE_API_KEY": "synthetic",
+                "VLM_MODEL": "structured-model",
+                "VLM_BASE_URL": "https://model.example/v1",
+                "VLM_API_KEY": "synthetic",
             },
             http,
         ).generate(
@@ -53,6 +55,7 @@ def test_canonical_extraction_preserves_reasoning_effort_on_the_wire(effort):
             timeout_seconds=2,
         )
     assert json.loads(result.content) == {"outcome": "no_facts", "facts": []}
+    assert seen[0]["model"] == "structured-model"
     if effort == "none":
         assert "reasoning_effort" not in seen[0]
         assert seen[0]["thinking"] == {"type": "disabled"}

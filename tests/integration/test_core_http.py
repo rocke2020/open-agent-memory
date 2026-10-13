@@ -63,9 +63,9 @@ def core_database(monkeypatch):
     monkeypatch.setenv("OAM_API_DSN", make_conninfo(dsn, options="-c role=oam_api"))
     # These tests inject models; the canonical bindings only identify their index generation.
     for name, value in {
-        "OAM_GENERATIVE_MODEL": "synthetic-vlm",
-        "OAM_GENERATIVE_ENDPOINT": "https://unused.example.test/v1",
-        "OAM_GENERATIVE_API_KEY": "synthetic",
+        "VLM_MODEL": "synthetic-vlm",
+        "VLM_BASE_URL": "https://unused.example.test/v1",
+        "VLM_API_KEY": "synthetic",
         "OAM_EMBEDDING_MODEL": "synthetic-embedding",
         "OAM_EMBEDDING_URL": "https://unused.example.test/v1",
         "OAM_EMBEDDING_KEY": "synthetic",
@@ -1076,13 +1076,6 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
             models=models,
             worker_id="report-worker",
         )
-        assert process_one(
-            config,
-            make_conninfo(dsn, options="-c role=oam_queue"),
-            make_conninfo(dsn, options="-c role=oam_content"),
-            models=models,
-            worker_id="report-worker",
-        )
         app.state.runtime.models = models
         generation_calls = list(models.generation_calls)
         for mode in ("fast", "mid", "deep"):
@@ -1172,13 +1165,6 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
                 worker_id="synthetic-worker",
             )
             is True
-        )
-        assert process_one(
-            config,
-            make_conninfo(dsn, options="-c role=oam_queue"),
-            make_conninfo(dsn, options="-c role=oam_content"),
-            models=models,
-            worker_id="synthetic-worker-links",
         )
         app.state.runtime.models = models
         recalled = await client.post(
@@ -1446,9 +1432,6 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
         )
         assert chat.status_code == 202, chat.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-chat")
-        assert process_one(
-            config, queue_dsn, content_dsn, models=models, worker_id="profile-chat-links"
-        )
         with psycopg.connect(dsn) as connection:
             connection.execute(
                 "UPDATE work_units SET available_at=clock_timestamp() WHERE stage='consolidate'"
@@ -1717,9 +1700,6 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
         )
         assert more_chat.status_code == 202
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="more-chat")
-        assert process_one(
-            config, queue_dsn, content_dsn, models=models, worker_id="more-chat-links"
-        )
         pending = await client.get("/v1/users/scope/profile")
         assert pending.json()["freshness"] == "dirty"
         assert models.generation_calls.count("profile") == profile_calls_before_new_chat
@@ -1866,9 +1846,6 @@ async def test_new_interaction_gets_a_new_profile_refresh_while_one_is_active(
         assert process_one(
             config, queue_dsn, content_dsn, models=models, worker_id="original-input"
         )
-        assert process_one(
-            config, queue_dsn, content_dsn, models=models, worker_id="original-input-links"
-        )
         with psycopg.connect(dsn) as connection:
             connection.execute(
                 "UPDATE work_units SET available_at=clock_timestamp() WHERE stage='consolidate'"
@@ -1979,9 +1956,6 @@ async def test_waiting_profile_refresh_does_not_absorb_a_new_processed_source(co
 
         await retain_two("A")
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="source-a")
-        assert process_one(
-            config, queue_dsn, content_dsn, models=models, worker_id="source-a-links"
-        )
         refresh_a = await client.post("/v1/users/scope/profile/refresh", json={})
         assert refresh_a.status_code == 202, refresh_a.text
         with psycopg.connect(dsn) as connection:
@@ -1994,9 +1968,6 @@ async def test_waiting_profile_refresh_does_not_absorb_a_new_processed_source(co
 
         await retain_two("B")
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="source-b")
-        assert process_one(
-            config, queue_dsn, content_dsn, models=models, worker_id="source-b-links"
-        )
         with psycopg.connect(dsn) as connection:
             connection.execute(
                 "UPDATE work_units SET available_at=clock_timestamp() "
@@ -2153,9 +2124,6 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
         )
         assert retained.status_code == 202, retained.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-input")
-        assert process_one(
-            config, queue_dsn, content_dsn, models=models, worker_id="profile-input-links"
-        )
         if insight_failure:
             with psycopg.connect(dsn) as connection:
                 connection.execute(
@@ -2358,9 +2326,6 @@ async def test_profile_main_can_use_supported_project_or_relationship_insight(
         )
         assert retained.status_code == 202, retained.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="main-input")
-        assert process_one(
-            config, queue_dsn, content_dsn, models=models, worker_id="main-input-links"
-        )
         requested = await client.post("/v1/users/scope/profile/refresh", json={})
         assert requested.status_code == 202, requested.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="main-l2")
@@ -2448,9 +2413,6 @@ async def test_profile_main_builds_dated_age_career_and_family_from_user_facts(c
         )
         assert retained.status_code == 202, retained.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="basic-input")
-        assert process_one(
-            config, queue_dsn, content_dsn, models=models, worker_id="basic-input-links"
-        )
         requested = await client.post("/v1/users/scope/profile/refresh", json={})
         assert requested.status_code == 202, requested.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="basic-l2")

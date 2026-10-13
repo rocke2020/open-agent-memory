@@ -27,6 +27,7 @@ class MemoryStore:
             update={"models": ModelsConfig()}
         )
         self.key = ("tenant", "scope")
+        self.claim = SimpleNamespace(operation_id="operation")
         self.authority = None
         self.generation_id = "generation"
         self.source = {
@@ -49,9 +50,9 @@ class MemoryStore:
 
     def execute(self, query, parameters):
         self.statements.append((query, parameters))
+        if "SELECT stage_state FROM operations" in query:
+            return SimpleNamespace(fetchone=lambda: (self.stages,))
         if "lifecycle_state='excluded'" in query:
-            from types import SimpleNamespace
-
             return SimpleNamespace(fetchone=lambda: None)
 
     def guard(self, connection):
@@ -88,11 +89,26 @@ class MemoryStore:
             sha256=hashlib.sha256(content).hexdigest(),
         )
 
-    def finish(self, *, schedule_consolidation=False, semantic_seed_ids=None):
+    def summarize_usage(self, connection):
+        pass
+
+    def finish(self, *, schedule_consolidation=False, inline_semantic=False):
         self.finished = True
 
     def fail(self, error):
         raise error
+
+
+def stub_semantic_completion(monkeypatch):
+    # These unit tests exercise extraction overlap; PostgreSQL tests own links.
+    from oam.workers import semantic_links
+
+    def complete(store, *, inline):
+        assert inline and store.stages["memory_ready"] and store.stages["temporal_links_ready"]
+        assert isinstance(store.stages["semantic_link_manifest"]["seed_ids"], list)
+        store.finish(inline_semantic=True)
+
+    monkeypatch.setattr(semantic_links, "process_semantic_claim", complete)
 
 
 class LocalModels:
@@ -674,6 +690,7 @@ def test_interaction_locator_keeps_original_message_order_and_internal_id(monkey
     from oam.indexing import links
 
     monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
+    stub_semantic_completion(monkeypatch)
 
     assert index_source.process_one(
         store.config, "queue", "content", models=LocalModels(), worker_id="worker"
@@ -763,6 +780,7 @@ def test_extraction_sliding_window_embeds_ready_facts_before_slow_sibling_finish
     from oam.indexing import links
 
     monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
+    stub_semantic_completion(monkeypatch)
 
     def publish(_store, _members, result, _vectors, **kwargs):
         published.extend(fact.text for fact in result.facts)
@@ -846,6 +864,7 @@ def test_ready_later_extraction_group_publishes_before_slow_earlier_group(monkey
     from oam.indexing import links
 
     monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
+    stub_semantic_completion(monkeypatch)
     published = []
 
     def publish(_store, owners, result, _vectors, **kwargs):
@@ -985,6 +1004,7 @@ def test_interaction_pipeline_overlaps_next_extraction_with_previous_publish(mon
     from oam.indexing import links
 
     monkeypatch.setattr(links, "build_temporal_links", lambda *args, **kwargs: {})
+    stub_semantic_completion(monkeypatch)
     assert index_source.process_one(
         store.config, "queue", "content", models=OverlapModels(), worker_id="worker"
     )

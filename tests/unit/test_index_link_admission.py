@@ -70,9 +70,9 @@ def test_link_search_uses_index_budget_independently_of_recall_budget(tmp_path):
 def test_index_link_budget_changes_generation_but_recall_budget_does_not():
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     environment = {
-        "OAM_GENERATIVE_MODEL": "synthetic",
-        "OAM_GENERATIVE_ENDPOINT": "http://models.example.test/v1",
-        "OAM_GENERATIVE_API_KEY": "synthetic",
+        "VLM_MODEL": "synthetic",
+        "VLM_BASE_URL": "http://models.example.test/v1",
+        "VLM_API_KEY": "synthetic",
         "OAM_EMBEDDING_MODEL": "synthetic",
         "OAM_EMBEDDING_URL": "http://embedding.example.test/v1",
         "OAM_EMBEDDING_KEY": "synthetic",

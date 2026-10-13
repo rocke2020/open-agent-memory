@@ -2,7 +2,6 @@
 
 from oam.db.context import bind_user
 from oam.indexing.links import (
-    SEMANTIC_LINK_RECIPE,
     SEMANTIC_SEED_BATCH_SIZE,
     propose_semantic_links,
     publish_semantic_links,
@@ -25,31 +24,16 @@ def _set_claim_timeout(connection, store):
     connection.execute("SELECT set_config('statement_timeout',%s,true)", (str(timeout_ms),))
 
 
-def process_semantic_claim(store):
+def process_semantic_claim(store, *, inline=False):
+    if inline:
+        store.mark_inline_semantic()
     with store.transaction() as connection:
         store.guard(connection)
-        state = connection.execute(
-            "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
-            "AND operation_id=%s",
-            (*store.key, store.claim.operation_id),
-        ).fetchone()[0]
-        manifest = state.get("semantic_link_manifest")
-        if (
-            not isinstance(manifest, dict)
-            or manifest.get("source_id") != store.source["source_id"]
-            or manifest.get("source_version") != store.source["source_version"]
-            or manifest.get("generation_id") != store.generation_id
-            or manifest.get("recipe") != SEMANTIC_LINK_RECIPE
-            or input_digest(manifest) != bytes(store.source["input_digest"])
-        ):
+        manifest = store.semantic_seed_manifest(connection)
+        if not inline and input_digest(manifest) != bytes(store.source["input_digest"]):
             raise StaleIndexWork("semantic seed manifest is incompatible")
         seeds = manifest.get("seed_ids")
-        if (
-            not isinstance(seeds, list)
-            or not seeds
-            or any(not isinstance(seed, str) or not seed for seed in seeds)
-            or seeds != sorted(set(seeds))
-        ):
+        if not seeds and not inline:
             raise StaleIndexWork("semantic seed manifest is malformed")
         store.readiness(connection, links_ready=False, semantic_links_status="running")
     for offset in range(0, len(seeds), SEMANTIC_SEED_BATCH_SIZE):
@@ -69,4 +53,7 @@ def process_semantic_claim(store):
                 connection, store.authority, store.config, store.generation_id, batch, proposals
             )
             store.guard(connection)
-    store.finish()
+    store.finish(
+        inline_semantic=inline,
+        schedule_consolidation=inline and store.config.index.insights_enabled,
+    )

@@ -1,12 +1,10 @@
 """Deferred link lifecycle on isolated PostgreSQL with deterministic models."""
 
-import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from threading import Event
-from time import perf_counter
 from types import SimpleNamespace
 
 import httpx
@@ -21,7 +19,7 @@ from test_index_links import add_fact
 from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.indexing.identity import index_generation
-from oam.indexing.store import IndexStore, StaleIndexWork
+from oam.indexing.store import IndexStore, StaleIndexWork, input_digest, stable_id
 from oam.workers.claims import claim_one
 from oam.workers.index_source import process_one
 
@@ -219,6 +217,65 @@ def direct_store(core_database, request):
     return SimpleNamespace(dsn=dsn, config=config, store=store, tenant=tenant)
 
 
+def legacy_direct_completion(store, *, semantic_seed_ids, schedule_consolidation=False):
+    """Persist the previous producer's manifest/work shape for upgrade coverage."""
+
+    seeds = sorted(set(semantic_seed_ids))
+    manifest = {
+        "source_id": store.source["source_id"],
+        "source_version": store.source["source_version"],
+        "generation_id": store.generation_id,
+        "seed_ids": seeds,
+        "recipe": "oam-semantic-links-v1",
+    }
+    with store.transaction() as connection:
+        store.guard(connection)
+        if seeds:
+            digest = input_digest(manifest)
+            work_id = stable_id("work_semantic_links", store.claim.operation_id)
+            existing = connection.execute(
+                "SELECT input_digest FROM work_units WHERE tenant_id=%s AND user_id=%s "
+                "AND work_unit_id=%s",
+                (*store.key, work_id),
+            ).fetchone()
+            if existing and bytes(existing[0]) != digest:
+                raise StaleIndexWork("legacy semantic work identity is incompatible")
+            connection.execute(
+                "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,"
+                "input_digest,generation_id,dependency_ids,status,attempts_remaining) "
+                "VALUES (%s,%s,%s,%s,'index_semantic_links',%s,%s,%s,'queued',%s) "
+                "ON CONFLICT DO NOTHING",
+                (
+                    *store.key,
+                    work_id,
+                    store.claim.operation_id,
+                    digest,
+                    store.generation_id,
+                    [store.claim.work_unit_id],
+                    store.config.retry.max_attempts,
+                ),
+            )
+        store.readiness(
+            connection,
+            memory_ready=True,
+            temporal_links_ready=True,
+            links_ready=not seeds,
+            semantic_link_manifest=manifest,
+            semantic_links_status="pending" if seeds else "succeeded",
+        )
+    store.finish(schedule_consolidation=schedule_consolidation)
+    if seeds:
+        with psycopg.connect(store.dsn) as connection:
+            from oam.db.context import bind_user
+
+            bind_user(connection.cursor(), store.authority)
+            connection.execute(
+                "UPDATE operations SET status='running' WHERE tenant_id=%s AND user_id=%s "
+                "AND operation_id=%s",
+                (*store.key, store.claim.operation_id),
+            )
+
+
 def run_semantic(fixture):
     return process_one(
         fixture.config,
@@ -231,7 +288,7 @@ def run_semantic(fixture):
 
 def test_exhausted_expired_semantic_claim_settles_partial_readiness(direct_store):
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"])
     semantic = claim_store(fixture.dsn, fixture.config)
     with psycopg.connect(fixture.dsn) as connection:
         connection.execute(
@@ -253,7 +310,7 @@ def test_semantic_retry_reuses_work_and_terminal_failure_preserves_facts(direct_
     from oam.workers import semantic_links
 
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"])
     with psycopg.connect(fixture.dsn) as connection:
         work_id = connection.execute(
             "SELECT work_unit_id FROM work_units WHERE stage='index_semantic_links'"
@@ -284,7 +341,7 @@ def test_proposal_read_allows_same_user_publication_without_epoch_change(direct_
     from oam.workers import semantic_links
 
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"])
     original = semantic_links.propose_semantic_links
     reading = Event()
     release = Event()
@@ -323,7 +380,7 @@ def test_publication_rejects_changes_after_proposal_read(direct_store, monkeypat
     from oam.workers import semantic_links
 
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"])
     original = semantic_links.propose_semantic_links
     mutations = {
         "lease": (
@@ -365,7 +422,7 @@ def test_publication_deduplicates_and_rechecks_remaining_cap(direct_store):
     from oam.indexing.links import publish_semantic_links
 
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"])
     semantic = claim_store(fixture.dsn, fixture.config)
     with semantic.transaction() as connection:
         connection.execute("SET LOCAL jit = on")
@@ -408,7 +465,7 @@ def test_publication_deduplicates_and_rechecks_remaining_cap(direct_store):
 
 def test_zero_seed_source_completes_without_semantic_work(direct_store):
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=[])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=[])
     with psycopg.connect(fixture.dsn) as connection:
         assert connection.execute("SELECT stage FROM work_units").fetchall() == [("index_source",)]
         status, state = connection.execute("SELECT status,stage_state FROM operations").fetchone()
@@ -417,7 +474,7 @@ def test_zero_seed_source_completes_without_semantic_work(direct_store):
 
 def test_dependency_blocks_claim_until_direct_work_succeeds(direct_store):
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"])
     with psycopg.connect(fixture.dsn) as connection:
         connection.execute("UPDATE work_units SET status='running' WHERE stage='index_source'")
     assert claim_store(fixture.dsn, fixture.config) is None
@@ -428,13 +485,13 @@ def test_dependency_blocks_claim_until_direct_work_succeeds(direct_store):
 
 def test_duplicate_direct_completion_keeps_one_compatible_manifest(direct_store):
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed", "b", "a", "seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed", "b", "a", "seed"])
     with psycopg.connect(fixture.dsn) as connection:
         before = connection.execute(
             "SELECT work_unit_id,input_digest FROM work_units WHERE stage='index_semantic_links'"
         ).fetchone()
         connection.execute("UPDATE work_units SET status='running' WHERE stage='index_source'")
-    fixture.store.finish(semantic_seed_ids=["a", "b", "seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["a", "b", "seed"])
     with psycopg.connect(fixture.dsn) as connection:
         assert connection.execute(
             "SELECT work_unit_id,input_digest FROM work_units WHERE stage='index_semantic_links'"
@@ -445,12 +502,12 @@ def test_duplicate_direct_completion_keeps_one_compatible_manifest(direct_store)
         assert manifest["seed_ids"] == ["a", "b", "seed"]
         connection.execute("UPDATE work_units SET status='running' WHERE stage='index_source'")
     with pytest.raises(StaleIndexWork, match="incompatible"):
-        fixture.store.finish(semantic_seed_ids=["c"])
+        legacy_direct_completion(fixture.store, semantic_seed_ids=["c"])
 
 
 def test_changed_manifest_cannot_publish(direct_store):
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"])
     with psycopg.connect(fixture.dsn) as connection:
         connection.execute(
             "UPDATE operations SET stage_state=jsonb_set(stage_state,"
@@ -470,7 +527,7 @@ def test_semantic_settlement_preserves_direct_usage_with_completed_consolidation
     from oam.workers import semantic_links
 
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"], schedule_consolidation=True)
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"], schedule_consolidation=True)
     with psycopg.connect(fixture.dsn) as connection:
         before = connection.execute(
             "SELECT stage_state->'usage',stage_state->'embedding_usage' FROM operations "
@@ -529,7 +586,9 @@ def test_semantic_completion_preserves_scheduled_consolidation(
     fixture = direct_store
     with psycopg.connect(fixture.dsn) as connection:
         before = connection.execute("SELECT clock_timestamp()").fetchone()[0]
-        fixture.store.finish(semantic_seed_ids=["seed"], schedule_consolidation=True)
+        legacy_direct_completion(
+            fixture.store, semantic_seed_ids=["seed"], schedule_consolidation=True
+        )
         after = connection.execute("SELECT clock_timestamp()").fetchone()[0]
         child = connection.execute(
             "SELECT operation_id,available_at,status FROM work_units WHERE stage='consolidate'"
@@ -555,7 +614,7 @@ def test_expiry_during_publication_rolls_back_the_batch(direct_store, monkeypatc
     from oam.workers import semantic_links
 
     fixture = direct_store
-    fixture.store.finish(semantic_seed_ids=["seed"])
+    legacy_direct_completion(fixture.store, semantic_seed_ids=["seed"])
     original = semantic_links.publish_semantic_links
 
     def expire(connection, *args):
@@ -591,7 +650,7 @@ def test_retry_after_one_committed_batch_recomputes_without_duplicate_edges(
         # source tables deliberately retain their fresh-database statistics.
         for table in ("search_units", "memories", "support"):
             connection.execute(f"ANALYZE {table}")
-    fixture.store.finish(semantic_seed_ids=seeds)
+    legacy_direct_completion(fixture.store, semantic_seed_ids=seeds)
     original = semantic_links.propose_semantic_links
     batches = []
 
@@ -624,23 +683,11 @@ def test_retry_after_one_committed_batch_recomputes_without_duplicate_edges(
         assert state["link_coverage"]["semantic_links"] == 2004
 
 
-async def test_direct_ready_operation_defers_semantic_links_under_same_operation(
-    core_database, tmp_path
-):
+async def test_source_operation_completes_links_and_recall_in_one_claim(core_database):
     dsn, tenant, headers = core_database
     config = load_config(ROOT / "configs/oam.yaml").config
     app = create_api_only_app(ROOT / "configs/oam.yaml")
     models = SyntheticIndexModels()
-
-    def process():
-        return process_one(
-            config,
-            make_conninfo(dsn, options="-c role=oam_queue"),
-            make_conninfo(dsn, options="-c role=oam_content"),
-            models=models,
-            worker_id="deferred-worker",
-        )
-
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -650,6 +697,7 @@ async def test_direct_ready_operation_defers_semantic_links_under_same_operation
         await use_created_user_key(client, "scope")
         receipt = await client.post(
             "/v1/retain",
+            headers={"Idempotency-Key": "inline-source"},
             json={
                 "user_id": "scope",
                 "input_type": "interaction",
@@ -665,98 +713,43 @@ async def test_direct_ready_operation_defers_semantic_links_under_same_operation
                     )
                 ],
             },
-            headers={"Idempotency-Key": "deferred-source"},
         )
         assert receipt.status_code == 202, receipt.text
-        route = f"/v1/users/scope/operations/{receipt.json()['operation_id']}"
-        started = perf_counter()
-        assert process()
-        direct_ms = (perf_counter() - started) * 1000
-        direct = (await client.get(route)).json()
-        assert direct["status"] == "processing"
-        assert direct["readiness"]["memory_ready"] is True
-        assert direct["readiness"]["temporal_links_ready"] is True
-        assert direct["readiness"]["links_ready"] is False
-        assert direct["stage_state"]["semantic_links_status"] == "pending"
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="inline-worker",
+        )
+        complete = (
+            await client.get(f"/v1/users/scope/operations/{receipt.json()['operation_id']}")
+        ).json()
+        assert complete["status"] == "succeeded"
+        assert complete["readiness"]["links_ready"]
         with psycopg.connect(dsn) as connection:
-            work = connection.execute(
-                "SELECT work_unit_id,stage,status,dependency_ids FROM work_units "
-                "WHERE tenant_id=%s AND operation_id=%s ORDER BY stage",
+            assert connection.execute(
+                "SELECT stage,status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
                 (tenant, receipt.json()["operation_id"]),
-            ).fetchall()
-            assert len(work) == 2
-            assert work[0][1:3] == ("index_semantic_links", "queued")
-            assert work[1][1:3] == ("index_source", "succeeded")
-            assert work[0][3] == [work[1][0]]
+            ).fetchall() == [("index_source", "succeeded")]
             assert (
                 connection.execute(
                     "SELECT count(*) FROM unit_links WHERE tenant_id=%s AND kind='semantic'",
                     (tenant,),
                 ).fetchone()[0]
-                == 0
-            )
-            assert (
-                connection.execute(
-                    "SELECT count(*) FROM temporal_links WHERE tenant_id=%s", (tenant,)
-                ).fetchone()[0]
-                > 0
+                == 2
             )
         app.state.runtime.models = models
-        recalls = {}
         for mode in ("fast", "mid"):
-            started = perf_counter()
             recalled = await client.post(
                 "/v1/recall",
                 json={
                     "user_id": "scope",
                     "query": "Lin morning explanations",
                     "recall_level": mode,
-                    "allow_partial": True,
                 },
             )
             assert recalled.status_code == 200, recalled.text
             assert "Lin prefers short explanations." in recalled.json()["context"]
             assert "Lin prefers updates in the morning." in recalled.json()["context"]
-            assert recalled.json()["diagnostics"]["readiness"] == "pending"
-            recalls[mode] = {
-                "elapsed_ms": (perf_counter() - started) * 1000,
-                "response": recalled.json(),
-            }
-        generation_calls = list(models.generation_calls)
-        started = perf_counter()
-        assert process()
-        semantic_ms = (perf_counter() - started) * 1000
-        complete = (await client.get(route)).json()
-        assert complete["status"] == "succeeded"
-        assert complete["readiness"]["links_ready"] is True
-        assert complete["stage_state"]["semantic_links_status"] == "succeeded"
-        assert complete["usage"] == direct["usage"]
-        assert models.generation_calls == generation_calls
-        with psycopg.connect(dsn) as connection:
-            assert (
-                connection.execute(
-                    "SELECT count(*) FROM unit_links WHERE tenant_id=%s AND kind='semantic'",
-                    (tenant,),
-                ).fetchone()[0]
-                == 2
-            )
-            assert (
-                connection.execute(
-                    "SELECT count(*) FROM work_units WHERE tenant_id=%s AND operation_id=%s",
-                    (tenant, receipt.json()["operation_id"]),
-                ).fetchone()[0]
-                == 2
-            )
-        (tmp_path / "public-http.json").write_text(
-            json.dumps(
-                {
-                    "boundary": "real PostgreSQL and public HTTP; deterministic model responses",
-                    "direct_ms": direct_ms,
-                    "semantic_ms": semantic_ms,
-                    "direct": direct,
-                    "complete": complete,
-                    "recalls": recalls,
-                },
-                indent=2,
-            )
-        )
+            assert recalled.json()["diagnostics"]["readiness"] == "ready"

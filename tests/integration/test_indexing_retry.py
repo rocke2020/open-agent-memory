@@ -12,6 +12,7 @@ import pytest
 import yaml
 from api_test_app import create_api_only_app as create_app
 from psycopg.conninfo import make_conninfo
+from psycopg.types.json import Jsonb
 from test_core_http import ROOT, SyntheticIndexModels, use_created_user_key
 from test_core_http import core_database as core_database
 
@@ -145,6 +146,264 @@ def run_source(dsn, config, models):
         models=models,
         worker_id="bounded-retry",
     )
+
+
+async def test_source_claim_finishes_complete_l1_pipeline(accepted_source):
+    client, dsn, tenant, config, operation = accepted_source
+    assert run_source(dsn, config, SyntheticIndexModels())
+    result = (await client.get(f"/v1/users/lin/operations/{operation}")).json()
+    assert result["status"] == "succeeded"
+    assert all(
+        result["readiness"][key]
+        for key in ("source_searchable", "memory_ready", "temporal_links_ready", "links_ready")
+    )
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT stage,status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        ).fetchall() == [("index_source", "succeeded")]
+
+
+async def test_semantic_retry_reuses_published_facts_without_model_calls(
+    accepted_source, monkeypatch
+):
+    from oam.workers import semantic_links
+
+    client, dsn, tenant, config, operation = accepted_source
+    original = semantic_links.propose_semantic_links
+
+    def timeout(*args, **kwargs):
+        raise psycopg.errors.QueryCanceled("synthetic semantic timeout")
+
+    monkeypatch.setattr(semantic_links, "propose_semantic_links", timeout)
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        run_source(dsn, config, SyntheticIndexModels())
+    partial = (await client.get(f"/v1/users/lin/operations/{operation}")).json()
+    assert partial["readiness"]["memory_ready"]
+    assert partial["readiness"]["temporal_links_ready"]
+    assert not partial["readiness"]["links_ready"]
+    with psycopg.connect(dsn) as connection:
+        checkpoints = connection.execute(
+            "SELECT stage_key,input_digest,output FROM index_stage_results "
+            "WHERE tenant_id=%s ORDER BY stage_key",
+            (tenant,),
+        ).fetchall()
+        assert (
+            connection.execute(
+                "SELECT status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
+                (tenant, operation),
+            ).fetchone()[0]
+            == "queued"
+        )
+
+    class NoModels:
+        def generate(self, *args, **kwargs):
+            pytest.fail("resume repeated extraction")
+
+        def embed(self, *args, **kwargs):
+            pytest.fail("resume repeated embeddings")
+
+    monkeypatch.setattr(semantic_links, "propose_semantic_links", original)
+    assert run_source(dsn, config, NoModels())
+    complete = (await client.get(f"/v1/users/lin/operations/{operation}")).json()
+    assert complete["status"] == "succeeded" and complete["readiness"]["links_ready"]
+    assert complete["usage"] == partial["usage"]
+    with psycopg.connect(dsn) as connection:
+        assert (
+            connection.execute(
+                "SELECT stage_key,input_digest,output FROM index_stage_results "
+                "WHERE tenant_id=%s ORDER BY stage_key",
+                (tenant,),
+            ).fetchall()
+            == checkpoints
+        )
+
+
+class CheckpointOnlyModels:
+    def generate(self, *args, **kwargs):
+        pytest.fail("checkpoint resume repeated extraction")
+
+    def embed(self, *args, **kwargs):
+        pytest.fail("checkpoint resume repeated embeddings")
+
+
+async def test_legacy_temporal_ready_claim_resumes_without_semantic_marker(
+    accepted_source, monkeypatch
+):
+    from oam.workers import semantic_links
+
+    client, dsn, tenant, config, operation = accepted_source
+    original = semantic_links.propose_semantic_links
+
+    def timeout(*args, **kwargs):
+        raise psycopg.errors.QueryCanceled("synthetic semantic timeout")
+
+    monkeypatch.setattr(semantic_links, "propose_semantic_links", timeout)
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        run_source(dsn, config, SyntheticIndexModels())
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "UPDATE operations SET stage_state=stage_state-'semantic_link_manifest'-"
+            "'semantic_links_status' WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        )
+        checkpoints = connection.execute(
+            "SELECT stage_key,input_digest,output FROM index_stage_results "
+            "WHERE tenant_id=%s ORDER BY stage_key",
+            (tenant,),
+        ).fetchall()
+
+    monkeypatch.setattr(semantic_links, "propose_semantic_links", original)
+    assert run_source(dsn, config, CheckpointOnlyModels())
+    complete = (await client.get(f"/v1/users/lin/operations/{operation}")).json()
+    assert complete["status"] == "succeeded" and complete["readiness"]["links_ready"]
+    with psycopg.connect(dsn) as connection:
+        assert (
+            connection.execute(
+                "SELECT stage_key,input_digest,output FROM index_stage_results "
+                "WHERE tenant_id=%s ORDER BY stage_key",
+                (tenant,),
+            ).fetchall()
+            == checkpoints
+        )
+
+
+@pytest.mark.parametrize("phase", ["fresh", "resume"])
+async def test_semantic_entry_database_error_retries_without_model_replay(
+    accepted_source, monkeypatch, phase
+):
+    from oam.workers import semantic_links
+
+    client, dsn, tenant, config, operation = accepted_source
+    original = IndexStore.semantic_seed_manifest
+
+    if phase == "resume":
+        proposal = semantic_links.propose_semantic_links
+
+        def proposal_timeout(*args, **kwargs):
+            raise psycopg.errors.QueryCanceled("synthetic semantic timeout")
+
+        monkeypatch.setattr(semantic_links, "propose_semantic_links", proposal_timeout)
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            run_source(dsn, config, SyntheticIndexModels())
+        monkeypatch.setattr(semantic_links, "propose_semantic_links", proposal)
+
+    def timeout(*args, **kwargs):
+        raise psycopg.errors.QueryCanceled("synthetic semantic entry timeout")
+
+    monkeypatch.setattr(IndexStore, "semantic_seed_manifest", timeout)
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        models = CheckpointOnlyModels() if phase == "resume" else SyntheticIndexModels()
+        run_source(dsn, config, models)
+    partial = (await client.get(f"/v1/users/lin/operations/{operation}")).json()
+    assert partial["readiness"]["memory_ready"]
+    assert partial["readiness"]["temporal_links_ready"]
+    assert not partial["readiness"]["links_ready"]
+    assert partial["stage_state"]["semantic_links_status"] == "pending"
+    with psycopg.connect(dsn) as connection:
+        assert (
+            connection.execute(
+                "SELECT status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
+                (tenant, operation),
+            ).fetchone()[0]
+            == "queued"
+        )
+
+    monkeypatch.setattr(IndexStore, "semantic_seed_manifest", original)
+    assert run_source(dsn, config, CheckpointOnlyModels())
+    complete = (await client.get(f"/v1/users/lin/operations/{operation}")).json()
+    assert complete["status"] == "succeeded" and complete["readiness"]["links_ready"]
+    assert complete["usage"] == partial["usage"]
+
+
+@pytest.mark.parametrize(
+    "corruption", ["missing", "scalar", "source_version", "generation_id", "recipe"]
+)
+async def test_semantic_resume_rejects_invalid_manifest_without_models(
+    accepted_source, monkeypatch, corruption
+):
+    from oam.indexing.store import StaleIndexWork
+    from oam.workers import semantic_links
+
+    _, dsn, tenant, config, operation = accepted_source
+
+    def timeout(*args, **kwargs):
+        raise psycopg.errors.QueryCanceled("synthetic semantic timeout")
+
+    monkeypatch.setattr(semantic_links, "propose_semantic_links", timeout)
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        run_source(dsn, config, SyntheticIndexModels())
+    with psycopg.connect(dsn) as connection:
+        state = connection.execute(
+            "SELECT stage_state FROM operations WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        ).fetchone()[0]
+        if corruption == "missing":
+            del state["semantic_link_manifest"]
+        elif corruption == "scalar":
+            state["semantic_link_manifest"] = "invalid"
+        else:
+            state["semantic_link_manifest"][corruption] = "invalid"
+        connection.execute(
+            "UPDATE operations SET stage_state=%s WHERE tenant_id=%s AND operation_id=%s",
+            (Jsonb(state), tenant, operation),
+        )
+
+    class NoModels:
+        def generate(self, *args, **kwargs):
+            pytest.fail("invalid resume repeated extraction")
+
+        def embed(self, *args, **kwargs):
+            pytest.fail("invalid resume repeated embeddings")
+
+    monkeypatch.setattr(IndexStore, "model_pipeline", lambda *args: pytest.fail("replayed models"))
+    with pytest.raises(StaleIndexWork, match="semantic seed manifest is incompatible"):
+        run_source(dsn, config, NoModels())
+
+
+async def test_expired_last_source_attempt_in_semantic_phase_settles(accepted_source, monkeypatch):
+    from oam.workers import semantic_links
+    from oam.workers.claims import claim_one
+
+    _, dsn, tenant, config, operation = accepted_source
+
+    def worker_death(*args, **kwargs):
+        raise SystemExit("synthetic worker death during semantic processing")
+
+    monkeypatch.setattr(semantic_links, "propose_semantic_links", worker_death)
+    monkeypatch.setattr(IndexStore, "fail", lambda *args: None)
+    with pytest.raises(SystemExit):
+        run_source(dsn, config, SyntheticIndexModels())
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "UPDATE work_units SET lease_expires_at=clock_timestamp()-interval '1 second',"
+            "attempts_remaining=0 WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        )
+        assert (
+            claim_one(
+                connection.cursor(),
+                worker_id="settler",
+                attempt_id="settle-attempt",
+                lease_seconds=config.lease.seconds,
+                user_concurrency=config.user.concurrency,
+            )
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
+                (tenant, operation),
+            ).fetchone()[0]
+            == "failed_terminal"
+        )
+        status, state = connection.execute(
+            "SELECT status,stage_state FROM operations WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        ).fetchone()
+        assert status == "partial_failed"
+        assert state["memory_ready"] and state["temporal_links_ready"]
+        assert not state["links_ready"]
 
 
 def claimed_checkpoint_store(accepted_source):
@@ -326,9 +585,8 @@ async def test_two_extractions_overlap_and_keep_distinct_source_support(accepted
     models = OverlapModels()
     assert run_source(dsn, config, models) is True
     direct = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
-    assert direct["status"] == "processing" and direct["readiness"]["memory_ready"] is True
-    assert direct["readiness"]["links_ready"] is False
-    assert run_source(dsn, config, models) is True
+    assert direct["status"] == "succeeded" and direct["readiness"]["memory_ready"] is True
+    assert direct["readiness"]["links_ready"] is True
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "succeeded"
     assert operation["usage"]["total_tokens"] == 60
@@ -352,8 +610,7 @@ async def test_failed_consolidation_keeps_completed_l1(accepted_source):
     assert run_source(dsn, config, SyntheticIndexModels()) is True
     source = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     consolidate_id = source["stage_state"]["consolidation_operation_id"]
-    assert source["status"] == "processing" and source["readiness"]["links_ready"] is False
-    assert run_source(dsn, config, SyntheticIndexModels()) is True
+    assert source["status"] == "succeeded" and source["readiness"]["links_ready"] is True
     with psycopg.connect(dsn) as connection:
         connection.execute(
             "UPDATE work_units SET available_at=clock_timestamp() WHERE tenant_id=%s "
@@ -412,8 +669,7 @@ async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_at
         assert operation["status"] == "processing"
     assert run_source(dsn, config, models) is True
     direct = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
-    assert direct["status"] == "processing" and direct["readiness"]["links_ready"] is False
-    assert run_source(dsn, config, models) is True
+    assert direct["status"] == "succeeded" and direct["readiness"]["links_ready"] is True
     assert run_source(dsn, config, models) is False
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "succeeded"
@@ -479,8 +735,7 @@ async def test_pre_dispatch_connect_timeout_reuses_completed_stages(accepted_sou
 
     assert run_source(dsn, config, models) is True
     direct = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
-    assert direct["status"] == "processing" and direct["readiness"]["links_ready"] is False
-    assert run_source(dsn, config, models) is True
+    assert direct["status"] == "succeeded" and direct["readiness"]["links_ready"] is True
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "succeeded"
     assert operation["stage_state"]["index_attempts"] == 2
@@ -726,10 +981,9 @@ async def test_retry_reuses_completed_fact_vectors_when_ready_group_batching_cha
     monkeypatch.setattr(index_source, "ThreadPoolExecutor", ReadyTogetherExecutor)
     assert run_source(dsn, config, models) is True
     indexed = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
-    assert indexed["status"] == "processing"
+    assert indexed["status"] == "succeeded"
     assert indexed["readiness"]["memory_ready"] is True
-    assert indexed["readiness"]["links_ready"] is False
-    assert run_source(dsn, config, models) is True
+    assert indexed["readiness"]["links_ready"] is True
     finished = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert finished["status"] == "succeeded"
     assert finished["readiness"]["links_ready"] is True
