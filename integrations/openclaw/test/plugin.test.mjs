@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { after, before, test } from 'node:test';
 
 let server;
@@ -8,6 +9,7 @@ let baseUrl;
 const requests = [];
 let stallRecall = false;
 let removalResponse;
+let retainResponses = {};
 
 before(async () => {
   server = createServer(async (request, response) => {
@@ -25,8 +27,10 @@ before(async () => {
       }
       response.end(JSON.stringify({ context: '[source: s1] Lin prefers concise answers.', context_tokens: 16, items: [{ source_id: 's1' }] }));
     } else if (request.url === '/v1/retain') {
-      response.statusCode = 202;
-      response.end(JSON.stringify({ operation_id: 'op1', source_id: 's1', revision: 1, readiness: { accepted: true } }));
+      const retained = JSON.parse(body);
+      const configured = retainResponses[retained.input_type];
+      response.statusCode = configured?.status ?? 202;
+      response.end(JSON.stringify(configured?.body ?? { operation_id: 'op1', source_id: 's1', revision: 1, readiness: { accepted: true } }));
     } else if (request.method === 'DELETE' && /^\/v1\/users\/u1\/(?:memories\/mem_42|insights\/ins_7)$/.test(request.url)) {
       const insight = request.url.includes('/insights/');
       response.statusCode = removalResponse?.status ?? 202;
@@ -51,6 +55,7 @@ async function installedPlugin(pluginConfig = {}, registrationMode = 'full') {
   const hooks = {};
   let tool;
   let removeTool;
+  const logs = [];
   const api = {
     registrationMode,
     pluginConfig: {
@@ -60,7 +65,7 @@ async function installedPlugin(pluginConfig = {}, registrationMode = 'full') {
       allowedDirectConversations: [{ channel: 'telegram', chatId: '42', senderId: '7' }],
       ...pluginConfig,
     },
-    logger: { info() {}, warn() {}, error() {} },
+    logger: { info(message) { logs.push(message); }, warn(message) { logs.push(message); }, error() {} },
     registerMemoryCapability() {},
     registerTool(factory, options) {
       if (options.name === 'memory_remove') removeTool = factory;
@@ -69,7 +74,7 @@ async function installedPlugin(pluginConfig = {}, registrationMode = 'full') {
     on(name, callback) { hooks[name] = callback; },
   };
   plugin.register(api);
-  return { hooks, tool, removeTool };
+  return { hooks, tool, removeTool, logs };
 }
 
 test('plugin manifest declares every registered memory tool', async () => {
@@ -77,6 +82,14 @@ test('plugin manifest declares every registered memory tool', async () => {
   const { tool, removeTool } = await installedPlugin();
   assert.ok(tool && removeTool);
   assert.deepEqual(manifest.contracts.tools, ['memory_search', 'memory_remove']);
+});
+
+test('built plugin loads all cron code from its shipped JavaScript entrypoint', async () => {
+  const build = spawnSync('npm', ['run', 'build'], { cwd: new URL('../', import.meta.url), encoding: 'utf8' });
+  assert.equal(build.status, 0, build.stderr);
+  const { default: built } = await import('../dist/index.js');
+  assert.equal(built.id, 'oam-openclaw');
+  assert.equal(typeof built.register, 'function');
 });
 
 test('offline inspection registers schemas with a SecretRef but full runtime rejects it', async () => {
@@ -111,6 +124,262 @@ const route = {
   toolAuthority: { allows: (name) => name === 'memory_search', assertActive() {} },
   hookInvocation: { assertActive() {} },
 };
+
+const cronJob = {
+  id: 'job-news', agentId: 'main', name: 'Daily news', description: 'Read the daily news',
+  enabled: true, schedule: { kind: 'cron', expr: '0 7 * * *', tz: 'Asia/Shanghai' },
+  sessionTarget: 'session:news', wakeMode: 'now',
+  payload: { kind: 'agentTurn', message: 'Summarize today\'s science news.', model: 'model-secret' },
+  createdAtMs: 1780000000000, updatedAtMs: 1780000001000,
+  state: { lastRunAtMs: 1780000002000, lastRunStatus: 'ok', lastDurationMs: 123 },
+};
+
+test('cron reconciliation learns enabled user tasks and skips inactive or maintenance jobs', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  const controller = new AbortController();
+  assert.equal(typeof hooks.cron_reconciled, 'function', 'cron definitions need a reconciliation hook');
+  await hooks.cron_reconciled({ reason: 'startup', enabled: true }, {
+    abortSignal: controller.signal,
+    getCron: () => ({ async list(options) {
+      assert.deepEqual(options, { includeDisabled: true });
+      return [cronJob, { ...cronJob, id: 'disabled-job', enabled: false, state: {} },
+        { ...cronJob, id: 'maintenance-job', payload: { kind: 'heartbeat' } },
+        { ...cronJob, id: 'foreign-job', agentId: 'research' }, { ...cronJob, id: 'unknown-job', agentId: undefined }];
+    } }),
+  });
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].body.messages[0].content, /Read the daily news/);
+  assert.equal(requests[0].body.messages[0].learning_eligible, true);
+  assert.ok(requests.every((r) => !JSON.stringify(r.body).includes('model-secret')));
+});
+
+test('cron heartbeat events never reach OAM even with errors or result text', async () => {
+  requests.length = 0;
+  const { hooks, logs } = await installedPlugin({ captureCronJobs: true });
+  for (const enabled of [true, false]) {
+    const job = { ...cronJob, enabled, payload: { kind: 'heartbeat' } };
+    for (const action of ['added', 'updated', 'removed', 'finished']) {
+      await hooks.cron_changed({ job, jobId: job.id, action, runAtMs: 1780000002000,
+        status: 'error', error: 'Maintenance failure', summary: 'Heartbeat diagnostics' }, {});
+    }
+  }
+  assert.equal(requests.length, 0);
+  assert.ok(logs.some((line) => /skipped.*reason=maintenance-payload/.test(line)));
+});
+
+test('cron definitions keep purpose and schedule without internal metadata or workflow prompts', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  const job = { ...cronJob, schedule: { kind: 'every', everyMs: 1800000, anchorMs: 471294, staggerMs: 1234 } };
+  await hooks.cron_changed({ action: 'added', jobId: job.id, job }, {});
+  const content = requests[0].body.messages[0].content;
+  assert.match(content, /Daily news/);
+  assert.match(content, /Read the daily news/);
+  assert.match(content, /1800000/);
+  assert.doesNotMatch(content, /job-news|agentId|session:news|wakeMode|anchorMs|staggerMs|model-secret|science news/);
+});
+
+test('cron tasks without descriptions preserve their name and timing without learning payload prompts', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  const job = { ...cronJob, name: 'heartbeat research', description: undefined,
+    payload: { kind: 'agentTurn', message: '# Weekly research\n\nReport new systems research.\n\n## Procedure\n\nRun a long operational workflow.' } };
+  await hooks.cron_changed({ action: 'added', jobId: job.id, job }, {});
+  const content = requests[0].body.messages[0].content;
+  assert.match(content, /heartbeat research/);
+  assert.match(content, /0 7 \* \* \*/);
+  assert.doesNotMatch(content, /Report new systems research|Procedure|operational workflow/);
+});
+
+test('cron command and script tasks never learn executable payloads', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  for (const payload of [{ kind: 'command', argv: ['run', 'secret-command'] },
+    { kind: 'script', script: 'SECRET_SCRIPT=private' }, { kind: 'systemEvent', text: 'private instructions' }]) {
+    const job = { ...cronJob, payload };
+    await hooks.cron_changed({ action: 'added', jobId: job.id, job }, {});
+  }
+  assert.equal(requests.length, 3);
+  for (const request of requests) {
+    assert.match(request.body.messages[0].content, /Read the daily news/);
+    assert.doesNotMatch(request.body.messages[0].content, /secret-command|SECRET_SCRIPT|private instructions/);
+  }
+});
+
+test('cron execution and delivery diagnostics are never archived as memory', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  for (const outcome of [{ status: 'error' }, { status: 'ok', deliveryError: 'Recipient unavailable' }]) {
+    await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: { ...cronJob, enabled: false },
+      runAtMs: 1780000002000, summary: 'NO_REPLY', ...outcome }, {});
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('cron successful report content enters learning as assistant-authored text', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  const event = { action: 'finished', jobId: cronJob.id, job: cronJob, agentId: 'main',
+    runAtMs: 1780000002000, durationMs: 123, status: 'ok', completionStatus: 'succeeded',
+    deliveryStatus: 'delivered', sessionId: 'news-session', runId: 'news-run',
+    summary: 'Research result: use <tag> literally.\nSource https://example.com/report' };
+  await hooks.cron_changed(event, {});
+  assert.equal(requests.length, 1);
+  const [report] = requests;
+  assert.equal(report.body.input_type, 'interaction');
+  assert.equal(report.path, '/v1/retain');
+  assert.equal(report.body.user_id, 'u1');
+  assert.equal(report.body.messages.length, 1);
+  const message = report.body.messages[0];
+  assert.equal(message.role, 'assistant');
+  assert.equal(message.learning_eligible, true);
+  assert.equal(message.content, event.summary);
+  assert.doesNotMatch(message.content, /news-run|news-session|jobId|durationMs|deliveryStatus|completionStatus/);
+  assert.equal(message.event_time, '2026-05-28T20:26:42.000Z');
+  await hooks.cron_changed(event, {});
+  assert.deepEqual(requests[1].body, report.body);
+  assert.equal(requests[1].headers['idempotency-key'], report.headers['idempotency-key']);
+});
+
+test('cron transient task definitions are skipped while their successful reports can be learned', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  for (const schedule of [{ kind: 'at', at: '2026-05-28T20:30:00Z' },
+    { kind: 'on-exit', command: 'wait-for-build' }, { kind: 'stream', command: ['watch-build'] }]) {
+    const job = { ...cronJob, schedule };
+    for (const action of ['added', 'updated', 'removed']) {
+      await hooks.cron_changed({ action, jobId: job.id, job }, {});
+    }
+    assert.equal(requests.length, 0);
+  }
+  await hooks.cron_changed({ action: 'finished', jobId: cronJob.id,
+    job: { ...cronJob, schedule: { kind: 'at', at: '2026-05-28T20:30:00Z' } },
+    runAtMs: 1780000002000, status: 'ok', summary: 'The completed analysis is available at https://example.com/result.' }, {});
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.messages[0].role, 'assistant');
+});
+
+test('cron unsuccessful or host-suppressed output is skipped despite nonblank summary', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  for (const outcome of [{ status: 'error', error: 'Provider unavailable' }, { status: 'skipped' },
+    { status: 'ok', error: 'Incomplete execution' },
+    ...['empty', 'silent', 'heartbeat', 'channel_transform'].map((deliverySuppressionReason) => ({ status: 'ok', deliverySuppressionReason }))]) {
+    await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: cronJob,
+      runAtMs: 1780000002000, summary: 'A nonblank status message.', ...outcome }, {});
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('cron execution-success report is learned even when delivery or overall completion failed', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: { ...cronJob, enabled: false },
+    runAtMs: 1780000002000, status: 'ok', completionStatus: 'failed', deliveryStatus: 'not-delivered',
+    deliveryError: 'Recipient unavailable', summary: 'A complete report with source https://example.com/source.' }, {});
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.messages[0].learning_eligible, true);
+  assert.ok(requests[0].body.messages[0].content.endsWith('https://example.com/source.'));
+  assert.doesNotMatch(requests[0].body.messages[0].content, /Recipient unavailable/);
+});
+
+test('cron routine outcomes and standalone host control replies make no OAM request', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  for (const summary of [undefined, '', '  ', 'HEARTBEAT_OK', 'NO_REPLY', ' NO_REPLY\nNO_REPLY ']) {
+    for (const status of ['ok', 'skipped']) {
+      await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: cronJob,
+        runAtMs: 1780000002000, status, summary, delivered: true, durationMs: 123 }, {});
+    }
+  }
+  assert.equal(requests.length, 0);
+  await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: cronJob,
+    runAtMs: 1780000002000, status: 'ok', summary: 'The report explains how NO_REPLY works.' }, {});
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.input_type, 'interaction');
+});
+
+test('cron definitions ignore runtime state and distinguish removed jobs', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  for (const event of [
+    { action: 'added', jobId: cronJob.id, job: cronJob },
+    { action: 'updated', jobId: cronJob.id, job: { ...cronJob, state: { nextRunAtMs: 1789999999000 } } },
+    { action: 'removed', jobId: cronJob.id, job: cronJob },
+  ]) await hooks.cron_changed(event, {});
+  assert.deepEqual(requests[0].body, requests[1].body);
+  assert.equal(requests[0].headers['idempotency-key'], requests[1].headers['idempotency-key']);
+  assert.notEqual(requests[0].headers['idempotency-key'], requests[2].headers['idempotency-key']);
+  assert.match(requests[2].body.messages[0].content, /removed/);
+  await hooks.cron_changed({ action: 'updated', jobId: cronJob.id, job: { ...cronJob, enabled: false } }, {});
+  assert.match(requests[3].body.messages[0].content, /disabled/);
+});
+
+test('cron reconciliation never backfills transient execution failures', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: cronJob,
+    runAtMs: cronJob.state.lastRunAtMs, durationMs: 123, status: 'error', error: 'Provider unavailable',
+    completionStatus: 'failed', sessionId: 'news-session', sessionKey: 'agent:main:news', runId: 'live-run' }, {});
+  assert.equal(requests.length, 0);
+  await hooks.cron_reconciled({ reason: 'reload', enabled: true }, {
+    getCron: () => ({ async list() { return [{ ...cronJob,
+      state: { ...cronJob.state, lastRunStatus: 'error', lastError: 'Provider unavailable' } }]; } }),
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.messages[0].role, 'user');
+  assert.doesNotMatch(requests[0].body.messages[0].content, /Provider unavailable/);
+});
+
+test('cron capture is opt-in and rejects foreign, malformed and cancelled events', async () => {
+  requests.length = 0;
+  const disabled = await installedPlugin();
+  assert.equal(disabled.hooks.cron_changed, undefined);
+  await assert.rejects(installedPlugin({ captureCronJobs: 'yes' }), /captureCronJobs/);
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  for (const event of [
+    { action: 'updated', jobId: 'other-id', job: cronJob },
+    { action: 'updated', jobId: cronJob.id, job: { ...cronJob, agentId: 'research' } },
+    { action: 'updated', jobId: cronJob.id, job: { ...cronJob, updatedAtMs: 1e30 } },
+    { action: 'started', jobId: cronJob.id, job: cronJob },
+    { action: 'finished', jobId: cronJob.id, job: cronJob, runAtMs: 1e30, status: 'ok' },
+  ]) await hooks.cron_changed(event, {});
+  const controller = new AbortController();
+  await hooks.cron_reconciled({ reason: 'reload', enabled: false }, {
+    abortSignal: controller.signal,
+    getCron: () => ({ async list() { controller.abort(); return [cronJob]; } }),
+  });
+  assert.equal(requests.length, 0);
+});
+
+test('cron report learning rejects failed or invalid acceptance receipts', async () => {
+  const event = { action: 'finished', jobId: cronJob.id, job: cronJob,
+    runAtMs: 1780000002000, status: 'ok', summary: 'A completed result' };
+  try {
+    for (const responses of [
+      { interaction: { status: 503, body: {} } },
+      { interaction: { status: 202, body: {} } },
+    ]) {
+      requests.length = 0;
+      retainResponses = responses;
+      const { hooks, logs } = await installedPlugin({ captureCronJobs: true });
+      await hooks.cron_changed(event, {});
+      assert.deepEqual(requests.map((r) => r.body.input_type), ['interaction']);
+      assert.equal(logs.length, 1);
+      assert.match(logs[0], /cron report job=job-news/);
+      assert.equal(logs.filter((line) => line.includes('operation=')).length, 0);
+      assert.ok(logs.every((line) => !line.includes('private-key')));
+    }
+    requests.length = 0;
+    retainResponses = {};
+    const { hooks } = await installedPlugin({ captureCronJobs: true });
+    await hooks.cron_changed({ ...event, summary: undefined }, {});
+    assert.equal(requests.length, 0);
+  } finally {
+    retainResponses = {};
+  }
+});
 
 test('owner-authorized local main turn recalls and captures its exact human text', async () => {
   requests.length = 0;

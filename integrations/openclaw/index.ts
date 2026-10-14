@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { registerCronCapture } from './cron.ts';
 
 const AUTO_RECALL_TIMEOUT_MS = 4_000;
 const TOOL_RECALL_TIMEOUT_MS = 12_000;
@@ -40,6 +41,9 @@ function configured(raw, registrationMode) {
       (raw.allowedDirectConversations.length === 0 && raw.allowLocalMainAgent !== true) ||
       (raw.allowLocalMainAgent !== undefined && typeof raw.allowLocalMainAgent !== 'boolean')) {
     throw new Error('OAM userId, resolved apiKey, and an approved route are required');
+  }
+  if (raw.captureCronJobs !== undefined && typeof raw.captureCronJobs !== 'boolean') {
+    throw new Error('captureCronJobs must be a boolean');
   }
   for (const route of raw.allowedDirectConversations) {
     if (!route || !['channel', 'chatId', 'senderId'].every((field) => typeof route[field] === 'string' && route[field].trim()) ||
@@ -197,6 +201,16 @@ function turnKey(config, ctx, message) {
   return `oam-oc-${sha256(JSON.stringify(identity))}`;
 }
 
+async function retain(config, body, key, signal) {
+  const receipt = await request(config, '/v1/retain', body, CAPTURE_TIMEOUT_MS, key, signal);
+  if (typeof receipt.operation_id !== 'string' || !receipt.operation_id ||
+      typeof receipt.source_id !== 'string' || !receipt.source_id ||
+      !Number.isInteger(receipt.revision) || receipt.revision < 1 || receipt.readiness?.accepted !== true) {
+    throw new Error('invalid retain receipt');
+  }
+  return receipt;
+}
+
 const plugin = {
   id: 'oam-openclaw',
   name: 'Open Agent Memory',
@@ -206,6 +220,7 @@ const plugin = {
     const config = configured(api.pluginConfig, api.registrationMode);
     const pendingLocalTurns = new Map();
     api.registerMemoryCapability({});
+    registerCronCapture(api, config, (body, key, signal) => retain(config, body, key, signal), safeError);
 
     api.on('before_prompt_build', async (event, ctx) => {
       if (!hookRoute(config, ctx) || !event?.prompt?.trim() || !ctx.toolAuthority?.allows('memory_search') ||
@@ -263,12 +278,7 @@ const plugin = {
           learning_eligible: message.learning_eligible && (!local || state.learningEligible) }],
       };
       try {
-        const receipt = await request(config, '/v1/retain', body, CAPTURE_TIMEOUT_MS, turnKey(config, ctx, message));
-        if (typeof receipt.operation_id !== 'string' || !receipt.operation_id ||
-            typeof receipt.source_id !== 'string' || !receipt.source_id ||
-            !Number.isInteger(receipt.revision) || receipt.revision < 1 || receipt.readiness?.accepted !== true) {
-          throw new Error('invalid retain receipt');
-        }
+        const receipt = await retain(config, body, turnKey(config, ctx, message));
         api.logger.info(`oam-openclaw: retain accepted operation=${receipt.operation_id} source=${receipt.source_id}`);
       } catch (error) {
         api.logger.warn(`oam-openclaw: capture ${safeError(error)}`);

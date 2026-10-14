@@ -21,6 +21,7 @@
       "targetAgentId": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$" },
       "maxContextTokens": { "type": "integer", "minimum": 1, "maximum": 8192 },
       "allowLocalMainAgent": { "type": "boolean" },
+      "captureCronJobs": { "type": "boolean" },
       "allowedDirectConversations": {
         "type": "array",
         "items": {
