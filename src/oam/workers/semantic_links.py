@@ -1,5 +1,8 @@
 """Deferred semantic reads outside the shared publication lock."""
 
+import json
+import time
+
 from oam.db.context import bind_user
 from oam.indexing.links import (
     SEMANTIC_SEED_BATCH_SIZE,
@@ -25,6 +28,7 @@ def _set_claim_timeout(connection, store):
 
 
 def process_semantic_claim(store, *, inline=False):
+    started = time.monotonic()
     if inline:
         store.mark_inline_semantic()
     with store.transaction() as connection:
@@ -33,9 +37,20 @@ def process_semantic_claim(store, *, inline=False):
         if not inline and input_digest(manifest) != bytes(store.source["input_digest"]):
             raise StaleIndexWork("semantic seed manifest is incompatible")
         seeds = manifest.get("seed_ids")
-        if not seeds and not inline:
-            raise StaleIndexWork("semantic seed manifest is malformed")
         store.readiness(connection, links_ready=False, semantic_links_status="running")
+    print(
+        json.dumps(
+            {
+                "stage": "semantic_started",
+                "operation_id": store.claim.operation_id,
+                "work_unit_id": store.claim.work_unit_id,
+                "generation_id": store.generation_id,
+                "seeds": len(seeds),
+                "inline": inline,
+            }
+        ),
+        flush=True,
+    )
     for offset in range(0, len(seeds), SEMANTIC_SEED_BATCH_SIZE):
         batch = seeds[offset : offset + SEMANTIC_SEED_BATCH_SIZE]
         store.check_retry_claim()
@@ -55,5 +70,16 @@ def process_semantic_claim(store, *, inline=False):
             store.guard(connection)
     store.finish(
         inline_semantic=inline,
-        schedule_consolidation=inline and store.config.index.insights_enabled,
+        schedule_consolidation=store.config.index.insights_enabled,
+    )
+    print(
+        json.dumps(
+            {
+                "stage": "semantic_succeeded",
+                "operation_id": store.claim.operation_id,
+                "work_unit_id": store.claim.work_unit_id,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+            }
+        ),
+        flush=True,
     )

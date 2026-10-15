@@ -77,8 +77,13 @@ class RecallService:
         *,
         deadline_at: datetime | None = None,
     ) -> dict:
-        with ExitStack() as sql_phase:
-            return self._search(authority, request, deadline_at=deadline_at, sql_phase=sql_phase)
+        try:
+            with ExitStack() as sql_phase:
+                return self._search(
+                    authority, request, deadline_at=deadline_at, sql_phase=sql_phase
+                )
+        except psycopg.errors.QueryCanceled as error:
+            raise TimeoutError("recall SQL deadline exceeded") from error
 
     def _search(self, authority, request, *, deadline_at, sql_phase: ExitStack) -> dict:
         request.validate_limits(self.config)
@@ -144,7 +149,7 @@ class RecallService:
                     value, error, duration_ms = value
                     if error is not None:
                         raise error
-            except (PermissionError, TimeoutError):
+            except (PermissionError, TimeoutError, psycopg.errors.QueryCanceled):
                 raise
             except (RuntimeError, ValueError, httpx.HTTPError, psycopg.Error) as exc:
                 if not request.allow_partial:
@@ -278,6 +283,15 @@ class RecallService:
                             seed_limit=min(self.config.search.temporal_seed_max, node_limit),
                             bucket_count=self.config.search.temporal_coverage_buckets,
                         )
+                        recovered_seeds = ()
+                        if not matched and not selected:
+                            selected = select_temporal_seeds(
+                                repository.temporal_candidates(vector, tier.channel_candidates),
+                                window=window,
+                                seed_limit=min(self.config.search.temporal_seed_max, node_limit),
+                                bucket_count=self.config.search.temporal_coverage_buckets,
+                            )
+                            recovered_seeds = tuple(node.node_id for node in selected)
                         expansion = temporal_spread(
                             selected,
                             lambda node, limit: repository.temporal_neighbors(node, vector, limit),
@@ -286,7 +300,7 @@ class RecallService:
                             neighbor_limit=self.config.search.temporal_neighbors,
                             deadline_reached=lambda: time.monotonic() >= deadline,
                         )
-                        return matched, expansion
+                        return tuple(dict.fromkeys((*matched, *recovered_seeds))), expansion
 
                 temporal_result = stage("temporal", temporal)
                 if temporal_result is not None:
@@ -607,6 +621,39 @@ class RecallService:
                         item["paths"] = paths.get(item["unit_id"], [])
                         companions[item["unit_id"]] = item
                     candidates.extend(companions.values())
+        if vector is not None:
+            passage_source_keys = tuple(
+                dict.fromkeys(
+                    (citation["source_id"], citation["source_version"])
+                    for item in source_seed_items
+                    if item["kind"] == "passage" and item["origin"] == "memory"
+                    for citation in item["citations"]
+                    if isinstance(citation.get("source_id"), str)
+                    and type(citation.get("source_version")) is int
+                )
+            )
+            if passage_source_keys:
+                originals = (
+                    stage(
+                        "source_user_originals",
+                        lambda: read(
+                            "source_user_passage_ids",
+                            passage_source_keys,
+                            vector,
+                            seed_limit,
+                            tuple(hydrated_passages),
+                        ),
+                    )
+                    or []
+                )
+                if originals:
+                    original_ids = tuple(dict.fromkeys(row["unit_id"] for row in originals))
+                    recovered = []
+                    for row in read("hydrate", original_ids):
+                        item = {key: value for key, value in row.items() if key != "locator"}
+                        item["paths"] = paths.get(item["unit_id"], [])
+                        recovered.append(item)
+                    candidates = [*recovered, *candidates]
         original_detail_set = set(original_detail_ids)
         candidates.extend(
             item for item in source_passages if item["unit_id"] not in original_detail_set
@@ -650,6 +697,7 @@ class RecallService:
                         "hierarchy",
                         "temporal",
                         "rerank",
+                        "source_user_originals",
                     )
                     if name in executed
                 ],

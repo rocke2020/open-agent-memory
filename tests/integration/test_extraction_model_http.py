@@ -36,7 +36,22 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
 
         def do_POST(self):
             data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            role = data["model"]
+            user = data.get("messages", [{}])[-1].get("content")
+            envelope = json.loads(user) if isinstance(user, str) else {}
+            if self.path.endswith("/embeddings"):
+                role = "embedding"
+            elif (
+                isinstance(user, list)
+                or "center" in envelope
+                or (
+                    "passages" in envelope
+                    and isinstance(envelope["passages"][0], dict)
+                    and "center" in envelope["passages"][0]
+                )
+            ):
+                role = "extraction"
+            else:
+                role = "abstract"
             calls.append((role, data.get("max_tokens")))
             finish = "stop"
             if self.path.endswith("/embeddings"):
@@ -134,6 +149,17 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
                     assert accepted.status_code == 202, accepted.text
                     assert process_one(
                         config, queue, content, models=models, worker_id="overflow-http"
+                    )
+                    queued = (
+                        await client.get(
+                            f"/v1/users/overflow/operations/{accepted.json()['operation_id']}"
+                        )
+                    ).json()
+                    assert queued["status"] == "processing"
+                    assert queued["readiness"]["memory_ready"]
+                    assert queued["readiness"]["links_ready"] is False
+                    assert process_one(
+                        config, queue, content, models=models, worker_id="overflow-http-links"
                     )
                     operation = (
                         await client.get(

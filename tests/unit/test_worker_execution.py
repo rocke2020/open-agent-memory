@@ -228,7 +228,9 @@ def test_source_claim_uses_the_configured_user_concurrency(monkeypatch):
 
     limits = []
 
-    def claim(cursor, *, worker_id, attempt_id, lease_seconds, user_concurrency):
+    def claim(
+        cursor, *, worker_id, attempt_id, lease_seconds, user_concurrency, claim_semantic_links
+    ):
         limits.append(user_concurrency)
         return None
 

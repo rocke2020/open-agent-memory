@@ -203,6 +203,7 @@ class RetryConfig(FrozenModel):
 class WorkerConfig(FrozenModel):
     embedded_enabled: bool
     max_tasks: PositiveInt
+    claim_semantic_links: bool = True
 
 
 class LeaseConfig(FrozenModel):

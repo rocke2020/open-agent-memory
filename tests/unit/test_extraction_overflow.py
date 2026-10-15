@@ -9,6 +9,79 @@ from oam.indexing.chunker import TextChunk
 from oam.indexing.extraction import ExtractionError, extract_facts
 from oam.indexing.grouping import extract_group
 from oam.models.runtime import ModelOutputError
+from oam.tokens import estimate_units, estimated_tokens
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("escaped", ["\\", "\x01"])
+def test_escaped_source_input_splits_before_dispatch_without_losing_support(grouped, escaped):
+    from oam.indexing.extraction import model_input_tokens
+
+    text = "".join(f"Line {index}: " + escaped * 50 + ".\n" for index in range(120))
+    requests = []
+
+    def respond(request):
+        messages = json.loads(request.content)["messages"]
+        envelope = json.loads(messages[1]["content"])
+        assert model_input_tokens(messages[0]["content"], envelope) <= 8192
+        center = envelope["passages"][0] if grouped else envelope
+        quote = center["center"]["text"]
+        fact = {"text": quote, "quote": quote}
+        if grouped:
+            fact["passage_id"] = center["passage_id"]
+        return response(json.dumps({"outcome": "facts", "facts": [fact]}))
+
+    with extraction_models(respond, requests) as (models, config):
+        chunk = TextChunk(text, 50, 50 + len(text), "prior", estimated_tokens(estimate_units(text)))
+        assert chunk.estimated_tokens <= config.chunk.ingestion.max_estimated_tokens
+        if grouped:
+            member = passage("canonical", text, 0)
+            result = extract_group(
+                models,
+                passages=(member,),
+                config=config,
+                timeout_seconds=1,
+            )
+        else:
+            result = extract_facts(
+                models,
+                chunk=chunk,
+                config=config,
+                message_role="user",
+                timeout_seconds=1,
+            )
+    assert len(requests) >= 2
+    centers = [json.loads(request["messages"][1]["content"]) for request in requests]
+    assert (
+        "".join(
+            (center["passages"][0] if grouped else center)["center"]["text"] for center in centers
+        )
+        == text
+    )
+    assert "".join(fact.quote for fact in result.facts) == text
+    assert result.outcome == "facts"
+    assert result.usage.coverage == "complete"
+    assert result.usage.total_tokens == 20 * len(requests)
+    assert all(fact.passage_id == ("canonical" if grouped else None) for fact in result.facts)
+
+
+@pytest.mark.parametrize("text", ["Tea.", "\\" * 7000])
+def test_unsplittable_input_bound_fails_without_dispatch(text):
+    requests = []
+    with extraction_models({"outcome": "no_facts", "facts": []}, requests) as (models, config):
+        config = config.model_copy(
+            update={"extraction": config.extraction.model_copy(update={"max_input_tokens": 1})}
+        )
+        with pytest.raises(ExtractionError, match="input exceeds") as failure:
+            extract_facts(
+                models,
+                chunk=TextChunk(text, 0, len(text), "", estimated_tokens(estimate_units(text))),
+                config=config,
+                message_role="user",
+                timeout_seconds=1,
+            )
+    assert requests == []
+    assert failure.value.usage is None
 
 
 def response(content, finish_reason="stop"):

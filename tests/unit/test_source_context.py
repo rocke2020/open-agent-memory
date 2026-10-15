@@ -5,6 +5,7 @@ from collections import Counter
 from contextlib import contextmanager
 from copy import deepcopy
 
+import psycopg
 import pytest
 from test_query_time_recall import CONFIG, DatedRepository, EmbeddingOnly
 
@@ -95,6 +96,9 @@ class SourceRepository(DatedRepository):
     def supported_fact_ids(self, passage_ids, vector, limit, excluded_ids):
         return []
 
+    def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+        return []
+
 
 class SourceService(RecallService):
     def __init__(self, rows, *, config=CONFIG, graph_paths=None):
@@ -105,6 +109,58 @@ class SourceService(RecallService):
     @contextmanager
     def _repository(self, authority, request, deadline):
         yield SourceRepository(request, self.rows, self.graph_paths)
+
+
+def test_trace_statement_timeout_preserves_recall_deadline_error(evidence_rows, monkeypatch):
+    def timed_out(*args):
+        raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(SourceRepository, "record_trace", timed_out)
+    with pytest.raises(TimeoutError, match="deadline"):
+        SourceService(evidence_rows).search(object(), SearchRequest(query="missed workshops"))
+
+
+@pytest.mark.parametrize("mode", ["fast", "mid"])
+def test_passage_seed_recovers_query_relevant_user_original_without_a_fact(evidence_rows, mode):
+    seed = deepcopy(evidence_rows[0])
+    seed.update(
+        unit_id="assistant_seed",
+        kind="passage",
+        text="Here is a checklist for tracking missed workshops.",
+        citations=[
+            {
+                "source_id": "conversation",
+                "source_version": 1,
+                "message_id": "3",
+                "message_index": 3,
+                "role": "assistant",
+            }
+        ],
+    )
+
+    class PassageRepository(SourceRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": "assistant_seed"}]
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            assert source_keys == (("conversation", 1),)
+            assert "assistant_seed" in excluded_ids
+            return [{"unit_id": "original"}]
+
+    class PassageService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield PassageRepository(request, self.rows, self.graph_paths)
+
+    result = PassageService([seed, evidence_rows[2]]).search(
+        object(), SearchRequest(query="missed workshops", recall_level=mode)
+    )
+
+    assert "On June 3, I missed the workshop while covering an extra shift." in result["context"]
+    original = next(item for item in result["items"] if item["unit_id"] == "original")
+    assert original["citations"][0]["role"] == "user"
+    assert result["diagnostics"]["generative_calls"] == 0
+    assert result["context_tokens"] <= CONFIG.context.default_tokens
 
 
 @pytest.mark.parametrize("mode", ["fast", "mid", "deep"])

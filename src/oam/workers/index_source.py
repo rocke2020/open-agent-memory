@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from importlib.resources import files
@@ -84,6 +85,7 @@ def process_one(
     queue_pool: ConnectionPool | None = None,
     content_pool: ConnectionPool | None = None,
 ) -> bool:
+    started = time.monotonic()
     queue_connection = (
         queue_pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
         if queue_pool is not None
@@ -96,6 +98,7 @@ def process_one(
             attempt_id="attempt_" + uuid4().hex,
             lease_seconds=config.lease.seconds,
             user_concurrency=config.user.concurrency,
+            claim_semantic_links=config.worker.claim_semantic_links,
         )
     if claim is None:
         return False
@@ -204,13 +207,35 @@ def process_one(
                 temporal_links_ready=True,
                 link_coverage=links,
                 semantic_link_manifest=manifest,
-                semantic_links_status="running",
+                semantic_links_status="pending",
                 links_ready=False,
             )
-        from oam.workers.semantic_links import process_semantic_claim
-
-        process_semantic_claim(store, inline=True)
+            store.finish(enqueue_semantic=True, connection=connection)
+        print(
+            json.dumps(
+                {
+                    "stage": "semantic_queued",
+                    "operation_id": store.claim.operation_id,
+                    "generation_id": store.generation_id,
+                    "seeds": len(manifest["seed_ids"]),
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                }
+            ),
+            flush=True,
+        )
     except BaseException as error:
+        print(
+            json.dumps(
+                {
+                    "stage": "index_claim_failed",
+                    "operation_id": store.claim.operation_id,
+                    "claim_stage": claim.stage,
+                    "error_type": type(error).__name__,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                }
+            ),
+            flush=True,
+        )
         store.fail(error)
         raise
     return True

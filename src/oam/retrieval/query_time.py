@@ -160,7 +160,7 @@ def _relative(expression: str, today: date, zone: ZoneInfo) -> TimeWindow:
 
 
 def infer_query_time(query: str, reference_at: datetime, timezone: str) -> QueryTime:
-    """Resolve one expression without letting uncertain dates disable ordinary recall."""
+    """Resolve a date or calendar interval without disabling ordinary recall."""
     if reference_at.tzinfo is None or reference_at.utcoffset() is None:
         raise ValueError("reference_time must be timezone-aware")
     zone = ZoneInfo(timezone)
@@ -173,8 +173,9 @@ def infer_query_time(query: str, reference_at: datetime, timezone: str) -> Query
 
 def _parse_query_time(query: str, local_reference: datetime, zone: ZoneInfo) -> QueryTime:
     matches: list[tuple[int, int, str, TimeWindow]] = []
+    calendar_spans: set[tuple[int, int]] = set()
 
-    def append(match: re.Match[str], window: TimeWindow) -> None:
+    def append(match: re.Match[str], window: TimeWindow, *, calendar: bool = False) -> None:
         start, end = match.span()
         if any(
             existing_start <= start and end <= existing_end
@@ -183,6 +184,8 @@ def _parse_query_time(query: str, local_reference: datetime, zone: ZoneInfo) -> 
             return
         matches[:] = [item for item in matches if not (start <= item[0] and item[1] <= end)]
         matches.append((start, end, match.group(), window))
+        if calendar:
+            calendar_spans.add((start, end))
 
     for match in _CJK_DATETIME.finditer(query):
         try:
@@ -204,7 +207,7 @@ def _parse_query_time(query: str, local_reference: datetime, zone: ZoneInfo) -> 
     for pattern in (_CJK_DATE, _ISO_DATE):
         for match in pattern.finditer(query):
             try:
-                append(match, _absolute(match, zone))
+                append(match, _absolute(match, zone), calendar=True)
             except ValueError as exc:
                 raise ValueError("invalid recognized query date") from exc
     for match in _ENGLISH_MONTH.finditer(query):
@@ -221,7 +224,7 @@ def _parse_query_time(query: str, local_reference: datetime, zone: ZoneInfo) -> 
             if match.group("day")
             else _next_month(start.year, start.month)
         )
-        append(match, _calendar_window(start, end, zone))
+        append(match, _calendar_window(start, end, zone), calendar=True)
     for pattern in (_ENGLISH_RELATIVE, _CJK_RELATIVE):
         for match in pattern.finditer(query):
             append(match, _relative(match.group(), local_reference.date(), zone))
@@ -237,6 +240,24 @@ def _parse_query_time(query: str, local_reference: datetime, zone: ZoneInfo) -> 
         append(match, _calendar_window(parsed.date(), parsed.date() + timedelta(days=1), zone))
     if not matches:
         return QueryTime(None, None, "no_time_expression")
+    ordered = sorted(matches)
+    if len(ordered) == 2:
+        left, right = ordered
+        connector = query[left[1] : right[0]].strip().casefold()
+        prefix = query[: left[0]]
+        interval = connector in {"to", "-", "–", "—", "~", "〜", "到", "至"}
+        interval |= connector == "and" and bool(re.search(r"\bbetween\s*$", prefix, re.I))
+        interval |= connector == "から" and query[right[1] :].lstrip().startswith("まで")
+        if interval:
+            calendar = all((item[0], item[1]) in calendar_spans for item in ordered)
+            comparison = bool(re.search(r"\bcompar(?:e|ed|ing)\s*$", prefix, re.I))
+            if not calendar or comparison or left[3].start > right[3].start:
+                return QueryTime(None, None, "ambiguous_time_expression")
+            return QueryTime(
+                TimeWindow(start=left[3].start, end=right[3].end),
+                query[left[0] : right[1]],
+                "inferred",
+            )
     windows = {(window.start, window.end) for _, _, _, window in matches}
     if len(windows) != 1:
         return QueryTime(None, None, "ambiguous_time_expression")

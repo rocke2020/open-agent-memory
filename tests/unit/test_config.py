@@ -194,7 +194,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
         config.search.mid.source_seed_results,
         config.search.mid.max_results,
     ) == (64, 128, 36, 96)
-    assert (config.context.default_tokens, config.context.max_tokens) == (2048, 15000)
+    assert (config.context.default_tokens, config.context.max_tokens) == (2048, 18000)
     assert config.context.source_seed_tokens == 8192
     assert config.context.source_detail_budget_fraction == 0.4
     assert config.context.tokenizer == "oam-unicode-quarter-v1"

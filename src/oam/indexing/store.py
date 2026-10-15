@@ -7,7 +7,7 @@ import json
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from threading import BoundedSemaphore, Lock
 
@@ -56,6 +56,7 @@ class IndexStore:
     _unsettled_model_stages: set[str] = field(default_factory=set, init=False, repr=False)
     _model_stage_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _inline_semantic: bool = field(default=False, init=False, repr=False)
+    _semantic_handoff: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self):
         self.authority = AuthorizedUser(
@@ -524,8 +525,11 @@ class IndexStore:
         *,
         schedule_consolidation: bool = False,
         inline_semantic: bool = False,
+        enqueue_semantic: bool = False,
+        connection=None,
     ):
-        with self.transaction() as connection:
+        self._semantic_handoff = enqueue_semantic
+        with self.transaction() if connection is None else nullcontext(connection) as connection:
             semantic_completion = self.claim.stage == "index_semantic_links" or inline_semantic
             if semantic_completion:
                 timeout = min(self.config.lease.seconds, self.config.model.attempt_timeout_seconds)
@@ -533,6 +537,36 @@ class IndexStore:
                     "SELECT set_config('statement_timeout',%s,true)", (str(int(timeout * 1000)),)
                 )
             self.guard(connection)
+            if enqueue_semantic:
+                manifest = self.semantic_seed_manifest(connection)
+                work_id = stable_id("work_semantic_links", self.claim.operation_id)
+                digest = input_digest(manifest)
+                existing = connection.execute(
+                    "SELECT input_digest,generation_id,dependency_ids FROM work_units "
+                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
+                    (*self.key, work_id),
+                ).fetchone()
+                if existing and (
+                    bytes(existing[0]) != digest
+                    or existing[1] != self.generation_id
+                    or existing[2] != [self.claim.work_unit_id]
+                ):
+                    raise StaleIndexWork("queued semantic work identity is incompatible")
+                connection.execute(
+                    "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,"
+                    "input_digest,generation_id,dependency_ids,status,attempts_remaining) "
+                    "VALUES (%s,%s,%s,%s,'index_semantic_links',%s,%s,%s,'queued',%s) "
+                    "ON CONFLICT DO NOTHING",
+                    (
+                        *self.key,
+                        work_id,
+                        self.claim.operation_id,
+                        digest,
+                        self.generation_id,
+                        [self.claim.work_unit_id],
+                        self.config.retry.max_attempts,
+                    ),
+                )
             if self.claim.stage != "index_semantic_links" or inline_semantic:
                 self.summarize_usage(connection)
             if semantic_completion:
@@ -541,6 +575,9 @@ class IndexStore:
                     "AND operation_id=%s",
                     (*self.key, self.claim.operation_id),
                 ).fetchone()[0]
+                schedule_consolidation = schedule_consolidation and not state.get(
+                    "consolidation_operation_id"
+                )
                 manifest = self.semantic_seed_manifest(connection)
                 count = connection.execute(
                     "SELECT count(*) FROM unit_links WHERE tenant_id=%s AND user_id=%s "
@@ -628,7 +665,7 @@ class IndexStore:
                 "stage_state=stage_state-'error'-'error_detail' "
                 "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
                 (
-                    "succeeded",
+                    "running" if enqueue_semantic else "succeeded",
                     *self.key,
                     self.claim.operation_id,
                 ),
@@ -693,7 +730,7 @@ class IndexStore:
         return manifest
 
     def fail(self, error: Exception):
-        from oam.indexing.extraction import ExtractionError
+        from oam.indexing.extraction import ExtractionError, ExtractionInputTooLongError
         from oam.models.runtime import ModelOutputError
 
         diagnostic = {"error": type(error).__name__}
@@ -702,8 +739,8 @@ class IndexStore:
         known_usage = (
             error.usage if isinstance(error, (ExtractionError, ModelOutputError)) else None
         )
-        not_dispatched = isinstance(error, httpx.ConnectTimeout)
-        retryable = not_dispatched or (
+        not_dispatched = isinstance(error, (httpx.ConnectTimeout, ExtractionInputTooLongError))
+        retryable = isinstance(error, httpx.ConnectTimeout) or (
             isinstance(error, ExtractionError) and known_usage is not None and error.retryable
         )
         policy_changed = (
@@ -716,7 +753,11 @@ class IndexStore:
             not_dispatched = False
             known_usage = None
             retryable = False
-        semantic = self.claim.stage == "index_semantic_links" or self._inline_semantic
+        semantic = (
+            self.claim.stage == "index_semantic_links"
+            or self._inline_semantic
+            or self._semantic_handoff
+        )
         if semantic:
             retryable = isinstance(error, (psycopg.Error, OSError))
         with self.transaction() as connection:
@@ -735,7 +776,7 @@ class IndexStore:
                 ),
             ).fetchone()
             if owned:
-                if not_dispatched or semantic or policy_changed:
+                if (not_dispatched and known_usage is None) or semantic or policy_changed:
                     connection.execute(
                         "UPDATE attempts SET disposition='failed',usage=NULL,response_ref=NULL,"
                         "finished_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
@@ -761,7 +802,7 @@ class IndexStore:
                     )
                 if retrying:
                     diagnostic["last_retry_error"] = dict(diagnostic)
-                if not semantic or self._inline_semantic:
+                if not semantic or self._inline_semantic or self._semantic_handoff:
                     self.summarize_usage(connection)
                 connection.execute(
                     "UPDATE operations SET status=%s,"

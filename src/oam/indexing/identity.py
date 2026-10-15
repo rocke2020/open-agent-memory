@@ -26,13 +26,18 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
     for role in roles_to_hash:
         binding = resolve_model_binding(config.models, role, environment)
         if binding is not None:
-            roles[role] = {
-                "model": binding.model,
-                "endpoint": binding.endpoint,
+            role_identity = {
                 "protocol": binding.protocol,
                 "reasoning_effort": binding.reasoning_effort,
                 "thinking": binding.thinking,
             }
+            # VLM_BASE_URL, VLM_API_KEY, and VLM_MODEL select the transport at
+            # runtime. Route and provider naming are deliberately excluded from
+            # content-generation identity so an equivalent binding can resume
+            # the same indexed generation.
+            if role == "embedding":
+                role_identity.update({"model": binding.model, "endpoint": binding.endpoint})
+            roles[role] = role_identity
     extraction = config.extraction.model_dump(mode="json")
     references_enabled = bool(config.extraction.reference_max_facts)
     grouping_enabled = config.extraction.group_max_passages > 1

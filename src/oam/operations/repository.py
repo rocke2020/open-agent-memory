@@ -40,6 +40,10 @@ class RetryRequiresPlanning(RuntimeError):
     """A dependency-bearing retry needs the later deterministic replanner."""
 
 
+class RetryRequiresReconciliation(RuntimeError):
+    """An ambiguous external attempt must be reconciled before replay."""
+
+
 class AttemptOwnershipMismatch(RuntimeError):
     """Attempt reconciliation did not match its immutable owner and fence."""
 
@@ -201,6 +205,16 @@ class OperationRepository:
             dependencies = cursor.fetchone()
             if dependencies is None or int(dependencies[0]) > 0:
                 raise RetryRequiresPlanning(original_operation_id)
+            cursor.execute(
+                "SELECT 1 FROM attempts a "
+                "JOIN work_units w USING(tenant_id,user_id,work_unit_id) "
+                "WHERE w.tenant_id=%s AND w.user_id=%s AND w.operation_id=%s "
+                "AND w.status IN ('failed_terminal','cancelled') "
+                "AND a.disposition='unknown_external_outcome' LIMIT 1",
+                (authority.tenant_id, authority.user_id, original_operation_id),
+            )
+            if cursor.fetchone() is not None:
+                raise RetryRequiresReconciliation(original_operation_id)
             cursor.execute(
                 f"INSERT INTO operations "  # noqa: S608
                 "(tenant_id, user_id, operation_id, principal_id, source_id, source_version, "

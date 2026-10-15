@@ -14,6 +14,7 @@ from oam.indexing.chunker import TextChunk, split_chunk_for_output_retry
 from oam.indexing.extraction import (
     EXTRACTION_SYSTEM,
     REFERENCE_CONTEXT_INSTRUCTIONS,
+    ExtractionInputTooLongError,
     _generate_json,
     extraction_envelope,
     model_input_tokens,
@@ -131,7 +132,7 @@ def extract_group(
         body, usage = _generate_json(
             models, "extraction", system, envelope, config, timeout_seconds
         )
-    except ModelOutputTooLongError as error:
+    except (ModelOutputTooLongError, ExtractionInputTooLongError) as error:
         halves: tuple[tuple[ExtractionPassage, ...], ...]
         if len(passages) > 1:
             midpoint = len(passages) // 2

@@ -656,6 +656,34 @@ class RecallRepository:
             {"source_ids": list(source_ids)},
         )
 
+    def source_user_passage_ids(
+        self,
+        source_keys: Sequence[tuple[str, int]],
+        vector: Sequence[float],
+        limit: int,
+        excluded_ids: Sequence[str],
+    ) -> list[dict]:
+        """Rank current user originals inside query-selected interaction sources."""
+        if not source_keys:
+            return []
+        return self._execute(
+            "WITH eligible AS NOT MATERIALIZED ("
+            + ELIGIBLE_PASSAGE_UNITS
+            + ") SELECT u.unit_id FROM eligible u WHERE u.kind='passage' "
+            "AND u.origin='memory' AND u.locator->>'role'='user' "
+            "AND u.embedding IS NOT NULL AND (u.source_id,u.source_version) IN ("
+            "SELECT * FROM unnest(%(source_ids)s::text[],%(source_versions)s::integer[])) "
+            "AND NOT (u.unit_id=ANY(%(excluded_ids)s::text[])) "
+            "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id LIMIT %(limit)s",
+            {
+                "source_ids": [key[0] for key in source_keys],
+                "source_versions": [key[1] for key in source_keys],
+                "vector": json.dumps(tuple(vector)),
+                "limit": limit,
+                "excluded_ids": list(excluded_ids),
+            },
+        )
+
     def supported_fact_ids(
         self,
         passage_ids: Sequence[str],
@@ -949,6 +977,43 @@ class RecallRepository:
             + self._basis_date("u")
             + " AS basis_date FROM filtered u WHERE kind='fact' AND unit_id=ANY(%(ids)s)",
             {"ids": list(unit_ids), "vector": json.dumps(tuple(vector))},
+        )
+        return tuple(TemporalNode(row["unit_id"], row["cosine"], row["basis_date"]) for row in rows)
+
+    def temporal_candidates(self, vector: Sequence[float], limit: int):
+        """Rank eligible facts inside the requested window before the pool cap."""
+        if self.request is None or self.request.time_window is None:
+            return ()
+        prefix = self._eligible(temporal=True, candidate_facts=True)
+        if self.request.time_basis in {"event", "referenced"}:
+            time_predicate = (
+                "EXISTS(SELECT 1 FROM unit_times ut WHERE "
+                "(ut.tenant_id,ut.user_id,ut.unit_id)=(u.tenant_id,u.user_id,u.unit_id) "
+                "AND ut.role=%(time_role)s AND ut.time_span && "
+                "tstzrange(%(time_start)s,%(time_end)s,'[)'))"
+            )
+        else:
+            time_predicate = (
+                self._basis_date("u") + " <@ tstzrange(%(time_start)s,%(time_end)s,'[)')"
+            )
+        rows = self._execute(
+            prefix
+            + "SELECT u.unit_id,LEAST(1.0,GREATEST(-1.0,1-u.distance)) AS cosine,"
+            + self._basis_date("u")
+            + " AS basis_date FROM (SELECT u.*,u.embedding <=> %(vector)s::vector AS distance "
+            "FROM search_units u WHERE u.tenant_id=current_setting('oam.tenant_id',true) "
+            "AND u.user_id=current_setting('oam.user_id',true) "
+            "AND u.kind='fact' AND u.embedding IS NOT NULL AND "
+            + time_predicate
+            + " ORDER BY (u.embedding <=> %(vector)s::vector)+0,u.unit_id OFFSET 0) u "
+            "WHERE 1-u.distance>=%(floor)s AND (SELECT true FROM filtered f WHERE "
+            "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
+            "ORDER BY u.distance,u.unit_id LIMIT %(limit)s",
+            {
+                "vector": json.dumps(tuple(vector)),
+                "floor": self.config.search.temporal_semantic_floor,
+                "limit": limit,
+            },
         )
         return tuple(TemporalNode(row["unit_id"], row["cosine"], row["basis_date"]) for row in rows)
 

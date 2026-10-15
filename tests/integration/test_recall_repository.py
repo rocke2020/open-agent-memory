@@ -140,6 +140,36 @@ def add_user_passage(connection, authority, node_id, text, mentioned_at):
     )
 
 
+def test_source_user_originals_filter_role_revision_and_eligibility_before_limit(recall_database):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    for identifier in ("a_assistant", "b_ineligible", "z_user"):
+        add_user_passage(connection, authority, identifier, "Workshop progress update.", None)
+    connection.execute(
+        'UPDATE search_units SET locator=locator || \'{"role":"assistant"}\'::jsonb '
+        "WHERE tenant_id=%s AND user_id=%s AND unit_id='a_assistant_passage'",
+        (authority.tenant_id, authority.user_id),
+    )
+    connection.execute(
+        "UPDATE evidence SET learning_eligible=false WHERE tenant_id=%s AND user_id=%s "
+        "AND evidence_id='b_ineligible'",
+        (authority.tenant_id, authority.user_id),
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    dimensions = config.index.embedding_dimensions
+    vector = [1.0] + [0.0] * (dimensions - 1)
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+    keys = (("a_assistant", 1), ("b_ineligible", 1), ("z_user", 1))
+
+    assert [row["unit_id"] for row in repository.source_user_passage_ids(keys, vector, 1, ())] == [
+        "z_user_passage"
+    ]
+    assert repository.source_user_passage_ids((("z_user", 2),), vector, 1, ()) == []
+    assert repository.source_user_passage_ids(keys, vector, 1, ("z_user_passage",)) == []
+
+
 def test_direct_retrieval_filters_ineligible_rows_before_its_limit(recall_database):
     from oam.retrieval.repository import RecallRepository
 
@@ -792,7 +822,7 @@ def test_event_window_only_qualifies_temporal_candidates(recall_database):
     from oam.retrieval.repository import RecallRepository
 
     connection, authority = recall_database
-    for node_id in ("a_reference", "b_boundary", "c_event"):
+    for node_id in ("a_hidden", "a_reference", "b_boundary", "c_event"):
         add_fact(connection, authority, node_id, "apple planting")
         date = datetime(2026, 2 if node_id == "b_boundary" else 1, 1, tzinfo=UTC)
         connection.execute(
@@ -808,6 +838,10 @@ def test_event_window_only_qualifies_temporal_candidates(recall_database):
                 Range(date, date, "[]"),
             ),
         )
+    connection.execute(
+        "UPDATE sources SET status='deleted' WHERE tenant_id=%s AND source_id='a_hidden'",
+        (authority.tenant_id,),
+    )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     request = SearchRequest(
         query="apple",
@@ -830,11 +864,13 @@ def test_event_window_only_qualifies_temporal_candidates(recall_database):
         node.node_id
         for node in repository.temporal_nodes(("a_reference", "b_boundary", "c_event"), vector)
     ] == ["c_event"]
+    assert [node.node_id for node in repository.temporal_candidates(vector, 1)] == ["c_event"]
     connection.execute(
         "UPDATE sources SET status='deleted' WHERE tenant_id=%s AND source_id='c_event'",
         (authority.tenant_id,),
     )
     assert repository.hydrate(("c_event",)) == []
+    assert repository.temporal_candidates(vector, 1) == ()
 
 
 def add_insight(connection, authority, unit_id, support_ids):

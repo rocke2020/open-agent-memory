@@ -59,6 +59,10 @@ class ExtractionError(ValueError):
         self.retryable = retryable
 
 
+class ExtractionInputTooLongError(ExtractionError):
+    """The serialized input exceeds the local bound before model dispatch."""
+
+
 class FrozenProjection(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -350,7 +354,7 @@ def extract_facts(
         body, usage = _generate_json(
             models, "extraction", system, envelope, config, timeout_seconds
         )
-    except ModelOutputTooLongError as error:
+    except (ModelOutputTooLongError, ExtractionInputTooLongError) as error:
         halves = split_chunk_for_output_retry(chunk, config.chunk.ingestion)
         if halves is None:
             raise
@@ -378,33 +382,36 @@ def extract_facts(
 
 def retry_split_extractions(
     producers: tuple[Callable[[], FactExtraction], ...],
-    overflow: ModelOutputTooLongError,
+    overflow: ModelOutputTooLongError | ExtractionInputTooLongError,
     check_retry_claim: Callable[[], None] | None = None,
 ) -> FactExtraction:
     """Retry smaller inputs in source order under the caller's existing checkpoint."""
+    input_overflow = isinstance(overflow, ExtractionInputTooLongError)
     logging.getLogger(__name__).warning(
-        "Extraction output overflow; retrying smaller source inputs"
+        "Extraction %s overflow; splitting source inputs",
+        "input" if input_overflow else "output",
     )
+    initial_usage = [] if input_overflow else [overflow.usage]
     results = []
     for produce in producers:
         if check_retry_claim is not None:
             try:
                 check_retry_claim()
             except Exception as error:
-                error.usage = _sum_extraction_usage(
-                    [overflow.usage, *(result.usage for result in results)]
-                )
+                usages = [*initial_usage, *(result.usage for result in results)]
+                if usages:
+                    error.usage = _sum_extraction_usage(usages)
                 raise
         try:
             results.append(produce())
         except Exception as error:
-            error.usage = _sum_extraction_usage(
-                [
-                    overflow.usage,
-                    *(result.usage for result in results),
-                    getattr(error, "usage", None),
-                ]
-            )
+            usages = [
+                *initial_usage,
+                *(result.usage for result in results),
+                getattr(error, "usage", None),
+            ]
+            if any(usage is not None for usage in usages):
+                error.usage = _sum_extraction_usage(usages)
             raise
     facts, diagnostics, offset = [], [], 0
     for result in results:
@@ -430,7 +437,7 @@ def retry_split_extractions(
         facts=tuple(facts),
         diagnostics=tuple(diagnostics),
         outcome="partial" if diagnostics else ("facts" if facts else "no_facts"),
-        usage=_sum_extraction_usage([overflow.usage, *(result.usage for result in results)]),
+        usage=_sum_extraction_usage([*initial_usage, *(result.usage for result in results)]),
     )
 
 
@@ -738,7 +745,9 @@ def _generate_json(
 ) -> tuple[dict, Usage]:
     user = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
     if model_input_tokens(system, envelope) > config.extraction.max_input_tokens:
-        raise ExtractionError("complete extraction input exceeds configured token bound")
+        raise ExtractionInputTooLongError(
+            "complete extraction input exceeds configured token bound"
+        )
     result = models.generate(
         role,
         system=system,

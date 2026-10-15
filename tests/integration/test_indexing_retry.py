@@ -139,13 +139,31 @@ async def accepted_source(core_database, tmp_path):
 
 
 def run_source(dsn, config, models):
-    return process_one(
+    processed = process_one(
         config,
         make_conninfo(dsn, options="-c role=oam_queue"),
         make_conninfo(dsn, options="-c role=oam_content"),
         models=models,
         worker_id="bounded-retry",
     )
+    if processed:
+        with psycopg.connect(dsn) as connection:
+            pending = connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM work_units w JOIN operations o "
+                "USING(tenant_id,user_id,operation_id) WHERE w.stage='index_semantic_links' "
+                "AND w.status='queued' AND o.status='running' AND NOT EXISTS("
+                "SELECT 1 FROM work_units d WHERE d.work_unit_id=ANY(w.dependency_ids) "
+                "AND d.status<>'succeeded'))"
+            ).fetchone()[0]
+        if pending:
+            assert process_one(
+                config,
+                make_conninfo(dsn, options="-c role=oam_queue"),
+                make_conninfo(dsn, options="-c role=oam_content"),
+                models=models,
+                worker_id="bounded-retry",
+            )
+    return processed
 
 
 async def test_source_claim_finishes_complete_l1_pipeline(accepted_source):
@@ -158,10 +176,116 @@ async def test_source_claim_finishes_complete_l1_pipeline(accepted_source):
         for key in ("source_searchable", "memory_ready", "temporal_links_ready", "links_ready")
     )
     with psycopg.connect(dsn) as connection:
-        assert connection.execute(
-            "SELECT stage,status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
-            (tenant, operation),
-        ).fetchall() == [("index_source", "succeeded")]
+        assert set(
+            connection.execute(
+                "SELECT stage,status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
+                (tenant, operation),
+            ).fetchall()
+        ) == {("index_source", "succeeded"), ("index_semantic_links", "succeeded")}
+
+
+@pytest.mark.parametrize("input_bound", [8192, 1])
+async def test_serialized_input_bound_preserves_source_or_reports_known_local_failure(
+    core_database, tmp_path, input_bound
+):
+    from oam.indexing.extraction import model_input_tokens
+
+    dsn, tenant, headers = core_database
+    values = yaml.safe_load((ROOT / "configs/oam.yaml").read_text())
+    values["extraction"]["max_input_tokens"] = input_bound
+    path = tmp_path / "input-bound.yaml"
+    path.write_text(yaml.safe_dump(values))
+    config = load_config(path).config
+    text = "".join(f"Line {index}: " + "\\" * 50 + ".\n" for index in range(120))
+    if input_bound == 1:
+        text = "Tea."
+
+    class BoundedModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            assert model_input_tokens(kwargs["system"], json.loads(kwargs["user"])) <= input_bound
+            return super().generate(role, **kwargs)
+
+    models = BoundedModels()
+    app = create_app(path)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "escaped-source")
+        accepted = await client.post(
+            "/v1/retain",
+            headers={"Idempotency-Key": "escaped-source"},
+            json={
+                "user_id": "escaped-source",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": text,
+                        "event_time": "2026-09-24T09:00:00Z",
+                        "learning_eligible": True,
+                    }
+                ],
+            },
+        )
+        assert accepted.status_code == 202, accepted.text
+        operation = accepted.json()["operation_id"]
+        if input_bound == 1:
+            with pytest.raises(ExtractionError, match="input exceeds"):
+                run_source(dsn, config, models)
+        else:
+            assert run_source(dsn, config, models)
+        value = (await client.get(f"/v1/users/escaped-source/operations/{operation}")).json()
+        with psycopg.connect(dsn) as connection:
+            assert connection.execute(
+                "SELECT normalized_text FROM passages WHERE tenant_id=%s", (tenant,)
+            ).fetchall() == [(text,)]
+            if input_bound == 1:
+                assert models.generation_calls == []
+                assert value["status"] == "partial"
+                assert connection.execute(
+                    "SELECT disposition FROM attempts WHERE tenant_id=%s", (tenant,)
+                ).fetchall() == [("failed",)]
+            else:
+                assert value["status"] == "succeeded"
+                assert all(
+                    value["readiness"][key]
+                    for key in (
+                        "source_searchable",
+                        "memory_ready",
+                        "temporal_links_ready",
+                        "links_ready",
+                    )
+                )
+                quotes = connection.execute(
+                    "SELECT span->>'quote' FROM support WHERE tenant_id=%s ORDER BY span->>'quote'",
+                    (tenant,),
+                ).fetchall()
+                assert sum(len(row[0]) for row in quotes) == len(text)
+                assert len(models.generation_calls) >= 2
+                assert value["usage"]["coverage"] == "complete"
+                assert value["usage"]["total_tokens"] == 30 * len(models.generation_calls)
+
+
+async def test_recall_trace_sql_timeout_returns_deadline_status(accepted_source, monkeypatch):
+    from oam.retrieval.repository import RecallRepository
+
+    client, dsn, _, config, _ = accepted_source
+    models = SyntheticIndexModels()
+    assert run_source(dsn, config, models)
+
+    def timed_out(*args):
+        raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(RecallRepository, "record_trace", timed_out)
+    monkeypatch.setattr(client._transport.app.state.runtime, "models", models)
+    response = await client.post(
+        "/v1/recall", json={"user_id": "lin", "query": "Lin prefers concise updates."}
+    )
+    assert response.status_code == 504, response.text
+    assert response.json()["detail"]["code"] == "RecallDeadlineExceeded"
 
 
 async def test_semantic_retry_reuses_published_facts_without_model_calls(
@@ -230,30 +354,31 @@ class CheckpointOnlyModels:
 async def test_legacy_temporal_ready_claim_resumes_without_semantic_marker(
     accepted_source, monkeypatch
 ):
-    from oam.workers import semantic_links
+    from oam.contracts.evidence import EvidenceAppendRequest
+    from oam.indexing.links import build_temporal_links
+    from oam.workers.index_source import _index_interaction
 
     client, dsn, tenant, config, operation = accepted_source
-    original = semantic_links.propose_semantic_links
-
-    def timeout(*args, **kwargs):
-        raise psycopg.errors.QueryCanceled("synthetic semantic timeout")
-
-    monkeypatch.setattr(semantic_links, "propose_semantic_links", timeout)
-    with pytest.raises(psycopg.errors.QueryCanceled):
-        run_source(dsn, config, SyntheticIndexModels())
-    with psycopg.connect(dsn) as connection:
+    store, _ = claimed_checkpoint_store(accepted_source)
+    request = EvidenceAppendRequest.model_validate_json(bytes(store.source["original_bytes"]))
+    with store.model_pipeline():
+        seeds, _ = _index_interaction(config, store, SyntheticIndexModels(), request)
+    # Exact older persisted shape: temporal readiness, no semantic marker or child work.
+    with store.transaction() as connection:
+        store.guard(connection)
+        build_temporal_links(connection, store.authority, config, store.generation_id, seeds)
+        store.readiness(connection, memory_ready=True, temporal_links_ready=True)
         connection.execute(
-            "UPDATE operations SET stage_state=stage_state-'semantic_link_manifest'-"
-            "'semantic_links_status' WHERE tenant_id=%s AND operation_id=%s",
+            "UPDATE work_units SET status='queued' WHERE tenant_id=%s AND operation_id=%s",
             (tenant, operation),
         )
+    with psycopg.connect(dsn) as connection:
         checkpoints = connection.execute(
             "SELECT stage_key,input_digest,output FROM index_stage_results "
             "WHERE tenant_id=%s ORDER BY stage_key",
             (tenant,),
         ).fetchall()
 
-    monkeypatch.setattr(semantic_links, "propose_semantic_links", original)
     assert run_source(dsn, config, CheckpointOnlyModels())
     complete = (await client.get(f"/v1/users/lin/operations/{operation}")).json()
     assert complete["status"] == "succeeded" and complete["readiness"]["links_ready"]
@@ -296,8 +421,8 @@ async def test_semantic_entry_database_error_retries_without_model_replay(
         models = CheckpointOnlyModels() if phase == "resume" else SyntheticIndexModels()
         run_source(dsn, config, models)
     partial = (await client.get(f"/v1/users/lin/operations/{operation}")).json()
-    assert partial["readiness"]["memory_ready"]
-    assert partial["readiness"]["temporal_links_ready"]
+    assert partial["readiness"]["memory_ready"] is (phase == "resume")
+    assert partial["readiness"]["temporal_links_ready"] is (phase == "resume")
     assert not partial["readiness"]["links_ready"]
     assert partial["stage_state"]["semantic_links_status"] == "pending"
     with psycopg.connect(dsn) as connection:
@@ -559,6 +684,12 @@ async def test_consumer_failure_preserves_unknown_overlapping_extraction(
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "partial"
     assert operation["usage"]["coverage"] == "partial"
+    blocked = await client.post(
+        f"/v1/users/lin/operations/{operation_id}/retry",
+        headers={"Idempotency-Key": "unknown-retry"},
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"]["code"] == "RetryRequiresReconciliation"
     with psycopg.connect(dsn) as connection:
         assert connection.execute(
             "SELECT disposition FROM attempts WHERE tenant_id=%s", (tenant,)
@@ -717,6 +848,24 @@ async def test_known_invalid_responses_stop_at_the_existing_claim_budget(
         assert connection.execute(
             "SELECT status,attempts_remaining FROM work_units WHERE tenant_id=%s", (tenant,)
         ).fetchone() == ("failed_terminal", 0)
+
+    retried = await client.post(
+        f"/v1/users/lin/operations/{operation_id}/retry",
+        headers={"Idempotency-Key": "resume-known-failure"},
+    )
+    assert retried.status_code == 201, retried.text
+    replacement = retried.json()["operation_id"]
+    models.failures = 0
+    assert run_source(dsn, config, models)
+    assert (await client.get(f"/v1/users/lin/operations/{replacement}")).json()["status"] == (
+        "succeeded"
+    )
+    assert models.first_calls == 1
+    repeated = await client.post(
+        f"/v1/users/lin/operations/{operation_id}/retry",
+        headers={"Idempotency-Key": "resume-known-failure"},
+    )
+    assert repeated.json()["operation_id"] == replacement
 
 
 async def test_pre_dispatch_connect_timeout_reuses_completed_stages(accepted_source):

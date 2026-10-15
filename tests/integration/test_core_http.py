@@ -29,6 +29,16 @@ BILINGUAL = MEDICAL / "bilingual"
 pytestmark = pytest.mark.integration
 
 
+def process_source(config, queue_dsn, content_dsn, *, models, worker_id):
+    """Run the source claim and its dependent linking claim before later consumers."""
+    from oam.workers.index_source import process_one
+
+    assert process_one(config, queue_dsn, content_dsn, models=models, worker_id=worker_id)
+    return process_one(
+        config, queue_dsn, content_dsn, models=models, worker_id=worker_id + "-links"
+    )
+
+
 async def use_created_user_key(client: httpx.AsyncClient, user_id: str) -> httpx.Response:
     created = await client.post("/v1/users", json={"user_id": user_id})
     assert created.status_code == 201, created.text
@@ -1047,7 +1057,7 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
             "/v1/retain", json=chat, headers={"Idempotency-Key": "chat"}
         )
         assert retained_chat.status_code == 202, retained_chat.text
-        assert process_one(
+        assert process_source(
             config,
             make_conninfo(dsn, options="-c role=oam_queue"),
             make_conninfo(dsn, options="-c role=oam_content"),
@@ -1157,7 +1167,7 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
         receipt = await client.post("/v1/retain", json=body, headers={"Idempotency-Key": "chat"})
         assert receipt.status_code == 202
         assert (
-            process_one(
+            process_source(
                 config,
                 make_conninfo(dsn, options="-c role=oam_queue"),
                 make_conninfo(dsn, options="-c role=oam_content"),
@@ -1431,7 +1441,9 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
             headers={"Idempotency-Key": "profile-chat"},
         )
         assert chat.status_code == 202, chat.text
-        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-chat")
+        assert process_source(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-chat"
+        )
         with psycopg.connect(dsn) as connection:
             connection.execute(
                 "UPDATE work_units SET available_at=clock_timestamp() WHERE stage='consolidate'"
@@ -1699,7 +1711,7 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
             headers={"Idempotency-Key": "more-profile-chat"},
         )
         assert more_chat.status_code == 202
-        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="more-chat")
+        assert process_source(config, queue_dsn, content_dsn, models=models, worker_id="more-chat")
         pending = await client.get("/v1/users/scope/profile")
         assert pending.json()["freshness"] == "dirty"
         assert models.generation_calls.count("profile") == profile_calls_before_new_chat
@@ -1843,7 +1855,7 @@ async def test_new_interaction_gets_a_new_profile_refresh_while_one_is_active(
             headers={"Idempotency-Key": "original-profile-input"},
         )
         assert original.status_code == 202, original.text
-        assert process_one(
+        assert process_source(
             config, queue_dsn, content_dsn, models=models, worker_id="original-input"
         )
         with psycopg.connect(dsn) as connection:
@@ -1901,7 +1913,7 @@ async def test_new_interaction_gets_a_new_profile_refresh_while_one_is_active(
         before_indexing = await client.post("/v1/users/scope/profile/refresh", json={})
         assert before_indexing.status_code == 409, before_indexing.text
         assert before_indexing.json()["detail"]["code"] == "ProfileInputsNotReady"
-        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="new-input")
+        assert process_source(config, queue_dsn, content_dsn, models=models, worker_id="new-input")
         second = await client.post("/v1/users/scope/profile/refresh", json={})
         assert second.status_code == 202, second.text
         assert second.json()["operation_id"] != first.json()["operation_id"]
@@ -1955,7 +1967,7 @@ async def test_waiting_profile_refresh_does_not_absorb_a_new_processed_source(co
             return response
 
         await retain_two("A")
-        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="source-a")
+        assert process_source(config, queue_dsn, content_dsn, models=models, worker_id="source-a")
         refresh_a = await client.post("/v1/users/scope/profile/refresh", json={})
         assert refresh_a.status_code == 202, refresh_a.text
         with psycopg.connect(dsn) as connection:
@@ -1967,7 +1979,7 @@ async def test_waiting_profile_refresh_does_not_absorb_a_new_processed_source(co
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="insight-a")
 
         await retain_two("B")
-        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="source-b")
+        assert process_source(config, queue_dsn, content_dsn, models=models, worker_id="source-b")
         with psycopg.connect(dsn) as connection:
             connection.execute(
                 "UPDATE work_units SET available_at=clock_timestamp() "
@@ -2123,7 +2135,9 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
             headers={"Idempotency-Key": "pending-profile-input"},
         )
         assert retained.status_code == 202, retained.text
-        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-input")
+        assert process_source(
+            config, queue_dsn, content_dsn, models=models, worker_id="profile-input"
+        )
         if insight_failure:
             with psycopg.connect(dsn) as connection:
                 connection.execute(
@@ -2325,7 +2339,7 @@ async def test_profile_main_can_use_supported_project_or_relationship_insight(
             headers={"Idempotency-Key": f"main-{subtype}"},
         )
         assert retained.status_code == 202, retained.text
-        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="main-input")
+        assert process_source(config, queue_dsn, content_dsn, models=models, worker_id="main-input")
         requested = await client.post("/v1/users/scope/profile/refresh", json={})
         assert requested.status_code == 202, requested.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="main-l2")
@@ -2412,7 +2426,9 @@ async def test_profile_main_builds_dated_age_career_and_family_from_user_facts(c
             headers={"Idempotency-Key": "basic-profile-input"},
         )
         assert retained.status_code == 202, retained.text
-        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="basic-input")
+        assert process_source(
+            config, queue_dsn, content_dsn, models=models, worker_id="basic-input"
+        )
         requested = await client.post("/v1/users/scope/profile/refresh", json={})
         assert requested.status_code == 202, requested.text
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="basic-l2")

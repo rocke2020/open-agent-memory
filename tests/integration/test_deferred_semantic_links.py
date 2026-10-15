@@ -1,5 +1,6 @@
 """Deferred link lifecycle on isolated PostgreSQL with deterministic models."""
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -184,6 +185,7 @@ def direct_store(core_database, request):
             "index": config.index.model_copy(
                 update={
                     "semantic_link_max_neighbors": 2,
+                    "insights_enabled": False,
                     **getattr(request, "param", {}),
                 }
             ),
@@ -683,7 +685,7 @@ def test_retry_after_one_committed_batch_recomputes_without_duplicate_edges(
         assert state["link_coverage"]["semantic_links"] == 2004
 
 
-async def test_source_operation_completes_links_and_recall_in_one_claim(core_database):
+async def test_source_publishes_recall_before_queued_links_complete(core_database):
     dsn, tenant, headers = core_database
     config = load_config(ROOT / "configs/oam.yaml").config
     app = create_api_only_app(ROOT / "configs/oam.yaml")
@@ -725,13 +727,40 @@ async def test_source_operation_completes_links_and_recall_in_one_claim(core_dat
         complete = (
             await client.get(f"/v1/users/scope/operations/{receipt.json()['operation_id']}")
         ).json()
+        assert complete["status"] == "processing"
+        assert complete["readiness"]["memory_ready"]
+        assert complete["readiness"]["temporal_links_ready"]
+        assert complete["readiness"]["links_ready"] is False
+        app.state.runtime.models = models
+        early = await client.post(
+            "/v1/recall",
+            json={"user_id": "scope", "query": "Lin morning", "allow_partial": True},
+        )
+        assert early.status_code == 200, early.text
+        assert "Lin prefers updates in the morning." in early.json()["context"]
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="link-worker",
+        )
+        complete = (
+            await client.get(f"/v1/users/scope/operations/{receipt.json()['operation_id']}")
+        ).json()
         assert complete["status"] == "succeeded"
         assert complete["readiness"]["links_ready"]
+        assert complete["stage_state"]["consolidation_operation_id"]
         with psycopg.connect(dsn) as connection:
-            assert connection.execute(
-                "SELECT stage,status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
-                (tenant, receipt.json()["operation_id"]),
-            ).fetchall() == [("index_source", "succeeded")]
+            assert set(
+                connection.execute(
+                    "SELECT stage,status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
+                    (tenant, receipt.json()["operation_id"]),
+                ).fetchall()
+            ) == {
+                ("index_source", "succeeded"),
+                ("index_semantic_links", "succeeded"),
+            }
             assert (
                 connection.execute(
                     "SELECT count(*) FROM unit_links WHERE tenant_id=%s AND kind='semantic'",
@@ -753,3 +782,161 @@ async def test_source_operation_completes_links_and_recall_in_one_claim(core_dat
             assert "Lin prefers short explanations." in recalled.json()["context"]
             assert "Lin prefers updates in the morning." in recalled.json()["context"]
             assert recalled.json()["diagnostics"]["readiness"] == "ready"
+
+
+def test_queued_empty_seed_manifest_settles_without_ann(direct_store, monkeypatch):
+    fixture = direct_store
+    manifest = {
+        "source_id": fixture.store.source["source_id"],
+        "source_version": fixture.store.source["source_version"],
+        "generation_id": fixture.store.generation_id,
+        "seed_ids": [],
+        "recipe": "oam-semantic-links-v1",
+    }
+    with fixture.store.transaction() as connection:
+        fixture.store.guard(connection)
+        fixture.store.readiness(
+            connection,
+            memory_ready=True,
+            temporal_links_ready=True,
+            links_ready=False,
+            semantic_link_manifest=manifest,
+            semantic_links_status="pending",
+        )
+        fixture.store.finish(enqueue_semantic=True, connection=connection)
+    monkeypatch.setattr(
+        "oam.workers.semantic_links.propose_semantic_links",
+        lambda *a: pytest.fail("valid no-facts source started ANN"),
+    )
+    assert run_semantic(fixture)
+    with psycopg.connect(fixture.dsn) as connection:
+        status, state = connection.execute(
+            "SELECT status,stage_state FROM operations WHERE operation_id='source-op'"
+        ).fetchone()
+        assert status == "succeeded"
+        assert state["links_ready"] is True
+        assert state["link_coverage"]["semantic_links"] == 0
+
+
+async def test_closed_import_holds_links_until_slow_source_is_ready(
+    core_database, monkeypatch, capsys
+):
+    from oam.indexing.links import propose_semantic_links
+
+    dsn, tenant, headers = core_database
+    config = load_config(ROOT / "configs/oam.yaml").config
+    held = config.model_copy(
+        update={"worker": config.worker.model_copy(update={"claim_semantic_links": False})}
+    )
+    app = create_api_only_app(ROOT / "configs/oam.yaml")
+    models = SyntheticIndexModels()
+    started, release = Event(), Event()
+    original_generate = models.generate
+
+    def slow_generate(role, **kwargs):
+        if role == "extraction" and "morning" in kwargs["user"]:
+            started.set()
+            assert release.wait(5), "slow source did not drain"
+        return original_generate(role, **kwargs)
+
+    monkeypatch.setattr(models, "generate", slow_generate)
+
+    def step(configuration):
+        return process_one(
+            configuration,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="closed-import-worker",
+        )
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        receipts = []
+        for index, text in enumerate(
+            ("Lin prefers short explanations.", "Lin prefers updates in the morning.")
+        ):
+            receipt = await client.post(
+                "/v1/retain",
+                headers={"Idempotency-Key": f"closed-{index}"},
+                json={
+                    "user_id": "scope",
+                    "input_type": "interaction",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": text,
+                            "event_time": "2026-09-01T09:00:00Z",
+                            "learning_eligible": True,
+                        }
+                    ],
+                },
+            )
+            assert receipt.status_code == 202, receipt.text
+            receipts.append(receipt.json()["operation_id"])
+        assert step(held)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            slow = executor.submit(step, held)
+            try:
+                assert started.wait(2), "second source never started extraction"
+                assert step(held) is False
+                with psycopg.connect(dsn) as connection:
+                    assert (
+                        connection.execute(
+                            "SELECT count(*) FROM unit_links WHERE kind='semantic'"
+                        ).fetchone()[0]
+                        == 0
+                    )
+                    assert connection.execute(
+                        "SELECT status,attempts_remaining FROM work_units "
+                        "WHERE stage='index_semantic_links'"
+                    ).fetchall() == [("queued", config.retry.max_attempts)]
+            finally:
+                release.set()
+                assert slow.result(timeout=3)
+        for operation in receipts:
+            value = (await client.get(f"/v1/users/scope/operations/{operation}")).json()
+            assert value["status"] == "processing"
+            assert value["readiness"]["memory_ready"]
+            assert value["readiness"]["temporal_links_ready"]
+            assert value["readiness"]["links_ready"] is False
+
+        attempts = 0
+
+        def retry_once(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("synthetic retryable link failure")
+            return propose_semantic_links(*args, **kwargs)
+
+        monkeypatch.setattr("oam.workers.semantic_links.propose_semantic_links", retry_once)
+        with pytest.raises(OSError, match="synthetic retryable"):
+            step(config)
+        assert step(config)
+        assert step(config)
+        assert models.generation_calls == ["extraction", "extraction"]
+        for operation in receipts:
+            value = (await client.get(f"/v1/users/scope/operations/{operation}")).json()
+            assert value["status"] == "succeeded"
+            assert value["readiness"]["links_ready"]
+        with psycopg.connect(dsn) as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM unit_links l JOIN search_units a "
+                    "ON a.unit_id=l.source_id JOIN search_units b ON b.unit_id=l.target_id "
+                    "WHERE l.kind='semantic' AND a.source_id<>b.source_id"
+                ).fetchone()[0]
+                == 2
+            )
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        failures = [event for event in events if event["stage"] == "index_claim_failed"]
+        assert len(failures) == 1
+        assert failures[0]["operation_id"] in receipts
+        assert failures[0]["claim_stage"] == "index_semantic_links"
+        assert failures[0]["error_type"] == "OSError"

@@ -8,7 +8,7 @@ from typing import Protocol
 
 CLAIM_ONE_SQL = (
     "SELECT tenant_id, user_id, work_unit_id, operation_id, stage, attempt_id, "
-    "fence, lease_expires_at FROM oam_claim_work(%s, %s, %s, %s)"
+    "fence, lease_expires_at FROM oam_claim_work(%s, %s, %s, %s, %s)"
 )
 
 RENEW_LEASE_SQL = """
@@ -51,6 +51,7 @@ def claim_one(
     attempt_id: str,
     lease_seconds: int,
     user_concurrency: int,
+    claim_semantic_links: bool = True,
 ) -> ClaimedWork | None:
     if not worker_id.strip():
         raise ValueError("worker_id cannot be empty")
@@ -61,7 +62,10 @@ def claim_one(
     if user_concurrency <= 0:
         raise ValueError("user_concurrency must be positive")
     cursor.execute("SELECT oam_settle_expired_semantic_work()", ())
-    cursor.execute(CLAIM_ONE_SQL, (worker_id, attempt_id, lease_seconds, user_concurrency))
+    cursor.execute(
+        CLAIM_ONE_SQL,
+        (worker_id, attempt_id, lease_seconds, user_concurrency, claim_semantic_links),
+    )
     row = cursor.fetchone()
     if row is None:
         return None

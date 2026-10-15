@@ -145,6 +145,9 @@ async def test_fast_http_infers_query_year_without_excluding_other_passages(
         )
         assert receipt.status_code == 202, receipt.text
         assert process(config, dsn, models)
+        assert process(config, dsn, models)  # Finish queued links before the next source.
+        completed = await client.get(f"/v1/users/scope/operations/{receipt.json()['operation_id']}")
+        assert completed.json()["status"] == "succeeded"
     app.state.runtime.models = models
 
     response = await client.post(

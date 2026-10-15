@@ -185,7 +185,7 @@ context:
   # Returned context budget when the caller omits max_context_tokens.
   default_tokens: 2048
   # Largest context budget a caller may request; measured with the local token estimate.
-  max_tokens: 15000
+  max_tokens: 18000
   # Maximum budget for initial ranked seeds and their source detail.
   source_seed_tokens: 8192
   # Initial share of the seed budget allocated to source passages.
@@ -227,6 +227,8 @@ worker:
   embedded_enabled: true
   # Limit running work items separately from simultaneous model calls.
   max_tasks: 10
+  # Closed imports can hold queued semantic work until their declared facts are ready.
+  claim_semantic_links: true
 
 lease:
   # Work-claim lifetime unless renewed by worker heartbeats.

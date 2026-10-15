@@ -108,6 +108,7 @@ def test_retry_creates_linked_operation_without_mutating_terminal_original() -> 
             _operation_row(status="failed_terminal"),
             None,  # no existing retry for this caller key
             (0,),  # no dependency-bearing failed units
+            None,  # no unknown external attempt
             _operation_row(status="accepted", operation_id="op-2", retry_of="op-1"),
         ]
     )
@@ -137,6 +138,21 @@ def test_retry_fails_closed_for_dependency_graph_that_requires_replanning() -> N
     connection = Connection([_operation_row(status="failed_terminal"), None, (2,)])
 
     with pytest.raises(repository.RetryRequiresPlanning):
+        repository.OperationRepository().retry(
+            connection,
+            _authority("memory:append"),
+            original_operation_id="op-1",
+            new_operation_id="op-2",
+            idempotency_key="retry-1",
+            request_hash=b"r" * 32,
+            attempts_remaining=3,
+        )
+
+
+def test_retry_fails_closed_for_unknown_external_outcome() -> None:
+    connection = Connection([_operation_row(status="failed_terminal"), None, (0,), (1,)])
+
+    with pytest.raises(repository.RetryRequiresReconciliation):
         repository.OperationRepository().retry(
             connection,
             _authority("memory:append"),

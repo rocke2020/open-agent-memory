@@ -132,6 +132,28 @@ def test_environment_model_name_is_part_of_index_generation_identity():
     assert first != index_generation(configured, environment)
 
 
+def test_vlm_route_and_model_spelling_do_not_change_index_generation_identity():
+    from oam.indexing.identity import index_generation
+
+    config = load_config(default_config_path()).config
+    first = {
+        "VLM_MODEL": "deepseek-flash",
+        "VLM_BASE_URL": "https://api.deepseek.com/v1",
+        "VLM_API_KEY": "first-secret",
+        "OAM_EMBEDDING_MODEL": "synthetic",
+        "OAM_EMBEDDING_URL": "http://embedding.test/v1",
+        "OAM_EMBEDDING_KEY": "embedding-secret",
+    }
+    second = {
+        **first,
+        "VLM_MODEL": "deepseek/deepseek-flash",
+        "VLM_BASE_URL": "https://tcai.example/v1",
+        "VLM_API_KEY": "second-secret",
+    }
+
+    assert index_generation(config, first) == index_generation(config, second)
+
+
 def test_extraction_prompt_revision_invalidates_index_generation(monkeypatch):
     from oam.indexing import identity
 

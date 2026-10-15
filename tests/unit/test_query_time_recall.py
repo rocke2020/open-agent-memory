@@ -12,7 +12,7 @@ import pytest
 from oam.config import load_config
 from oam.contracts.search import SearchRequest
 from oam.models.runtime import Usage
-from oam.retrieval.algorithms import TemporalExpansion
+from oam.retrieval.algorithms import TemporalExpansion, TemporalNode
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.service import RecallService, RecallUnavailable
 from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
@@ -58,14 +58,17 @@ class DatedRepository:
     def related_user_fact(self, unit_ids):
         return None
 
+    def temporal_nodes(self, unit_ids, vector):
+        return []
+
+    def temporal_candidates(self, vector, limit):
+        return ()
+
     def ordinary(self, seeds, vector):
         return (), {}
 
     def valid_paths(self, paths, vector):
         return paths
-
-    def temporal_nodes(self, unit_ids, vector):
-        return []
 
     def temporal_neighbors(self, source_id, vector, limit):
         return []
@@ -97,6 +100,57 @@ class DatedService(RecallService):
     @contextmanager
     def _repository(self, authority, request, deadline):
         yield DatedRepository(request)
+
+
+@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("existing", ["none", "matched", "seed", "failed"])
+def test_temporal_recovers_window_seeds_only_without_existing_temporal_inputs(mode, existing):
+    calls = []
+
+    class RecoveryRepository(DatedRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": "new"}]
+
+        def dense(self, vector, limit):
+            return [{"unit_id": "new", "kind": "fact", "score": 0.8}]
+
+        def temporal_matches(self, unit_ids):
+            return ("old",) if existing == "matched" else ()
+
+        def temporal_nodes(self, unit_ids, vector):
+            if existing == "failed":
+                raise RuntimeError("temporal qualification failed")
+            return (
+                (TemporalNode("old", 0.8, datetime(2024, 9, 23, tzinfo=UTC)),)
+                if existing == "seed"
+                else ()
+            )
+
+        def temporal_candidates(self, vector, limit):
+            assert existing == "none"
+            assert self.request.query == "apple harvest in 2024"
+            assert limit == CONFIG.search.fast.channel_candidates
+            calls.append("recovery")
+            return (TemporalNode("old", 0.8, datetime(2024, 9, 23, tzinfo=UTC)),)
+
+    class RecoveryService(DatedService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RecoveryRepository(request)
+
+    result = RecoveryService(CONFIG, None, EmbeddingOnly(), generation_id="generation").search(
+        object(),
+        SearchRequest(
+            query="apple harvest in 2024", recall_level=mode, allow_partial=existing == "failed"
+        ),
+    )
+
+    assert calls == (["recovery"] if existing == "none" else [])
+    if existing in {"none", "matched"}:
+        old = next(item for item in result["items"] if item["unit_id"] == "old")
+        assert old["paths"][0]["arm"] == "temporal"
+    assert result["diagnostics"]["generative_calls"] == 0
+    assert result["diagnostics"]["degraded"] == (["temporal"] if existing == "failed" else [])
 
 
 def test_recall_rejects_policy_change_after_hydration():
@@ -600,3 +654,118 @@ def test_mid_context_respects_fused_relevance_under_item_cap():
 
     assert [item["unit_id"] for item in result["items"]] == ["a_noise", "z_user"]
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
+
+
+@pytest.mark.parametrize(
+    "query,start,end,expression",
+    [
+        (
+            "Summarize the workshop from 2024-08-01 to 2024-10-22.",
+            "2024-08-01T00:00:00+00:00",
+            "2024-10-23T00:00:00+00:00",
+            "2024-08-01 to 2024-10-22",
+        ),
+        (
+            "Purchases between July 2024 and September 2024",
+            "2024-07-01T00:00:00+00:00",
+            "2024-10-01T00:00:00+00:00",
+            "July 2024 and September 2024",
+        ),
+        (
+            "Travel 2024-07-01–2024-07-29",
+            "2024-07-01T00:00:00+00:00",
+            "2024-07-30T00:00:00+00:00",
+            "2024-07-01–2024-07-29",
+        ),
+        (
+            "Employment from 2023 to 2025",
+            "2023-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+            "2023 to 2025",
+        ),
+        (
+            "总结2024年8月1日到2024年10月22日的采购",
+            "2024-08-01T00:00:00+00:00",
+            "2024-10-23T00:00:00+00:00",
+            "2024年8月1日到2024年10月22日",
+        ),
+        (
+            "2024年7月1日から2024年7月29日までの旅行",
+            "2024-07-01T00:00:00+00:00",
+            "2024-07-30T00:00:00+00:00",
+            "2024年7月1日から2024年7月29日",
+        ),
+        (
+            "Harvest 2024-07 to 2024-07",
+            "2024-07-01T00:00:00+00:00",
+            "2024-08-01T00:00:00+00:00",
+            "2024-07 to 2024-07",
+        ),
+    ],
+)
+def test_explicit_calendar_range_includes_final_calendar_period(query, start, end, expression):
+    parsed = infer_query_time(query, datetime(2026, 10, 13, tzinfo=UTC), "UTC")
+
+    assert parsed.status == "inferred"
+    assert parsed.window.start.isoformat() == start
+    assert parsed.window.end.isoformat() == end
+    assert parsed.expression == expression
+
+
+def test_calendar_range_computes_both_local_boundaries_across_dst():
+    parsed = infer_query_time(
+        "Trips from 2025-03-08 to 2025-03-09",
+        datetime(2026, 10, 13, tzinfo=UTC),
+        "America/Los_Angeles",
+    )
+
+    assert parsed.window.start.isoformat() == "2025-03-08T08:00:00+00:00"
+    assert parsed.window.end.isoformat() == "2025-03-10T07:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Compare 2024-07-01 and 2024-07-29",
+        "Compare 2024-07-01 to 2024-07-29",
+        "2024-10-22 to October 2024",
+        "Travel on 2024-07-01 or 2024-07-29",
+        "From 2024-07-29 to 2024-07-01",
+        "From 2024-08 to 2024-07",
+        "From 2024-07-01 to 2024-07-29, compared with 2025-01-01",
+        "Between 2024-07-01 and 2024-07-29 or 2024-08-01",
+        "2024年7月1日から2024年7月29日の予定",
+        "2024-07-01T10:00Z to 2024-07-01T11:00Z",
+        "2024-07-01T10:00Z to 2024-07-01T10:00Z",
+        "last month to this month",
+    ],
+)
+def test_unrelated_or_unsupported_ranges_do_not_create_a_window(query):
+    parsed = infer_query_time(query, datetime(2026, 10, 13, tzinfo=UTC), "UTC")
+
+    assert parsed.window is None
+    assert parsed.status == "ambiguous_time_expression"
+
+
+@pytest.mark.parametrize("mode", ["fast", "mid"])
+def test_calendar_range_recall_preserves_query_and_outside_evidence(mode):
+    query = "Apple harvest from 2025-09-01 to 2025-09-30"
+
+    class RecordingEmbedding(EmbeddingOnly):
+        def embed(self, texts, **kwargs):
+            assert texts == (query,)
+            return super().embed(texts, **kwargs)
+
+    service = DatedService(CONFIG, None, RecordingEmbedding(), generation_id="generation")
+    result = service.search(object(), SearchRequest(query=query, recall_level=mode))
+
+    assert result["diagnostics"]["query_time"]["window"] == {
+        "start": "2025-09-01T00:00:00Z",
+        "end": "2025-10-01T00:00:00Z",
+    }
+    assert result["diagnostics"]["query_time"]["basis"] == "event"
+    assert "temporal" in result["diagnostics"]["executed_arms"]
+    assert result["items"][0]["unit_id"] == "new"
+    assert {item["unit_id"] for item in result["items"]} == {"new", "old"}
+    assert result["diagnostics"]["generative_calls"] == 0
+    assert result["diagnostics"]["degraded"] == []

@@ -82,6 +82,7 @@ from oam.operations.repository import (
     OperationRecord,
     RemovalRecoveryConflict,
     RetryRequiresPlanning,
+    RetryRequiresReconciliation,
 )
 from oam.operations.state import OperationStatus as StoredOperationStatus
 from oam.profiles.service import ProfileInputsNotReady, ProfileRefreshUnresolved
@@ -1299,6 +1300,7 @@ def _operation_call(call) -> OperationResponse:
         OperationNotRetryable,
         OperationIdempotencyConflict,
         RetryRequiresPlanning,
+        RetryRequiresReconciliation,
         RemovalRecoveryConflict,
         AttemptOwnershipMismatch,
     ) as exc:
