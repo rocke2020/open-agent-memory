@@ -200,7 +200,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert config.context.tokenizer == "oam-unicode-quarter-v1"
     assert (config.chunk.recall.default_tokens, config.chunk.recall.max_tokens) == (8192, 8192)
     assert config.profile.max_content_bytes == 16384
-    assert config.profile.max_output_tokens == 2048
+    assert config.profile.max_output_tokens == 4096
     assert config.profile.attempt_timeout_seconds == 180
     assert (config.planner.max_calls, config.planner.max_context_tokens) == (1, 2048)
     assert config.request.batch_deadline_seconds == 10

@@ -13,7 +13,7 @@ import pytest
 import uvicorn
 from api_test_app import create_api_only_app as create_app
 from psycopg.conninfo import make_conninfo
-from test_capacity_http import provider_configuration
+from test_capacity_http import provider_configuration, provider_role
 from test_core_http import MEDICAL, use_created_user_key
 from test_core_http import core_database as core_database
 
@@ -36,7 +36,7 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
 
         def do_POST(self):
             data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            role = data["model"]
+            role = provider_role(data, self.path)
             calls.append((role, data.get("max_tokens")))
             finish = "stop"
             if self.path.endswith("/embeddings"):

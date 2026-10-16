@@ -833,6 +833,38 @@ def test_insight_rejects_unusable_or_invented_support(reply):
         synthesize_insight(models, facts=inputs, config=config, timeout_seconds=1)
 
 
+def test_insight_request_preserves_source_roles_without_assuming_unknown_is_user():
+    from datetime import datetime
+
+    from oam.indexing.extraction import InsightInput, synthesize_insight
+
+    facts = tuple(
+        InsightInput(
+            id=identifier,
+            text=text,
+            source_refs=(source,),
+            mentioned_at=datetime.fromisoformat("2026-05-03T18:00:00+00:00"),
+            message_role=role,
+        )
+        for identifier, text, source, role in (
+            ("f1", "The user requested a factual story.", "s1:1", "user"),
+            ("f2", "The assistant generated a fictional family.", "s2:1", "assistant"),
+            ("f3", "A daily delivery task was observed.", "s3:1", "system"),
+            ("f4", "An observation with unknown attribution.", "s4:1", None),
+        )
+    )
+    requests = []
+    with extraction_models(
+        {"outcome": "no_insight", "subtype": None, "text": None, "support_ids": []}, requests
+    ) as (models, config):
+        synthesize_insight(models, facts=facts, config=config, timeout_seconds=1)
+
+    supplied = json.loads(requests[0]["messages"][1]["content"])["facts"]
+    assert [fact["message_role"] for fact in supplied] == ["user", "assistant", "system", None]
+    assert [fact["source_refs"] for fact in supplied] == [["s1:1"], ["s2:1"], ["s3:1"], ["s4:1"]]
+    assert {fact["mentioned_at"] for fact in supplied} == {"2026-05-03T18:00:00Z"}
+
+
 def test_insight_distinguishes_valid_no_insight_and_rejects_duplicate_input_identity():
     from oam.indexing.extraction import InsightInput, synthesize_insight
 

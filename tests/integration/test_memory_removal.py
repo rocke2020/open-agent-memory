@@ -403,6 +403,7 @@ class RepairModels:
     def __init__(self, *, malformed=False):
         self.calls = []
         self.malformed = malformed
+        self.insight_inputs = []
 
     def generate(self, role, **kwargs):
         from oam.models.runtime import ModelResult, Usage
@@ -410,6 +411,7 @@ class RepairModels:
         self.calls.append(role)
         assert role == "insights"
         facts = json.loads(kwargs["user"])["facts"]
+        self.insight_inputs.append(facts)
         return ModelResult(
             content="invalid"
             if self.malformed
@@ -448,6 +450,10 @@ async def test_l1_cleanup_then_repairs_same_id_and_deletes_insufficient_support(
             "INSERT INTO insight_support VALUES (%s,%s,%s,2,%s,1)",
             (database.tenant, USER, INSIGHT, OTHER_MEMORIES[1]),
         )
+        connection.execute(
+            "UPDATE search_units SET locator=%s WHERE memory_id=%s",
+            (Jsonb({"role": "assistant"}), SURVIVING_MEMORY),
+        )
     async with _client(database.headers) as client:
         response = await client.delete(f"/v1/users/{USER}/memories/{REMOVED_MEMORY}")
         assert response.status_code == 202, response.text
@@ -464,6 +470,10 @@ async def test_l1_cleanup_then_repairs_same_id_and_deletes_insufficient_support(
         models = RepairModels()
         assert _run_repair(database, models)
         assert models.calls == ["insights", "embedding"]
+        assert {fact["id"]: fact["message_role"] for fact in models.insight_inputs[0]} == {
+            SURVIVING_MEMORY: "assistant",
+            OTHER_MEMORIES[1]: None,
+        }
         with _content(database.dsn, database.tenant) as connection:
             assert connection.execute(
                 "SELECT revision,synthesis_text FROM insights WHERE insight_id=%s",

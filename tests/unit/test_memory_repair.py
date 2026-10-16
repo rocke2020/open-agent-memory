@@ -126,8 +126,8 @@ def test_repair_publishes_next_revision_under_same_insight_id():
     store = RepairStore(
         repair_state(["fact-a", "fact-b"]),
         [
-            ("unit-a", "fact-a", "A supported fact.", "source-a", 1, None),
-            ("unit-b", "fact-b", "Another supported fact.", "source-b", 1, None),
+            ("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None),
+            ("unit-b", "fact-b", "Another supported fact.", "source-b", 1, None, None),
         ],
     )
 
@@ -158,7 +158,7 @@ def test_repair_publishes_next_revision_under_same_insight_id():
 def test_insufficient_support_deletes_without_model_call():
     store = RepairStore(
         repair_state(["fact-a"]),
-        [("unit-a", "fact-a", "A supported fact.", "source-a", 1, None)],
+        [("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None)],
     )
 
     class NoCalls:
@@ -177,8 +177,8 @@ def test_direct_insight_removal_wins_over_pending_repair():
     store = RepairStore(
         repair_state(["fact-a", "fact-b"]),
         [
-            ("unit-a", "fact-a", "A supported fact.", "source-a", 1, None),
-            ("unit-b", "fact-b", "Another supported fact.", "source-b", 1, None),
+            ("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None),
+            ("unit-b", "fact-b", "Another supported fact.", "source-b", 1, None, None),
         ],
         direct_removed={"insight"},
     )
@@ -199,9 +199,9 @@ def test_repair_refuses_partial_support_after_input_packing(monkeypatch):
     store = RepairStore(
         repair_state(["fact-a", "fact-b", "fact-c"]),
         [
-            ("unit-a", "fact-a", "A.", "source", 1, None),
-            ("unit-b", "fact-b", "B.", "source", 1, None),
-            ("unit-c", "fact-c", "C.", "source", 1, None),
+            ("unit-a", "fact-a", "A.", "source", 1, None, None),
+            ("unit-b", "fact-b", "B.", "source", 1, None, None),
+            ("unit-c", "fact-c", "C.", "source", 1, None, None),
         ],
     )
     monkeypatch.setattr("oam.governance.repair.pack_insight_facts", lambda facts, config: facts[:2])
@@ -235,8 +235,8 @@ def test_superseded_repair_continues_with_other_insights(monkeypatch, outcome):
     store = RepairStore(
         state,
         [
-            ("unit-a", "fact-a", "A.", "source", 1, None),
-            ("unit-b", "fact-b", "B.", "source", 1, None),
+            ("unit-a", "fact-a", "A.", "source", 1, None, None),
+            ("unit-b", "fact-b", "B.", "source", 1, None, None),
         ],
     )
     store.connection.history_revision = 3

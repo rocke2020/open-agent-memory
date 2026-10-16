@@ -1140,6 +1140,7 @@ def _insights(store, models, new_fact_ids):
                 "SELECT candidate.unit_id,candidate.content_text,candidate.source_id,"
                 "candidate.source_version,candidate.mentioned_at,candidate.source_created_at,"
                 "candidate.source_updated_at,candidate.embedding,"
+                "candidate.locator->>'role' AS message_role,"
                 "jsonb_agg(candidate_times.detail ORDER BY candidate_times.annotation_id) "
                 "FILTER (WHERE candidate_times.annotation_id IS NOT NULL) AS annotations "
                 "FROM eligible candidate "
@@ -1149,18 +1150,19 @@ def _insights(store, models, new_fact_ids):
                 "WHERE candidate.kind='fact' "
                 "GROUP BY candidate.unit_id,candidate.content_text,candidate.source_id,"
                 "candidate.source_version,candidate.mentioned_at,candidate.source_created_at,"
-                "candidate.source_updated_at,candidate.embedding"
+                "candidate.source_updated_at,candidate.embedding,candidate.locator->>'role'"
                 "), ranked AS ("
                 "SELECT candidate.unit_id,candidate.content_text,candidate.source_id,"
                 "candidate.source_version,candidate.mentioned_at,candidate.source_created_at,"
                 "candidate.source_updated_at,candidate.annotations,"
+                "candidate.message_role,"
                 "min(candidate.embedding <=> seeds.embedding) AS distance "
                 "FROM candidate_annotations candidate CROSS JOIN seeds "
                 "GROUP BY candidate.unit_id,candidate.content_text,candidate.source_id,"
                 "candidate.source_version,candidate.mentioned_at,candidate.source_created_at,"
-                "candidate.source_updated_at,candidate.annotations"
+                "candidate.source_updated_at,candidate.annotations,candidate.message_role"
                 ") SELECT unit_id,content_text,source_id,source_version,mentioned_at,"
-                "source_created_at,source_updated_at,annotations FROM ranked "
+                "source_created_at,source_updated_at,annotations,message_role FROM ranked "
                 "ORDER BY (unit_id=ANY(%s)) DESC,distance,unit_id LIMIT %s",
                 (seed_ids, seed_ids, store.config.extraction.max_facts_per_group),
             ).fetchall()
@@ -1174,6 +1176,7 @@ def _insights(store, models, new_fact_ids):
                 temporal_annotations=tuple(
                     _insight_temporal_annotation(value) for value in (row[7] or [])
                 ),
+                message_role=row[8],
             )
             for row in rows
         )

@@ -1,5 +1,4 @@
 import math
-import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,13 +18,13 @@ from oam.models.runtime import EmbeddingResult, Usage
 from oam.retrieval.fts import index_streams
 
 pytestmark = pytest.mark.integration
+pytest_plugins = ["test_core_http"]
 
 
 @pytest.fixture
-def recall_database():
-    dsn = os.environ.get("OAM_TEST_POSTGRES_DSN")
-    if not dsn or os.environ.get("OAM_TEST_POSTGRES_ISOLATED") != "1":
-        pytest.skip("requires an explicitly isolated PostgreSQL database")
+def recall_database(core_database):
+    # ANN and planner assertions need physical isolation, including index and table statistics.
+    dsn, _, _ = core_database
     with (
         psycopg.connect(dsn, autocommit=True) as connection,
         connection.transaction(force_rollback=True),

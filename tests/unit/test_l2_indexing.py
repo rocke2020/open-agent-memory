@@ -84,8 +84,8 @@ def l2_store(monkeypatch):
     store.source = {"source_id": "source-1", "source_version": 1}
     state = {}
     facts = [
-        ("fact-1", "The user moved in 2019.", "source-1", 1, None, None, None, []),
-        ("fact-2", "The user moved in 2020.", "source-1", 1, None, None, None, []),
+        ("fact-1", "The user moved in 2019.", "source-1", 1, None, None, None, [], "user"),
+        ("fact-2", "The user moved in 2020.", "source-1", 1, None, None, None, [], "user"),
     ]
     connection = L2Connection(state, facts)
 
