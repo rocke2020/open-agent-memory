@@ -1,13 +1,16 @@
-"""Opt-in graph evidence reaches fast context; disabled requests dispatch no graph work."""
+"""Configured graph defaults and request overrides reach the fast context."""
 
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 from test_query_time_recall import CONFIG, DatedRepository, EmbeddingOnly
 
-from oam.contracts.search import SearchManyRequest, SearchRequest
+from oam.auth.credentials import AuthorizedUser
+from oam.config import ConfigurationError, load_config
+from oam.contracts.search import RecallLevel, SearchManyRequest, SearchRequest
 from oam.retrieval.service import RecallService, RecallUnavailable
 
 
@@ -63,15 +66,94 @@ class CausalRepository(DatedRepository):
 
 
 class CausalService(RecallService):
-    def __init__(self, *, failure=False):
+    def __init__(self, *, failure=False, config=CONFIG):
         super().__init__(
-            CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
+            config, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
         )
         self.calls, self.failure = [], failure
 
     @contextmanager
     def _repository(self, authority, request, deadline):
         yield CausalRepository(request, self.calls, self.failure)
+
+
+@pytest.mark.parametrize(
+    ("configured", "override", "expected"),
+    [(False, None, False), (True, None, True), (True, False, False), (False, True, True)],
+)
+def test_fast_graph_uses_yaml_default_unless_request_overrides(
+    tmp_path: Path, configured, override, expected
+):
+    path = tmp_path / "oam.yaml"
+    path.write_text(f"search:\n  fast_graph: {str(configured).lower()}\n")
+    service = CausalService(config=load_config(path).config)
+    options = {} if override is None else {"fast_graph": override}
+    result = service.search(
+        AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
+        SearchRequest(query="why move", recall_level=RecallLevel.FAST, **options),
+    )
+    assert {item["unit_id"] for item in result["items"]} == (
+        {"effect", "cause", "origin"} if expected else {"effect"}
+    )
+    assert ("graph" in result["diagnostics"]["executed_arms"]) is expected
+
+
+@pytest.mark.parametrize("planned", [False, True])
+def test_batch_and_planner_keep_inherited_fast_graph_default(tmp_path: Path, planned):
+    from oam.api.search import decompose_and_search, search_many
+    from oam.models.runtime import ModelResult, Usage
+
+    path = tmp_path / "oam.yaml"
+    path.write_text("search:\n  fast_graph: true\n")
+    config = load_config(path).config
+    service = CausalService(config=config)
+
+    def one(request, deadline):
+        return service.search(object(), request, deadline_at=deadline)
+
+    if planned:
+
+        class Planner:
+            def generate(self, *args, **kwargs):
+                return ModelResult(
+                    content='{"queries":["why move"]}', usage=Usage(coverage="unavailable")
+                )
+
+        config = config.model_copy(
+            update={
+                "models": config.models.model_copy(
+                    update={
+                        "reasoning_effort": config.models.reasoning_effort.model_copy(
+                            update={"planner": "none"}
+                        )
+                    }
+                )
+            }
+        )
+        result = decompose_and_search(
+            config, SearchRequest(query="why move", recall_level=RecallLevel.FAST), one, Planner()
+        )
+    else:
+        result = search_many(
+            config,
+            SearchManyRequest(queries=["why move"], recall_level=RecallLevel.FAST),
+            one,
+        )
+    assert result["status"] == "ok"
+    assert {item["unit_id"] for item in result["results"][0]["result"]["items"]} == {
+        "effect",
+        "cause",
+        "origin",
+    }
+    if planned:
+        assert result["planner"]["status"] == "used"
+
+
+def test_fast_graph_yaml_rejects_nonboolean_values(tmp_path: Path):
+    path = tmp_path / "oam.yaml"
+    path.write_text('search:\n  fast_graph: "false"\n')
+    with pytest.raises(ConfigurationError, match="fast_graph"):
+        load_config(path)
 
 
 @pytest.mark.parametrize("options", [{}, {"fast_graph": False}])

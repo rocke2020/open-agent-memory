@@ -69,6 +69,9 @@ extraction:
   reference_max_input_tokens: 2048
 
 search:
+  # Default stored entity/alias and causal expansion for fast recall; requests may override.
+  # Semantic-neighbor expansion remains excluded from fast graph.
+  fast_graph: false
   # Per-query limit measured with the local token estimate.
   max_query_tokens: 512
   # Maximum queries in a batch or generated decomposition plan.

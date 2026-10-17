@@ -70,8 +70,8 @@ class DatedRepository:
     def valid_paths(self, paths, vector):
         return paths
 
-    def temporal_neighbors(self, source_id, vector, limit):
-        return []
+    def temporal_neighbors_batch(self, source_ids, vector, limit):
+        return {source_id: () for source_id in source_ids}
 
     def hydrate(self, unit_ids):
         return [
@@ -103,8 +103,76 @@ class DatedService(RecallService):
 
 
 @pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("existing_seed", [False, True])
+def test_window_pool_preserves_disconnected_evidence_with_existing_time_matches(
+    mode, existing_seed
+):
+    query = "equipment maintenance in 2024"
+
+    class WindowRepository(DatedRepository):
+        def __init__(self, request):
+            super().__init__(request)
+            self.rows["late"] = {"year": 2024, "text": "A replacement lens arrived in December."}
+
+        def lexical(self, query, limit):
+            return [{"unit_id": "old"}, {"unit_id": "new"}]
+
+        def dense(self, vector, limit):
+            return [{"unit_id": "old", "kind": "fact", "score": 0.8}]
+
+        def temporal_nodes(self, unit_ids, vector):
+            return (
+                (TemporalNode("old", 0.8, datetime(2024, 9, 23, tzinfo=UTC)),)
+                if existing_seed
+                else ()
+            )
+
+        def temporal_candidates(self, vector, limit):
+            return (TemporalNode("late", 0.7, datetime(2024, 12, 10, tzinfo=UTC)),)
+
+        def hydrate(self, unit_ids):
+            rows = super().hydrate(unit_ids)
+            for row in rows:
+                row["citations"] = [
+                    {"source_id": row["unit_id"], "source_version": 1, "role": "user"}
+                ]
+            return rows
+
+        def source_user_passage_ids(self, *args):
+            return []
+
+        def supported_fact_ids(self, *args):
+            return []
+
+    class WindowService(DatedService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield WindowRepository(request)
+
+    class CompleteQueryEmbedding(EmbeddingOnly):
+        def embed(self, texts, **kwargs):
+            assert texts == (query,)
+            return super().embed(texts, **kwargs)
+
+    result = WindowService(
+        CONFIG, None, CompleteQueryEmbedding(), generation_id="generation"
+    ).search(object(), SearchRequest(query=query, recall_level=mode))
+
+    items = {item["unit_id"]: item for item in result["items"]}
+    assert set(items) == {"old", "new", "late"}
+    assert items["late"]["text"] == "A replacement lens arrived in December."
+    assert items["late"]["citations"] == [
+        {"source_id": "late", "source_version": 1, "role": "user"}
+    ]
+    assert items["late"]["paths"] == [
+        {"arm": "temporal", "relation": "time_match", "nodes": ["late"]}
+    ]
+    assert result["diagnostics"]["generative_calls"] == 0
+
+
+@pytest.mark.parametrize("mode", ["fast", "mid"])
 @pytest.mark.parametrize("existing", ["none", "matched", "seed", "failed"])
-def test_temporal_recovers_window_seeds_only_without_existing_temporal_inputs(mode, existing):
+def test_temporal_window_pool_is_independent_of_direct_matches_and_roots(mode, existing):
     calls = []
 
     class RecoveryRepository(DatedRepository):
@@ -127,7 +195,7 @@ def test_temporal_recovers_window_seeds_only_without_existing_temporal_inputs(mo
             )
 
         def temporal_candidates(self, vector, limit):
-            assert existing == "none"
+            assert existing != "failed"
             assert self.request.query == "apple harvest in 2024"
             assert limit == CONFIG.search.fast.channel_candidates
             calls.append("recovery")
@@ -145,12 +213,48 @@ def test_temporal_recovers_window_seeds_only_without_existing_temporal_inputs(mo
         ),
     )
 
-    assert calls == (["recovery"] if existing == "none" else [])
+    assert calls == ([] if existing == "failed" else ["recovery"])
     if existing in {"none", "matched"}:
         old = next(item for item in result["items"] if item["unit_id"] == "old")
         assert old["paths"][0]["arm"] == "temporal"
     assert result["diagnostics"]["generative_calls"] == 0
     assert result["diagnostics"]["degraded"] == (["temporal"] if existing == "failed" else [])
+
+
+@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("allow_partial", [False, True])
+def test_window_pool_failure_does_not_publish_existing_temporal_votes(mode, allow_partial):
+    class FailedPoolRepository(DatedRepository):
+        def dense(self, vector, limit):
+            return [{"unit_id": "old", "kind": "fact", "score": 0.8}]
+
+        def temporal_nodes(self, unit_ids, vector):
+            return (TemporalNode("old", 0.8, datetime(2024, 9, 23, tzinfo=UTC)),)
+
+        def temporal_candidates(self, vector, limit):
+            raise RuntimeError("window pool unavailable")
+
+    class FailedPoolService(DatedService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield FailedPoolRepository(request)
+
+    service = FailedPoolService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
+    request = SearchRequest(
+        query="apple harvest in 2024", recall_level=mode, allow_partial=allow_partial
+    )
+    if not allow_partial:
+        with pytest.raises(RecallUnavailable, match="temporal stage failed"):
+            service.search(object(), request)
+        return
+
+    result = service.search(object(), request)
+    assert {item["unit_id"] for item in result["items"]} == {"old", "new"}
+    assert result["diagnostics"]["partial"] is True
+    assert result["diagnostics"]["degraded"] == ["temporal"]
+    assert "temporal" not in result["diagnostics"]["executed_arms"]
+    assert all(not item["paths"] for item in result["items"])
+    assert result["diagnostics"]["generative_calls"] == 0
 
 
 def test_recall_rejects_policy_change_after_hydration():

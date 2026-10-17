@@ -111,6 +111,50 @@ class SourceService(RecallService):
         yield SourceRepository(request, self.rows, self.graph_paths)
 
 
+@pytest.mark.parametrize("mode", ["fast", "mid"])
+def test_assistant_original_does_not_consume_the_only_protected_fact_slot(evidence_rows, mode):
+    assistant = deepcopy(evidence_rows[2])
+    assistant.update(
+        unit_id="assistant_guide",
+        text="Here are several ways to organize a workshop. " * 50,
+        citations=[
+            {
+                "source_id": "guide",
+                "source_version": 1,
+                "message_id": "1",
+                "message_index": 1,
+                "role": "assistant",
+            }
+        ],
+    )
+
+    class RankedRepository(SourceRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": "assistant_guide"}, {"unit_id": "fact"}]
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            return []
+
+    class RankedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RankedRepository(request, self.rows, self.graph_paths)
+
+    tier = getattr(CONFIG.search, mode).model_copy(
+        update={"source_seed_results": 1, "max_results": 2}
+    )
+    config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={mode: tier})})
+    result = RankedService([assistant, evidence_rows[0], evidence_rows[2]], config=config).search(
+        object(), SearchRequest(query="missed workshops", recall_level=mode)
+    )
+
+    assert [item["unit_id"] for item in result["items"]] == ["fact", "original"]
+    assert "The user missed the workshop on June 3." in result["context"]
+    assert evidence_rows[2]["text"] in result["context"]
+    assert result["items"][1]["citations"] == evidence_rows[2]["citations"]
+    assert result["diagnostics"]["generative_calls"] == 0
+
+
 def test_trace_statement_timeout_preserves_recall_deadline_error(evidence_rows, monkeypatch):
     def timed_out(*args):
         raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")

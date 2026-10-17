@@ -230,7 +230,7 @@ def _path_rank(hit: TemporalHit) -> tuple[float, float, str, str, tuple[str, ...
 
 def temporal_spread(
     seeds: Sequence[TemporalNode],
-    neighbors: Callable[[str, int], Sequence[TemporalEdge]],
+    neighbors: Callable[[Sequence[str], int], Mapping[str, Sequence[TemporalEdge]]],
     *,
     window: TimeRange,
     node_limit: int,
@@ -240,8 +240,8 @@ def temporal_spread(
     """Expand eligible, prefiltered neighbor rows; preserve exact selected paths.
 
     The callback applies authorization, generation, time witnesses and the query
-    cosine floor before its cap. Node budgets include seeds. Expiration discards
-    every proposal from the unfinished breadth-first level.
+    cosine floor before its per-parent cap, in one call per frontier. Node budgets
+    include seeds. Expiration discards every proposal from the unfinished level.
     """
     _validate_window(window)
     if node_limit < 1 or neighbor_limit < 1:
@@ -270,10 +270,14 @@ def temporal_spread(
         if len(visited) == node_limit:
             return finish("node_budget")
         proposals: dict[str, TemporalHit] = {}
-        for parent in sorted(frontier, key=lambda hit: hit.node_id):
+        ordered_frontier = sorted(frontier, key=lambda hit: hit.node_id)
+        neighbor_rows = neighbors(
+            tuple(parent.node_id for parent in ordered_frontier), neighbor_limit
+        )
+        for parent in ordered_frontier:
             if deadline_reached():
                 return finish("deadline")
-            edges = neighbors(parent.node_id, neighbor_limit)
+            edges = neighbor_rows.get(parent.node_id, ())
             for edge in edges[:neighbor_limit]:
                 if deadline_reached():
                     return finish("deadline")

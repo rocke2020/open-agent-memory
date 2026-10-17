@@ -27,6 +27,7 @@ from oam.retrieval.context import (
     ContextUnitCosts,
     assemble_context,
     pack_ranked,
+    primary_seed_eligible,
     render_context,
     render_item,
     source_diverse_seed_order,
@@ -93,7 +94,9 @@ class RecallService:
             raise ValueError("query exceeds configured token limit")
         started = time.monotonic()
         mode = request.recall_level.value
-        fast_graph = mode == "fast" and request.fast_graph
+        fast_graph = mode == "fast" and (
+            self.config.search.fast_graph if request.fast_graph is None else request.fast_graph
+        )
         deadline = started + getattr(self.config.recall, f"{mode}_deadline_seconds")
         if deadline_at is not None:
             if deadline_at.utcoffset() is None:
@@ -277,24 +280,25 @@ class RecallService:
                             )
                         )
                         matched = repository.temporal_matches(direct_ids)
+                        temporal_nodes = {
+                            node.node_id: node for node in repository.temporal_nodes(seeds, vector)
+                        }
+                        for node in repository.temporal_candidates(vector, tier.channel_candidates):
+                            temporal_nodes.setdefault(node.node_id, node)
                         selected = select_temporal_seeds(
-                            repository.temporal_nodes(seeds, vector),
+                            tuple(temporal_nodes.values()),
                             window=window,
                             seed_limit=min(self.config.search.temporal_seed_max, node_limit),
                             bucket_count=self.config.search.temporal_coverage_buckets,
                         )
-                        recovered_seeds = ()
-                        if not matched and not selected:
-                            selected = select_temporal_seeds(
-                                repository.temporal_candidates(vector, tier.channel_candidates),
-                                window=window,
-                                seed_limit=min(self.config.search.temporal_seed_max, node_limit),
-                                bucket_count=self.config.search.temporal_coverage_buckets,
-                            )
-                            recovered_seeds = tuple(node.node_id for node in selected)
+                        recovered_seeds = tuple(
+                            node.node_id for node in selected if node.node_id not in matched
+                        )
                         expansion = temporal_spread(
                             selected,
-                            lambda node, limit: repository.temporal_neighbors(node, vector, limit),
+                            lambda nodes, limit: repository.temporal_neighbors_batch(
+                                nodes, vector, limit
+                            ),
                             window=window,
                             node_limit=node_limit,
                             neighbor_limit=self.config.search.temporal_neighbors,
@@ -472,8 +476,10 @@ class RecallService:
         context_costs = ContextUnitCosts()
         seed_limit = min(tier.source_seed_results, tier.max_results)
         ranked_candidates = [item for item in candidates if item["unit_id"] != related_tail_id]
+        seed_order = source_diverse_seed_order(ranked_candidates)
+        discovery_seed_items = pack_ranked(seed_order, seed_budget, seed_limit, costs=context_costs)
         seed_items = pack_ranked(
-            source_diverse_seed_order(ranked_candidates),
+            [item for item in seed_order if primary_seed_eligible(item)],
             seed_budget,
             seed_limit,
             costs=context_costs,
@@ -625,7 +631,7 @@ class RecallService:
             passage_source_keys = tuple(
                 dict.fromkeys(
                     (citation["source_id"], citation["source_version"])
-                    for item in source_seed_items
+                    for item in discovery_seed_items
                     if item["kind"] == "passage" and item["origin"] == "memory"
                     for citation in item["citations"]
                     if isinstance(citation.get("source_id"), str)

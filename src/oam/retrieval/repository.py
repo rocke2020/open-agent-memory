@@ -426,21 +426,31 @@ class RecallRepository:
                 {"query": query, "limit": limit},
             )
         candidate, primary, full, term_queries = _rank_queries(terms, parameters)
+        # Order matches before checking support so a common term does not
+        # validate the entire history. Eligibility still precedes every cap.
+        eligible_ordered = self.candidate_units_sql.replace("FROM search_units u", "FROM ordered u")
         rows = self._execute(
             "WITH queries AS (SELECT "
             f"{candidate} AS candidate,{primary} AS primary,{full} AS full), "
-            "hits AS MATERIALIZED (SELECT u.unit_id,u.lexical_bilingual,u.mentioned_at,"
+            "hits AS MATERIALIZED (SELECT u.tenant_id,u.user_id,u.unit_id,u.kind,u.origin,"
+            "u.source_id,u.source_version,u.evidence_id,u.passage_id,u.memory_id,"
+            "u.insight_id,u.insight_revision,u.generation_id,u.lexical_bilingual,u.mentioned_at,"
             "u.lexical_bilingual @@ q.full AS full_match,"
             "u.lexical_bilingual @@ q.primary AS primary_match "
-            "FROM ("
-            + self.candidate_units_sql
-            + ") u,queries q WHERE u.lexical_bilingual @@ q.candidate) "
+            "FROM search_units u,queries q WHERE "
+            "u.tenant_id=current_setting('oam.tenant_id',true) "
+            "AND u.user_id=current_setting('oam.user_id',true) "
+            "AND u.lexical_bilingual @@ q.candidate) "
             "SELECT t.term_order,hit.unit_id,hit.mentioned_at,hit.full_match,hit.primary_match "
             f"FROM unnest(ARRAY[{term_queries}]) WITH ORDINALITY AS t(term,term_order) "
-            "CROSS JOIN LATERAL (SELECT u.unit_id,u.mentioned_at,u.full_match,u.primary_match,"
+            "CROSS JOIN LATERAL (WITH ordered AS (SELECT u.*,"
             "ts_rank_cd(%(weights)s::float4[],u.lexical_bilingual,t.term) AS score "
             "FROM hits u WHERE u.lexical_bilingual @@ t.term "
             "ORDER BY u.full_match DESC,u.primary_match DESC,score DESC,"
+            "u.mentioned_at DESC NULLS LAST,u.unit_id OFFSET 0) "
+            "SELECT u.unit_id,u.mentioned_at,u.full_match,u.primary_match,u.score FROM ("
+            + eligible_ordered
+            + ") u ORDER BY u.full_match DESC,u.primary_match DESC,u.score DESC,"
             "u.mentioned_at DESC NULLS LAST,u.unit_id LIMIT %(limit)s) hit "
             "ORDER BY t.term_order,hit.full_match DESC,hit.primary_match DESC,hit.score DESC,"
             "hit.mentioned_at DESC NULLS LAST,hit.unit_id",
@@ -1017,7 +1027,7 @@ class RecallRepository:
         )
         return tuple(TemporalNode(row["unit_id"], row["cosine"], row["basis_date"]) for row in rows)
 
-    def _temporal_edges(self, source_ids, vector, *, limit=None, edge_ids=None):
+    def _temporal_edges(self, source_ids, vector, *, limit=None, edge_ids=None, per_source=False):
         prefix = self._eligible(temporal=True)
         adjacent = []
         for source, target in (("left_id", "right_id"), ("right_id", "left_id")):
@@ -1049,8 +1059,12 @@ class RecallRepository:
                 )
             witnesses = "(edge.relation='caused_by' OR (" + " AND ".join(conditions) + "))"
         query = (
-            prefix + ", adjacent AS (" + " UNION ALL ".join(adjacent) + ") "
-            "SELECT target.unit_id,LEAST(1.0,GREATEST(-1.0,"
+            prefix
+            + ", adjacent AS ("
+            + " UNION ALL ".join(adjacent)
+            + ") "
+            + ("SELECT edge.source_id," if per_source else "SELECT ")
+            + "target.unit_id,LEAST(1.0,GREATEST(-1.0,"
             "1-(target.embedding <=> %(vector)s::vector))) AS cosine,"
             + self._basis_date("target")
             + " AS basis_date,edge.weight,edge.relation,edge.edge_id "
@@ -1072,11 +1086,38 @@ class RecallRepository:
         if edge_ids is not None:
             query += " AND edge.edge_id=ANY(%(edges)s)"
             parameters["edges"] = list(edge_ids)
-        query += " ORDER BY edge.weight DESC,target.unit_id,edge.edge_id"
-        if limit is not None:
+        if per_source:
+            query = (
+                "SELECT * FROM (SELECT candidates.*,row_number() OVER (PARTITION BY source_id "
+                "ORDER BY weight DESC,unit_id,edge_id) AS neighbor_rank FROM ("
+                + query
+                + ") candidates) ranked WHERE neighbor_rank<=%(limit)s "
+                "ORDER BY source_id,weight DESC,unit_id,edge_id"
+            )
+            parameters["limit"] = limit
+        else:
+            query += " ORDER BY edge.weight DESC,target.unit_id,edge.edge_id"
+        if limit is not None and not per_source:
             query += " LIMIT %(limit)s"
             parameters["limit"] = limit
         return self._execute(query, parameters)
+
+    def temporal_neighbors_batch(
+        self, source_ids: Sequence[str], vector: Sequence[float], limit: int
+    ) -> dict[str, tuple[TemporalEdge, ...]]:
+        if not source_ids:
+            return {}
+        grouped: dict[str, list[TemporalEdge]] = {source_id: [] for source_id in source_ids}
+        for row in self._temporal_edges(source_ids, vector, limit=limit, per_source=True):
+            grouped[row["source_id"]].append(
+                TemporalEdge(
+                    TemporalNode(row["unit_id"], row["cosine"], row["basis_date"]),
+                    row["weight"],
+                    row["relation"],
+                    row["edge_id"],
+                )
+            )
+        return {source_id: tuple(edges) for source_id, edges in grouped.items()}
 
     def temporal_neighbors(self, source_id: str, vector: Sequence[float], limit: int):
         rows = self._temporal_edges((source_id,), vector, limit=limit)

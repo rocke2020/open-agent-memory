@@ -191,7 +191,7 @@ def _spread(seeds, neighbors, *, node_limit=20, neighbor_limit=5, deadline=lambd
 
     return temporal_spread(
         seeds,
-        neighbors,
+        lambda sources, limit: {source: neighbors(source, limit) for source in sources},
         window=TimeRange(_day(0), _day(10)),
         node_limit=node_limit,
         neighbor_limit=neighbor_limit,
@@ -336,3 +336,47 @@ def test_temporal_applies_neighbor_and_total_node_caps_before_further_work() -> 
 
     assert [hit.node_id for hit in result.discoveries] == ["a"]
     assert result.stop_reason == "node_budget"
+
+
+def test_temporal_frontier_batches_preserve_exact_paths_and_discard_expired_level():
+    from oam.retrieval.algorithms import TemporalEdge, TemporalNode, TimeRange, temporal_spread
+
+    seed, a, b, target = (TemporalNode(name, 0.8, _day(5)) for name in ("s", "a", "b", "t"))
+    edges = {
+        "s": (TemporalEdge(b, 1.0, "temporal", "sb"), TemporalEdge(a, 1.0, "temporal", "sa")),
+        "a": (TemporalEdge(target, 0.9, "temporal", "at"),),
+        "b": (TemporalEdge(target, 0.8, "caused_by", "bt"),),
+    }
+    expected = _spread((seed,), lambda source, limit: edges.get(source, ())[:limit])
+    calls = []
+    expired = False
+
+    def batch(sources, limit):
+        nonlocal expired
+        calls.append(sources)
+        if sources == ("a", "b") and expire:
+            expired = True
+        return {source: edges.get(source, ())[:limit] for source in sources}
+
+    def deadline():
+        return expired
+
+    for expire in (False, True):
+        calls.clear()
+        expired = False
+        result = temporal_spread(
+            (seed,),
+            batch,
+            window=TimeRange(_day(0), _day(10)),
+            node_limit=20,
+            neighbor_limit=5,
+            deadline_reached=deadline,
+        )
+        assert calls[:2] == [("s",), ("a", "b")]
+        if expire:
+            assert result.stop_reason == "deadline"
+            assert [hit.node_id for hit in result.discoveries] == ["a", "b"]
+        else:
+            assert result == expected
+            assert result.discoveries[-1].path_edge_ids == ("sa", "at")
+            assert calls == [("s",), ("a", "b"), ("t",)]

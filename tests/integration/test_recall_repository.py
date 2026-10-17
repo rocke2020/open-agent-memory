@@ -425,6 +425,16 @@ def test_lexical_eligibility_avoids_second_unit_lookup_for_each_hit(recall_datab
         )
         == 0
     )
+    # Ranking a common term should validate only enough supported candidates to
+    # fill each term's cap, rather than every matching memory in the history.
+    assert (
+        sum(
+            node.get("Actual Loops", 0) * node.get("Actual Rows", 0)
+            for node in nodes(plan)
+            if node.get("Relation Name") == "memories"
+        )
+        <= 20
+    )
 
 
 def test_imperative_show_does_not_promote_movie_preferences(recall_database):
@@ -1430,7 +1440,7 @@ def test_temporal_witness_role_is_checked_before_neighbor_cap(recall_database):
 
     connection, authority = recall_database
     instant = datetime(2026, 1, 6, tzinfo=UTC)
-    for node in ("a_seed", "b_wrong", "c_valid"):
+    for node in ("a_seed", "b_wrong", "c_valid", "d_valid", "aa_seed"):
         add_fact(connection, authority, node, node)
         connection.execute(
             "INSERT INTO unit_times VALUES (%s,%s,%s,%s,'event',%s,'{}')",
@@ -1441,13 +1451,15 @@ def test_temporal_witness_role_is_checked_before_neighbor_cap(recall_database):
         "(%s,%s,'wrong-reference','b_wrong','date_reference',%s,'{}')",
         (authority.tenant_id, authority.user_id, Range(instant, instant, "[]")),
     )
-    for target, witness, weight in (
-        ("b_wrong", "wrong-reference", 1.0),
-        ("c_valid", "c_valid", 0.9),
+    for source, target, witness, weight in (
+        ("a_seed", "b_wrong", "wrong-reference", 1.0),
+        ("a_seed", "c_valid", "c_valid", 0.9),
+        ("aa_seed", "b_wrong", "wrong-reference", 0.2),
+        ("aa_seed", "d_valid", "d_valid", 0.1),
     ):
         connection.execute(
-            "INSERT INTO temporal_links VALUES (%s,%s,'event','a_seed',%s,'a_seed',%s,0,%s)",
-            (authority.tenant_id, authority.user_id, target, witness, weight),
+            "INSERT INTO temporal_links VALUES (%s,%s,'event',%s,%s,%s,%s,0,%s)",
+            (authority.tenant_id, authority.user_id, source, target, source, witness, weight),
         )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     request = SearchRequest(
@@ -1464,6 +1476,15 @@ def test_temporal_witness_role_is_checked_before_neighbor_cap(recall_database):
     )
 
     assert [edge.target.node_id for edge in neighbors] == ["c_valid"]
+    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
+    sources = ("a_seed", "aa_seed")
+    batched = repository.temporal_neighbors_batch(sources, vector, 1)
+    assert batched == {
+        source: repository.temporal_neighbors(source, vector, 1) for source in sources
+    }
+    assert {
+        source: [edge.target.node_id for edge in edges] for source, edges in batched.items()
+    } == {"a_seed": ["c_valid"], "aa_seed": ["d_valid"]}
 
 
 def test_strict_window_requires_every_insight_support_to_match(recall_database):

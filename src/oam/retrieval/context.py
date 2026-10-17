@@ -373,6 +373,15 @@ def source_window_ids(seed_items: list[dict], passage_locators: list[dict]) -> l
     ]
 
 
+def primary_seed_eligible(item: dict) -> bool:
+    """Assistant originals support discovery without reserving primary context."""
+    return not (
+        item["kind"] == "passage"
+        and item["citations"]
+        and item["citations"][0].get("role") == "assistant"
+    )
+
+
 def assemble_context(
     candidates: list[dict],
     seed_items: list[dict],
@@ -386,15 +395,7 @@ def assemble_context(
 ) -> tuple[list[dict], list[str]]:
     """Protect ranked facts and bounded source windows, then fill from ranked evidence."""
     costs = costs or ContextUnitCosts()
-    primary = [
-        item
-        for item in seed_items
-        if not (
-            item["kind"] == "passage"
-            and item["citations"]
-            and item["citations"][0].get("role") == "assistant"
-        )
-    ]
+    primary = [item for item in seed_items if primary_seed_eligible(item)]
     primary_budget = int(seed_budget * (1 - detail_fraction))
     detail_budget = int(seed_budget * detail_fraction)
     primary_selected = pack_ranked(primary, primary_budget, max_results, costs=costs)

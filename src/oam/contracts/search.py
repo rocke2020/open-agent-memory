@@ -60,10 +60,13 @@ class SearchIncludeOptions(FrozenContract):
 
 class SearchOutputOptions(FrozenContract):
     recall_level: RecallLevel = RecallLevel.MID
-    fast_graph: bool = Field(
-        default=False,
+    fast_graph: bool | None = Field(
+        default=None,
         strict=True,
-        description="Opt in to stored entity/alias and causal graph expansion in fast mode.",
+        description=(
+            "Override stored entity/alias and causal graph expansion in fast mode. "
+            "Omitted or null inherits search.fast_graph from configuration."
+        ),
     )
     max_context_tokens: PositiveInt | None = None
     include: SearchIncludeOptions = Field(default_factory=SearchIncludeOptions)

@@ -104,6 +104,7 @@ class MidArmWeights(FrozenModel):
 
 
 class SearchConfig(FrozenModel):
+    fast_graph: bool = Field(strict=True)
     max_query_tokens: PositiveInt
     max_queries: PositiveInt
     query_concurrency: PositiveInt
