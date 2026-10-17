@@ -228,7 +228,7 @@ async def test_inspection_reads_current_resources_memories_and_original_bytes():
             assert (user_id, resource_id) == ("lin", "report")
             return b"<script>alert(1)</script>", "text/html"
 
-        def list_memories(self, actor, user_id, *, after):
+        def list_memories(self, actor, user_id, *, after, memory_type, limit, offset):
             assert (user_id, after) == ("lin", None)
             return {
                 "items": [{"id": "fact_1", "kind": "fact", "citations": []}],

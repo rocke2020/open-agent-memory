@@ -22,7 +22,7 @@ from oam.db.entity_eligibility import (
 )
 from oam.indexing.identity import index_generation
 from oam.profiles.inputs import load_profile_inputs
-from oam.profiles.service import _current_snapshot, _view
+from oam.profiles.service import _current_snapshot, _view, stored_profile_support_ids
 
 EXPORT_PART_BYTES = 1024 * 1024
 EXPORT_FORMAT_VERSION = 1
@@ -210,8 +210,13 @@ class ExportRepository:
         profile_authority = replace(
             authority, capabilities=authority.capabilities | {"memory:read"}
         )
-        inputs = load_profile_inputs(connection, profile_authority, generation)
         snapshot = _current_snapshot(connection, authority)
+        inputs = load_profile_inputs(
+            connection,
+            profile_authority,
+            generation,
+            stored_support_ids=stored_profile_support_ids(snapshot),
+        )
         view = _view(self.config, inputs, snapshot, sys.maxsize)
         return {
             "kind": "profile",

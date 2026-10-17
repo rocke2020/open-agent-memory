@@ -51,6 +51,18 @@ def profile_identity(input_identity: bytes, instruction: str | None) -> bytes:
     return hashlib.sha256(recipe.encode("utf-8")).digest()
 
 
+def stored_profile_support_ids(snapshot: dict[str, Any] | None) -> set[str]:
+    if snapshot is None or snapshot["content"] is not None:
+        return set()
+    return {
+        support["id"]
+        for fields in snapshot.get("sections", {}).values()
+        for field in fields
+        for support in field.get("supports", [])
+        if "id" in support
+    }
+
+
 def _view(
     config: OAMConfig,
     inputs: ProfileInputs,
@@ -62,7 +74,7 @@ def _view(
         try:
             document = render_stored_profile_fields(
                 snapshot["sections"],
-                inputs.prompt_inputs,
+                inputs.stored_support_inputs,
                 inputs.eligible_support_ids,
                 max_content_bytes=config.profile.max_content_bytes,
             )
@@ -103,6 +115,7 @@ def _view(
         "policy_epoch": inputs.policy_epoch,
         "content": content,
         "instruction": snapshot["instruction"] if snapshot else None,
+        "default_prompt": PROFILE_SYSTEM,
         "references": snapshot["references"] if content is not None else [],
         "support_ids": snapshot["support_ids"] if content is not None else [],
         "freshness": freshness,
@@ -147,7 +160,12 @@ class ProfileService:
                 generation = snapshot["generation_id"]
             if generation is None:
                 generation = index_generation(self.config, os.environ)
-            inputs = load_profile_inputs(connection, authority, generation)
+            inputs = load_profile_inputs(
+                connection,
+                authority,
+                generation,
+                stored_support_ids=stored_profile_support_ids(snapshot),
+            )
             result = _public_view(self.config, inputs, snapshot, max_tokens)
             SourceInspector._check_policy(connection, authority, inputs.policy_epoch)
             return result

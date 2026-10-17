@@ -11,6 +11,7 @@ from urllib.request import urlopen
 import pytest
 
 from oam.contracts.retain import RecallRequest
+from oam.profiles.prompt import PROFILE_SYSTEM
 
 playwright = pytest.importorskip("playwright.sync_api")
 WEB = Path(__file__).parents[2] / "src" / "oam" / "web"
@@ -139,6 +140,8 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
             data = {"status": "accepted", "operation_id": "create-op"}
         elif path.endswith("/profile") or "/profile?" in path:
             data = {
+                "default_prompt": PROFILE_SYSTEM,
+                "instruction": None,
                 "profile_revision": None if profile_missing else 3,
                 "updated_at": None if profile_missing else "2026-09-29T12:30:00+00:00",
                 "freshness": "partial"
@@ -234,7 +237,27 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert page.get_by_label("Date of birth", exact=True).is_hidden()
 
                 page.locator('[data-view="profiles"]').click()
-                detail.get_by_text("Read-only User Profile", exact=True).wait_for()
+                detail.locator(".profile-content").wait_for()
+                assert page.locator("#profile-budget").count() == 0
+                assert page.locator("#profile-form input[type=checkbox]").count() == 0
+                assert page.locator(".list-panel").is_hidden()
+                customization = page.locator("#profile-customization")
+                assert not customization.evaluate("element => element.open")
+                assert page.locator("#profile-instruction").is_hidden()
+                assert page.get_by_role("button", name="Refresh profile", exact=True).is_visible()
+                customization.get_by_text("Customize profile", exact=True).click()
+                prompt_details = page.locator("#profile-prompt-details")
+                prompt = page.locator("#profile-default-prompt")
+                instruction_status = page.locator("#profile-instruction-status")
+                assert "no saved custom instruction" in instruction_status.inner_text()
+                assert page.get_by_role("button", name="Use default instructions").is_hidden()
+                assert not prompt_details.evaluate("element => element.open")
+                assert prompt.is_hidden()
+                prompt_details.get_by_text("Default profile prompt", exact=True).click()
+                assert prompt.is_visible()
+                assert prompt.inner_text() == PROFILE_SYSTEM
+                assert prompt.locator("textarea, input").count() == 0
+                prompt_details.get_by_text("Default profile prompt", exact=True).click()
                 assert detail.locator(".profile-content strong").count() == 1
                 assert detail.locator(".profile-content strong").inner_text() == "engineer"
                 detail.get_by_text(
@@ -253,7 +276,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert "Updated" in updated.inner_text()
                 assert "ago" in updated.inner_text()
                 assert "2026" in updated.get_attribute("title")
-                assert top_level[1].startswith("Up to date")
+                assert top_level[0].startswith("Up to date")
                 assert detail.get_by_text("Freshness", exact=True).count() == 0
                 assert detail.get_by_text("Revision", exact=True).count() == 0
                 assert detail.get_by_text("Pending inputs", exact=True).count() == 0
@@ -268,9 +291,46 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert detail.get_by_text("Conversation", exact=True).is_visible()
                 assert calls[-1][1].endswith("/profile")
 
+                page.locator("#profile-instruction").fill("Return JSON.")
+                customization.get_by_text("Customize profile", exact=True).click()
+                page.locator("#refresh-profile").click()
+                page.locator("#status").get_by_text(
+                    "creation/refresh pending", exact=False
+                ).wait_for()
+                assert json.loads(calls[-1][2]) == {}
+                page.locator('[data-view="profiles"]').click()
+                detail.locator(".profile-content").wait_for()
+                customization.get_by_text("Customize profile", exact=True).click()
+                assert page.locator("#profile-instruction").input_value() == "Return JSON."
+                page.get_by_role("button", name="Apply and refresh", exact=True).click()
+                page.locator("#status").get_by_text(
+                    "creation/refresh pending", exact=False
+                ).wait_for()
+                assert json.loads(calls[-1][2]) == {"instruction": "Return JSON."}
+                customization.get_by_text("Customize profile", exact=True).click()
+
+                profile_overrides.update(freshness="uncovered", uncovered_inputs=115)
+                page.locator('[data-view="profiles"]').click()
+                generation_details = detail.locator("details").filter(
+                    has=page.get_by_text("Generation details", exact=True)
+                )
+                generation_details.wait_for()
+                assert detail.locator(".profile-content").is_visible()
+                assert "115" not in detail.inner_text()
+                assert "document may miss details" not in detail.inner_text().lower()
+                assert not generation_details.evaluate("element => element.open")
+                generation_details.locator("summary").click()
+                assert generation_details.get_by_text("115", exact=True).is_visible()
+                assert generation_details.get_by_text(
+                    "Insights outside this summary", exact=True
+                ).is_visible()
+                profile_overrides.clear()
+
                 profile_missing = True
                 page.locator('[data-view="profiles"]').click()
                 detail.get_by_text("No generated User Profile yet", exact=False).wait_for()
+                assert prompt.text_content() == PROFILE_SYSTEM
+                assert "no saved custom instruction" in instruction_status.text_content()
                 assert summary.get_by_text("Not created", exact=True).is_visible()
                 assert summary.locator("time").count() == 0
                 assert detail.get_by_text("Last refreshed", exact=True).count() == 0
@@ -279,9 +339,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 page.locator("#status").get_by_text(
                     "creation/refresh pending", exact=False
                 ).wait_for()
-                assert (
-                    "Create/Refresh User Profile" in page.locator("#refresh-profile").inner_text()
-                )
+                assert "Create profile" in page.locator("#refresh-profile").inner_text()
                 assert json.loads(calls[-1][2]) == {}
 
                 profile_indexing = True
@@ -295,7 +353,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 profile_failed = True
                 page.locator('[data-view="profiles"]').click()
                 detail.get_by_text("1 Insight input failed", exact=False).wait_for()
-                assert summary.get_by_text("Incomplete", exact=True).is_visible()
+                assert summary.get_by_text("Some inputs unavailable", exact=True).is_visible()
                 assert detail.get_by_text("partial", exact=True).count() == 0
 
                 profile_failed = False
@@ -340,12 +398,11 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     pending_inputs=0,
                     omitted=[{"reason": "budget"}],
                 )
-                page.locator("#profile-budget").fill("0")
-                page.locator("#profile-form button").first.click()
+                page.locator('[data-view="profiles"]').click()
                 detail.get_by_text(
-                    "User Profile exceeds the preview token budget", exact=False
+                    "User Profile exceeds the server's display limit", exact=False
                 ).wait_for()
-                assert "preview token budget" in page.locator("#status").inner_text()
+                assert "server's display limit" in page.locator("#status").inner_text()
                 assert detail.get_by_text("Refresh it to rebuild", exact=False).count() == 0
                 assert summary.get_by_text("Up to date", exact=True).is_visible()
                 assert summary.locator("time").is_visible()
@@ -361,11 +418,30 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     freshness="current",
                 )
                 page.locator('[data-view="profiles"]').click()
-                detail.get_by_text("Saved instruction", exact=True).wait_for()
+                detail.locator("pre.source-text").wait_for()
+                customization.get_by_text("Customize profile", exact=True).click()
+                assert "Saved custom instruction active" in instruction_status.inner_text()
+                assert "supplements the default prompt" in instruction_status.inner_text()
+                assert prompt.text_content() == PROFILE_SYSTEM
                 rendered = detail.locator("pre").inner_text()
                 assert json.loads(rendered)["occupation"] == "Engineer"
                 assert detail.locator("script").count() == 0
                 assert page.locator("#status").inner_text() == "User Profile loaded."
+                page.get_by_role("button", name="Use default instructions", exact=True).click()
+                page.locator("#status").get_by_text(
+                    "creation/refresh pending", exact=False
+                ).wait_for()
+                assert json.loads(calls[-1][2]) == {"reset_instruction": True}
+                assert page.locator("#profile-instruction").input_value() == ""
+                page.set_viewport_size({"width": 390, "height": 844})
+                page.locator('[data-view="profiles"]').click()
+                detail.locator("pre.source-text").wait_for()
+                assert detail.bounding_box()["y"] < 844
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.get_by_role("button", name="Sign out", exact=True).click()
+                assert prompt.text_content() == ""
+                assert page.locator("#profile-instruction-status").text_content() == ""
+                assert not customization.evaluate("element => element.open")
             finally:
                 context.close()
                 browser.close()
