@@ -535,24 +535,28 @@ def test_fast_graph_keeps_full_history_gate_when_nonseed_fact_has_no_stored_path
 ):
     from test_entity_graph import alias_history
 
+    from oam.retrieval.repository import _graph_fact_eligibility
+
     connection, authority = recall_database
     repository, vector, _ = alias_history(connection, authority)
     seeds = ("definition", "seed", "continuation")
+
+    def admitted_seeds():
+        return {
+            row["unit_id"]
+            for row in repository._execute(
+                _graph_fact_eligibility(include_semantic=False) + "SELECT unit_id FROM seeds",
+                {"seeds": list(seeds)},
+            )
+        }
+
+    assert admitted_seeds() == set()
     assert repository.fast_graph(seeds, vector) == ((), {})
     add_fact(connection, authority, "unrelated", "A fact without stored graph relations.")
-    rows = []
-    execute = repository._execute
-
-    def capture(query, parameters):
-        result = execute(query, parameters)
-        rows.extend(row for row in result if "source" in row)
-        return result
-
-    repository._execute = capture
+    # The full-history gate admits seeds even when the nonseed fact has no
+    # stored path. Existing seeds still cannot become new graph candidates.
+    assert admitted_seeds() == set(seeds)
     assert repository.fast_graph(seeds, vector) == ((), {})
-    # Seed targets do not activate new candidates, but the full-history gate
-    # still admits their stored paths when another eligible fact exists.
-    assert {row["unit_id"] for row in rows if row["source"] == "entity"} == set(seeds)
 
 
 def test_raw_graph_guard_keeps_ineligible_nonseed_on_full_proof_path(recall_database):

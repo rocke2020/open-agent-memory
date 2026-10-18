@@ -14,6 +14,7 @@
     draftKey: null,
     profileRequest: 0,
     detailRequest: 0,
+    savedProfileInstruction: "",
   };
   function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -36,9 +37,13 @@
     state.profileRequest += 1;
     state.detailRequest += 1;
     byId("query").value = "";
-    byId("profile-budget").value = "";
+    state.savedProfileInstruction = "";
     byId("profile-instruction").value = "";
-    byId("profile-reset-instruction").checked = false;
+    byId("profile-instruction-status").textContent = "";
+    byId("profile-default-prompt").textContent = "";
+    byId("profile-prompt-details").open = false;
+    byId("profile-customization").open = false;
+    byId("profile-use-default").hidden = true;
     byId("item-list").replaceChildren();
     byId("detail").replaceChildren(element("p", "Select an item to inspect its source and readiness."));
     byId("load-more").hidden = true;
@@ -142,6 +147,10 @@
     byId("new-resource").textContent = view === "profile-data" ? "Add Profile Data" : "Add Resource";
     byId("search-form").hidden = view !== "memories";
     byId("profile-form").hidden = view !== "profiles";
+    byId("refresh-profile").hidden = view !== "profiles";
+    byId("detail-title").textContent = view === "profiles" ? "User Profile" : "Details";
+    document.querySelector(".list-panel").hidden = view === "profiles";
+    byId("workspace-grid").classList.toggle("profile-view", view === "profiles");
     byId("item-list").hidden = view === "profiles";
     byId("refresh-list").hidden = view === "profiles";
     for (const tab of document.querySelectorAll("[data-view]")) {
@@ -163,11 +172,8 @@
     const generation = state.generation;
     const requestId = ++state.profileRequest;
     try {
-      const params = new URLSearchParams();
-      const budget = byId("profile-budget").value;
-      if (budget !== "") params.set("max_tokens", budget);
       status("Loading User Profile…");
-      const profile = await json(route(params.size ? `profile?${params}` : "profile"));
+      const profile = await json(route("profile"));
       if (!current(generation) || state.view !== "profiles" || requestId !== state.profileRequest) return false;
       const message = showProfile(profile);
       status(message || "User Profile loaded.");
@@ -214,8 +220,8 @@
       current: "Up to date",
       dirty: "Out of date",
       stale: "Out of date",
-      partial: "Incomplete",
-      uncovered: "Incomplete",
+      partial: "Some inputs unavailable",
+      uncovered: "Up to date",
       missing: profile.profile_revision == null ? "Not created" : "Needs rebuild",
     };
     const line = element("div", undefined, "profile-freshness");
@@ -240,24 +246,33 @@
   }
 
   function showProfile(profile) {
+    const instruction = profile.instruction || "";
+    const editor = byId("profile-instruction");
+    if (editor.value === state.savedProfileInstruction) editor.value = instruction;
+    state.savedProfileInstruction = instruction;
+    byId("profile-default-prompt").textContent = profile.default_prompt;
+    byId("profile-instruction-status").textContent = profile.instruction
+      ? "Saved custom instruction active; it supplements the default prompt."
+      : "Default prompt active; no saved custom instruction.";
+    byId("profile-use-default").hidden = !instruction;
+    byId("refresh-profile").textContent = profile.profile_revision == null ? "Create profile" : "Refresh profile";
     const detail = byId("detail");
     const failedInputs = profile.failed_inputs || 0;
     const blockedInputs = profile.blocked_inputs || 0;
     const uncoveredInputs = profile.uncovered_inputs || 0;
-    detail.replaceChildren(element("h3", "Read-only User Profile"));
+    detail.replaceChildren();
     detail.append(profileStatusLine(profile));
     if (profile.content) detail.append(renderProfileContent(profile.content));
-    if (profile.instruction) detail.append(labelValue("Saved instruction", profile.instruction));
     if (failedInputs > 0) detail.append(labelValue("Failed Insight inputs", failedInputs));
     if (blockedInputs > 0) detail.append(labelValue("Failed initial processing", blockedInputs));
     let message = "";
     if (!profile.content) {
       if ((profile.omitted || []).some(item => item.reason === "budget")) {
-        message = "User Profile exceeds the preview token budget. Increase or clear the budget to view the complete document.";
+        message = "This User Profile exceeds the server's display limit.";
       } else if (profile.profile_revision == null) {
-        message = "No generated User Profile yet. Use Create/Refresh User Profile to create one from eligible inputs.";
+        message = "No generated User Profile yet. Use Create profile to create one from eligible inputs.";
       } else if (profile.freshness === "missing") {
-        message = "This stored revision has no User Profile document. Use Create/Refresh User Profile to build one from current sources.";
+        message = "This stored revision has no User Profile document. Use Refresh profile to build one from current sources.";
       } else {
         message = "The stored User Profile is unavailable for these inputs. Refresh it to rebuild from current sources.";
       }
@@ -265,7 +280,12 @@
     }
     if (failedInputs > 0) detail.append(element("p", `${failedInputs} Insight input${failedInputs === 1 ? "" : "s"} failed. ${profile.content ? "This User Profile uses" : "A refreshed User Profile can use"} only ready information.`));
     if (blockedInputs > 0) detail.append(element("p", `${blockedInputs} memory input${blockedInputs === 1 ? "" : "s"} could not be prepared. Check the input operation before refreshing the User Profile.`));
-    if (uncoveredInputs > 0) detail.append(element("p", `${uncoveredInputs} eligible memory item${uncoveredInputs === 1 ? " was" : "s were"} beyond this User Profile's input limit. The document may miss details.`));
+    if (uncoveredInputs > 0) {
+      const generationDetails = element("details");
+      generationDetails.append(element("summary", "Generation details"));
+      generationDetails.append(labelValue("Insights outside this summary", uncoveredInputs));
+      detail.append(generationDetails);
+    }
     const references = profile.references || [];
     if (references.length) {
       const referenceDetails = element("details", undefined, "profile-references");
@@ -301,21 +321,18 @@
     } catch (error) { if (current(generation)) showError(error); }
   }
 
-  async function refreshProfile() {
+  async function refreshProfile(body = {}) {
     const generation = state.generation;
     const requestId = ++state.profileRequest;
     try {
       status("Checking User Profile inputs…");
-      const instruction = byId("profile-instruction").value.trim();
-      const reset = byId("profile-reset-instruction").checked;
-      if (instruction && reset) throw new Error("Clear the custom instruction to use the default format.");
-      const body = reset ? { reset_instruction: true } : instruction ? { instruction } : {};
       const outcome = await json(route("profile/refresh"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (!current(generation) || state.view !== "profiles" || requestId !== state.profileRequest) return;
+      if (body.reset_instruction) byId("profile-instruction").value = "";
       if (outcome.status === "unchanged") {
         if (await loadProfile()) status("Nothing new to create or refresh. Stored User Profile reused with zero generation calls.");
       } else {
@@ -883,9 +900,15 @@
   byId("search-form").addEventListener("submit", search);
   byId("profile-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    loadProfile().catch(showError);
+    const instruction = byId("profile-instruction").value.trim();
+    if (!instruction) {
+      status("Enter custom instructions before applying them.", true);
+      return;
+    }
+    refreshProfile({ instruction });
   });
-  byId("refresh-profile").addEventListener("click", refreshProfile);
+  byId("refresh-profile").addEventListener("click", () => refreshProfile());
+  byId("profile-use-default").addEventListener("click", () => refreshProfile({ reset_instruction: true }));
   byId("export-button").addEventListener("click", createExport);
   for (const tab of document.querySelectorAll("[data-view]")) {
     tab.addEventListener("click", () => setView(tab.dataset.view));

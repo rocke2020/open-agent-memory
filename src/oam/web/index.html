@@ -54,7 +54,7 @@
         <button type="button" data-view="profiles" aria-pressed="false">User Profile</button>
       </nav>
 
-      <div class="workspace-grid">
+      <div id="workspace-grid" class="workspace-grid">
         <section class="card list-panel" aria-labelledby="list-title">
           <div class="panel-heading">
             <h2 id="list-title">Memories</h2>
@@ -67,16 +67,6 @@
               <button type="submit">Search</button>
             </div>
           </form>
-          <form id="profile-form" class="profile-form" hidden>
-            <label for="profile-instruction">Custom User Profile instruction (optional)</label>
-            <textarea id="profile-instruction" rows="3" maxlength="4000" placeholder="Leave blank to reuse the saved instruction"></textarea>
-            <label><input id="profile-reset-instruction" type="checkbox">Use the default User Profile format</label>
-            <label>Preview token budget <input id="profile-budget" type="number" min="0" placeholder="Server default"></label>
-            <div class="actions">
-              <button type="submit">View User Profile</button>
-              <button id="refresh-profile" type="button" class="secondary">Create/Refresh User Profile</button>
-            </div>
-          </form>
           <button id="new-resource" type="button" class="secondary" hidden>Add Resource</button>
           <ul id="item-list" class="item-list" aria-label="Current items"></ul>
           <button id="load-more" type="button" class="secondary" hidden>Load more</button>
@@ -85,8 +75,27 @@
         <section class="card detail-panel" aria-labelledby="detail-title">
           <div class="panel-heading">
             <h2 id="detail-title">Details</h2>
+            <button id="refresh-profile" type="button" class="secondary" hidden>Refresh profile</button>
           </div>
           <div id="detail" class="detail-content"><p>Select an item to inspect its source and readiness.</p></div>
+          <form id="profile-form" class="profile-form" hidden>
+            <details id="profile-customization">
+              <summary>Customize profile</summary>
+              <div class="profile-customization-fields">
+                <p id="profile-instruction-status" class="form-note" role="status" aria-label="Saved profile instruction"></p>
+                <label for="profile-instruction">Custom instructions</label>
+                <textarea id="profile-instruction" rows="3" maxlength="4000" placeholder="Describe the content or format you want"></textarea>
+                <div class="actions">
+                  <button type="submit">Apply and refresh</button>
+                  <button id="profile-use-default" type="button" class="secondary" hidden>Use default instructions</button>
+                </div>
+                <details id="profile-prompt-details">
+                  <summary>Default profile prompt</summary>
+                  <pre id="profile-default-prompt" class="source-text"></pre>
+                </details>
+              </div>
+            </details>
+          </form>
         </section>
       </div>
     </section>

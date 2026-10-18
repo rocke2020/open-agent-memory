@@ -107,8 +107,8 @@ def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(
                 return SimpleNamespace(fetchall=lambda: rows)
             if "SELECT candidate.unit_id" in query:
                 rows = [
-                    ("f1", "A", "source-a", 1, None, None, None, None),
-                    ("f2", "B", "source-b", 1, None, None, None, None),
+                    ("f1", "A", "source-a", 1, None, None, None, None, None),
+                    ("f2", "B", "source-b", 1, None, None, None, None, None),
                 ]
                 return SimpleNamespace(fetchall=lambda: rows)
             if "SELECT unit_id FROM eligible WHERE unit_id=ANY" in query:

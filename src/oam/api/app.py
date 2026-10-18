@@ -1,11 +1,13 @@
 import asyncio
 import json
+import logging
 import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from ipaddress import ip_address
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -46,6 +48,12 @@ from oam.contracts.credentials import (
     CredentialRevokedResponse,
 )
 from oam.contracts.debug import ReplayRequest
+from oam.contracts.memory import (
+    MAX_MEMORY_OFFSET,
+    MAX_MEMORY_PAGE_SIZE,
+    MEMORY_KIND_BY_TYPE,
+    MemoryType,
+)
 from oam.contracts.operations import (
     OperationReadiness,
     OperationResponse,
@@ -66,7 +74,7 @@ from oam.contracts.retain import (
     UserRequest,
 )
 from oam.contracts.search import SearchManyRequest, SearchRequest
-from oam.db.inspection import SourcePolicyChanged
+from oam.db.inspection import MemoryNotFound, SourcePolicyChanged
 from oam.db.queue_admission import QueueAdmissionFull
 from oam.db.sources import IdempotencyConflict, SourceNotFound, SourceVersionConflict
 from oam.debug.traces import TraceNotFound
@@ -206,6 +214,7 @@ def create_app(
 
     @app.middleware("http")
     async def request_boundary(request: Request, call_next):
+        request.state.request_id = f"req_{uuid4().hex}"
         bearer_secret = _bearer_secret(request.headers.get("authorization"))
         mode = app.state.auth_mode
         needs_key = _requires_bearer(request.url.path) and (
@@ -275,7 +284,7 @@ def create_app(
             else:
                 request.state.actor = actor
                 response = await call_next(request)
-        response.headers["X-Request-ID"] = f"req_{uuid4().hex}"
+        response.headers["X-Request-ID"] = request.state.request_id
         response.headers["OAM-Contract-Version"] = resolved.config.contract_version
         return response
 
@@ -889,11 +898,44 @@ def _register_reserved_routes(
         )
 
     @app.get("/v1/users/{user_id}/memories", tags=["Memory"])
-    def list_memories(request: Request, user_id: str, after: str | None = None) -> dict:
-        return _content_call(
+    def list_memories(
+        request: Request,
+        user_id: str,
+        after: str | None = None,
+        memory_type: MemoryType | None = None,
+        limit: int | None = Query(default=None, ge=1, le=MAX_MEMORY_PAGE_SIZE),
+        offset: int = Query(default=0, ge=0, le=MAX_MEMORY_OFFSET),
+    ) -> dict:
+        if after and offset:
+            raise HTTPException(422, detail={"code": "InvalidRequest"})
+        return _memory_read_call(
+            request,
             lambda: _require_runtime(runtime).list_memories(
-                request.state.actor, user_id, after=after
-            )
+                request.state.actor,
+                user_id,
+                after=after,
+                memory_type=memory_type,
+                limit=limit,
+                offset=offset,
+            ),
+            operation="list",
+            memory_type=memory_type or "all",
+        )
+
+    @app.get("/v1/users/{user_id}/memories/{memory_id}", tags=["Memory"])
+    def get_memory(
+        request: Request,
+        user_id: str,
+        memory_id: str,
+        memory_type: MemoryType,
+    ) -> dict:
+        return _memory_read_call(
+            request,
+            lambda: _require_runtime(runtime).get_memory(
+                request.state.actor, user_id, memory_id, kind=MEMORY_KIND_BY_TYPE[memory_type]
+            ),
+            operation="detail",
+            memory_type=memory_type,
         )
 
     @app.delete("/v1/users/{user_id}/memories/{memory_id}", status_code=202, tags=["Memory"])
@@ -1185,6 +1227,41 @@ def _validate_limits(body, config: OAMConfig) -> None:
         ) from exc
 
 
+def _memory_read_call(
+    request: Request, call: Callable[[], dict], *, operation: str, memory_type: str
+):
+    began = monotonic()
+    result: dict = {}
+    status_code, reason = 500, "InternalError"
+    try:
+        result = _content_call(call)
+        status_code, reason = 200, "none"
+        return result
+    except HTTPException as exc:
+        status_code = exc.status_code
+        reason = exc.detail.get("code", "RequestFailed")
+        raise
+    finally:
+        returned = len(result["items"]) if "items" in result else int(status_code == 200)
+        logging.getLogger("uvicorn.error").info(
+            "memory_read request_id=%s operation=%s memory_type=%s status=%s "
+            "limit=%s offset=%s pagination=%s returned=%s total=%s policy_epoch=%s "
+            "reason=%s duration_ms=%.2f",
+            request.state.request_id,
+            operation,
+            memory_type,
+            status_code,
+            result.get("limit"),
+            result.get("offset"),
+            "cursor" if request.query_params.get("after") else "offset",
+            returned,
+            result.get("total"),
+            result.get("policy_epoch"),
+            reason,
+            (monotonic() - began) * 1000,
+        )
+
+
 def _content_call(call):
     try:
         return call()
@@ -1208,7 +1285,7 @@ def _content_call(call):
         raise HTTPException(409, detail={"code": type(exc).__name__}) from exc
     except SourceNotFound as exc:
         raise HTTPException(404, detail={"code": "SourceUnavailable"}) from exc
-    except RemovalNotFound as exc:
+    except (RemovalNotFound, MemoryNotFound) as exc:
         raise HTTPException(404, detail={"code": "MemoryUnavailable"}) from exc
     except TraceNotFound as exc:
         raise HTTPException(404, detail={"code": "TraceUnavailable"}) from exc

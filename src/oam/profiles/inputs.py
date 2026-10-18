@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -13,9 +14,8 @@ from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_SUPPORT, ELIGIBLE_UNITS
 from oam.profiles.resources import map_profile_data
 
-PROFILE_INPUT_SCHEMA_VERSION = 4
+PROFILE_INPUT_SCHEMA_VERSION = 5
 MAX_PROMPT_UNITS = 64
-MAX_PROMPT_UNITS_PER_KIND = 32
 MAX_PASSAGES_PER_MEMORY = 4
 MAX_PASSAGES_PER_UNIT = 8
 MAX_UNIT_TEXT_CHARS = 2000
@@ -163,6 +163,7 @@ class ProfileInputs:
     prompt_inputs: list[dict[str, Any]]
     eligible_support_ids: set[str]
     uncovered_inputs: int
+    stored_support_inputs: list[dict[str, Any]] = dataclass_field(default_factory=list)
 
 
 def _identity(payload: dict[str, Any]) -> bytes:
@@ -211,13 +212,7 @@ def _exact_fields(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
 
 
 def _prompt_inputs(cursor, authority: AuthorizedUser, units: list[dict], generation_id: str):
-    facts = [row for row in units if row["kind"] == "fact"]
-    insights = [row for row in units if row["kind"] == "insight"]
-    selected = facts[:MAX_PROMPT_UNITS_PER_KIND] + insights[:MAX_PROMPT_UNITS_PER_KIND]
-    remaining = MAX_PROMPT_UNITS - len(selected)
-    selected += (facts[MAX_PROMPT_UNITS_PER_KIND:] + insights[MAX_PROMPT_UNITS_PER_KIND:])[
-        :remaining
-    ]
+    selected = units[:MAX_PROMPT_UNITS]
     insight_keys = {
         (row["insight_id"], row["insight_revision"]) for row in selected if row["kind"] == "insight"
     }
@@ -279,7 +274,13 @@ def _prompt_inputs(cursor, authority: AuthorizedUser, units: list[dict], generat
     return result
 
 
-def load_profile_inputs(connection, authority: AuthorizedUser, generation_id: str) -> ProfileInputs:
+def load_profile_inputs(
+    connection,
+    authority: AuthorizedUser,
+    generation_id: str,
+    *,
+    stored_support_ids: set[str] | None = None,
+) -> ProfileInputs:
     """Load current Profile inputs in one caller-owned PostgreSQL connection."""
     if not authority.allows("memory:read"):
         raise PermissionError("memory:read is required")
@@ -318,7 +319,18 @@ def load_profile_inputs(connection, authority: AuthorizedUser, generation_id: st
             ),
         )
         pending = cursor.fetchall()
-        prompt_inputs = _prompt_inputs(cursor, authority, units, generation_id)
+        profile_units = [row for row in units if row["kind"] == "insight"]
+        prompt_inputs = _prompt_inputs(cursor, authority, profile_units, generation_id)
+        stored_support_inputs = (
+            _prompt_inputs(
+                cursor,
+                authority,
+                [row for row in units if row["unit_id"] in stored_support_ids],
+                generation_id,
+            )
+            if stored_support_ids
+            else []
+        )
 
     supported: dict[str, dict[str, Any]] = {}
     for row in units:
@@ -355,7 +367,7 @@ def load_profile_inputs(connection, authority: AuthorizedUser, generation_id: st
                     row["insight_subtype"],
                     row["content_text"],
                 ]
-                for row in units
+                for row in profile_units
             ],
             "profile_resources": [[row["source_id"], row["source_version"]] for row in resources],
             "pending": [
@@ -387,5 +399,6 @@ def load_profile_inputs(connection, authority: AuthorizedUser, generation_id: st
         policy_epoch=state["policy_epoch"],
         prompt_inputs=prompt_inputs,
         eligible_support_ids=eligible_support_ids,
-        uncovered_inputs=len(units) - len(prompt_inputs),
+        uncovered_inputs=len(profile_units) - len(prompt_inputs),
+        stored_support_inputs=stored_support_inputs,
     )

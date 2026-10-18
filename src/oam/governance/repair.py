@@ -52,7 +52,8 @@ def repair_insights(store, models) -> bool:
             store.guard(connection)
             rows = connection.execute(
                 f"WITH eligible AS ({ELIGIBLE_UNITS}) "
-                "SELECT unit_id,memory_id,content_text,source_id,source_version,mentioned_at "
+                "SELECT unit_id,memory_id,content_text,source_id,source_version,mentioned_at,"
+                "locator->>'role' AS message_role "
                 "FROM eligible WHERE kind='fact' AND memory_id=ANY(%s) "
                 "ORDER BY memory_id,unit_id",
                 (list(support_ids),),
@@ -92,6 +93,7 @@ def repair_insights(store, models) -> bool:
                     text=row[2],
                     source_refs=(f"{row[3]}:{row[4]}",),
                     mentioned_at=row[5],
+                    message_role=row[6],
                 )
                 for row in rows
             ),

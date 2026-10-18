@@ -1,5 +1,7 @@
 """Recorded output cannot outlive the source policy that supports it."""
 
+import time
+
 import pytest
 from psycopg.types.json import Jsonb
 from test_source_version_admission import command
@@ -45,8 +47,8 @@ def test_recorded_trace_redacts_content_after_source_deletion(source_database):
                 "paths": [],
             }
         ],
-        "context": "[passage] passage memory\nPrivate text\nSource: ",
-        "context_tokens": 12,
+        "context": "[1] passage memory\nPrivate text\nSource: ",
+        "context_tokens": 10,
         "tokenizer": "oam-unicode-quarter-v1",
         "diagnostics": {"generative_calls": 0},
     }
@@ -62,7 +64,7 @@ def test_recorded_trace_redacts_content_after_source_deletion(source_database):
         ),
     )
     config = load_config("configs/oam.yaml").config
-    recall = RecallRepository(connection, authority, config, deadline=10**12)
+    recall = RecallRepository(connection, authority, config, deadline=time.monotonic() + 10)
     assert recall.record_trace(
         "recorded", 0, {"arms": {"dense": ["passage"]}, "query_hash": "hash"}, result
     )

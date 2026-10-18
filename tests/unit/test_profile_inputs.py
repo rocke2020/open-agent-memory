@@ -338,10 +338,11 @@ def test_loader_returns_supported_memory_exact_fields_and_cited_prompt_inputs() 
             "locator": {"message": 1},
         }
     ]
-    assert result.prompt_inputs[1]["support_memory_ids"] == ["fact_1"]
-    assert result.prompt_inputs[1]["source_passages"] == result.prompt_inputs[0]["source_passages"]
-    assert result.prompt_inputs[1]["subtype"] == "projects"
-    assert result.prompt_inputs[1]["revision"] == 2
+    assert len(result.prompt_inputs) == 1
+    assert result.prompt_inputs[0]["kind"] == "insight"
+    assert result.prompt_inputs[0]["support_memory_ids"] == ["fact_1"]
+    assert result.prompt_inputs[0]["subtype"] == "projects"
+    assert result.prompt_inputs[0]["revision"] == 2
     assert result.pending_inputs == 0
     assert result.policy_epoch == 4
     assert len(result.identity) == 32
@@ -390,8 +391,9 @@ def test_evidence_only_change_does_not_dirty_profile_identity_but_coverage_does(
     assert blocked.waiting_source_ids == ("chat_2",)
 
 
-def test_bounded_prompt_keeps_insights_when_many_facts_exist() -> None:
+def test_l1_facts_do_not_fill_profile_inputs_or_change_refresh_identity() -> None:
     connection = ProfileConnection()
+    first = load(connection)
     insight = connection.units[-1]
     connection.units = [
         {
@@ -412,10 +414,45 @@ def test_bounded_prompt_keeps_insights_when_many_facts_exist() -> None:
 
     inputs = load(connection)
 
-    assert len(inputs.prompt_inputs) <= 64
-    assert {item["kind"] for item in inputs.prompt_inputs} == {"fact", "insight"}
+    assert len(inputs.prompt_inputs) == 1
+    assert {item["kind"] for item in inputs.prompt_inputs} == {"insight"}
     assert len(inputs.supported) == 101
-    assert inputs.uncovered_inputs == 37
+    assert inputs.uncovered_inputs == 0
+    assert inputs.identity == first.identity
+
+
+def test_profile_input_limit_counts_only_insights() -> None:
+    connection = ProfileConnection()
+    insight = connection.units[-1]
+    connection.units += [
+        {
+            **insight,
+            "unit_id": f"extra_insight_unit_{index}",
+            "insight_id": f"extra_insight_{index}",
+        }
+        for index in range(64)
+    ]
+    connection.insight_links += [
+        {"insight_id": f"extra_insight_{index}", "insight_revision": 2, "memory_id": "fact_1"}
+        for index in range(64)
+    ]
+
+    inputs = load(connection)
+
+    assert len(inputs.prompt_inputs) == 64
+    assert all(item["kind"] == "insight" for item in inputs.prompt_inputs)
+    assert inputs.uncovered_inputs == 1
+
+
+def test_profile_data_remains_available_without_insights() -> None:
+    connection = ProfileConnection()
+    connection.units = connection.units[:1]
+
+    inputs = load(connection)
+
+    assert inputs.prompt_inputs == []
+    assert inputs.exact_fields[0]["value"] == "Python"
+    assert inputs.uncovered_inputs == 0
 
 
 def test_prompt_limits_cited_passages_per_input() -> None:

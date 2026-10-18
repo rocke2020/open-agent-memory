@@ -34,7 +34,8 @@ def test_stored_field_profile_is_readable_without_regeneration() -> None:
         blocked_inputs=0,
         waiting_source_ids=(),
         policy_epoch=1,
-        prompt_inputs=[
+        prompt_inputs=[],
+        stored_support_inputs=[
             {
                 "kind": "fact",
                 "id": "fact_1",
@@ -96,13 +97,14 @@ def test_stored_field_profile_is_readable_without_regeneration() -> None:
     assert withdrawn["references"] == []
 
     inputs.eligible_support_ids.add("fact_1")
-    inputs.prompt_inputs.clear()
+    inputs.stored_support_inputs.clear()
     unhydrated = _view(config, inputs, snapshot, 500)
     assert unhydrated["content"] is None
     assert unhydrated["freshness"] == "stale"
 
 
-def test_profile_view_reports_only_a_recorded_publication_time() -> None:
+def test_profile_view_reports_only_a_recorded_publication_time(monkeypatch) -> None:
+    monkeypatch.setattr(profile_service, "PROFILE_SYSTEM", "Current server Profile prompt.")
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     inputs = ProfileInputs(
         identity=b"x" * 32,
@@ -140,3 +142,9 @@ def test_profile_view_reports_only_a_recorded_publication_time() -> None:
     assert _view(config, inputs, snapshot, 1)["content"] is None
     inputs.eligible_support_ids.clear()
     assert _view(config, inputs, snapshot, 500)["content"] is None
+
+    for stored in (None, snapshot, {**snapshot, "instruction": "Return JSON."}):
+        view = _view(config, inputs, stored, 0)
+        assert view["default_prompt"] == "Current server Profile prompt."
+        assert view["instruction"] == (stored["instruction"] if stored else None)
+        assert view["generation_calls"] == 0

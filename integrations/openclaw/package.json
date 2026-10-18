@@ -5,7 +5,7 @@
   "description": "Open Agent Memory plugin for OpenClaw",
   "type": "module",
   "scripts": {
-    "build": "esbuild index.ts --format=esm --platform=node --target=node22 --outfile=dist/index.js",
+    "build": "esbuild index.ts --bundle --format=esm --platform=node --target=node22 --outfile=dist/index.js",
     "test": "node --experimental-strip-types --test test/*.test.mjs",
     "setup": "node setup.mjs",
     "prepack": "npm run build"
@@ -14,6 +14,7 @@
   "files": [
     "setup.mjs",
     "index.ts",
+    "cron.ts",
     "dist/index.js",
     "openclaw.plugin.json",
     "README.md"

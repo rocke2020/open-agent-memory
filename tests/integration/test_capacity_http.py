@@ -20,6 +20,23 @@ pytestmark = pytest.mark.integration
 pytest_plugins = ["test_core_http"]
 
 
+def provider_role(payload, path):
+    """Identify the operation when several generation roles share one model."""
+    if path.endswith("/embeddings"):
+        return "embedding"
+    content = payload["messages"][-1]["content"]
+    if isinstance(content, list):
+        return "extraction"
+    envelope = json.loads(content)
+    if "center" in envelope or any("center" in p for p in envelope.get("passages", [])):
+        return "extraction"
+    if "facts" in envelope:
+        return "insights"
+    if "inputs" in envelope:
+        return "profile"
+    return "abstract"
+
+
 @pytest.fixture
 def fake_provider(monkeypatch):
     calls = []
@@ -31,7 +48,7 @@ def fake_provider(monkeypatch):
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             vision = isinstance(request.get("messages", [{}])[-1].get("content"), list)
-            calls.append((self.path, request["model"], vision))
+            calls.append((self.path, provider_role(request, self.path), vision))
             if self.path.endswith("/embeddings"):
                 response = {
                     "data": [
@@ -218,7 +235,7 @@ async def test_embedded_runner_accepts_indexes_and_recalls_both_origins(
             results[mode] = {"elapsed_seconds": elapsed, "response": payload}
         (tmp_path / "cited-recall.json").write_text(json.dumps(results, indent=2))
     assert app.state.worker.stop_event.is_set()
-    assert any(model == "synthetic-vlm" for _, model, _ in fake_provider)
+    assert any(role == "extraction" for _, role, _ in fake_provider)
     with psycopg.connect(dsn) as connection:
         assert (
             connection.execute(

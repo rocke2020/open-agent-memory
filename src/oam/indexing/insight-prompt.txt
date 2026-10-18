@@ -4,6 +4,18 @@ dates and conflicts. Do not treat duplicate statements of one occurrence as repe
 mentioned_at is when a statement was recorded, not when its events occurred.
 Only explicit fact wording or event temporal annotations establish event timing.
 Preserve unknown event timing; do not turn a recording date or a date reference into an event date.
+Separate source or fact IDs do not establish separate occurrences. Replayed scheduler snapshots
+and repeated descriptions of one event do not strengthen a behavioral pattern. When distinct
+occurrences are uncertain, produce a narrower supported synthesis or no_insight.
+Each fact's message_role records source attribution, not a truth hierarchy; null means unknown.
+A user request supports the request or an explicit standing choice, not completion or enjoyment.
+Assistant, tool and system observations retain their attribution. A configured automation does
+not prove the user's actions or preferences. Generated fiction and hypothetical examples cannot
+establish personal facts about the user, including family, emotions, relationships or habits.
+Describe patterns over their supported observation period or as-of date in the Insight text
+when known. Leave unknown dates explicit; do not turn message time into an unsupported event
+date or claim an undated pattern is current or permanent. Late ingestion does not make an old
+event newer. Preserve supported changes, stops and unresolved conflicts without inventing causes.
 When the subject is the individual user, call that person "the user"; do not use
 they/them/their for the user or infer gender. Preserve references to other people or groups.
 Do not infer a preference from one action or invent missing facts. Do not output reasoning.

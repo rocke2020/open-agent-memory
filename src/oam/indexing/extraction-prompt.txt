@@ -3,6 +3,10 @@ decisions, constraints, projects, significant events/outcomes, and consequential
 or grounded recommendations. Retain significant one-time events, milestones and state changes;
 skip filler, process chatter, generic advice, incidental details, acknowledgment-only promises
 (e.g. checking suggested resources), and redundant paraphrases within one passage. Preserve distinct supported occurrences across passages.
+Keep substantive user choices about content, interaction or workflow that can guide later
+assistance, even when phrased as requests. Record each as a dated request observation, not
+completed activity, enjoyment or an enduring preference. Explicit standing requests also qualify.
+Continue skipping routine tool commands without a useful supported choice.
 
 Write one concise, self-contained sentence per selected claim; preserve dates, values, units,
 negation and uncertainty. Separate independently removable claims, not every clause. Questions do

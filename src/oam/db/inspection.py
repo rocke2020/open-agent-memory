@@ -8,12 +8,56 @@ from dataclasses import asdict
 from psycopg.rows import dict_row
 
 from oam.auth.credentials import AuthorizedUser
+from oam.contracts.memory import (
+    MAX_MEMORY_OFFSET,
+    MAX_MEMORY_PAGE_SIZE,
+    MEMORY_KIND_BY_TYPE,
+    MEMORY_TYPE_BY_KIND,
+    MemoryKind,
+    MemoryType,
+)
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.profiles.resources import map_profile_data, public_profile_data_support
 
 INSPECTION_PAGE_SIZE = 50
 RESOURCE_PASSAGE_LIMIT = 200
+
+_MEMORY_ITEMS = """
+SELECT u.unit_id,u.kind,u.memory_id,u.insight_id,u.insight_revision,
+       i.subtype,u.origin,u.content_text AS text,u.locator,u.created_at,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+           'source_id',e.source_id,'source_version',e.source_version,
+           'evidence_id',sp.evidence_id,'passage_id',sp.passage_id,'span',sp.span)
+           ORDER BY e.source_id,sp.passage_id)
+           FROM support sp JOIN evidence e USING(tenant_id,user_id,evidence_id)
+           WHERE sp.tenant_id=u.tenant_id AND sp.user_id=u.user_id
+           AND sp.memory_id=ANY(CASE WHEN u.kind='insight' THEN
+               ARRAY(SELECT memory_id FROM insight_support isp
+                     WHERE isp.tenant_id=u.tenant_id AND isp.user_id=u.user_id
+                     AND isp.insight_id=u.insight_id
+                     AND isp.insight_revision=u.insight_revision)
+               ELSE ARRAY[u.memory_id] END)), '[]'::jsonb) AS citations,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+           'memory_id',isp.memory_id,'support_revision',isp.support_revision)
+           ORDER BY isp.memory_id)
+           FROM insight_support isp WHERE isp.tenant_id=u.tenant_id
+           AND isp.user_id=u.user_id AND isp.insight_id=u.insight_id
+           AND isp.insight_revision=u.insight_revision), '[]'::jsonb) AS supports,
+       ARRAY(SELECT DISTINCT isp.insight_id FROM insight_support isp
+             JOIN insights parent ON (parent.tenant_id,parent.user_id,parent.insight_id,
+                 parent.revision)=(isp.tenant_id,isp.user_id,isp.insight_id,isp.insight_revision)
+             WHERE isp.tenant_id=u.tenant_id AND isp.user_id=u.user_id
+             AND isp.memory_id=u.memory_id AND parent.visible_to IS NULL
+             ORDER BY isp.insight_id) AS affected_insight_ids
+FROM selected u LEFT JOIN insights i ON
+    (i.tenant_id,i.user_id,i.insight_id,i.revision)=
+    (u.tenant_id,u.user_id,u.insight_id,u.insight_revision)
+"""
+
+
+class MemoryNotFound(LookupError):
+    """The requested typed learned record is not currently readable."""
 
 
 class SourcePolicyChanged(RuntimeError):
@@ -256,7 +300,24 @@ class SourceInspector:
                 "policy_epoch": epoch,
             }
 
-    def list_memories(self, connection, authority: AuthorizedUser, *, after: str | None) -> dict:
+    def list_memories(
+        self,
+        connection,
+        authority: AuthorizedUser,
+        *,
+        after: str | None,
+        memory_type: MemoryType | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict:
+        page_size = INSPECTION_PAGE_SIZE if limit is None else limit
+        if not 1 <= page_size <= MAX_MEMORY_PAGE_SIZE or not 0 <= offset <= MAX_MEMORY_OFFSET:
+            raise ValueError("invalid memory page bounds")
+        if (memory_type is not None and memory_type not in MEMORY_KIND_BY_TYPE) or (
+            after and offset
+        ):
+            raise ValueError("invalid memory type or mixed pagination")
+        kind = None if memory_type is None else MEMORY_KIND_BY_TYPE[memory_type]
         with connection.transaction():
             epoch = self._admit(connection, authority)
             cursor_time = None
@@ -272,49 +333,67 @@ class SourceInspector:
             with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}) "
-                    "SELECT u.unit_id,u.kind,u.memory_id,u.insight_id,u.insight_revision,"
-                    "i.subtype,u.origin,u.content_text AS text,u.locator,"
-                    "COALESCE((SELECT jsonb_agg(jsonb_build_object('source_id',e.source_id,"
-                    "'source_version',e.source_version,'evidence_id',sp.evidence_id,"
-                    "'passage_id',sp.passage_id,'span',sp.span) "
-                    "ORDER BY e.source_id,sp.passage_id) "
-                    "FROM support sp JOIN evidence e USING(tenant_id,user_id,evidence_id) "
-                    "WHERE sp.tenant_id=u.tenant_id AND sp.user_id=u.user_id "
-                    "AND sp.memory_id=ANY(CASE WHEN u.kind='insight' THEN "
-                    "ARRAY(SELECT memory_id FROM insight_support isp "
-                    "WHERE isp.tenant_id=u.tenant_id "
-                    "AND isp.user_id=u.user_id AND isp.insight_id=u.insight_id "
-                    "AND isp.insight_revision=u.insight_revision) ELSE ARRAY[u.memory_id] END)),"
-                    "'[]'::jsonb) AS citations,"
-                    "COALESCE((SELECT jsonb_agg(jsonb_build_object('memory_id',isp.memory_id,"
-                    "'support_revision',isp.support_revision) ORDER BY isp.memory_id) "
-                    "FROM insight_support isp WHERE isp.tenant_id=u.tenant_id "
-                    "AND isp.user_id=u.user_id AND isp.insight_id=u.insight_id "
-                    "AND isp.insight_revision=u.insight_revision),'[]'::jsonb) AS supports,"
-                    "ARRAY(SELECT DISTINCT isp.insight_id FROM insight_support isp "
-                    "JOIN insights parent ON (parent.tenant_id,parent.user_id,parent.insight_id,"
-                    "parent.revision)=(isp.tenant_id,isp.user_id,isp.insight_id,"
-                    "isp.insight_revision) "
-                    "WHERE isp.tenant_id=u.tenant_id AND isp.user_id=u.user_id "
-                    "AND isp.memory_id=u.memory_id AND parent.visible_to IS NULL "
-                    "ORDER BY isp.insight_id) AS affected_insight_ids "
-                    "FROM eligible u LEFT JOIN insights i ON "
-                    "(i.tenant_id,i.user_id,i.insight_id,i.revision)="
-                    "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision) "
-                    "WHERE u.kind IN ('fact','insight') "
-                    "AND (%s::timestamptz IS NULL OR "
-                    "(u.created_at,u.unit_id)<(%s::timestamptz,%s)) "
-                    "ORDER BY u.created_at DESC,u.unit_id DESC LIMIT %s",
-                    (cursor_time, cursor_time, after or "", INSPECTION_PAGE_SIZE + 1),
+                    ",filtered AS MATERIALIZED (SELECT tenant_id,user_id,unit_id,created_at "
+                    "FROM eligible "
+                    "WHERE kind IN ('fact','insight') AND (%s::text IS NULL OR kind=%s)),"
+                    "page AS (SELECT tenant_id,user_id,unit_id FROM filtered "
+                    "WHERE (%s::timestamptz IS NULL OR "
+                    "(created_at,unit_id)<(%s::timestamptz,%s)) "
+                    "ORDER BY created_at DESC,unit_id DESC LIMIT %s OFFSET %s),"
+                    "selected AS (SELECT u.* FROM page JOIN search_units u "
+                    "USING(tenant_id,user_id,unit_id)) "
+                    "SELECT totals.total,item.* FROM (SELECT count(*) AS total FROM filtered) "
+                    f"totals LEFT JOIN LATERAL ({_MEMORY_ITEMS}) item ON true "
+                    "ORDER BY item.created_at DESC,item.unit_id DESC",
+                    (kind, kind, cursor_time, cursor_time, after or "", page_size + 1, offset),
                 )
                 rows = cursor.fetchall()
-            items = [dict(row) for row in rows[:INSPECTION_PAGE_SIZE]]
+            total = rows[0]["total"]
+            records = [
+                {k: v for k, v in row.items() if k != "total"} for row in rows if row["unit_id"]
+            ]
+            items = records[:page_size]
+            for item in items:
+                item["memory_type"] = MEMORY_TYPE_BY_KIND[item["kind"]]
+            has_more = len(records) > page_size
             self._check_policy(connection, authority, epoch)
             return {
                 "items": items,
-                "next_after": items[-1]["unit_id"] if len(rows) > INSPECTION_PAGE_SIZE else None,
+                "total": total,
+                "limit": page_size,
+                "offset": None if after else offset,
+                "next_offset": offset + page_size if has_more and not after else None,
+                "next_after": items[-1]["unit_id"] if has_more else None,
                 "policy_epoch": epoch,
             }
+
+    def get_memory(
+        self,
+        connection,
+        authority: AuthorizedUser,
+        memory_id: str,
+        *,
+        kind: MemoryKind,
+    ) -> dict | None:
+        if kind not in ("fact", "insight"):
+            raise ValueError("invalid memory kind")
+        identity_column = "memory_id" if kind == "fact" else "insight_id"
+        with connection.transaction():
+            epoch = self._admit(connection, authority)
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}),"
+                    "selected AS (SELECT * FROM eligible WHERE kind=%s "
+                    f"AND {identity_column}=%s) {_MEMORY_ITEMS}",
+                    (kind, memory_id),
+                )
+                row = cursor.fetchone()
+            self._check_policy(connection, authority, epoch)
+            return (
+                None
+                if row is None
+                else {**row, "memory_type": MEMORY_TYPE_BY_KIND[kind], "policy_epoch": epoch}
+            )
 
     @staticmethod
     def _resource_row(row) -> dict:

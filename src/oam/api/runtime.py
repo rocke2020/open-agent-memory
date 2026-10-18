@@ -40,6 +40,7 @@ from oam.contracts.credentials import (
 )
 from oam.contracts.debug import ReplayRequest
 from oam.contracts.evidence import EvidenceAppendRequest
+from oam.contracts.memory import MemoryKind, MemoryType
 from oam.contracts.operations import ReconcileAttemptRequest
 from oam.contracts.profile import ProfileDataRequest
 from oam.contracts.resources import EvidenceResourceCreate, ResourceMediaType
@@ -51,7 +52,7 @@ from oam.contracts.retain import (
 )
 from oam.contracts.search import SearchManyRequest, SearchRequest
 from oam.db.context import bind_user
-from oam.db.inspection import SourceInspector
+from oam.db.inspection import MemoryNotFound, SourceInspector
 from oam.db.migrations import load_migrations
 from oam.db.readiness import DATABASE_READINESS_TIMEOUT_SECONDS
 from oam.db.sources import AcceptanceReceipt, AcceptSource, SourceNotFound, SourceRepository
@@ -106,7 +107,20 @@ class APIRuntime(Protocol):
         self, actor: RequestActor, user_id: str, resource_id: str
     ) -> tuple[bytes, str]: ...
 
-    def list_memories(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict: ...
+    def list_memories(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        *,
+        after: str | None,
+        memory_type: MemoryType | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict: ...
+
+    def get_memory(
+        self, actor: RequestActor, user_id: str, memory_id: str, *, kind: MemoryKind
+    ) -> dict: ...
 
     def delete_memory(self, actor: RequestActor, user_id: str, memory_id: str) -> dict: ...
 
@@ -429,10 +443,36 @@ class DatabaseRuntime:
             raise SourceNotFound(resource_id)
         return result
 
-    def list_memories(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict:
+    def list_memories(
+        self,
+        actor: RequestActor,
+        user_id: str,
+        *,
+        after: str | None,
+        memory_type: MemoryType | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
-            return SourceInspector().list_memories(connection, authority, after=after)
+            return SourceInspector().list_memories(
+                connection,
+                authority,
+                after=after,
+                memory_type=memory_type,
+                limit=limit,
+                offset=offset,
+            )
+
+    def get_memory(
+        self, actor: RequestActor, user_id: str, memory_id: str, *, kind: MemoryKind
+    ) -> dict:
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            result = SourceInspector().get_memory(connection, authority, memory_id, kind=kind)
+        if result is None:
+            raise MemoryNotFound(memory_id)
+        return result
 
     def delete_memory(self, actor: RequestActor, user_id: str, memory_id: str) -> dict:
         with self.pool.connection() as connection:

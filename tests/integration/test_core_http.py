@@ -1336,6 +1336,23 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
     assert models.generation_calls == ["extraction", "insights"]
 
 
+def synthetic_profile_insight(user):
+    from oam.models.runtime import ModelResult, Usage
+
+    facts = json.loads(user)["facts"]
+    return ModelResult(
+        content=json.dumps(
+            {
+                "outcome": "insight",
+                "subtype": "general_insights",
+                "text": " ".join(fact["text"] for fact in facts),
+                "support_ids": [fact["id"] for fact in facts],
+            }
+        ),
+        usage=Usage(input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"),
+    )
+
+
 async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_path, monkeypatch):
     from oam.config import load_config
     from oam.exports.validation import validate_directory
@@ -1352,6 +1369,9 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
         timeout_profile = False
 
         def generate(self, role, **kwargs):
+            if role == "insights":
+                self.generation_calls.append(role)
+                return synthetic_profile_insight(kwargs["user"])
             if role != "profile":
                 return super().generate(role, **kwargs)
             assert kwargs["max_output_tokens"] == config.profile.max_output_tokens
@@ -1368,12 +1388,11 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
                 for field in prompt["exact_fields"]
                 if field["key"] == "date_of_birth"
             )
-            fact = next(
-                item
-                for item in prompt["inputs"]
-                if item["kind"] == "fact" and "brief explanations" in item["text"]
+            assert all(item["kind"] == "insight" for item in prompt["inputs"])
+            insight = next(
+                item for item in prompt["inputs"] if "brief explanations" in item["text"]
             )
-            support_id = "report-only" if self.fail_profile else fact["id"]
+            support_id = "report-only" if self.fail_profile else insight["id"]
             body = (
                 json.dumps(
                     {"summary": "The user prefers brief replies.", "date_of_birth": birth_date}
@@ -1777,12 +1796,13 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
         )
         assert timeout_resource.status_code == 202
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-v3")
-        uncertain = await client.post("/v1/users/scope/profile/refresh", json={})
+        timeout_instruction = {"instruction": "Return one JSON object with date_of_birth."}
+        uncertain = await client.post("/v1/users/scope/profile/refresh", json=timeout_instruction)
         assert uncertain.status_code == 202
         models.timeout_profile = True
         with pytest.raises(httpx.ReadTimeout):
             process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-timeout")
-        again = await client.post("/v1/users/scope/profile/refresh", json={})
+        again = await client.post("/v1/users/scope/profile/refresh", json=timeout_instruction)
         assert again.status_code == 409
 
 
@@ -2086,11 +2106,7 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
                 return super().generate(role, **kwargs)
             self.generation_calls.append(role)
             prompt_inputs = json.loads(kwargs["user"])["inputs"]
-            support = next(
-                item
-                for item in prompt_inputs
-                if item["kind"] == ("fact" if insight_failure else "insight")
-            )
+            support = next(item for item in prompt_inputs if item["kind"] == "insight")
             return ModelResult(
                 content=json.dumps(
                     {
@@ -2244,12 +2260,17 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
         assert profile.json()["freshness"] == ("partial" if insight_failure else "current")
         assert profile.json()["pending_inputs"] == (1 if insight_failure else 0)
         assert profile.json()["failed_inputs"] == (1 if insight_failure else 0)
-        assert "brief" in profile.json()["content"]
-        assert profile.json()["references"][0]["kind"] == ("fact" if insight_failure else "insight")
+        if insight_failure:
+            assert profile.json()["support_ids"] == []
+            assert profile.json()["references"] == []
+            assert "brief" not in profile.json()["content"]
+        else:
+            assert "brief" in profile.json()["content"]
+            assert profile.json()["references"][0]["kind"] == "insight"
         unchanged = await client.post("/v1/users/scope/profile/refresh", json={})
         assert unchanged.status_code == 200, unchanged.text
         assert unchanged.json()["status"] == "unchanged"
-        assert models.generation_calls.count("profile") == 1
+        assert models.generation_calls.count("profile") == (0 if insight_failure else 1)
 
 
 @pytest.mark.parametrize(
@@ -2356,7 +2377,9 @@ async def test_profile_main_can_use_supported_project_or_relationship_insight(
         assert profile.json()["references"][0]["kind"] == "insight"
 
 
-async def test_profile_main_builds_dated_age_career_and_family_from_user_facts(core_database):
+async def test_profile_main_builds_dated_age_career_and_family_from_supported_insight(
+    core_database,
+):
     from oam.config import load_config
     from oam.models.runtime import ModelResult, Usage
     from oam.workers.index_source import process_one
@@ -2368,24 +2391,30 @@ async def test_profile_main_builds_dated_age_career_and_family_from_user_facts(c
 
     class BasicProfileModels(SyntheticIndexModels):
         def generate(self, role, **kwargs):
+            if role == "insights":
+                self.generation_calls.append(role)
+                return synthetic_profile_insight(kwargs["user"])
             if role != "profile":
                 return super().generate(role, **kwargs)
             self.generation_calls.append(role)
             assert kwargs["max_output_tokens"] == config.profile.max_output_tokens
             assert kwargs["timeout_seconds"] == config.profile.attempt_timeout_seconds
-            facts = [
-                item for item in json.loads(kwargs["user"])["inputs"] if item["kind"] == "fact"
-            ]
-            age = next(item for item in facts if "44 years old" in item["text"])
-            career = next(item for item in facts if "engineer" in item["text"])
-            family = next(item for item in facts if "maternal uncles" in item["text"])
-            assert age["source_passages"][0]["event_time"] == "2026-09-29T09:00:00+00:00"
+            inputs = json.loads(kwargs["user"])["inputs"]
+            assert len(inputs) == 1 and inputs[0]["kind"] == "insight"
+            insight = inputs[0]
+            for claim in ("44 years old", "engineer", "maternal uncles"):
+                assert claim in insight["text"]
+            assert len(insight["support_memory_ids"]) == 3
+            assert any(
+                passage["event_time"] == "2026-09-29T09:00:00+00:00"
+                for passage in insight["source_passages"]
+            )
             return ModelResult(
                 content=json.dumps(
                     {
                         "content": "The user was 44 years old as of 2026-09-29 [1]. "
-                        "The user is an engineer [2]. The user has four maternal uncles [3].",
-                        "support_ids": [age["id"], career["id"], family["id"]],
+                        "The user is an engineer [1]. The user has four maternal uncles [1].",
+                        "support_ids": [insight["id"]],
                     }
                 ),
                 usage=Usage(
@@ -2439,7 +2468,8 @@ async def test_profile_main_builds_dated_age_career_and_family_from_user_facts(c
         assert "44 years old as of 2026-09-29" in content
         assert "The user is an engineer" in content
         assert "The user has four maternal uncles" in content
-        assert len(profile.json()["references"]) == 3
+        assert len(profile.json()["references"]) == 1
+        assert profile.json()["references"][0]["kind"] == "insight"
 
 
 async def test_profile_read_withholds_superseded_resource_support(core_database):

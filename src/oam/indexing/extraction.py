@@ -24,7 +24,7 @@ from pydantic import (
 )
 
 from oam.config import OAMConfig
-from oam.contracts.evidence import TemporalAnnotation
+from oam.contracts.evidence import MessageRole, TemporalAnnotation
 from oam.indexing.chunker import TextChunk, split_chunk_for_output_retry
 from oam.indexing.entity_names import entity_name_key
 from oam.models.runtime import ModelOutputTooLongError, RuntimeModels, Usage
@@ -126,6 +126,7 @@ class InsightInput(FrozenProjection):
     source_refs: tuple[NonBlank, ...] = Field(min_length=1)
     mentioned_at: datetime | None = None
     temporal_annotations: tuple[TemporalAnnotation, ...] = ()
+    message_role: MessageRole | None = None
 
 
 class InsightResult(FrozenProjection):

@@ -161,14 +161,14 @@ textarea:focus-visible {
   background: currentColor;
 }
 
-.profile-state[data-freshness="current"] {
+.profile-state[data-freshness="current"],
+.profile-state[data-freshness="uncovered"] {
   color: var(--positive);
 }
 
 .profile-state[data-freshness="dirty"],
 .profile-state[data-freshness="stale"],
 .profile-state[data-freshness="partial"],
-.profile-state[data-freshness="uncovered"],
 .profile-state[data-freshness="missing"] {
   color: var(--warning);
 }
@@ -257,6 +257,12 @@ label {
   align-items: start;
 }
 
+.workspace-grid.profile-view {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 64rem;
+  margin-inline: auto;
+}
+
 .panel-heading {
   border-bottom: 1px solid var(--border);
   padding-bottom: 0.75rem;
@@ -270,6 +276,12 @@ label {
   display: grid;
   gap: 0.9rem;
   margin: 1rem 0;
+}
+
+.profile-customization-fields {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1rem;
 }
 
 .profile-form fieldset {
@@ -397,6 +409,7 @@ pre {
 
   .tabs button {
     flex: 1;
+    padding-inline: 0.5rem;
   }
 
   .detail-row {

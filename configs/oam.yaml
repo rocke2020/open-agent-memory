@@ -201,7 +201,7 @@ profile:
   # Maximum accepted UTF-8 Profile content: 16 KB; separate from the model's token cap.
   max_content_bytes: 16384
   # Completion-token cap for Profile refresh generation.
-  max_output_tokens: 2048
+  max_output_tokens: 4096
   # Per-call generation timeout for Profile refresh, overriding model.attempt_timeout_seconds.
   attempt_timeout_seconds: 180
 
