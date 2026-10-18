@@ -36,16 +36,35 @@ def test_default_grouping_uses_a_distinct_generation_from_singletons():
     assert index_generation(config, {}) != index_generation(singleton, {})
 
 
-def test_insight_consolidation_delay_does_not_invalidate_indexed_content():
+def test_insight_consolidation_delay_does_not_invalidate_indexed_content(tmp_path):
     from oam.indexing.identity import index_generation
 
     config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
-    tuned = config.model_copy(
-        update={
-            "index": config.index.model_copy(update={"insight_consolidation_delay_seconds": 7200})
-        }
-    )
+    path = tmp_path / "oam.yaml"
+    path.write_text("index:\n  insight_consolidation_delay_hours: 2\n")
+    tuned = load_config(path).config.model_copy(update={"models": ModelsConfig()})
     assert index_generation(config, {}) == index_generation(tuned, {})
+
+
+def test_insight_embedding_recipe_changes_only_an_insights_enabled_generation(monkeypatch):
+    from oam.indexing import identity
+
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
+    enabled = config.model_copy(
+        update={"index": config.index.model_copy(update={"insights_enabled": True})}
+    )
+    disabled = config.model_copy(
+        update={"index": config.index.model_copy(update={"insights_enabled": False})}
+    )
+    enabled_generation = identity.index_generation(enabled, {})
+    disabled_generation = identity.index_generation(disabled, {})
+
+    monkeypatch.setattr(
+        identity, "INSIGHT_RETRIEVAL_RECIPE", "different-purpose-recipe", raising=False
+    )
+
+    assert identity.index_generation(enabled, {}) != enabled_generation
+    assert identity.index_generation(disabled, {}) == disabled_generation
 
 
 def test_resource_completion_budget_invalidates_generated_resource_checkpoints():

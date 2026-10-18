@@ -578,7 +578,7 @@ def test_semantic_settlement_preserves_direct_usage_with_completed_consolidation
     ("direct_store", "expected_delay_seconds"),
     [
         ({"insights_enabled": True}, 86400),
-        ({"insights_enabled": True, "insight_consolidation_delay_seconds": 7200}, 7200),
+        ({"insights_enabled": True, "insight_consolidation_delay_hours": 2}, 7200),
     ],
     indirect=["direct_store"],
 )

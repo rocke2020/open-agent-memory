@@ -13,12 +13,13 @@ import psycopg
 from pydantic import ValidationError
 
 from oam.config import OAMConfig
-from oam.contracts.search import SearchManyRequest, SearchRequest
+from oam.contracts.search import SearchManyRequest, SearchRequest, TimeBasis
 from oam.models.runtime import (
     MIN_GENERATION_OUTPUT_TOKENS,
     ModelDispatchUnavailable,
     ModelOutputError,
 )
+from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.service import RecallUnavailable
 from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
@@ -34,7 +35,7 @@ def search_many(
     search_one: SearchOne,
 ) -> dict:
     _validate_batch(config, request)
-    deadline = _deadline(config, request, config.request.batch_deadline_seconds)
+    deadline = _deadline(request, config.request.batch_deadline_seconds)
     return _run_batch(config, request, search_one, deadline)
 
 
@@ -49,48 +50,61 @@ def decompose_and_search(
     _validate_queries(config, [request.query])
     if config.models.binding_for("planner") is None:
         raise NotImplementedError("the optional planner role is not configured")
-    deadline = _deadline(config, request, config.request.delegated_deadline_seconds)
-    system = PLANNER_SYSTEM_TEMPLATE.format(max_queries=config.search.max_queries)
-    user = json.dumps({"question": request.query}, ensure_ascii=False)
-    if estimated_tokens(estimate_units(system + user)) > config.planner.max_context_tokens:
-        raise ValueError("planner input exceeds configured context limit")
+    deadline = _deadline(request, config.request.delegated_deadline_seconds)
+    reference_time = request.reference_time or datetime.now(UTC)
+    request = request.model_copy(update={"reference_time": reference_time})
+    if request.time_window is None:
+        parsed = infer_query_time(
+            request.query, reference_time, request.reference_timezone or "UTC"
+        )
+        if parsed.window is not None:
+            request = request.model_copy(
+                update={"time_basis": TimeBasis.EVENT, "time_window": parsed.window}
+            )
 
     usage = None
     calls = 0
     fallback = None
-    try:
-        generated = _call_planner_until_deadline(config, models, system, user, deadline)
-    except (ModelOutputError, httpx.HTTPError, TimeoutError, ValueError) as exc:
-        before_dispatch = isinstance(exc, ModelDispatchUnavailable) or (
-            isinstance(exc, ValueError) and not isinstance(exc, ModelOutputError)
-        )
-        calls = 0 if before_dispatch else 1
-        if isinstance(exc, ModelOutputError) and exc.usage is not None:
-            usage = exc.usage.model_dump(mode="json")
-        fallback = {"reason": "PlannerUnavailable"}
+    planner_skipped = config.search.max_queries == 1
+    if planner_skipped:
+        batch = _planned_batch(request, [request.query], deadline)
     else:
-        calls = 1
-        usage = generated.usage.model_dump(mode="json")
+        system = PLANNER_SYSTEM_TEMPLATE.format(max_queries=config.search.max_queries - 1)
+        user = json.dumps({"question": request.query}, ensure_ascii=False)
+        if estimated_tokens(estimate_units(system + user)) > config.planner.max_context_tokens:
+            raise ValueError("planner input exceeds configured context limit")
         try:
-            content = json.loads(generated.content)
-            if not isinstance(content, dict) or set(content) != {"queries"}:
-                raise ValueError("planner returned an invalid query object")
-            queries = content["queries"]
-            if not isinstance(queries, list):
-                raise ValueError("planner returned an invalid query list")
-            batch = _planned_batch(request, queries, deadline)
-            _validate_batch(config, batch)
-        except (ValueError, ValidationError):
-            fallback = {"reason": "InvalidPlan"}
+            generated = _call_planner_until_deadline(config, models, system, user, deadline)
+        except (ModelOutputError, httpx.HTTPError, TimeoutError, ValueError) as exc:
+            before_dispatch = isinstance(exc, ModelDispatchUnavailable) or (
+                isinstance(exc, ValueError) and not isinstance(exc, ModelOutputError)
+            )
+            calls = 0 if before_dispatch else 1
+            if isinstance(exc, ModelOutputError) and exc.usage is not None:
+                usage = exc.usage.model_dump(mode="json")
+            fallback = {"reason": "PlannerUnavailable"}
+        else:
+            calls = 1
+            usage = generated.usage.model_dump(mode="json")
+            try:
+                content = json.loads(generated.content)
+                if not isinstance(content, dict) or set(content) != {"queries"}:
+                    raise ValueError("planner returned an invalid query object")
+                queries = content["queries"]
+                if not isinstance(queries, list) or not queries:
+                    raise ValueError("planner returned an invalid query list")
+                batch = _planned_batch(request, queries, deadline)
+                _validate_batch(config, batch)
+            except (ValueError, ValidationError):
+                fallback = {"reason": "InvalidPlan"}
 
     if fallback is not None:
-        queries = [request.query]
-        batch = _planned_batch(request, queries, deadline)
+        batch = _planned_batch(request, [request.query], deadline)
 
     response = _run_batch(config, batch, search_one, deadline)
-    response["plan"] = {"queries": queries} if fallback is None else None
+    response["plan"] = {"queries": batch.queries} if fallback is None else None
     response["planner"] = {
-        "status": "used" if fallback is None else "fallback",
+        "status": "skipped" if planner_skipped else "used" if fallback is None else "fallback",
         "calls": calls,
         "usage": usage,
         "cost": None,
@@ -125,8 +139,8 @@ def _call_planner_until_deadline(
 def _planned_batch(
     request: SearchRequest, queries: list[str], deadline: datetime
 ) -> SearchManyRequest:
-    return SearchManyRequest(
-        queries=queries,
+    batch = SearchManyRequest(
+        queries=[request.query, *queries],
         recall_level=request.recall_level,
         fast_graph=request.fast_graph,
         max_context_tokens=request.max_context_tokens,
@@ -138,6 +152,7 @@ def _planned_batch(
         reference_time=request.reference_time,
         reference_timezone=request.reference_timezone,
     )
+    return batch.model_copy(update={"queries": list(dict.fromkeys(batch.queries))})
 
 
 def _validate_options(request: SearchManyRequest | SearchRequest) -> None:
@@ -157,11 +172,10 @@ def _validate_batch(config: OAMConfig, request: SearchManyRequest) -> None:
     _validate_queries(config, request.queries)
 
 
-def _deadline(config: OAMConfig, request, endpoint_seconds: float) -> datetime:
+def _deadline(request, endpoint_seconds: float) -> datetime:
     now = datetime.now(UTC)
-    level_seconds = getattr(config.recall, f"{request.recall_level.value}_deadline_seconds")
     deadline = min(
-        now + timedelta(seconds=min(endpoint_seconds, level_seconds)),
+        now + timedelta(seconds=endpoint_seconds),
         request.deadline_at or datetime.max.replace(tzinfo=UTC),
     )
     if deadline <= datetime.now(UTC):

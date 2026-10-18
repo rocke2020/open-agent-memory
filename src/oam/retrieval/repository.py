@@ -56,7 +56,7 @@ def _causal_ctes() -> str:
         "JOIN filtered u ON "
         "(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.target_id) "
         "WHERE (l.tenant_id,l.user_id,l.source_id)=(f.tenant_id,f.user_id,f.target_id) "
-        "AND l.kind='caused_by' AND u.kind='fact' AND l.target_id<>f.seed_id "
+        "AND l.kind='caused_by' AND u.kind='fact' AND l.target_id<>ALL(%(seeds)s::text[]) "
         "ORDER BY l.weight DESC,l.target_id LIMIT %(links)s) e)"
     )
 
@@ -147,6 +147,7 @@ def _causal_paths(rows):
 
 _ANCHOR = re.compile(r'"([^"\n]+)"|\b([A-Za-z][A-Za-z0-9]*-\d+[A-Za-z0-9-]*|[\w]+_[\w-]+)\b')
 EXACT_USER_ORDER_MIN_CANDIDATES = 64
+LEXICAL_DOCUMENT_LENGTH_NORMALIZATION = 2
 _QUERY_FUNCTION_WORDS = frozenset(
     {
         "a",
@@ -412,7 +413,11 @@ class RecallRepository:
             return []
         terms = query_terms(query)
         candidates = _informative_terms(terms.candidates)
-        parameters = {"limit": limit, "weights": list(self.config.search.fts_rank_weights)}
+        parameters = {
+            "limit": limit,
+            "weights": list(self.config.search.fts_rank_weights),
+            "normalization": LEXICAL_DOCUMENT_LENGTH_NORMALIZATION,
+        }
         if not candidates:
             if not terms.candidates:
                 return []
@@ -435,6 +440,8 @@ class RecallRepository:
             "hits AS MATERIALIZED (SELECT u.tenant_id,u.user_id,u.unit_id,u.kind,u.origin,"
             "u.source_id,u.source_version,u.evidence_id,u.passage_id,u.memory_id,"
             "u.insight_id,u.insight_revision,u.generation_id,u.lexical_bilingual,u.mentioned_at,"
+            "ts_rank_cd(%(weights)s::float4[],u.lexical_bilingual,q.candidate,"
+            "%(normalization)s) AS partial_score,"
             "u.lexical_bilingual @@ q.full AS full_match,"
             "u.lexical_bilingual @@ q.primary AS primary_match "
             "FROM search_units u,queries q WHERE "
@@ -444,7 +451,7 @@ class RecallRepository:
             "SELECT t.term_order,hit.unit_id,hit.mentioned_at,hit.full_match,hit.primary_match "
             f"FROM unnest(ARRAY[{term_queries}]) WITH ORDINALITY AS t(term,term_order) "
             "CROSS JOIN LATERAL (WITH ordered AS (SELECT u.*,"
-            "ts_rank_cd(%(weights)s::float4[],u.lexical_bilingual,t.term) AS score "
+            "u.partial_score AS score "
             "FROM hits u WHERE u.lexical_bilingual @@ t.term "
             "ORDER BY u.full_match DESC,u.primary_match DESC,score DESC,"
             "u.mentioned_at DESC NULLS LAST,u.unit_id OFFSET 0) "
@@ -523,10 +530,11 @@ class RecallRepository:
             "u.tenant_id=current_setting('oam.tenant_id',true) "
             "AND u.user_id=current_setting('oam.user_id',true) "
         )
-        if self.request is not None and (
+        exact_user_order = self.request is not None and (
             self.request.recall_level != RecallLevel.FAST
             or limit >= EXACT_USER_ORDER_MIN_CANDIDATES
-        ):
+        )
+        if exact_user_order:
             # For larger pools, rank this user's vectors before the support
             # check. The outer limit still admits eligible units only.
             source = (
@@ -545,7 +553,7 @@ class RecallRepository:
             + predicate
             + "(SELECT true FROM filtered f WHERE "
             "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
-            f"ORDER BY {distance} LIMIT %(limit)s",
+            f"ORDER BY {distance}{',u.unit_id' if exact_user_order else ''} LIMIT %(limit)s",
             {"vector": json.dumps(tuple(vector)), "limit": limit},
             configure_ann=True,
         )
@@ -768,7 +776,8 @@ class RecallRepository:
                 "(SELECT l.source_id,l.target_id,l.weight FROM unit_links l JOIN filtered u ON "
                 f"(u.tenant_id,u.user_id,u.unit_id)=(l.tenant_id,l.user_id,l.{target}) "
                 f"WHERE (l.tenant_id,l.user_id,l.{source})=(s.tenant_id,s.user_id,s.unit_id) "
-                f"AND l.kind='semantic' AND u.kind='fact' ORDER BY l.weight DESC,l.{target} "
+                "AND l.kind='semantic' AND u.kind='fact' "
+                f"AND u.unit_id<>ALL(%(seeds)s::text[]) ORDER BY l.weight DESC,l.{target} "
                 "LIMIT %(links)s)"
             )
         graph = self._execute(
@@ -783,9 +792,9 @@ class RecallRepository:
             "CROSS JOIN LATERAL (SELECT u.unit_id,ue.name_id,u.embedding <=> %(vector)s::vector "
             "AS distance FROM filtered u JOIN memberships ue "
             "USING(tenant_id,user_id,unit_id) WHERE u.kind='fact' "
-            "AND ue.entity_id=e.entity_id "
+            "AND ue.entity_id=e.entity_id AND u.unit_id<>ALL(%(seeds)s::text[]) "
             "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id "
-            "LIMIT %(per_entity)s+1) c), "
+            "LIMIT %(per_entity)s) c), "
             "entity_rows AS (SELECT s.seed_id,s.entity_id,s.name_id AS seed_name_id,"
             "c.name_id AS target_name_id,c.unit_id FROM seed_entities s "
             "CROSS JOIN LATERAL (SELECT unit_id,name_id FROM entity_candidates c "
@@ -1029,6 +1038,7 @@ class RecallRepository:
 
     def _temporal_edges(self, source_ids, vector, *, limit=None, edge_ids=None, per_source=False):
         prefix = self._eligible(temporal=True)
+        source_match = "=source_seed.unit_id" if per_source else "=ANY(%(sources)s)"
         adjacent = []
         for source, target in (("left_id", "right_id"), ("right_id", "left_id")):
             adjacent.append(
@@ -1037,14 +1047,14 @@ class RecallRepository:
                 "t.left_annotation_id,t.right_annotation_id,"
                 "jsonb_build_array('temporal',t.time_basis,t.left_id,t.right_id,"
                 "t.left_annotation_id,t.right_annotation_id)::text AS edge_id "
-                f"FROM temporal_links t WHERE t.{source}=ANY(%(sources)s) "
+                f"FROM temporal_links t WHERE t.{source}{source_match} "
                 "AND t.time_basis=%(basis)s"
             )
         adjacent.append(
             "SELECT l.tenant_id,l.user_id,l.source_id,l.target_id,l.weight,'caused_by',"
             "NULL::text,NULL::text,NULL::text,NULL::text,"
             "jsonb_build_array('caused_by',l.source_id,l.target_id)::text FROM unit_links l "
-            "WHERE l.kind='caused_by' AND l.source_id=ANY(%(sources)s)"
+            f"WHERE l.kind='caused_by' AND l.source_id{source_match}"
         )
         witnesses = "true"
         if self.request.time_basis in {"event", "referenced"}:
@@ -1058,25 +1068,26 @@ class RecallRepository:
                     "tstzrange(%(time_start)s,%(time_end)s,'[)'))"
                 )
             witnesses = "(edge.relation='caused_by' OR (" + " AND ".join(conditions) + "))"
-        query = (
-            prefix
-            + ", adjacent AS ("
-            + " UNION ALL ".join(adjacent)
-            + ") "
-            + ("SELECT edge.source_id," if per_source else "SELECT ")
-            + "target.unit_id,LEAST(1.0,GREATEST(-1.0,"
-            "1-(target.embedding <=> %(vector)s::vector))) AS cosine,"
-            + self._basis_date("target")
-            + " AS basis_date,edge.weight,edge.relation,edge.edge_id "
-            "FROM adjacent edge JOIN filtered source ON "
-            "(source.tenant_id,source.user_id,source.unit_id)="
-            "(edge.tenant_id,edge.user_id,edge.source_id) "
-            "JOIN filtered target ON "
-            "(target.tenant_id,target.user_id,target.unit_id)="
-            "(edge.tenant_id,edge.user_id,edge.target_id) "
-            "WHERE source.kind='fact' AND target.kind='fact' "
-            "AND 1-(target.embedding <=> %(vector)s::vector)>=%(floor)s AND " + witnesses
-        )
+
+        def eligible_edges(edges):
+            return (
+                ("SELECT edge.source_id," if per_source else "SELECT ")
+                + "target.unit_id,LEAST(1.0,GREATEST(-1.0,"
+                "1-(target.embedding <=> %(vector)s::vector))) AS cosine,"
+                + self._basis_date("target")
+                + " AS basis_date,edge.weight,edge.relation,edge.edge_id "
+                f"FROM {edges} JOIN filtered source ON "
+                "(source.tenant_id,source.user_id,source.unit_id)="
+                "(edge.tenant_id,edge.user_id,edge.source_id) "
+                "JOIN filtered target ON "
+                "(target.tenant_id,target.user_id,target.unit_id)="
+                "(edge.tenant_id,edge.user_id,edge.target_id) "
+                "WHERE source.kind='fact' AND target.kind='fact' "
+                "AND 1-(target.embedding <=> %(vector)s::vector)>=%(floor)s AND "
+                + witnesses
+                + (" AND edge.edge_id=ANY(%(edges)s)" if edge_ids is not None else "")
+            )
+
         parameters = {
             "sources": list(source_ids),
             "vector": json.dumps(tuple(vector)),
@@ -1084,19 +1095,40 @@ class RecallRepository:
             "floor": self.config.search.temporal_semantic_floor,
         }
         if edge_ids is not None:
-            query += " AND edge.edge_id=ANY(%(edges)s)"
             parameters["edges"] = list(edge_ids)
         if per_source:
+            # A union's top-k is contained in its eligible branches' top-k.
+            # Keep every support/time/cosine predicate before each branch cap.
+            branches = [
+                "("
+                + eligible_edges(
+                    f"({edges}) edge(tenant_id,user_id,source_id,target_id,weight,relation,"
+                    "left_id,right_id,left_annotation_id,right_annotation_id,edge_id)"
+                )
+                + " ORDER BY edge.weight DESC,target.unit_id,edge.edge_id LIMIT %(limit)s)"
+                for edges in adjacent
+            ]
             query = (
                 "SELECT * FROM (SELECT candidates.*,row_number() OVER (PARTITION BY source_id "
                 "ORDER BY weight DESC,unit_id,edge_id) AS neighbor_rank FROM ("
-                + query
+                + prefix
+                + " SELECT limited.* FROM (SELECT DISTINCT unnest(%(sources)s::text[]) "
+                "AS unit_id) source_seed CROSS JOIN LATERAL ("
+                + " UNION ALL ".join(branches)
+                + ") limited"
                 + ") candidates) ranked WHERE neighbor_rank<=%(limit)s "
                 "ORDER BY source_id,weight DESC,unit_id,edge_id"
             )
             parameters["limit"] = limit
         else:
-            query += " ORDER BY edge.weight DESC,target.unit_id,edge.edge_id"
+            query = (
+                prefix
+                + ", adjacent AS ("
+                + " UNION ALL ".join(adjacent)
+                + ") "
+                + eligible_edges("adjacent edge")
+                + " ORDER BY edge.weight DESC,target.unit_id,edge.edge_id"
+            )
         if limit is not None and not per_source:
             query += " LIMIT %(limit)s"
             parameters["limit"] = limit

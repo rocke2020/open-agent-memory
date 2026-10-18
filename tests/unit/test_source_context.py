@@ -207,6 +207,50 @@ def test_passage_seed_recovers_query_relevant_user_original_without_a_fact(evide
     assert result["context_tokens"] <= CONFIG.context.default_tokens
 
 
+@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("max_results", [5, 6])
+def test_supplemental_original_does_not_displace_ranked_evidence(evidence_rows, mode, max_results):
+    guide = deepcopy(evidence_rows[2])
+    guide.update(
+        unit_id="guide",
+        text="Workshop troubleshooting guide.",
+        citations=[{"source_id": "guide", "source_version": 1, "role": "assistant"}],
+    )
+    recovered = deepcopy(guide)
+    recovered.update(
+        unit_id="recovered",
+        text="I requested a workshop troubleshooting guide.",
+        citations=[{"source_id": "guide", "source_version": 1, "role": "user"}],
+    )
+    ranked_fact = {**evidence_rows[1], "unit_id": "ranked_fact", "text": "The workshop moved."}
+
+    class RankedRepository(SourceRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": uid} for uid in ("fact", "guide", "other", "ranked_fact")]
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            assert source_keys == (("guide", 1),)
+            return [{"unit_id": "recovered"}]
+
+    class RankedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RankedRepository(request, self.rows, self.graph_paths)
+
+    tier = getattr(CONFIG.search, mode).model_copy(
+        update={"source_seed_results": 2, "max_results": max_results}
+    )
+    config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={mode: tier})})
+    rows = [*evidence_rows[:3], guide, ranked_fact, recovered]
+    result = RankedService(rows, config=config).search(
+        object(), SearchRequest(query="missed workshops", recall_level=mode)
+    )
+    ids = {item["unit_id"] for item in result["items"]}
+    assert {"fact", "original", "ranked_fact"} <= ids
+    assert ("recovered" in ids) == (max_results == 6)
+    assert len(ids) <= max_results
+
+
 @pytest.mark.parametrize("mode", ["fast", "mid", "deep"])
 def test_grouped_context_preserves_facts_and_shows_source_once(evidence_rows, mode):
     result = SourceService(evidence_rows).search(

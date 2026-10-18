@@ -659,7 +659,7 @@ class RecallService:
                         item = {key: value for key, value in row.items() if key != "locator"}
                         item["paths"] = paths.get(item["unit_id"], [])
                         recovered.append(item)
-                    candidates = [*recovered, *candidates]
+                    candidates = [*candidates, *recovered]
         original_detail_set = set(original_detail_ids)
         candidates.extend(
             item for item in source_passages if item["unit_id"] not in original_detail_set

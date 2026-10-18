@@ -64,6 +64,39 @@ def test_consolidation_rejects_changed_related_source_policy():
         guarded_store("consolidate").guard(GuardConnection())
 
 
+@pytest.mark.parametrize("delay_hours", [2, 0.5])
+def test_consolidation_schedule_uses_configured_hours(tmp_path, delay_hours):
+    from datetime import UTC, datetime
+
+    from oam.config import load_config
+
+    scheduled = []
+
+    class Connection(GuardConnection):
+        def execute(self, query, parameters=()):
+            if query.startswith("SELECT COALESCE(min(created_at)"):
+                return SimpleNamespace(fetchone=lambda: (datetime(2026, 10, 18, tzinfo=UTC),))
+            if query.startswith("INSERT INTO work_units"):
+                scheduled.append((query, parameters))
+            return super().execute(query, parameters)
+
+    path = tmp_path / "oam.yaml"
+    path.write_text(f"index:\n  insight_consolidation_delay_hours: {delay_hours}\n")
+    store = guarded_store("index_source")
+    store.config = load_config(path).config
+    store.source["accepted_seq"] = 1
+    store.claim.attempt_id = "attempt"
+    store.summarize_usage = lambda connection: None
+    store.readiness = lambda connection, **state: None
+
+    store.finish(schedule_consolidation=True, connection=Connection())
+
+    assert len(scheduled) == 1
+    query, parameters = scheduled[0]
+    assert "clock_timestamp()+(%s*interval '1 hour')" in query
+    assert parameters[6] == delay_hours
+
+
 def test_index_store_pool_checkout_is_bounded_by_pool_timeout():
     from contextlib import contextmanager
 

@@ -258,7 +258,7 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
     base["search"]["fast"]["fused_candidates"] = 128
     base["chunk"]["ingestion"]["target_estimated_tokens"] = 37
     base["chunk"]["recall"]["default_tokens"] = 101
-    base["index"]["insight_consolidation_delay_seconds"] = 172800
+    base["index"]["insight_consolidation_delay_hours"] = 48
     config_directory = tmp_path / "configs"
     config_directory.mkdir()
     (config_directory / "oam.yaml").write_text(yaml.safe_dump(base))
@@ -276,14 +276,14 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
             "print(c.resource.max_bytes, c.search.fast.fused_candidates, "
             "c.search.fast.max_results, c.chunk.ingestion.target_estimated_tokens, "
             "c.chunk.recall.default_tokens, c.chunk.recall.max_tokens, "
-            "c.index.insight_consolidation_delay_seconds)",
+            "c.index.insight_consolidation_delay_hours)",
             str(override),
         ],
         cwd=tmp_path,
         text=True,
     )
 
-    assert output.strip() == "12345 128 19 37 101 203 172800"
+    assert output.strip() == "12345 128 19 37 101 203 48.0"
 
 
 def test_missing_canonical_numeric_limit_is_not_filled_by_python(
@@ -325,12 +325,10 @@ def test_operator_config_can_disable_l2_and_profile_model_roles(tmp_path: Path) 
     assert config.required_unbound_roles() == set()
 
 
-@pytest.mark.parametrize("delay_seconds", [0, -1])
-def test_insight_consolidation_rejects_nonpositive_delay(
-    tmp_path: Path, delay_seconds: int
-) -> None:
+@pytest.mark.parametrize("delay_hours", [0, -1])
+def test_insight_consolidation_rejects_nonpositive_delay(tmp_path: Path, delay_hours: int) -> None:
     path = tmp_path / "oam.yaml"
-    path.write_text(f"index:\n  insight_consolidation_delay_seconds: {delay_seconds}\n")
+    path.write_text(f"index:\n  insight_consolidation_delay_hours: {delay_hours}\n")
 
     with pytest.raises(ConfigurationError, match="greater than 0"):
         load_config(path)

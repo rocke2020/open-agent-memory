@@ -273,7 +273,7 @@ class UserConfig(FrozenModel):
 
 class IndexConfig(FrozenModel):
     insights_enabled: bool = True
-    insight_consolidation_delay_seconds: PositiveInt
+    insight_consolidation_delay_hours: PositiveFloat
     embedding_dimensions: PositiveInt = Field(le=2000)
     semantic_link_min_similarity: float = Field(ge=0, le=1)
     semantic_link_max_neighbors: PositiveInt

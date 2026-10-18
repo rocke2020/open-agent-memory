@@ -130,6 +130,7 @@ class InsightInput(FrozenProjection):
 
 class InsightResult(FrozenProjection):
     text: NonBlank | None
+    retrieval_text: NonBlank | None = None
     support_ids: tuple[NonBlank, ...]
     outcome: Literal["insight", "no_insight"]
     subtype: (
@@ -145,10 +146,16 @@ class InsightResult(FrozenProjection):
     )
     usage: Usage
 
+    @property
+    def embedding_text(self) -> str | None:
+        return self.retrieval_text if self.retrieval_text is not None else self.text
+
     @model_validator(mode="after")
     def validate_subtype(self) -> InsightResult:
         if (self.outcome == "no_insight") != (self.subtype is None):
             raise ValueError("only a supported Insight has a subtype")
+        if self.outcome == "no_insight" and self.retrieval_text is not None:
+            raise ValueError("only a supported Insight has retrieval text")
         return self
 
 
@@ -205,7 +212,11 @@ def synthesize_insight(
         )
     try:
         result = InsightResult.model_validate(
-            {**{key: body[key] for key in required}, "usage": usage}
+            {
+                **{key: body[key] for key in required},
+                "retrieval_text": body.get("retrieval_text"),
+                "usage": usage,
+            }
         )
     except ValidationError as exc:
         raise ExtractionError("Insight output is malformed", usage=usage, retryable=True) from exc

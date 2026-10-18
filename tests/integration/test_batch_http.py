@@ -132,13 +132,14 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
 
         assert response.status_code == 200, response.text
         payload = response.json()
-        assert [row["query"] for row in payload["results"]] == [
-            "apple orchard",
-            "pear orchard",
-        ]
+        expected_queries = ["apple orchard", "pear orchard"]
+        if delegated:
+            expected_queries.insert(0, body["query"])
+        assert [row["query"] for row in payload["results"]] == expected_queries
         assert all(row["status"] == "ok" for row in payload["results"])
-        assert any(item["unit_id"] == "apple" for item in payload["results"][0]["result"]["items"])
-        assert any(item["unit_id"] == "pear" for item in payload["results"][1]["result"]["items"])
+        by_query = {row["query"]: row["result"] for row in payload["results"]}
+        assert any(item["unit_id"] == "apple" for item in by_query["apple orchard"]["items"])
+        assert any(item["unit_id"] == "pear" for item in by_query["pear orchard"]["items"])
         assert payload["context_tokens"] <= config.context.default_tokens
         assert all(
             row["result"]["diagnostics"]["generative_calls"] == 0 for row in payload["results"]

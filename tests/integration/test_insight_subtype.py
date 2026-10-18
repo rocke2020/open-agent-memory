@@ -1,5 +1,6 @@
 """Insight subtype persistence uses one descriptive, constrained column."""
 
+import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -71,14 +72,19 @@ def test_persisted_insight_rejects_absent_or_unknown_subtype(insight_connection,
         insert_insight(connection, tenant, subtype=subtype)
 
 
-def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(insight_connection):
+@pytest.mark.parametrize("retrieval_text", [None, "Instrument restoration"])
+def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(
+    insight_connection, retrieval_text, capsys
+):
     connection, tenant = insight_connection
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     published_units = []
+    embedding_inputs = []
 
     class PublicationStore:
         key = (tenant, "scope")
         generation_id = "generation"
+        claim = SimpleNamespace(operation_id="consolidation-op")
         source = {
             "accepted_seq": 1,
             "source_id": "source-a",
@@ -123,12 +129,14 @@ def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(insight_co
 
         def checkpoint(self, stage, inputs, produce):
             if stage == "insight_embed":
+                embedding_inputs.append(inputs)
                 return {"vectors": [[1.0, 0.0]]}
             assert stage == "insight"
             return {
                 "outcome": "insight",
                 "subtype": "patterns",
                 "text": "Repeated supported behavior.",
+                "retrieval_text": retrieval_text,
                 "support_ids": ["f1", "f2"],
                 "usage": {},
             }
@@ -148,3 +156,12 @@ def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(insight_co
     ).fetchone()
     assert row == ("patterns", "Repeated supported behavior.")
     assert published_units[0]["kind"] == "insight"
+    assert published_units[0]["text"] == "Repeated supported behavior."
+    assert published_units[0]["locator"]["support_ids"] == ["f1", "f2"]
+    assert published_units[0]["locator"]["retrieval_text"] == retrieval_text
+    assert embedding_inputs == [retrieval_text or "Repeated supported behavior."]
+    emitted = capsys.readouterr().out
+    assert emitted
+    event = json.loads(emitted)
+    assert event["operation_id"] == "consolidation-op"
+    assert event["embedding_input"] == ("purpose" if retrieval_text else "full_text")

@@ -157,8 +157,8 @@ index:
   entity_search_rank_normalization: 0
   # L2 Insight synthesis is independently configurable; Profile may consume L2 when enabled.
   insights_enabled: true
-  # Delay from direct L1 completion to newly queued L2 consolidation (24 hours).
-  insight_consolidation_delay_seconds: 86400
+  # Delay in hours from completed source indexing to newly queued L2 consolidation.
+  insight_consolidation_delay_hours: 24
   # Vector length required from the embedding model; must match the database schema.
   embedding_dimensions: 1024
   # Create index-time semantic links only above this cosine similarity.

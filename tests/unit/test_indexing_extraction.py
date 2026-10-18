@@ -796,6 +796,129 @@ def test_insight_requires_two_distinct_known_supports_and_preserves_source_refer
     assert payload["facts"][0]["source_refs"] == ["m1:0:35"]
 
 
+@pytest.fixture
+def instrument_insight_inputs():
+    from oam.indexing.extraction import InsightInput
+
+    return (
+        InsightInput(
+            id="repair-request",
+            text="The user requested help repairing an open seam in the user's cello.",
+            source_refs=("instrument:1",),
+        ),
+        InsightInput(
+            id="repair-status",
+            text="The user has not attempted the cello repair yet.",
+            source_refs=("instrument:1",),
+        ),
+    )
+
+
+def test_insight_request_distinguishes_recording_time_from_supported_event_time():
+    from oam.indexing.extraction import InsightInput, synthesize_insight
+
+    facts = tuple(
+        InsightInput.model_validate(item)
+        for item in (
+            {
+                "id": "repair",
+                "text": "The user requested cello repair advice; the repair date is unknown.",
+                "source_refs": ["instrument:1"],
+                "mentioned_at": "2025-03-09T12:00:00Z",
+            },
+            {
+                "id": "inspection",
+                "text": "The user had the cello inspected on March 2, 2025.",
+                "source_refs": ["instrument:1"],
+                "mentioned_at": "2025-03-09T12:00:00Z",
+                "temporal_annotations": [
+                    {
+                        "role": "event",
+                        "start": "2025-03-02T00:00:00Z",
+                        "end": "2025-03-03T00:00:00Z",
+                        "quote": "on March 2, 2025",
+                    }
+                ],
+            },
+        )
+    )
+    requests = []
+    with extraction_models(
+        {"outcome": "no_insight", "text": None, "support_ids": [], "subtype": None}, requests
+    ) as (models, config):
+        synthesize_insight(models, facts=facts, config=config, timeout_seconds=1)
+    assert len(requests) == 1
+    system = requests[0]["messages"][0]["content"]
+    assert "mentioned_at is when a statement was recorded, not when its events occurred" in system
+    assert (
+        "Only explicit fact wording or event temporal annotations establish event timing" in system
+    )
+    assert "Preserve unknown event timing" in system
+    supplied = json.loads(requests[0]["messages"][1]["content"])["facts"]
+    assert supplied[0]["mentioned_at"] == "2025-03-09T12:00:00Z"
+    assert supplied[0]["temporal_annotations"] == []
+    assert supplied[1]["temporal_annotations"][0]["start"] == "2025-03-02T00:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "optional_fields",
+    [{"retrieval_text": "Cello repair assistance"}, {}, {"retrieval_text": None}],
+)
+def test_insight_preserves_optional_retrieval_text_without_replacing_claims(
+    instrument_insight_inputs, optional_fields
+):
+    from oam.indexing.extraction import synthesize_insight
+
+    reply = {
+        "outcome": "insight",
+        "subtype": "projects",
+        "text": "The user requested help repairing the cello's open seam but has not attempted it.",
+        "support_ids": ["repair-request", "repair-status"],
+    }
+    reply.update(optional_fields)
+    requests = []
+    with extraction_models(reply, requests) as (models, config):
+        result = synthesize_insight(
+            models, facts=instrument_insight_inputs, config=config, timeout_seconds=1
+        )
+    assert result.retrieval_text == optional_fields.get("retrieval_text")
+    assert result.embedding_text == (
+        "Cello repair assistance"
+        if optional_fields.get("retrieval_text")
+        else "The user requested help repairing the cello's open seam but has not attempted it."
+    )
+    assert result.text == (
+        "The user requested help repairing the cello's open seam but has not attempted it."
+    )
+    assert result.support_ids == ("repair-request", "repair-status")
+    assert result.outcome == "insight"
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("outcome", "retrieval_text"),
+    [("insight", ""), ("insight", " \t"), ("no_insight", "Cello repair assistance")],
+)
+def test_insight_rejects_blank_retrieval_text_or_label_without_insight(
+    instrument_insight_inputs, outcome, retrieval_text
+):
+    from oam.indexing.extraction import synthesize_insight
+
+    reply = {
+        "outcome": outcome,
+        "subtype": "projects" if outcome == "insight" else None,
+        "text": "The user requested cello repair help but has not attempted it."
+        if outcome == "insight"
+        else None,
+        "support_ids": ["repair-request", "repair-status"] if outcome == "insight" else [],
+        "retrieval_text": retrieval_text,
+    }
+    with extraction_models(reply) as (models, config), pytest.raises(ExtractionError):
+        synthesize_insight(
+            models, facts=instrument_insight_inputs, config=config, timeout_seconds=1
+        )
+
+
 @pytest.mark.parametrize(
     "reply",
     [
@@ -845,6 +968,7 @@ def test_insight_distinguishes_valid_no_insight_and_rejects_duplicate_input_iden
         result = synthesize_insight(models, facts=(first, second), config=config, timeout_seconds=1)
         assert result.outcome == "no_insight" and result.text is None
         assert result.subtype is None
+        assert result.embedding_text is None
         with pytest.raises(ExtractionError):
             synthesize_insight(models, facts=(first, first), config=config, timeout_seconds=1)
     assert len(requests) == 1

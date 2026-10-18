@@ -383,7 +383,11 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
 
     assert len(model_calls) == 1
     assert model_calls[0].url.path == "/chat/completions"
-    assert sorted(query for query, _, _ in searched) == ["Lin city", "Lin response style"]
+    assert sorted(query for query, _, _ in searched) == [
+        "Lin city",
+        "Lin city and response style",
+        "Lin response style",
+    ]
     assert len({deadline for _, deadline, _ in searched}) == 1
     assert all(basis.value == "event" for _, _, basis in searched)
     assert result["planner"]["status"] == "used"

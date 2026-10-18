@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 
 from psycopg.types.json import Jsonb
 
@@ -14,7 +15,7 @@ from oam.indexing.extraction import (
     pack_insight_facts,
     synthesize_insight,
 )
-from oam.indexing.store import MEMORY_REVISION, stable_id
+from oam.indexing.store import MEMORY_REVISION, log_insight_indexed, stable_id
 
 
 def repair_insights(store, models) -> bool:
@@ -101,6 +102,7 @@ def repair_insights(store, models) -> bool:
             raise ValueError("Insight repair budget cannot fit the complete eligible support set")
 
         input_values = [fact.model_dump(mode="json") for fact in facts]
+        insight_started = time.monotonic()
         result = InsightResult.model_validate(
             store.checkpoint(
                 f"repair:{insight_id}:{revision}:{policy_epoch}:synthesis",
@@ -125,10 +127,12 @@ def repair_insights(store, models) -> bool:
         if set(result.support_ids) != captured_support:
             raise ValueError("Insight repair must preserve the complete eligible support set")
 
+        embedding_text = result.embedding_text
+        assert embedding_text is not None
         vector = store.checkpoint(
             f"repair:{insight_id}:{revision}:{policy_epoch}:embed",
-            result.text,
-            lambda text=result.text: models.embed(
+            embedding_text,
+            lambda text=embedding_text: models.embed(
                 (text,), timeout_seconds=store.config.model.attempt_timeout_seconds
             ),
         )
@@ -187,13 +191,18 @@ def repair_insights(store, models) -> bool:
                 kind="insight",
                 text=result.text,
                 vector=vector["vectors"][0],
-                locator={"support_ids": list(result.support_ids), "repair": True},
+                locator={
+                    "support_ids": list(result.support_ids),
+                    "repair": True,
+                    "retrieval_text": result.retrieval_text,
+                },
                 insight_id=insight_id,
                 insight_revision=revision,
             )
             outcomes[insight_id] = "updated"
             store.mark_l2_group(connection, [row[0] for row in rows], "insight")
             _save_outcome(store, connection, outcomes)
+        log_insight_indexed(store, result, insight_id, revision, insight_started)
     return True
 
 

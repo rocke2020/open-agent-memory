@@ -39,7 +39,7 @@ from oam.indexing.grouping import (
 )
 from oam.indexing.identity import index_generation
 from oam.indexing.references import eligible_reference_ids, freeze_extraction_references
-from oam.indexing.store import MEMORY_REVISION, IndexStore, stable_id
+from oam.indexing.store import MEMORY_REVISION, IndexStore, log_insight_indexed, stable_id
 from oam.workers.claims import claim_one
 
 ABSTRACT_SYSTEM = (
@@ -1216,6 +1216,7 @@ def _insights(store, models, new_fact_ids):
             continue
 
         input_values = [fact.model_dump(mode="json") for fact in facts]
+        insight_started = time.monotonic()
         result = InsightResult.model_validate(
             store.checkpoint(
                 "insight",
@@ -1229,10 +1230,12 @@ def _insights(store, models, new_fact_ids):
             )
         )
         if result.text:
+            embedding_text = result.embedding_text
+            assert embedding_text is not None
             vector = store.checkpoint(
                 "insight_embed",
-                result.text,
-                lambda text=result.text: models.embed(
+                embedding_text,
+                lambda text=embedding_text: models.embed(
                     (text,), timeout_seconds=store.config.model.attempt_timeout_seconds
                 ),
             )
@@ -1281,9 +1284,14 @@ def _insights(store, models, new_fact_ids):
                     kind="insight",
                     text=result.text,
                     vector=vector["vectors"][0],
-                    locator={"support_ids": list(result.support_ids), "seed_ids": examined_group},
+                    locator={
+                        "support_ids": list(result.support_ids),
+                        "seed_ids": examined_group,
+                        "retrieval_text": result.retrieval_text,
+                    },
                     insight_id=identifier,
                 )
+            log_insight_indexed(store, result, identifier, 1, insight_started)
         with store.transaction() as connection:
             store.guard(connection)
             store.mark_l2_group(connection, examined_group, result.outcome)

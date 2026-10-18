@@ -572,6 +572,37 @@ def test_common_term_remains_a_bounded_candidate_source(recall_database):
     }
 
 
+@pytest.mark.parametrize(
+    ("query", "partial", "terms"),
+    [
+        ("kiln fan pressure", "Fan pressure rises during drying.", ("kiln", "fan", "pressure")),
+        ("风扇 压力 湿度", "风扇压力升高。", ("风扇", "压力", "湿度")),
+    ],
+)
+def test_partial_query_coverage_survives_repeated_single_term_competitors(
+    recall_database, query, partial, terms
+):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "z_partial", partial)
+    for term_index, term in enumerate(terms):
+        for index in range(3):
+            add_fact(
+                connection,
+                authority,
+                f"a_repeat_{term_index}_{index}",
+                (term + " ") * 15 + "unrelated explanation " * 100,
+            )
+    # A stronger but ineligible match must not consume the candidate budget.
+    add_fact(connection, authority, "a_hidden", query, eligible=False)
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+
+    assert "z_partial" in {row["unit_id"] for row in repository.lexical(query, 2)}
+
+
 def test_quoted_phrase_does_not_admit_separated_words_through_fts(recall_database):
     from oam.retrieval.repository import RecallRepository
 
@@ -1555,6 +1586,27 @@ def test_point_time_basis_is_visible_in_returned_evidence(recall_database):
     row = repository.hydrate(("apple",))[0]
 
     assert {"role": "mentioned", "at": "2026-01-03T00:00:00+00:00"} in row["time_evidence"]
+
+
+@pytest.mark.parametrize(("mode", "limit"), [("fast", 64), ("mid", 1)])
+def test_exact_dense_ties_use_stable_identity_after_similarity(recall_database, mode, limit):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "z_first_inserted", "Orchard maintenance report.")
+    add_fact(connection, authority, "a_later_inserted", "A separate orchard report.")
+    add_fact(connection, authority, "0_less_relevant", "A related orchard topic.", direction=0.8)
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
+    repository = RecallRepository(
+        connection,
+        authority,
+        config,
+        deadline=time.monotonic() + 5,
+        request=SearchRequest(query="orchard", recall_level=mode),
+    )
+    expected = ["a_later_inserted", "z_first_inserted", "0_less_relevant"]
+    assert [row["unit_id"] for row in repository.dense(vector, limit)] == expected[:limit]
 
 
 def test_hnsw_executes_and_matches_exact_scoped_neighbors(recall_database, monkeypatch):

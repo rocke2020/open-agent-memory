@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from threading import BoundedSemaphore, Lock
+from typing import TYPE_CHECKING
 
 import httpx
 import psycopg
@@ -22,6 +23,9 @@ from oam.capacity import CAPACITY_POLL_SECONDS, CapacityUnavailable
 from oam.config import OAMConfig
 from oam.db.context import bind_user
 from oam.workers.claims import RENEW_LEASE_SQL, ClaimedWork
+
+if TYPE_CHECKING:
+    from oam.indexing.extraction import InsightResult
 
 MEMORY_REVISION = 1
 _INDEXING_CONNECTION_SLOTS: dict[tuple[str, int], BoundedSemaphore] = {}
@@ -39,6 +43,26 @@ class StaleConsolidationPolicy(StaleIndexWork):
 def stable_id(prefix: str, *parts: object) -> str:
     value = json.dumps(parts, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return prefix + "_" + hashlib.sha256(value.encode()).hexdigest()[:32]
+
+
+def log_insight_indexed(
+    store: IndexStore, result: InsightResult, insight_id: str, revision: int, started: float
+) -> None:
+    print(
+        json.dumps(
+            {
+                "stage": "insight_indexed",
+                "operation_id": store.claim.operation_id,
+                "generation_id": store.generation_id,
+                "insight_id": insight_id,
+                "revision": revision,
+                "embedding_input": "purpose" if result.retrieval_text is not None else "full_text",
+                "support_count": len(result.support_ids),
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+            }
+        ),
+        flush=True,
+    )
 
 
 def input_digest(inputs: object) -> bytes:
@@ -630,14 +654,14 @@ class IndexStore:
                     "stage,input_digest,generation_id,status,available_at,attempts_remaining,"
                     "l2_priority_at) "
                     "VALUES (%s,%s,%s,%s,'consolidate',%s,%s,'queued',"
-                    "clock_timestamp()+(%s*interval '1 second'),%s,%s) ON CONFLICT DO NOTHING",
+                    "clock_timestamp()+(%s*interval '1 hour'),%s,%s) ON CONFLICT DO NOTHING",
                     (
                         *self.key,
                         work_id,
                         consolidation_id,
                         self.source["input_digest"],
                         self.generation_id,
-                        self.config.index.insight_consolidation_delay_seconds,
+                        self.config.index.insight_consolidation_delay_hours,
                         self.config.retry.max_attempts,
                         l2_priority_at,
                     ),

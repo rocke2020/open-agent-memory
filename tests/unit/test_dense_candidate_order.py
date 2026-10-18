@@ -16,7 +16,7 @@ class _Connection:
 def test_larger_dense_pools_order_user_vectors_before_eligibility():
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     statements = {}
-    for mode, limit in (("fast", 32), ("fast", 64), ("mid", 64)):
+    for mode, limit in (("fast", 32), ("fast", 64), ("mid", 64), ("deep", 64)):
         repository = object.__new__(RecallRepository)
         repository.connection = _Connection()
         repository.config = config
@@ -29,7 +29,7 @@ def test_larger_dense_pools_order_user_vectors_before_eligibility():
         repository.dense((1.0,), limit)
 
     assert "ORDER BY u.embedding <=> %(vector)s::vector LIMIT" in statements["fast", 32]
-    for key in (("fast", 64), ("mid", 64)):
+    for key in (("fast", 64), ("mid", 64), ("deep", 64)):
         assert "ORDER BY distance OFFSET 0" in statements[key]
         assert "WHERE (SELECT true FROM filtered f WHERE " in statements[key]
-        assert "ORDER BY u.distance LIMIT" in statements[key]
+        assert "ORDER BY u.distance,u.unit_id LIMIT" in statements[key]

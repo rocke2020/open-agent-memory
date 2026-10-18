@@ -155,6 +155,53 @@ def test_repair_publishes_next_revision_under_same_insight_id():
     assert all(":8:" in stage for stage, _ in store.cache)
 
 
+@pytest.mark.parametrize("retrieval_text", [None, "Violin restoration"])
+def test_repair_embeds_current_purpose_but_publishes_full_supported_text(retrieval_text, capsys):
+    store = RepairStore(
+        repair_state(["fact-a", "fact-b"]),
+        [
+            ("unit-a", "fact-a", "The user is restoring a violin.", "source", 1, None),
+            ("unit-b", "fact-b", "The user requested a bridge inspection.", "source", 1, None),
+        ],
+    )
+    text = "The user is restoring a violin and requested a bridge inspection."
+    embedded = []
+
+    class Models:
+        def generate(self, role, **kwargs):
+            assert role == "insights"
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "outcome": "insight",
+                        "text": text,
+                        "retrieval_text": retrieval_text,
+                        "support_ids": ["fact-a", "fact-b"],
+                        "subtype": "projects",
+                    }
+                ),
+                usage=Usage(),
+            )
+
+        def embed(self, texts, **kwargs):
+            embedded.extend(texts)
+            return EmbeddingResult(vectors=((0.25,) * 1024,), usage=Usage())
+
+    assert repair_insights(store, Models())
+
+    assert embedded == [retrieval_text or text]
+    assert store.units[0]["text"] == text
+    assert store.units[0]["locator"]["support_ids"] == ["fact-a", "fact-b"]
+    assert store.units[0]["locator"]["retrieval_text"] == retrieval_text
+    assert store.units[0]["vector"] == [0.25] * 1024
+    emitted = capsys.readouterr().out
+    assert emitted
+    event = json.loads(emitted)
+    assert event["stage"] == "insight_indexed"
+    assert event["operation_id"] == "repair-op"
+    assert event["embedding_input"] == ("purpose" if retrieval_text else "full_text")
+
+
 def test_insufficient_support_deletes_without_model_call():
     store = RepairStore(
         repair_state(["fact-a"]),

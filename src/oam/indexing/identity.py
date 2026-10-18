@@ -11,6 +11,7 @@ from oam.tokens import ESTIMATOR
 
 INDEX_RECIPE = "oam-source-fact-insight-v32"
 RESOURCE_VISION_RECIPE = "oam-vision-downscale-v1"
+INSIGHT_RETRIEVAL_RECIPE = "oam-insight-purpose-v2"
 
 
 def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
@@ -59,10 +60,12 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
             "max_pixels_per_image": config.resource.max_pixels_per_image,
         },
         "index": config.index.model_dump(
-            mode="json", exclude={"insight_consolidation_delay_seconds"}
+            mode="json", exclude={"insight_consolidation_delay_hours"}
         ),
         "roles": roles,
     }
+    if config.index.insights_enabled:
+        identity["insight_retrieval_recipe"] = INSIGHT_RETRIEVAL_RECIPE
     return (
         "gen_"
         + hashlib.sha256(
