@@ -119,7 +119,7 @@ class InsightService(RecallService):
         yield self.repository
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_primary_insight_restores_complete_direct_code_without_independent_fact_hit(mode):
     service = InsightService()
     result = service.search(
@@ -319,7 +319,7 @@ def test_insight_reached_only_by_secondary_expansion_does_not_expand(monkeypatch
 
     monkeypatch.setattr(InsightRepository, "insight_support_units", forbidden)
     result = InsightService(rows).search(
-        object(), SearchRequest(query="batch implementation", recall_level="mid")
+        object(), SearchRequest(query="batch implementation", recall_level="normal")
     )
     assert result["diagnostics"]["l2_source_expansion"] == []
     assert ORIGINAL not in result["context"]

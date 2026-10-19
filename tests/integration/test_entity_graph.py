@@ -215,7 +215,8 @@ def test_partial_revalidation_keeps_other_graph_paths_and_independent_direct_hit
     service = recall_service(connection, config, vector, ChangedAliasRepository)
 
     result = service.search(
-        authority, SearchRequest(query="research projects", recall_level="mid", allow_partial=True)
+        authority,
+        SearchRequest(query="research projects", recall_level="normal", allow_partial=True),
     )
 
     by_id = {item["unit_id"]: item for item in result["items"]}
@@ -288,7 +289,7 @@ def test_replacement_witness_preserves_same_graph_path_under_strict_recall(recal
     service = recall_service(connection, repository.config, vector, ReplacedSupportRepository)
 
     result = service.search(
-        authority, SearchRequest(query="research membership", recall_level="mid")
+        authority, SearchRequest(query="research membership", recall_level="normal")
     )
 
     target = next(item for item in result["items"] if item["unit_id"] == "continuation")
@@ -335,7 +336,9 @@ def test_unfit_alias_proof_drops_graph_vote_and_keeps_independently_admitted_fac
 
     result = service.search(
         authority,
-        SearchRequest(query="research membership", recall_level="mid", max_context_tokens=budget),
+        SearchRequest(
+            query="research membership", recall_level="normal", max_context_tokens=budget
+        ),
     )
 
     selected = next(item for item in result["items"] if item["unit_id"] == "continuation")
@@ -392,7 +395,9 @@ def test_unfit_entity_proof_recomputes_graph_rank_from_surviving_semantic_paths(
 
     result = service.search(
         authority,
-        SearchRequest(query="research membership", recall_level="mid", max_context_tokens=budget),
+        SearchRequest(
+            query="research membership", recall_level="normal", max_context_tokens=budget
+        ),
     )
 
     target = next(item for item in result["items"] if item["unit_id"] == "continuation")

@@ -250,7 +250,7 @@ async def test_public_http_fast_graph_option_reaches_real_sql_context(core_datab
             json={
                 "user_id": "scope",
                 "query": "anchorword",
-                "recall_level": "mid",
+                "recall_level": "normal",
                 "fast_graph": True,
             },
         )

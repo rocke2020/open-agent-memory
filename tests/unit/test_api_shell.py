@@ -220,9 +220,50 @@ async def test_http_admission_uses_selected_config_limits(
 
 async def test_openapi_search_contracts_exclude_profile_selection(client) -> None:
     schemas = (await client.get("/openapi.json")).json()["components"]["schemas"]
+    assert schemas["RecallLevel"]["enum"] == ["fast", "normal"]
     for name in ("RecallRequest", "SearchRequest", "SearchManyRequest"):
         assert "include_profile" not in schemas[name]["properties"]
         assert schemas[name]["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/v1/recall", {"user_id": "scope", "query": "q"}),
+        ("/v1/users/scope/search-many", {"queries": ["q"]}),
+        ("/v1/users/scope/decompose-and-search", {"query": "q"}),
+    ],
+)
+@pytest.mark.parametrize("level", ["deep", "mid"])
+async def test_http_rejects_removed_modes_before_retrieval(tmp_path, path, payload, level) -> None:
+    class AdmissionRuntime:
+        def authenticate(self, secret):
+            pass
+
+        def search(self, actor, user_id, body):
+            return {}
+
+        def search_many(self, actor, user_id, body):
+            return {}
+
+        def decompose_and_search(self, actor, user_id, body):
+            return {}
+
+    config = tmp_path / "oam.yaml"
+    config.write_text("{}\n")
+    transport = httpx.ASGITransport(app=create_app(config, runtime=AdmissionRuntime()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            path,
+            json={**payload, "recall_level": level},
+            headers={"Authorization": "Bearer synthetic-key"},
+        )
+
+    assert response.status_code == 422
+    assert any(
+        error["loc"] == ["body", "recall_level"] and error["type"] == "enum"
+        for error in response.json()["detail"]
+    )
 
 
 async def test_capabilities_publish_limits_without_secrets(client) -> None:
@@ -242,7 +283,8 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["limits"]["model"]["attempt_timeout_seconds"] == 60
     assert payload["limits"]["user"]["max_chats"] == 1000
     assert payload["features"]["python_sdk"] is False
-    assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "mid", "deep"))
+    assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "normal"))
+    assert "deep_recall" not in payload["features"]
     assert payload["features"]["batch_recall"] is True
     assert payload["features"]["planner"] is False
     assert "api_key" not in response.text.lower()

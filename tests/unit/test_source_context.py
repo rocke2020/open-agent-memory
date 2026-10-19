@@ -72,9 +72,6 @@ class SourceRepository(DatedRepository):
     def ordinary(self, seeds, vector):
         return tuple(self.graph_paths), self.graph_paths
 
-    def hierarchy(self, seeds, vector):
-        return (), {}
-
     def hydrate(self, unit_ids):
         return [deepcopy(self.rows[unit_id]) for unit_id in unit_ids]
 
@@ -111,7 +108,7 @@ class SourceService(RecallService):
         yield SourceRepository(request, self.rows, self.graph_paths)
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_assistant_original_does_not_consume_the_only_protected_fact_slot(evidence_rows, mode):
     assistant = deepcopy(evidence_rows[2])
     assistant.update(
@@ -164,7 +161,7 @@ def test_trace_statement_timeout_preserves_recall_deadline_error(evidence_rows, 
         SourceService(evidence_rows).search(object(), SearchRequest(query="missed workshops"))
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_passage_seed_recovers_query_relevant_user_original_without_a_fact(evidence_rows, mode):
     seed = deepcopy(evidence_rows[0])
     seed.update(
@@ -207,7 +204,7 @@ def test_passage_seed_recovers_query_relevant_user_original_without_a_fact(evide
     assert result["context_tokens"] <= CONFIG.context.default_tokens
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("max_results", [5, 6])
 def test_supplemental_original_does_not_displace_ranked_evidence(evidence_rows, mode, max_results):
     guide = deepcopy(evidence_rows[2])
@@ -251,7 +248,7 @@ def test_supplemental_original_does_not_displace_ranked_evidence(evidence_rows, 
     assert len(ids) <= max_results
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid", "deep"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_grouped_context_preserves_facts_and_shows_source_once(evidence_rows, mode):
     result = SourceService(evidence_rows).search(
         object(), SearchRequest(query="missed workshops", recall_level=mode)
@@ -323,7 +320,7 @@ def test_grouping_neither_fetches_nor_backfills_beyond_item_cap(evidence_rows, c
     config = CONFIG.model_copy(
         update={
             "search": CONFIG.search.model_copy(
-                update={"mid": CONFIG.search.mid.model_copy(update={"max_results": cap})}
+                update={"normal": CONFIG.search.normal.model_copy(update={"max_results": cap})}
             )
         }
     )
@@ -564,7 +561,7 @@ def test_related_user_fact_does_not_displace_the_only_query_ranked_result(eviden
     assert [item["unit_id"] for item in result["items"]] == ["fact"]
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_related_fact_does_not_displace_a_seed_exceeding_its_primary_budget(evidence_rows, mode):
     ranked = deepcopy(evidence_rows[0])
     ranked["text"] = "Query ranked detail. " * 110
@@ -1037,7 +1034,7 @@ def test_recall_restores_facts_supported_by_direct_and_windowed_user_passages(ev
         def _repository(self, authority, request, deadline):
             yield CompanionRepository(request, self.rows, self.graph_paths)
 
-    for mode in ("fast", "mid"):
+    for mode in ("fast", "normal"):
         result = CompanionService(rows).search(
             object(), SearchRequest(query="Which workshop was missed?", recall_level=mode)
         )

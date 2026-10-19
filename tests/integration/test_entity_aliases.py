@@ -110,7 +110,7 @@ async def test_aliases_reach_public_worker_and_cited_recall(reference_client):
         json={
             "user_id": "lin",
             "query": "When did I join Nova Research?",
-            "recall_level": "mid",
+            "recall_level": "normal",
             "max_context_tokens": 2048,
         },
     )
@@ -372,7 +372,7 @@ class FocusedAliasModels(AliasModels):
 
 
 @pytest.mark.asyncio
-async def test_public_mid_discovers_alias_target_absent_from_direct_arms(
+async def test_public_normal_discovers_alias_target_absent_from_direct_arms(
     reference_client, tmp_path
 ):
     client, dsn, tenant, config, app = reference_client
@@ -380,7 +380,7 @@ async def test_public_mid_discovers_alias_target_absent_from_direct_arms(
         update={
             "graph_seed_max": 2,
             "fast": config.search.fast.model_copy(update={"channel_candidates": 1}),
-            "mid": config.search.mid.model_copy(update={"channel_candidates": 1}),
+            "normal": config.search.normal.model_copy(update={"channel_candidates": 1}),
         }
     )
     config = config.model_copy(update={"search": search})
@@ -395,7 +395,7 @@ async def test_public_mid_discovers_alias_target_absent_from_direct_arms(
     await retain(client, "discovery-distractor", ["I observed a cloud over the city."])
     assert run_source(dsn, config, app.state.runtime.models)
     observed = {}
-    for mode in ("fast", "mid"):
+    for mode in ("fast", "normal"):
         response = await client.post(
             "/v1/recall",
             json={

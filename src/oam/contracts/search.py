@@ -24,8 +24,7 @@ class FrozenContract(BaseModel):
 
 class RecallLevel(StrEnum):
     FAST = "fast"
-    MID = "mid"
-    DEEP = "deep"
+    NORMAL = "normal"
 
 
 class TimeBasis(StrEnum):
@@ -59,7 +58,7 @@ class SearchIncludeOptions(FrozenContract):
 
 
 class SearchOutputOptions(FrozenContract):
-    recall_level: RecallLevel = RecallLevel.MID
+    recall_level: RecallLevel = RecallLevel.NORMAL
     fast_graph: bool | None = Field(
         default=None,
         strict=True,

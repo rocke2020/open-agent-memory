@@ -816,7 +816,7 @@ test('local control recall suppression preserves owner admission and frozen capt
   assert.equal(requests.length, 0);
 });
 
-test('explicit search uses the fixed user and defaults to mid recall', async () => {
+test('explicit search uses the fixed user and defaults to normal recall', async () => {
   requests.length = 0;
   const { tool } = await installedPlugin();
   const search = tool.create({
@@ -827,9 +827,24 @@ test('explicit search uses the fixed user and defaults to mid recall', async () 
   assert.match(result.content[0].text, /Lin prefers concise answers/);
   assert.deepEqual(requests.map(({ path }) => path), ['/v1/recall']);
   assert.equal(requests[0].body.user_id, 'u1');
-  assert.equal(requests[0].body.recall_level, 'mid');
+  assert.equal(requests[0].body.recall_level, 'normal');
   assert.equal(requests[0].body.query, 'Lin preference');
   assert.equal('include_profile' in requests[0].body, false);
+});
+
+test('explicit search rejects removed modes without dispatching recall', async () => {
+  requests.length = 0;
+  const { tool } = await installedPlugin();
+  const search = tool.create({
+    agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7',
+    conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {},
+  });
+  for (const recall_level of ['deep', 'mid']) {
+    const result = await search.execute('removed-mode', { query: 'Lin preference', recall_level });
+    assert.equal(result.isError, true);
+  }
+  assert.deepEqual(requests, []);
+  assert.deepEqual(search.parameters.properties.recall_level.enum, ['fast', 'normal']);
 });
 
 test('memory_remove deletes exactly one memory or Insight ID through its typed route', async () => {

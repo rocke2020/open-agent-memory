@@ -482,7 +482,7 @@ async def test_public_pdf_and_image_retain_to_cited_recall(
     assert ("extraction" in models.generation_calls) is uses_vision
 
 
-async def test_structured_native_pdf_late_detail_reaches_fast_and_mid_context(
+async def test_structured_native_pdf_late_detail_reaches_fast_and_normal_context(
     core_database, tmp_path
 ):
     from oam.config import load_config
@@ -560,7 +560,7 @@ async def test_structured_native_pdf_late_detail_reaches_fast_and_mid_context(
         measurements = []
         for mode, query in (
             (mode, query)
-            for mode in ("fast", "mid")
+            for mode in ("fast", "normal")
             for query in (
                 "seal broken sealed backup restart",
                 "What should I do when the seal is broken?",
@@ -1091,7 +1091,7 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
         )
         app.state.runtime.models = models
         generation_calls = list(models.generation_calls)
-        for mode in ("fast", "mid", "deep"):
+        for mode in ("fast", "normal"):
             recalled = await client.post(
                 "/v1/recall",
                 json={

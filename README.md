@@ -4,7 +4,7 @@
 
 Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for agent developers. It preserves eligible interaction evidence, derives source-backed memory, keeps HTML/PDF/image Resources separate, retrieves both origins together with citations, and builds the read-only User Profile only when explicitly requested.
 
-The repository is implementing v0.0.1. The user-qualified retain/recall API, source-backed facts, typed Insights, stored User Profile, joint fast/mid/deep retrieval, Resource revision/deletion, recorded inspection, portable export and browser Inspector have isolated PostgreSQL or browser functional coverage. Separate API/worker processes with configured real models have produced and recalled supported L2 plus HTML Evidence through the current API. No complete LongMemEval stage is available. Live User Profile model quality, document-vision quality and release-level recovery remain later gates, so this is not a release candidate.
+The repository is implementing v0.0.1. The user-qualified retain/recall API, source-backed facts, typed Insights, stored User Profile, joint fast/normal retrieval, Resource revision/deletion, recorded inspection, portable export and browser Inspector have isolated PostgreSQL or browser functional coverage. Separate API/worker processes with configured real models have produced and recalled supported L2 plus HTML Evidence through the current API. No complete LongMemEval stage is available. Live User Profile model quality, document-vision quality and release-level recovery remain later gates, so this is not a release candidate.
 
 ## Product Model
 
@@ -30,7 +30,7 @@ trusted application -> user-authorized retain -> PostgreSQL receipt + immutable 
                          Resources -> passages + abstract
                                       |
                                       v
-                         joint fast/mid/deep recall + citations
+                         joint fast/normal recall + citations
 
 explicit User Profile refresh -> unchanged: zero calls
                          -> changed: durable operation -> L3
@@ -64,7 +64,7 @@ The default `worker.embedded_enabled: true` requires the API, queue and worker-c
 
 ## Release Boundary
 
-v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/mid/deep joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and mid are the primary everyday recall modes; deep is an explicit higher-budget option. The Python SDK, targeted fact controls, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
+v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/normal joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and normal are the supported recall modes. The Python SDK, targeted fact controls, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
 
 No Dockerfile or public image exists yet. Packaging and publication are the final release phase after the complete source-level acceptance matrix passes.
 

@@ -349,7 +349,11 @@ async def test_process_topology_indexes_and_recalls_during_imports(
                     )
 
                 await asyncio.gather(
-                    *(recall(index, mode) for index in range(api_count) for mode in ("fast", "mid"))
+                    *(
+                        recall(index, mode)
+                        for index in range(api_count)
+                        for mode in ("fast", "normal")
+                    )
                 )
                 written = await asyncio.gather(*write_tasks)
                 for user, operation_ids in written:

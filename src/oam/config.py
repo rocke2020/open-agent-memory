@@ -96,7 +96,7 @@ class SearchTier(FrozenModel):
         return self
 
 
-class MidArmWeights(FrozenModel):
+class NormalArmWeights(FrozenModel):
     lexical: PositiveFloat
     dense: PositiveFloat
     graph: PositiveFloat
@@ -110,7 +110,7 @@ class SearchConfig(FrozenModel):
     query_concurrency: PositiveInt
     rrf_k: PositiveInt
     fts_rank_weights: tuple[float, float, float, float]
-    mid_arm_weights: MidArmWeights
+    normal_arm_weights: NormalArmWeights
     graph_seed_min_similarity: float = Field(ge=0, le=1)
     graph_seed_max: PositiveInt
     relation_hops: Literal[2]
@@ -118,8 +118,6 @@ class SearchConfig(FrozenModel):
     entity_candidates_per_entity: PositiveInt
     entities_per_seed: PositiveInt
     links_per_seed: PositiveInt
-    hierarchy_parents_per_seed: PositiveInt
-    hierarchy_children_per_parent: PositiveInt
     temporal_seed_max: PositiveInt
     temporal_coverage_buckets: PositiveInt
     temporal_neighbors: PositiveInt
@@ -128,8 +126,7 @@ class SearchConfig(FrozenModel):
     ann_iterative_scan: Literal["strict_order"]
     ann_scan_max_tuples: PositiveInt
     fast: SearchTier
-    mid: SearchTier
-    deep: SearchTier
+    normal: SearchTier
 
     @field_validator("fts_rank_weights")
     @classmethod
@@ -142,8 +139,7 @@ class SearchConfig(FrozenModel):
 class RecallConfig(FrozenModel):
     turn_deadline_seconds: PositiveFloat
     fast_deadline_seconds: PositiveFloat
-    mid_deadline_seconds: PositiveFloat
-    deep_deadline_seconds: PositiveFloat
+    normal_deadline_seconds: PositiveFloat
 
 
 class ContextConfig(FrozenModel):

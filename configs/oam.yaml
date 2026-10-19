@@ -84,8 +84,8 @@ search:
   # D applies to all indexed units; current HTML passages may also supply C/B/A.
   # Higher weights favor those structural fields when present.
   fts_rank_weights: [0.1, 0.2, 0.4, 1.0]
-  # Only mid uses these arm weights; fast and deep use equal fusion weights.
-  mid_arm_weights:
+  # Only normal uses these arm weights; fast uses equal fusion weights.
+  normal_arm_weights:
     lexical: 1.0
     dense: 1.0
     # Entity, semantic, and causal neighbors are indirect evidence.
@@ -106,10 +106,6 @@ search:
   entities_per_seed: 8
   # Cap each semantic direction and causal hop at this many links.
   links_per_seed: 16
-  # Maximum L2 parent Insights expanded per dense fact seed in deep mode.
-  hierarchy_parents_per_seed: 2
-  # Maximum related child facts expanded per L2 parent in deep mode.
-  hierarchy_children_per_parent: 8
   # Maximum temporal seeds selected before spreading.
   temporal_seed_max: 10
   # Spread temporal seeds across the requested time window.
@@ -132,17 +128,11 @@ search:
     fused_candidates: 128
     source_seed_results: 36
     max_results: 96
-  mid:
+  normal:
     channel_candidates: 64
     fused_candidates: 128
     rerank_candidates: 48
     source_seed_results: 36
-    max_results: 96
-  deep:
-    channel_candidates: 64
-    fused_candidates: 128
-    rerank_candidates: 64
-    source_seed_results: 56
     max_results: 96
 
 index:
@@ -184,10 +174,8 @@ recall:
   turn_deadline_seconds: 10
   # Maximum fast-search duration; caller and trusted-turn deadlines may shorten it.
   fast_deadline_seconds: 3
-  # Maximum mid-search duration; caller and trusted-turn deadlines may shorten it.
-  mid_deadline_seconds: 5
-  # Maximum deep-search duration; caller and trusted-turn deadlines may shorten it.
-  deep_deadline_seconds: 10
+  # Maximum normal-search duration; caller and trusted-turn deadlines may shorten it.
+  normal_deadline_seconds: 5
 
 context:
   # Returned context budget when the caller omits max_context_tokens.
@@ -362,5 +350,5 @@ models:
     api_key_env: OAM_EMBEDDING_KEY
     # Declared capabilities; embedding roles require embeddings.
     capabilities: [embeddings]
-  # null disables the optional reranking stage; a binding enables it for mid/deep search.
+  # null disables the optional reranking stage; a binding enables it for normal search.
   reranker: null

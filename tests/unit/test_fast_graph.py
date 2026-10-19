@@ -180,7 +180,7 @@ def test_enabled_fast_delivers_two_supported_causes_in_final_context():
     assert ("fast_graph", ("effect",)) in service.calls
 
 
-@pytest.mark.parametrize("mode", ["mid", "deep"])
+@pytest.mark.parametrize("mode", ["normal"])
 def test_fast_only_option_rejects_nonfast_modes(mode):
     with pytest.raises(ValidationError, match="fast_graph"):
         SearchRequest(query="why move", recall_level=mode, fast_graph=True)

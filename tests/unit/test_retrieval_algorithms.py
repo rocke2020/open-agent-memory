@@ -14,7 +14,7 @@ def test_rank_fusion_counts_each_arm_once_and_breaks_ties_by_id() -> None:
     assert [item.score for item in result] == pytest.approx([5 / 6, 5 / 6])
 
 
-def test_mid_fusion_keeps_a_lexical_only_candidate_ahead_of_graph_only_results() -> None:
+def test_normal_fusion_keeps_a_lexical_only_candidate_ahead_of_graph_only_results() -> None:
     from oam.config import load_config
     from oam.retrieval.algorithms import reciprocal_rank_fusion
 
@@ -23,7 +23,7 @@ def test_mid_fusion_keeps_a_lexical_only_candidate_ahead_of_graph_only_results()
     lexical = (target, *(f"lexical_{index}" for index in range(47)))
     dense = tuple(f"dense_{index}" for index in range(48))
     graph = tuple(f"graph_{index}" for index in range(32))
-    weights = config.search.mid_arm_weights
+    weights = config.search.normal_arm_weights
 
     ranked = reciprocal_rank_fusion(
         (lexical, dense, graph),
@@ -33,7 +33,7 @@ def test_mid_fusion_keeps_a_lexical_only_candidate_ahead_of_graph_only_results()
 
     ids = [item.node_id for item in ranked]
     assert ids.index(target) < ids.index("graph_0")
-    assert target in {item.node_id for item in ranked[: config.search.mid.max_results]}
+    assert target in {item.node_id for item in ranked[: config.search.normal.max_results]}
 
 
 def test_ordinary_causal_expansion_follows_two_outgoing_edges_only() -> None:

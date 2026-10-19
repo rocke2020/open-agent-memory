@@ -235,7 +235,7 @@ async def test_public_reference_path_preserves_occurrences_and_concurrent_suppor
             assert reference["mentioned_at"] == "2026-09-24T09:00:00+00:00"
             assert reference["time_qualifiers"] == [event_qualifier]
             evidence["extraction_inputs"] = models.inputs
-    for mode in ("fast", "mid"):
+    for mode in ("fast", "normal"):
         recall = await client.post(
             "/v1/recall",
             json={
@@ -489,7 +489,7 @@ async def test_short_source_uses_one_call_and_keeps_mixed_message_citations(
     assert [ref["text"] for ref in models.inputs[0]["reference_facts"]] == ["I prefer tea."]
     app.state.runtime.models = models
     recalls = {}
-    for mode in ("fast", "mid"):
+    for mode in ("fast", "normal"):
         recall = await client.post(
             "/v1/recall",
             json={

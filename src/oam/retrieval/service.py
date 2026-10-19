@@ -143,15 +143,10 @@ class RecallService:
             with self._repository(authority, request, deadline) as repository:
                 return getattr(repository, method)(*args)
 
-        def stage(name, call, *, timed=False):
+        def stage(name, call):
             began = time.monotonic()
-            duration_ms = None
             try:
                 value = call()
-                if timed:
-                    value, error, duration_ms = value
-                    if error is not None:
-                        raise error
             except (PermissionError, TimeoutError, psycopg.errors.QueryCanceled):
                 raise
             except (RuntimeError, ValueError, httpx.HTTPError, psycopg.Error) as exc:
@@ -160,9 +155,7 @@ class RecallService:
                 degraded.append(name)
                 return None
             finally:
-                timing[name] = (
-                    duration_ms if duration_ms is not None else (time.monotonic() - began) * 1000
-                )
+                timing[name] = (time.monotonic() - began) * 1000
             executed.append(name)
             return value
 
@@ -234,50 +227,13 @@ class RecallService:
                     arms["graph"] = ranks
                     for node_id, node_paths in evidence.items():
                         paths.setdefault(node_id, []).extend(node_paths)
-            if mode != "fast":
-
-                def record_expansion(name, result):
-                    if result is not None:
-                        ranks, evidence = result
-                        arms[name] = ranks
-                        for node_id, node_paths in evidence.items():
-                            paths.setdefault(node_id, []).extend(node_paths)
-
-                expansions = (("graph", "ordinary"),)
-                if mode == "deep":
-                    expansions += (("hierarchy", "hierarchy"),)
-                if len(expansions) > 1 and getattr(self.pool, "max_size", 1) >= 2:
-
-                    def timed_expansion(method):
-                        began = time.monotonic()
-                        try:
-                            result = read(method, seeds, vector)
-                        except Exception as error:
-                            return None, error, (time.monotonic() - began) * 1000
-                        return result, None, (time.monotonic() - began) * 1000
-
-                    with ThreadPoolExecutor(
-                        max_workers=2, thread_name_prefix="oam-recall-expand"
-                    ) as executor:
-                        futures = {
-                            name: executor.submit(timed_expansion, method)
-                            for name, method in expansions
-                        }
-                        for name, _ in expansions:
-                            outcome = stage(
-                                name,
-                                lambda name=name: futures[name].result(
-                                    timeout=_remaining(deadline)
-                                ),
-                                timed=True,
-                            )
-                            if outcome is not None:
-                                record_expansion(name, outcome)
-                else:
-                    for name, method in expansions:
-                        record_expansion(
-                            name, stage(name, lambda method=method: read(method, seeds, vector))
-                        )
+            if mode == "normal":
+                expansion = stage("graph", lambda: read("ordinary", seeds, vector))
+                if expansion is not None:
+                    ranks, evidence = expansion
+                    arms["graph"] = ranks
+                    for node_id, node_paths in evidence.items():
+                        paths.setdefault(node_id, []).extend(node_paths)
             if request.time_window:
 
                 def temporal():
@@ -405,8 +361,8 @@ class RecallService:
 
         def fused_ids():
             weights = (
-                tuple(getattr(self.config.search.mid_arm_weights, name) for name in arms)
-                if mode == "mid"
+                tuple(getattr(self.config.search.normal_arm_weights, name) for name in arms)
+                if mode == "normal"
                 else None
             )
             return tuple(
@@ -970,7 +926,6 @@ class RecallService:
                         "dense",
                         "related_user_fact",
                         "graph",
-                        "hierarchy",
                         "temporal",
                         "rerank",
                         "source_user_originals",
@@ -980,7 +935,7 @@ class RecallService:
                 ],
                 "omitted_stages": [
                     name
-                    for name in ("graph", "hierarchy", "temporal", "rerank")
+                    for name in ("graph", "temporal", "rerank")
                     if name not in executed and name not in degraded
                 ],
                 "degraded": sorted(set(degraded)),
@@ -1002,8 +957,8 @@ class RecallService:
             },
         }
         weights = (
-            tuple(getattr(self.config.search.mid_arm_weights, name) for name in arms)
-            if mode == "mid"
+            tuple(getattr(self.config.search.normal_arm_weights, name) for name in arms)
+            if mode == "normal"
             else (1.0,) * len(arms)
         )
         arm_positions = {

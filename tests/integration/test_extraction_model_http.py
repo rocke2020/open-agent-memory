@@ -178,7 +178,7 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
                     )
                     assert ("extraction", 4096) in calls
                     assert ("abstract", 4096) in calls
-                    for mode in ("fast", "mid"):
+                    for mode in ("fast", "normal"):
                         recalled = await client.post(
                             "/v1/recall",
                             json={

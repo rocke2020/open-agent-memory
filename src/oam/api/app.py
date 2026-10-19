@@ -373,8 +373,7 @@ def create_app(
             "features": {
                 "python_sdk": False,
                 "fast_recall": True,
-                "mid_recall": True,
-                "deep_recall": True,
+                "normal_recall": True,
                 "batch_recall": True,
                 "planner": config.models.binding_for("planner") is not None,
                 "profiles": runtime is not None and config.profile.enabled,

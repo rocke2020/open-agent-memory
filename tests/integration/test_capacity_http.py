@@ -214,7 +214,7 @@ async def test_embedded_runner_accepts_indexes_and_recalls_both_origins(
             assert time.monotonic() < deadline, states
             await asyncio.sleep(0.05)
         results = {}
-        for mode, limit in [("fast", 3), ("mid", 5)]:
+        for mode, limit in [("fast", 3), ("normal", 5)]:
             start = time.monotonic()
             response = await client.post(
                 "/v1/recall",

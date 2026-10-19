@@ -1,10 +1,8 @@
 """Natural-language time in the public recall service."""
 
-import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
 from types import SimpleNamespace
 
 import pytest
@@ -102,7 +100,7 @@ class DatedService(RecallService):
         yield DatedRepository(request)
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("existing_seed", [False, True])
 def test_window_pool_preserves_disconnected_evidence_with_existing_time_matches(
     mode, existing_seed
@@ -170,7 +168,7 @@ def test_window_pool_preserves_disconnected_evidence_with_existing_time_matches(
     assert result["diagnostics"]["generative_calls"] == 0
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("existing", ["none", "matched", "seed", "failed"])
 def test_temporal_window_pool_is_independent_of_direct_matches_and_roots(mode, existing):
     calls = []
@@ -221,7 +219,7 @@ def test_temporal_window_pool_is_independent_of_direct_matches_and_roots(mode, e
     assert result["diagnostics"]["degraded"] == (["temporal"] if existing == "failed" else [])
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("allow_partial", [False, True])
 def test_window_pool_failure_does_not_publish_existing_temporal_votes(mode, allow_partial):
     class FailedPoolRepository(DatedRepository):
@@ -338,13 +336,13 @@ def test_explicit_window_overrides_date_in_query():
     assert result["diagnostics"]["query_time"]["status"] == "explicit"
 
 
-def test_mid_keeps_temporal_rank_and_out_of_window_direct_evidence():
+def test_normal_keeps_temporal_rank_and_out_of_window_direct_evidence():
     service = DatedService(
         CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
     request = SearchRequest(
         query="apple harvest in 2025",
-        recall_level="mid",
+        recall_level="normal",
         reference_time="2026-09-23T12:00:00Z",
     )
 
@@ -486,106 +484,27 @@ def test_fast_temporal_deadline_cannot_report_complete_recall(monkeypatch):
     assert "temporal_deadline" in partial["diagnostics"]["degraded"]
 
 
-class ExpansionRepository(DatedRepository):
-    def __init__(self, request, activity):
-        super().__init__(request)
-        self.activity = activity
-
-    def dense(self, vector, limit):
-        return [{"unit_id": "old", "kind": "fact", "score": 0.9}]
-
-    def ordinary(self, seeds, vector):
-        return self._expand("graph", "old")
-
-    def hierarchy(self, seeds, vector):
-        return self._expand("hierarchy", "new")
-
-    def _expand(self, name, node):
-        with self.activity["lock"]:
-            self.activity["active"] += 1
-            self.activity["peak"] = max(self.activity["peak"], self.activity["active"])
-            self.activity["repositories"].add(id(self))
-        try:
-            time.sleep(0.04)
-            if self.activity.get("fail") == name:
-                raise RuntimeError("expansion failed")
-            return (node,), {}
-        finally:
-            with self.activity["lock"]:
-                self.activity["active"] -= 1
-
-
-class ExpansionService(RecallService):
-    def __init__(self, *, pool_size=2, fail=None):
-        super().__init__(
-            CONFIG,
-            SimpleNamespace(max_size=pool_size),
-            EmbeddingOnly(),
-            generation_id="generation",
-        )
-        self.activity = {
-            "lock": Lock(),
-            "active": 0,
-            "peak": 0,
-            "repositories": set(),
-            "fail": fail,
-        }
-
-    @contextmanager
-    def _repository(self, authority, request, deadline):
-        yield ExpansionRepository(request, self.activity)
-
-
-def test_deep_expansions_overlap_on_distinct_repositories_and_keep_arm_order():
-    service = ExpansionService()
-
-    result = service.search(object(), SearchRequest(query="apple", recall_level="deep"))
-
-    assert service.activity["peak"] == 2
-    assert len(service.activity["repositories"]) == 2
-    assert service.activity["active"] == 0
-    assert result["diagnostics"]["executed_arms"] == [
-        "lexical",
-        "dense",
-        "graph",
-        "hierarchy",
-    ]
-    assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
-
-
-def test_mid_skips_hierarchy_and_uses_only_one_graph_repository():
-    service = ExpansionService(pool_size=1)
-
-    result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))
-
-    assert service.activity["peak"] == 1
-    assert len(service.activity["repositories"]) == 1
-    assert service.activity["active"] == 0
-    assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
-    assert "hierarchy" in result["diagnostics"]["omitted_stages"]
-    assert result["diagnostics"]["degraded"] == []
-
-
 @pytest.mark.parametrize("allow_partial", [False, True])
-@pytest.mark.parametrize(
-    "mode,failed_arm", [("mid", "graph"), ("deep", "graph"), ("deep", "hierarchy")]
-)
-def test_expansion_failure_drains_other_job_and_obeys_partial_policy(
-    allow_partial, mode, failed_arm
-):
-    service = ExpansionService(fail=failed_arm)
-    request = SearchRequest(query="apple", recall_level=mode, allow_partial=allow_partial)
+def test_normal_graph_failure_obeys_partial_policy(allow_partial):
+    class FailedGraphRepository(DatedRepository):
+        def ordinary(self, seeds, vector):
+            raise RuntimeError("expansion failed")
 
+    class FailedGraphService(RecallService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield FailedGraphRepository(request)
+
+    service = FailedGraphService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
+    request = SearchRequest(query="apple", recall_level="normal", allow_partial=allow_partial)
     if allow_partial:
         result = service.search(object(), request)
-        assert result["diagnostics"]["degraded"] == [failed_arm]
-        expected = {"hierarchy" if failed_arm == "graph" else "graph"} if mode == "deep" else set()
-        assert (set(result["diagnostics"]["executed_arms"]) & {"graph", "hierarchy"}) == expected
-        assert result["diagnostics"]["timing_ms"][failed_arm] >= 30
+        assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
+        assert result["diagnostics"]["degraded"] == ["graph"]
+        assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
     else:
-        with pytest.raises(RecallUnavailable, match=f"{failed_arm} stage failed"):
+        with pytest.raises(RecallUnavailable, match="graph stage failed"):
             service.search(object(), request)
-    assert service.activity["active"] == 0
 
 
 class DirectEvidenceRepository(DatedRepository):
@@ -597,9 +516,6 @@ class DirectEvidenceRepository(DatedRepository):
 
     def ordinary(self, seeds, vector):
         return ("a_graph",), {}
-
-    def hierarchy(self, seeds, vector):
-        raise AssertionError("mid must not run hierarchy")
 
     def hydrate(self, unit_ids):
         return [
@@ -622,16 +538,18 @@ class DirectEvidenceService(RecallService):
         yield DirectEvidenceRepository(request)
 
 
-def test_mid_equal_arm_weights_use_stable_id_for_dense_graph_tie():
+def test_normal_equal_arm_weights_use_stable_id_for_dense_graph_tie():
     equal_search = CONFIG.search.model_copy(
-        update={"mid_arm_weights": CONFIG.search.mid_arm_weights.model_copy(update={"graph": 1.0})}
+        update={
+            "normal_arm_weights": CONFIG.search.normal_arm_weights.model_copy(update={"graph": 1.0})
+        }
     )
     equal_config = CONFIG.model_copy(update={"search": equal_search})
     service = DirectEvidenceService(
         equal_config, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
 
-    result = service.search(object(), SearchRequest(query="apple", recall_level="mid"))
+    result = service.search(object(), SearchRequest(query="apple", recall_level="normal"))
 
     assert [item["unit_id"] for item in result["items"]] == ["a_graph", "z_direct"]
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
@@ -651,9 +569,6 @@ class OverlappingGraphRepository(DirectEvidenceRepository):
         assert seeds == ("z_seed",)
         return ("z_unrelated",), {}
 
-    def hierarchy(self, seeds, vector):
-        return (), {}
-
 
 class OverlappingGraphService(RecallService):
     @contextmanager
@@ -661,22 +576,19 @@ class OverlappingGraphService(RecallService):
         yield OverlappingGraphRepository(request)
 
 
-@pytest.mark.parametrize("mode", ["mid", "deep"])
-def test_graph_and_dense_each_vote_for_a_shared_candidate(mode):
+def test_graph_and_dense_each_vote_for_a_shared_candidate():
     service = OverlappingGraphService(
         CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
 
-    result = service.search(object(), SearchRequest(query="apple", recall_level=mode))
+    result = service.search(object(), SearchRequest(query="apple", recall_level="normal"))
 
     assert [item["unit_id"] for item in result["items"]][:2] == ["z_unrelated", "a_relevant"]
     expected_arms = ["lexical", "dense", "graph"]
-    if mode == "deep":
-        expected_arms.append("hierarchy")
     assert result["diagnostics"]["executed_arms"] == expected_arms
 
 
-def test_mid_partial_embedding_failure_keeps_lexical_arm_weight():
+def test_normal_partial_embedding_failure_keeps_lexical_arm_weight():
     class FailedEmbedding:
         def embed(self, texts, **kwargs):
             raise RuntimeError("embedding unavailable")
@@ -684,7 +596,7 @@ def test_mid_partial_embedding_failure_keeps_lexical_arm_weight():
     service = DatedService(CONFIG, None, FailedEmbedding(), generation_id="generation")
 
     result = service.search(
-        object(), SearchRequest(query="apple", recall_level="mid", allow_partial=True)
+        object(), SearchRequest(query="apple", recall_level="normal", allow_partial=True)
     )
 
     assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
@@ -740,11 +652,11 @@ class ConversationService(RecallService):
         yield ConversationRepository(request)
 
 
-def test_mid_context_respects_fused_relevance_under_item_cap():
+def test_normal_context_respects_fused_relevance_under_item_cap():
     config = CONFIG.model_copy(
         update={
             "search": CONFIG.search.model_copy(
-                update={"mid": CONFIG.search.mid.model_copy(update={"max_results": 2})}
+                update={"normal": CONFIG.search.normal.model_copy(update={"max_results": 2})}
             )
         }
     )
@@ -753,7 +665,7 @@ def test_mid_context_respects_fused_relevance_under_item_cap():
     )
 
     result = service.search(
-        object(), SearchRequest(query="recommend something", recall_level="mid")
+        object(), SearchRequest(query="recommend something", recall_level="normal")
     )
 
     assert [item["unit_id"] for item in result["items"]] == ["a_noise", "z_user"]
@@ -851,7 +763,7 @@ def test_unrelated_or_unsupported_ranges_do_not_create_a_window(query):
     assert parsed.status == "ambiguous_time_expression"
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_calendar_range_recall_preserves_query_and_outside_evidence(mode):
     query = "Apple harvest from 2025-09-01 to 2025-09-30"
 
