@@ -159,6 +159,11 @@ index:
   insights_enabled: true
   # Delay in hours from completed source indexing to newly queued L2 consolidation.
   insight_consolidation_delay_hours: 24
+  # Maximum related new facts and existing complete Insight bodies per L2 request.
+  insight_seed_max: 8
+  insight_candidate_max: 8
+  # Dedicated L2 completion ceiling, including provider reasoning tokens.
+  insight_max_output_tokens: 64000
   # Vector length required from the embedding model; must match the database schema.
   embedding_dimensions: 1024
   # Create index-time semantic links only above this cosine similarity.
@@ -339,7 +344,7 @@ models:
     # Reasoning setting for source-backed fact extraction.
     extraction: none
     # Reasoning setting for L2 Insight synthesis.
-    insights: high
+    insights: low
     # Reasoning setting for Resource abstract generation.
     abstract: low
     # Reasoning setting for explicit Profile refresh generation.

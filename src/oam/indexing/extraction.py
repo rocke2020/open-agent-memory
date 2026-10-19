@@ -43,6 +43,9 @@ EXTRACTION_SYSTEM = (
 
 
 INSIGHT_SYSTEM = files("oam.indexing").joinpath("insight-prompt.txt").read_text(encoding="utf-8")
+INCREMENTAL_INSIGHT_SYSTEM = (
+    files("oam.indexing").joinpath("incremental-insight-prompt.txt").read_text(encoding="utf-8")
+)
 
 REFERENCE_CONTEXT_INSTRUCTIONS = (
     files("oam.indexing").joinpath("extraction-reference-suffix.txt").read_text(encoding="utf-8")
@@ -158,6 +161,128 @@ class InsightResult(FrozenProjection):
         if self.outcome == "no_insight" and self.retrieval_text is not None:
             raise ValueError("only a supported Insight has retrieval text")
         return self
+
+
+class InsightAction(FrozenProjection):
+    action: Literal["UPDATE", "CREATE", "NO_CHANGE", "NO_INSIGHT"]
+    target_id: NonBlank | None
+    expected_revision: Annotated[StrictInt, Field(ge=1)] | None
+    text: NonBlank | None
+    retrieval_text: NonBlank | None
+    subtype: (
+        Literal[
+            "preferences",
+            "patterns",
+            "projects",
+            "relationships",
+            "experiences",
+            "general_insights",
+        ]
+        | None
+    )
+    support_ids: tuple[NonBlank, ...]
+    seed_ids: tuple[NonBlank, ...] = Field(min_length=1)
+
+
+class ConsolidationResult(FrozenProjection):
+    actions: tuple[InsightAction, ...] = Field(min_length=1)
+    usage: Usage
+
+
+def consolidation_envelope(facts, seeds, targets) -> dict:
+    return {
+        "facts": [fact.model_dump(mode="json") for fact in facts],
+        "seed_ids": list(seeds),
+        "targets": list(targets),
+    }
+
+
+def consolidate_insights(
+    models: RuntimeModels,
+    *,
+    facts: tuple[InsightInput, ...],
+    seeds: tuple[str, ...],
+    targets: tuple[dict, ...],
+    config: OAMConfig,
+    timeout_seconds: float,
+) -> ConsolidationResult:
+    identities = {fact.id for fact in facts}
+    target_by_id = {target["id"]: target for target in targets}
+    if (
+        len(identities) != len(facts)
+        or not 1 <= len(facts) <= config.extraction.max_facts_per_group
+        or not 1 <= len(seeds) <= config.index.insight_seed_max
+        or len(set(seeds)) != len(seeds)
+        or not set(seeds) <= identities
+        or len(target_by_id) != len(targets)
+        or len(targets) > config.index.insight_candidate_max
+    ):
+        raise ExtractionError("incremental Insight input is not a bounded distinct set")
+    body, usage = _generate_json(
+        models,
+        "insights",
+        INCREMENTAL_INSIGHT_SYSTEM,
+        consolidation_envelope(facts, seeds, targets),
+        config,
+        timeout_seconds,
+        max_output_tokens=config.index.insight_max_output_tokens,
+    )
+    try:
+        result = ConsolidationResult.model_validate({**body, "usage": usage})
+    except ValidationError as exc:
+        raise ExtractionError("Insight actions are malformed", usage=usage, retryable=True) from exc
+
+    def invalid(message):
+        raise ExtractionError(message, usage=usage, retryable=True)
+
+    covered: set[str] = set()
+    used_targets: set[str] = set()
+    for action in result.actions:
+        addressed, support = set(action.seed_ids), set(action.support_ids)
+        if (
+            len(addressed) != len(action.seed_ids)
+            or not addressed <= set(seeds)
+            or covered & addressed
+            or len(support) != len(action.support_ids)
+            or not support <= identities
+        ):
+            invalid("Insight action has duplicate, unknown or already addressed inputs")
+        covered.update(addressed)
+        target = target_by_id.get(action.target_id)
+        if action.action in {"UPDATE", "NO_CHANGE"}:
+            if (
+                target is None
+                or action.expected_revision != target["revision"]
+                or action.target_id in used_targets
+            ):
+                invalid("Insight action has an unknown, duplicate or stale target")
+            used_targets.add(action.target_id)
+        elif action.target_id is not None or action.expected_revision is not None:
+            invalid("only UPDATE or NO_CHANGE may address an existing target")
+        if action.action in {"CREATE", "UPDATE"}:
+            retained = {item["id"] for item in target["supports"]} if target else set()
+            if (
+                not action.text
+                or action.subtype is None
+                or not addressed <= support
+                or len(support | retained) < 2
+            ):
+                invalid("Insight requires a complete claim and at least two known supports")
+        else:
+            if (
+                action.text is not None
+                or action.retrieval_text is not None
+                or action.subtype is not None
+                or support
+            ):
+                invalid("no-change/no-insight cannot contain claims or new support")
+            if action.action == "NO_CHANGE" and not addressed <= {
+                item["id"] for item in target["supports"]
+            }:
+                invalid("NO_CHANGE cannot discard additional corroborating support")
+    if covered != set(seeds):
+        invalid("every presented seed requires exactly one disposition")
+    return result
 
 
 def model_input_tokens(system: str, envelope: dict) -> int:
@@ -754,6 +879,8 @@ def _generate_json(
     envelope: dict,
     config: OAMConfig,
     timeout_seconds: float,
+    *,
+    max_output_tokens: int | None = None,
 ) -> tuple[dict, Usage]:
     user = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
     if model_input_tokens(system, envelope) > config.extraction.max_input_tokens:
@@ -764,7 +891,7 @@ def _generate_json(
         role,
         system=system,
         user=user,
-        max_output_tokens=config.extraction.max_output_tokens,
+        max_output_tokens=max_output_tokens or config.extraction.max_output_tokens,
         timeout_seconds=timeout_seconds,
     )
     try:

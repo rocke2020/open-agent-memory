@@ -269,12 +269,15 @@ class SyntheticIndexModels:
                 ],
             }
         elif role == "insights":
-            output = {
-                "outcome": "insight",
-                "subtype": "general_insights",
-                "text": "Lin prefers concise morning updates.",
-                "support_ids": [fact["id"] for fact in envelope["facts"]],
-            }
+            output = insight_reply(
+                envelope,
+                {
+                    "outcome": "insight",
+                    "subtype": "general_insights",
+                    "text": "Lin prefers concise morning updates.",
+                    "support_ids": [fact["id"] for fact in envelope["facts"]],
+                },
+            )
         else:
             output = {"abstract": "Synthetic medical measurements."}
         if role == "extraction" and self.invalid_fact:
@@ -1336,18 +1339,42 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
     assert models.generation_calls == ["extraction", "insights"]
 
 
+def insight_reply(envelope, result):
+    """Model double for ordinary actions and the separate complete-support repair call."""
+    if "seed_ids" not in envelope:
+        return result
+    return {
+        "actions": [
+            {
+                "action": "CREATE",
+                "target_id": None,
+                "expected_revision": None,
+                "text": result["text"],
+                "retrieval_text": result.get("retrieval_text"),
+                "subtype": result["subtype"],
+                "support_ids": result["support_ids"],
+                "seed_ids": envelope["seed_ids"],
+            }
+        ]
+    }
+
+
 def synthetic_profile_insight(user):
     from oam.models.runtime import ModelResult, Usage
 
-    facts = json.loads(user)["facts"]
+    envelope = json.loads(user)
+    facts = envelope["facts"]
     return ModelResult(
         content=json.dumps(
-            {
-                "outcome": "insight",
-                "subtype": "general_insights",
-                "text": " ".join(fact["text"] for fact in facts),
-                "support_ids": [fact["id"] for fact in facts],
-            }
+            insight_reply(
+                envelope,
+                {
+                    "outcome": "insight",
+                    "subtype": "general_insights",
+                    "text": " ".join(fact["text"] for fact in facts),
+                    "support_ids": [fact["id"] for fact in facts],
+                },
+            )
         ),
         usage=Usage(input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"),
     )
@@ -2303,14 +2330,18 @@ async def test_profile_main_can_use_supported_project_or_relationship_insight(
     class MainModels(SyntheticIndexModels):
         def generate(self, role, **kwargs):
             if role == "insights":
-                facts = json.loads(kwargs["user"])["facts"]
+                envelope = json.loads(kwargs["user"])
+                facts = envelope["facts"]
                 self.generation_calls.append(role)
-                content = {
-                    "outcome": "insight",
-                    "subtype": subtype,
-                    "text": value,
-                    "support_ids": [fact["id"] for fact in facts],
-                }
+                content = insight_reply(
+                    envelope,
+                    {
+                        "outcome": "insight",
+                        "subtype": subtype,
+                        "text": value,
+                        "support_ids": [fact["id"] for fact in facts],
+                    },
+                )
             elif role == "profile":
                 self.generation_calls.append(role)
                 assert kwargs["max_output_tokens"] == config.profile.max_output_tokens

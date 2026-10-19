@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from psycopg.types.range import Range
+from test_core_http import core_database as core_database
 from test_recall_repository import FixedModels, TransactionPool, add_fact, add_insight
 from test_recall_repository import recall_database as recall_database
 
@@ -105,14 +106,16 @@ def test_time_matched_raw_and_fully_supported_insight_receive_temporal_rank(reca
         add_fact(connection, authority, node, f"Shared plan {node}")
         annotate(connection, authority, node, instant)
     add_insight(connection, authority, "plan", ("a", "b"))
-    connection.execute(
-        "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,source_version,"
-        "evidence_id,passage_id,generation_id,content_text,locator,embedding,lexical_text) "
-        "SELECT tenant_id,user_id,'raw','passage','memory',source_id,source_version,evidence_id,"
-        "'a',generation_id,content_text,locator,embedding,lexical_text FROM search_units "
-        "WHERE tenant_id=%s AND unit_id='a'",
-        (authority.tenant_id,),
-    )
+    for source, unit in (("a", "raw"), ("b", "raw_b")):
+        connection.execute(
+            "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
+            "source_version,"
+            "evidence_id,passage_id,generation_id,content_text,locator,embedding,lexical_text) "
+            "SELECT tenant_id,user_id,%s,'passage','memory',source_id,source_version,evidence_id,"
+            "%s,generation_id,content_text,locator,embedding,lexical_text FROM search_units "
+            "WHERE tenant_id=%s AND unit_id=%s",
+            (unit, source, authority.tenant_id, source),
+        )
     annotate(connection, authority, "raw", instant)
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     service = RecallService(
@@ -126,7 +129,7 @@ def test_time_matched_raw_and_fully_supported_insight_receive_temporal_rank(reca
     )
     items = {item["unit_id"]: item for item in service.search(authority, request)["items"]}
     for node in ("raw", "plan"):
-        assert items[node]["paths"] == [
+        assert [path for path in items[node]["paths"] if path["arm"] == "temporal"] == [
             {"arm": "temporal", "relation": "time_match", "nodes": [node]}
         ]
     assert items["plan"]["time_evidence"] == []
@@ -137,4 +140,4 @@ def test_time_matched_raw_and_fully_supported_insight_receive_temporal_rank(reca
     )
     items = {item["unit_id"]: item for item in service.search(authority, request)["items"]}
     assert items["plan"]["paths"] == []
-    assert items["raw"]["paths"][0]["arm"] == "temporal"
+    assert any(path["arm"] == "temporal" for path in items["raw"]["paths"])

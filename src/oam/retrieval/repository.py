@@ -661,6 +661,35 @@ class RecallRepository:
                     row["time_evidence"].append({"role": role, "at": instant.isoformat()})
         return rows
 
+    def insight_support_units(
+        self, unit_ids: Sequence[str], vector: Sequence[float] | None, limit: int
+    ) -> list[dict]:
+        """Rank bounded supports of current eligible parents, independent of direct hits."""
+        if not unit_ids:
+            return []
+        return self._execute(
+            self._eligible(candidate_facts=True).rstrip()
+            + " SELECT parent.unit_id AS insight_unit_id,child.* FROM filtered parent "
+            "CROSS JOIN LATERAL (SELECT fact.unit_id,fact.memory_id,sp.support_revision,"
+            "CASE WHEN %(vector)s::vector IS NOT NULL THEN "
+            "fact.embedding <=> %(vector)s::vector END AS distance "
+            "FROM insight_support sp JOIN filtered fact ON fact.kind='fact' AND "
+            "(fact.tenant_id,fact.user_id,fact.memory_id,fact.generation_id)="
+            "(sp.tenant_id,sp.user_id,sp.memory_id,parent.generation_id) "
+            "WHERE (sp.tenant_id,sp.user_id,sp.insight_id,sp.insight_revision)="
+            "(parent.tenant_id,parent.user_id,parent.insight_id,parent.insight_revision) "
+            "AND sp.support_revision=1 ORDER BY distance NULLS LAST,fact.unit_id "
+            "LIMIT %(limit)s) child WHERE parent.kind='insight' "
+            "AND parent.unit_id=ANY(%(ids)s) "
+            "ORDER BY array_position(%(ids)s,parent.unit_id),"
+            "child.distance NULLS LAST,child.unit_id",
+            {
+                "ids": list(unit_ids),
+                "vector": json.dumps(tuple(vector)) if vector else None,
+                "limit": limit,
+            },
+        )
+
     def source_passage_locators(self, source_ids: Sequence[str]) -> list[dict]:
         if not source_ids:
             return []

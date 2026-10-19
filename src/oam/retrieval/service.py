@@ -166,6 +166,22 @@ class RecallService:
             executed.append(name)
             return value
 
+        def l2_read(method, *args):
+            began = time.monotonic()
+            try:
+                value = read(method, *args)
+                if "l2_source_expansion" not in executed:
+                    executed.append("l2_source_expansion")
+                return value
+            except (PermissionError, TimeoutError, psycopg.errors.QueryCanceled):
+                raise
+            except (RuntimeError, ValueError, httpx.HTTPError, psycopg.Error) as error:
+                raise RecallUnavailable("l2_source expansion failed") from error
+            finally:
+                timing["l2_source_expansion"] = (
+                    timing.get("l2_source_expansion", 0) + (time.monotonic() - began) * 1000
+                )
+
         initial_index_state = read("user_state")
         if initial_index_state["index_generation_id"] != self.generation_id:
             raise RecallUnavailable("query generation differs from active user generation")
@@ -502,13 +518,133 @@ class RecallService:
                 if isinstance(citation.get("source_id"), str)
             )
         )
+        primary_ids = {item["unit_id"] for item in seed_items}
+        direct_ids = set(arms.get("dense", ())) | set(arms.get("lexical", ()))
+        primary_insights = [
+            item
+            for item in candidates
+            if item["unit_id"] in primary_ids & direct_ids and item["kind"] == "insight"
+        ]
+        l2_diagnostics, l2_supports, l2_fact_items = [], {}, {}
+        if primary_insights:
+            selected = l2_read(
+                "insight_support_units",
+                tuple(item["unit_id"] for item in primary_insights),
+                vector,
+                SUPPORT_COMPANION_LIMIT,
+            )
+            support_rows = {
+                row["unit_id"]: row
+                for row in l2_read(
+                    "hydrate", tuple(dict.fromkeys(row["unit_id"] for row in selected))
+                )
+            }
+            for insight in primary_insights:
+                identity = insight["unit_id"]
+                expected = {
+                    support["memory_id"]: support["support_revision"]
+                    for support in insight["supports"]
+                }
+                links = [row for row in selected if row["insight_unit_id"] == identity]
+                facts = []
+                valid = len({link["memory_id"] for link in links}) == min(
+                    len(expected), SUPPORT_COMPANION_LIMIT
+                )
+                for link in links:
+                    row = support_rows.get(link["unit_id"])
+                    if (
+                        row is None
+                        or row["kind"] != "fact"
+                        or row.get("memory_id") != link["memory_id"]
+                        or expected.get(link["memory_id"]) != link["support_revision"]
+                        or not row["citations"]
+                    ):
+                        valid = False
+                        continue
+                    facts.append(
+                        l2_fact_items.setdefault(
+                            row["unit_id"],
+                            {
+                                key: value
+                                for key, value in {
+                                    **row,
+                                    "paths": list(paths.get(row["unit_id"], [])),
+                                }.items()
+                                if key != "locator"
+                            },
+                        )
+                    )
+                l2_diagnostics.append(
+                    {
+                        "unit_id": identity,
+                        "insight_id": insight["insight_id"],
+                        "insight_revision": insight["insight_revision"],
+                        "support_count": len(expected),
+                        "selected_support_ids": [row["memory_id"] for row in facts],
+                        "support_selection_limit": SUPPORT_COMPANION_LIMIT,
+                        "unselected_support_count": max(0, len(expected) - len(links)),
+                        "selection": (
+                            "query_vector_ranked_bounded_supports"
+                            if vector is not None
+                            else "stable_support_order_without_query_vector"
+                        ),
+                        "direct_chunk_ids": [],
+                        "status": "pending" if valid else "ineligible",
+                        "reason": None if valid else "missing_or_ineligible_support",
+                    }
+                )
+                if valid:
+                    l2_supports[identity] = facts
+            source_ids = tuple(
+                dict.fromkeys(
+                    (
+                        *source_ids,
+                        *(
+                            citation["source_id"]
+                            for facts in l2_supports.values()
+                            for fact in facts
+                            for citation in fact["citations"]
+                            if isinstance(citation.get("source_id"), str)
+                        ),
+                    )
+                )
+            )
         source_passages = []
         original_detail_ids = []
         expanded_detail_ids = []
+        l2_detail_ids = []
         if source_ids:
-            locators = read("source_passage_locators", source_ids)
+            locators = (l2_read if primary_insights else read)(
+                "source_passage_locators", source_ids
+            )
             original_detail_ids = source_window_ids(seed_items, locators)
-            detail_ids = original_detail_ids
+            by_citation = {
+                (row["source_id"], row["source_version"], row["passage_id"]): row
+                for row in locators
+            }
+            for diagnostic in l2_diagnostics:
+                identity = diagnostic["unit_id"]
+                if identity not in l2_supports:
+                    continue
+                facts = l2_supports[identity]
+                direct_ids = source_window_ids(facts, locators, policy="l2_direct")
+                citations = [citation for fact in facts for citation in fact["citations"]]
+                if not direct_ids or any(
+                    (
+                        citation.get("source_id"),
+                        citation.get("source_version"),
+                        citation.get("passage_id"),
+                    )
+                    not in by_citation
+                    for citation in citations
+                ):
+                    diagnostic.update(
+                        status="ineligible", reason="missing_or_ineligible_direct_chunk"
+                    )
+                    continue
+                diagnostic["direct_chunk_ids"] = direct_ids
+                l2_detail_ids.extend(direct_ids)
+            detail_ids = list(dict.fromkeys((*original_detail_ids, *l2_detail_ids)))
             related_seed = next(
                 (
                     item
@@ -553,12 +689,13 @@ class RecallService:
                     if len(expanded_detail_ids) >= len(RELATED_SOURCE_WINDOW_OFFSETS):
                         break
                 expanded_detail_ids = expanded_detail_ids[: len(RELATED_SOURCE_WINDOW_OFFSETS)]
-                detail_ids = list(dict.fromkeys((*expanded_detail_ids, *original_detail_ids)))
+                detail_ids = list(dict.fromkeys((*expanded_detail_ids, *detail_ids)))
             if detail_ids:
                 missing_ids = [node for node in detail_ids if node not in hydrated_passages]
                 if missing_ids:
                     hydrated_passages.update(
-                        (row["unit_id"], row) for row in read("hydrate", missing_ids)
+                        (row["unit_id"], row)
+                        for row in (l2_read if primary_insights else read)("hydrate", missing_ids)
                     )
                 for node in detail_ids:
                     row = hydrated_passages.get(node)
@@ -567,6 +704,15 @@ class RecallService:
                     item = {key: value for key, value in row.items() if key != "locator"}
                     item["paths"] = paths.get(item["unit_id"], [])
                     source_passages.append(item)
+                for diagnostic in l2_diagnostics:
+                    if diagnostic["status"] != "pending":
+                        continue
+                    if any(
+                        node not in hydrated_passages for node in diagnostic["direct_chunk_ids"]
+                    ):
+                        diagnostic.update(
+                            status="ineligible", reason="missing_or_ineligible_direct_chunk"
+                        )
                 if expanded_detail_ids:
                     by_id = {item["unit_id"]: item for item in source_passages}
                     detail_cap = min(
@@ -579,9 +725,13 @@ class RecallService:
                         tier.max_results,
                         costs=context_costs,
                     )
-                    selected = set(original_detail_ids)
+                    selected = set(original_detail_ids) | set(l2_detail_ids)
                     source_passages = [
-                        *(by_id[unit_id] for unit_id in original_detail_ids if unit_id in by_id),
+                        *(
+                            by_id[unit_id]
+                            for unit_id in dict.fromkeys((*original_detail_ids, *l2_detail_ids))
+                            if unit_id in by_id
+                        ),
                         *(item for item in expanded if item["unit_id"] not in selected),
                     ]
         if vector is not None:
@@ -592,7 +742,7 @@ class RecallService:
                     for unit_id in original_detail_ids
                     if unit_id in source_by_id
                 ),
-                *source_passages,
+                *(item for item in source_passages if item["unit_id"] not in l2_detail_ids),
             ]
             passage_ids = tuple(
                 dict.fromkeys(
@@ -661,8 +811,70 @@ class RecallService:
                         recovered.append(item)
                     candidates = [*candidates, *recovered]
         original_detail_set = set(original_detail_ids)
+        evidence_groups = []
+        passages_by_id = {item["unit_id"]: item for item in source_passages}
+        direct_locators = {row["unit_id"]: row for row in locators} if source_ids else {}
+        for node in dict.fromkeys(l2_detail_ids):
+            if node in passages_by_id:
+                item = passages_by_id[node]
+                item["citations"] = [
+                    {**citation, "passage_id": direct_locators[node]["passage_id"]}
+                    for citation in item["citations"]
+                ]
+        for insight, diagnostic in zip(primary_insights, l2_diagnostics, strict=True):
+            if diagnostic["status"] != "pending":
+                continue
+            facts = l2_supports[insight["unit_id"]]
+            for fact in facts:
+                fact["paths"].append(
+                    {
+                        "arm": "l2_source",
+                        "insight_id": insight["insight_id"],
+                        "insight_revision": insight["insight_revision"],
+                        "memory_id": fact["memory_id"],
+                    }
+                )
+                for citation in fact["citations"]:
+                    locator = by_citation[
+                        (citation["source_id"], citation["source_version"], citation["passage_id"])
+                    ]
+                    passage = passages_by_id[locator["unit_id"]]
+                    edge = {
+                        "arm": "l2_source",
+                        "insight_id": insight["insight_id"],
+                        "insight_revision": insight["insight_revision"],
+                        "memory_id": fact["memory_id"],
+                        "support_revision": 1,
+                        "passage_id": citation["passage_id"],
+                        "source_id": citation["source_id"],
+                        "source_version": citation["source_version"],
+                    }
+                    if edge not in passage["paths"]:
+                        passage["paths"].append(edge)
+            evidence_groups.append(
+                [
+                    insight,
+                    *facts,
+                    *(passages_by_id[node] for node in diagnostic["direct_chunk_ids"]),
+                ]
+            )
+        invalid_insights = {
+            entry["unit_id"] for entry in l2_diagnostics if entry["status"] == "ineligible"
+        }
+        candidates = [
+            l2_fact_items.get(item["unit_id"], passages_by_id.get(item["unit_id"], item))
+            for item in candidates
+            if item["unit_id"] not in invalid_insights
+        ]
+        seed_items = [
+            l2_fact_items.get(item["unit_id"], passages_by_id.get(item["unit_id"], item))
+            for item in seed_items
+            if item["unit_id"] not in invalid_insights
+        ]
         candidates.extend(
-            item for item in source_passages if item["unit_id"] not in original_detail_set
+            item
+            for item in source_passages
+            if item["unit_id"] not in original_detail_set and item["unit_id"] not in l2_detail_ids
         )
         source_passages = [
             item for item in source_passages if item["unit_id"] in original_detail_set
@@ -676,7 +888,65 @@ class RecallService:
             detail_fraction=self.config.context.source_detail_budget_fraction,
             max_results=tier.max_results,
             costs=context_costs,
+            evidence_groups=evidence_groups,
         )
+        selected_insights = [
+            item for item in items if item["kind"] == "insight" and item["unit_id"] in l2_supports
+        ]
+        fresh_insights = (
+            {
+                row["unit_id"]: row
+                for row in l2_read("hydrate", tuple(item["unit_id"] for item in selected_insights))
+            }
+            if selected_insights
+            else {}
+        )
+        selected_ids = {item["unit_id"] for item in items}
+        for diagnostic in l2_diagnostics:
+            if diagnostic["status"] != "pending":
+                continue
+            identity = diagnostic["unit_id"]
+            if identity not in selected_ids:
+                diagnostic.update(
+                    status="budget_omitted", reason="complete_group_exceeds_hard_limit"
+                )
+                continue
+            old = next(item for item in primary_insights if item["unit_id"] == identity)
+            fresh = fresh_insights.get(identity)
+            if (
+                fresh is None
+                or fresh["insight_revision"] != old["insight_revision"]
+                or fresh["supports"] != old["supports"]
+            ):
+                diagnostic.update(status="ineligible", reason="insight_changed_before_return")
+            else:
+                diagnostic.update(status="included")
+        # Remove stale groups; shared evidence and independently selected items survive.
+        retained = {entry["unit_id"] for entry in l2_diagnostics if entry["status"] == "included"}
+        independent = {
+            item["unit_id"] for item in (*candidates, *source_passages) if item["kind"] != "insight"
+        }
+        allowed = independent | {
+            item["unit_id"]
+            for group in evidence_groups
+            if group[0]["unit_id"] in retained
+            for item in group
+        }
+        grouped_ids = {node["unit_id"] for group in evidence_groups for node in group}
+        items = [
+            item
+            for item in items
+            if item["unit_id"] in allowed or item["unit_id"] not in grouped_ids
+        ]
+        retained_identities = {
+            entry["insight_id"] for entry in l2_diagnostics if entry["status"] == "included"
+        }
+        for item in items:
+            item["paths"] = [
+                path
+                for path in item["paths"]
+                if path.get("arm") != "l2_source" or path["insight_id"] in retained_identities
+            ]
         context = render_context(items)
         context_tokens = estimated_tokens(estimate_units(context))
         if context_tokens > budget:
@@ -704,6 +974,7 @@ class RecallService:
                         "temporal",
                         "rerank",
                         "source_user_originals",
+                        "l2_source_expansion",
                     )
                     if name in executed
                 ],
@@ -716,6 +987,7 @@ class RecallService:
                 "readiness": index_state["readiness"],
                 "partial": index_state["readiness"] != "ready" or bool(degraded),
                 "generative_calls": 0,
+                "l2_source_expansion": l2_diagnostics,
                 "temporal_stop": temporal_stop,
                 "query_time": {
                     "status": time_status,
@@ -769,6 +1041,7 @@ class RecallService:
             "rerank_scores": rerank_scores,
             "related_user_fact": related,
             "result_ids": [item["unit_id"] for item in items],
+            "l2_source_expansion": l2_diagnostics,
             "packing": {
                 "token_limit": budget,
                 "selected_ids": [item["unit_id"] for item in items],

@@ -268,6 +268,7 @@ def _prompt_inputs(cursor, authority: AuthorizedUser, units: list[dict], generat
             "source_passages_truncated": len(source_passages) > MAX_PASSAGES_PER_UNIT,
         }
         if row["kind"] == "insight":
+            item["insight_id"] = row["insight_id"]
             item["subtype"] = row["insight_subtype"]
             item["revision"] = row["insight_revision"]
         result.append(item)

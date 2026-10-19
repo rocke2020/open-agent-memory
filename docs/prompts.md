@@ -13,7 +13,8 @@ The extraction system message combines the shared rules with the grouped prefix 
 | [extraction-prompt.txt](../src/oam/indexing/extraction-prompt.txt) | Shared fact extraction rules and output contract | [extraction.py](../src/oam/indexing/extraction.py) |
 | [extraction-group-prefix.txt](../src/oam/indexing/extraction-group-prefix.txt) | Passage ownership and output ordering for grouped extraction | [grouping.py](../src/oam/indexing/grouping.py) |
 | [extraction-reference-suffix.txt](../src/oam/indexing/extraction-reference-suffix.txt) | Existing-fact reference rules | [extraction.py](../src/oam/indexing/extraction.py) |
-| [insight-prompt.txt](../src/oam/indexing/insight-prompt.txt) | Supported Insight synthesis and subtype selection | [extraction.py](../src/oam/indexing/extraction.py) |
+| [incremental-insight-prompt.txt](../src/oam/indexing/incremental-insight-prompt.txt) | Target-aware UPDATE/CREATE and explicit seed dispositions | [extraction.py](../src/oam/indexing/extraction.py), [consolidation.py](../src/oam/indexing/consolidation.py) |
+| [insight-prompt.txt](../src/oam/indexing/insight-prompt.txt) | Complete-support synthesis for removal repair | [extraction.py](../src/oam/indexing/extraction.py), [repair.py](../src/oam/governance/repair.py) |
 | [profiles/prompt.txt](../src/oam/profiles/prompt.txt) | Default Profile generation and custom-format rules | [prompt.py](../src/oam/profiles/prompt.py), [worker.py](../src/oam/profiles/worker.py) |
 
 Extraction and Insight files retain their exact whitespace during loading. The Profile loader strips final newline characters. Intentional indexing prompt changes require an indexing-recipe update; Profile prompt text participates in refresh identity.

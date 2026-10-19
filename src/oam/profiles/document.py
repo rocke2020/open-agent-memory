@@ -90,7 +90,14 @@ def build_profile_document(
             {
                 "support_id": identifier,
                 "kind": item["kind"],
-                **({"revision": item["revision"]} if item["kind"] == "insight" else {}),
+                **(
+                    {
+                        "revision": item["revision"],
+                        "insight_id": item.get("insight_id", identifier),
+                    }
+                    if item["kind"] == "insight"
+                    else {}
+                ),
                 **passages[0],
                 "passages": passages,
             }

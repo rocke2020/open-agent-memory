@@ -32,10 +32,24 @@ async def test_l2_worker_preserves_accepted_roles_and_message_dates(core_databas
         def generate(self, role, **kwargs):
             if role != "insights":
                 return super().generate(role, **kwargs)
-            self.insight_inputs = json.loads(kwargs["user"])["facts"]
+            envelope = json.loads(kwargs["user"])
+            self.insight_inputs = envelope["facts"]
             return ModelResult(
                 content=json.dumps(
-                    {"outcome": "no_insight", "subtype": None, "text": None, "support_ids": []}
+                    {
+                        "actions": [
+                            {
+                                "action": "NO_INSIGHT",
+                                "target_id": None,
+                                "expected_revision": None,
+                                "text": None,
+                                "retrieval_text": None,
+                                "subtype": None,
+                                "support_ids": [],
+                                "seed_ids": envelope["seed_ids"],
+                            }
+                        ]
+                    }
                 ),
                 usage=Usage(),
             )

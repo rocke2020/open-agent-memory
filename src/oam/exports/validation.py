@@ -316,7 +316,10 @@ def validate_directory(path: str | Path) -> dict[str, int]:
                                 supported = support_id in memory_ids
                                 member_ids = {support_id}
                             elif ref.get("kind") == "insight":
-                                insight_key = (support_id, ref.get("revision"))
+                                insight_key = (
+                                    ref.get("insight_id", support_id),
+                                    ref.get("revision"),
+                                )
                                 supported = insight_key in insight_ids
                                 member_ids = insight_members.get(insight_key, set())
                             else:

@@ -2,16 +2,19 @@
 
 import json
 import os
-from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
 import psycopg
 import pytest
+from api_test_app import create_api_only_app as create_app
+from test_core_http import SyntheticIndexModels, insight_reply, use_created_user_key
+from test_core_http import core_database as core_database
+from test_incremental_l2 import retain_and_consolidate
 
 from oam.config import load_config
-from oam.workers.index_source import _insights
+from oam.models.runtime import ModelResult, Usage
 
 
 @pytest.fixture
@@ -73,95 +76,68 @@ def test_persisted_insight_rejects_absent_or_unknown_subtype(insight_connection,
 
 
 @pytest.mark.parametrize("retrieval_text", [None, "Instrument restoration"])
-def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(
-    insight_connection, retrieval_text, capsys
+async def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(
+    core_database, retrieval_text, capsys
 ):
-    connection, tenant = insight_connection
-    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    published_units = []
-    embedding_inputs = []
+    dsn, tenant, headers = core_database
+    root = Path(__file__).parents[2]
+    config = load_config(root / "configs/oam.yaml").config
 
-    class PublicationStore:
-        key = (tenant, "scope")
-        generation_id = "generation"
-        claim = SimpleNamespace(operation_id="consolidation-op")
-        source = {
-            "accepted_seq": 1,
-            "source_id": "source-a",
-            "source_version": 1,
-        }
-        examined = set()
-        last_outcome = "no_insight"
+    class SubtypeModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            if role != "insights":
+                return super().generate(role, **kwargs)
+            envelope = json.loads(kwargs["user"])
+            return ModelResult(
+                content=json.dumps(
+                    insight_reply(
+                        envelope,
+                        {
+                            "text": "Repeated supported behavior.",
+                            "subtype": "patterns",
+                            "support_ids": [fact["id"] for fact in envelope["facts"]],
+                            "retrieval_text": retrieval_text,
+                        },
+                    )
+                ),
+                usage=Usage(),
+            )
 
-        @contextmanager
-        def transaction(self):
-            yield self
-
-        def guard(self, connection):
-            pass
-
-        def execute(self, query, parameters=None):
-            if "SELECT unit_id FROM eligible WHERE kind='fact'" in query:
-                examined_ids = set(parameters[3] or []) if parameters else set()
-                rows = [(value,) for value in ("f1", "f2") if value not in examined_ids]
-                return SimpleNamespace(fetchall=lambda: rows)
-            if "SELECT candidate.unit_id" in query:
-                rows = [
-                    ("f1", "A", "source-a", 1, None, None, None, None, None),
-                    ("f2", "B", "source-b", 1, None, None, None, None, None),
-                ]
-                return SimpleNamespace(fetchall=lambda: rows)
-            if "SELECT unit_id FROM eligible WHERE unit_id=ANY" in query:
-                rows = [("f1",), ("f2",)]
-                return SimpleNamespace(fetchall=lambda: rows)
-            if query.startswith("INSERT INTO insight_support"):
-                return None
-            return connection.execute(query, parameters)
-
-        def l2_progress(self, connection):
-            return set(self.examined), self.last_outcome
-
-        def mark_l2_group(self, connection, unit_ids, outcome):
-            assert set(unit_ids) == {"f1", "f2"}
-            assert outcome == "insight"
-            self.examined.update(unit_ids)
-            self.last_outcome = outcome
-
-        def checkpoint(self, stage, inputs, produce):
-            if stage == "insight_embed":
-                embedding_inputs.append(inputs)
-                return {"vectors": [[1.0, 0.0]]}
-            assert stage == "insight"
-            return {
-                "outcome": "insight",
-                "subtype": "patterns",
-                "text": "Repeated supported behavior.",
-                "retrieval_text": retrieval_text,
-                "support_ids": ["f1", "f2"],
-                "usage": {},
-            }
-
-        def insert_unit(self, connection, **unit):
-            published_units.append(unit)
-
-        def readiness(self, connection, **stages):
-            pass
-
-    store = PublicationStore()
-    store.config = config
-    _insights(store, None, ["f1", "f2"])
-
-    row = connection.execute(
-        "SELECT subtype,synthesis_text FROM insights WHERE tenant_id=%s", (tenant,)
-    ).fetchone()
-    assert row == ("patterns", "Repeated supported behavior.")
-    assert published_units[0]["kind"] == "insight"
-    assert published_units[0]["text"] == "Repeated supported behavior."
-    assert published_units[0]["locator"]["support_ids"] == ["f1", "f2"]
-    assert published_units[0]["locator"]["retrieval_text"] == retrieval_text
-    assert embedding_inputs == [retrieval_text or "Repeated supported behavior."]
-    emitted = capsys.readouterr().out
-    assert emitted
-    event = json.loads(emitted)
-    assert event["operation_id"] == "consolidation-op"
-    assert event["embedding_input"] == ("purpose" if retrieval_text else "full_text")
+    models = SubtypeModels()
+    app = create_app(root / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        app.state.runtime.models = models
+        await retain_and_consolidate(
+            client,
+            dsn,
+            tenant,
+            config,
+            models,
+            "subtype",
+            [
+                "The user restored a violin on Monday.",
+                "The user restored a violin on Tuesday.",
+            ],
+        )
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT subtype,synthesis_text FROM insights WHERE tenant_id=%s", (tenant,)
+        ).fetchone() == ("patterns", "Repeated supported behavior.")
+        locator = connection.execute(
+            "SELECT locator FROM search_units WHERE tenant_id=%s AND kind='insight'", (tenant,)
+        ).fetchone()[0]
+        assert len(locator["support_ids"]) == 2
+        assert locator["retrieval_text"] == retrieval_text
+    assert models.embedding_batches[-1] == (retrieval_text or "Repeated supported behavior.",)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    published = next(event for event in events if event["stage"] == "insight_published")
+    assert published["published"][0]["insight_id"].startswith("insight_")
+    assert published["published"][0]["revision"] == 1
+    assert published["actions"] == ["CREATE"]
+    assert "input_tokens" in published["usage"]

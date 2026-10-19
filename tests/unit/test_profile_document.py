@@ -269,3 +269,23 @@ def test_stored_fields_preserve_conflicts_and_all_resource_references() -> None:
         )
     with pytest.raises(ValueError, match="size limit"):
         render_stored_profile_fields(sections, [], eligible, max_content_bytes=200)
+
+
+def test_insight_reference_preserves_canonical_identity_separate_from_search_projection():
+    insight = {
+        **INPUTS[0],
+        "kind": "insight",
+        "id": "projection_revision_2",
+        "insight_id": "stable_insight",
+        "revision": 2,
+    }
+    result = build_profile_document(
+        json.dumps({"content": "A supported claim [1].", "support_ids": ["projection_revision_2"]}),
+        [insight],
+        [],
+        instruction=None,
+        max_content_bytes=4096,
+    )
+    assert result["references"][0]["support_id"] == "projection_revision_2"
+    assert result["references"][0]["insight_id"] == "stable_insight"
+    assert result["references"][0]["revision"] == 2

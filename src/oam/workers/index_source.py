@@ -23,13 +23,9 @@ from oam.governance.cleanup import cleanup_claim, cleanup_removal_claim
 from oam.indexing.chunker import chunk_text
 from oam.indexing.extraction import (
     FactExtraction,
-    InsightInput,
-    InsightResult,
     extract_facts,
     extraction_envelope,
     model_input_tokens,
-    pack_insight_facts,
-    synthesize_insight,
 )
 from oam.indexing.grouping import (
     ExtractionPassage,
@@ -39,7 +35,7 @@ from oam.indexing.grouping import (
 )
 from oam.indexing.identity import index_generation
 from oam.indexing.references import eligible_reference_ids, freeze_extraction_references
-from oam.indexing.store import MEMORY_REVISION, IndexStore, log_insight_indexed, stable_id
+from oam.indexing.store import IndexStore, stable_id
 from oam.workers.claims import claim_one
 
 ABSTRACT_SYSTEM = (
@@ -1123,189 +1119,6 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
 
 
 def _insights(store, models, new_fact_ids):
-    from oam.db.eligibility import ELIGIBLE_UNITS
+    from oam.indexing.consolidation import consolidate_source
 
-    if not new_fact_ids:
-        with store.transaction() as connection:
-            store.guard(connection)
-            store.readiness(connection, insights_ready=True, insight_outcome="no_insight")
-        return
-
-    while True:
-        with store.transaction() as connection:
-            store.guard(connection)
-            examined, last_outcome = store.l2_progress(connection)
-            pending_rows = connection.execute(
-                f"WITH eligible AS ({ELIGIBLE_UNITS}) "
-                "SELECT unit_id FROM eligible "
-                "WHERE kind='fact' AND source_id=%s AND source_version=%s "
-                "AND unit_id=ANY(%s) AND NOT (unit_id=ANY(%s)) "
-                "ORDER BY created_at,unit_id LIMIT %s",
-                (
-                    store.source["source_id"],
-                    store.source["source_version"],
-                    new_fact_ids,
-                    list(examined),
-                    store.config.extraction.max_facts_per_group,
-                ),
-            ).fetchall()
-        if not pending_rows:
-            with store.transaction() as connection:
-                store.guard(connection)
-                store.readiness(connection, insights_ready=True, insight_outcome=last_outcome)
-            return
-
-        seed_ids = [row[0] for row in pending_rows]
-        with store.transaction() as connection:
-            store.guard(connection)
-            rows = connection.execute(
-                f"WITH eligible AS ({ELIGIBLE_UNITS}), seeds AS ("
-                "SELECT unit_id,embedding FROM eligible WHERE kind='fact' AND unit_id=ANY(%s)"
-                "), candidate_annotations AS ("
-                "SELECT candidate.unit_id,candidate.content_text,candidate.source_id,"
-                "candidate.source_version,candidate.mentioned_at,candidate.source_created_at,"
-                "candidate.source_updated_at,candidate.embedding,"
-                "candidate.locator->>'role' AS message_role,"
-                "jsonb_agg(candidate_times.detail ORDER BY candidate_times.annotation_id) "
-                "FILTER (WHERE candidate_times.annotation_id IS NOT NULL) AS annotations "
-                "FROM eligible candidate "
-                "LEFT JOIN unit_times candidate_times ON (candidate_times.tenant_id,"
-                "candidate_times.user_id,candidate_times.unit_id)=(candidate.tenant_id,"
-                "candidate.user_id,candidate.unit_id) "
-                "WHERE candidate.kind='fact' "
-                "GROUP BY candidate.unit_id,candidate.content_text,candidate.source_id,"
-                "candidate.source_version,candidate.mentioned_at,candidate.source_created_at,"
-                "candidate.source_updated_at,candidate.embedding,candidate.locator->>'role'"
-                "), ranked AS ("
-                "SELECT candidate.unit_id,candidate.content_text,candidate.source_id,"
-                "candidate.source_version,candidate.mentioned_at,candidate.source_created_at,"
-                "candidate.source_updated_at,candidate.annotations,"
-                "candidate.message_role,"
-                "min(candidate.embedding <=> seeds.embedding) AS distance "
-                "FROM candidate_annotations candidate CROSS JOIN seeds "
-                "GROUP BY candidate.unit_id,candidate.content_text,candidate.source_id,"
-                "candidate.source_version,candidate.mentioned_at,candidate.source_created_at,"
-                "candidate.source_updated_at,candidate.annotations,candidate.message_role"
-                ") SELECT unit_id,content_text,source_id,source_version,mentioned_at,"
-                "source_created_at,source_updated_at,annotations,message_role FROM ranked "
-                "ORDER BY (unit_id=ANY(%s)) DESC,distance,unit_id LIMIT %s",
-                (seed_ids, seed_ids, store.config.extraction.max_facts_per_group),
-            ).fetchall()
-
-        facts = tuple(
-            InsightInput(
-                id=row[0],
-                text=row[1],
-                source_refs=(f"{row[2]}:{row[3]}",),
-                mentioned_at=row[4],
-                temporal_annotations=tuple(
-                    _insight_temporal_annotation(value) for value in (row[7] or [])
-                ),
-                message_role=row[8],
-            )
-            for row in rows
-        )
-        facts = pack_insight_facts(facts, store.config)
-        if len(rows) >= 2 and len(facts) < 2:
-            raise ValueError("Insight input budget cannot fit two supporting facts")
-        examined_group = [fact.id for fact in facts if fact.id in seed_ids]
-        if not examined_group:
-            examined_group = seed_ids[:1]
-
-        if len(facts) < 2:
-            with store.transaction() as connection:
-                store.guard(connection)
-                store.mark_l2_group(connection, examined_group, "no_insight")
-            continue
-
-        input_values = [fact.model_dump(mode="json") for fact in facts]
-        insight_started = time.monotonic()
-        result = InsightResult.model_validate(
-            store.checkpoint(
-                "insight",
-                input_values,
-                lambda facts=facts: synthesize_insight(
-                    models,
-                    facts=facts,
-                    config=store.config,
-                    timeout_seconds=store.config.model.attempt_timeout_seconds,
-                ),
-            )
-        )
-        if result.text:
-            embedding_text = result.embedding_text
-            assert embedding_text is not None
-            vector = store.checkpoint(
-                "insight_embed",
-                embedding_text,
-                lambda text=embedding_text: models.embed(
-                    (text,), timeout_seconds=store.config.model.attempt_timeout_seconds
-                ),
-            )
-            digest = hashlib.sha256(json.dumps(input_values, sort_keys=True).encode()).digest()
-            identifier = stable_id("insight", store.generation_id, digest.hex())
-            with store.transaction() as connection:
-                store.guard(connection)
-                removed = connection.execute(
-                    "SELECT 1 FROM operations WHERE tenant_id=%s AND user_id=%s "
-                    "AND removal_target_kind='insight' AND removal_target_id=%s",
-                    (*store.key, identifier),
-                ).fetchone()
-                if removed:
-                    store.mark_l2_group(connection, examined_group, result.outcome)
-                    continue
-                eligible = connection.execute(
-                    f"WITH eligible AS ({ELIGIBLE_UNITS}) "
-                    "SELECT unit_id FROM eligible WHERE unit_id=ANY(%s)",
-                    (list(result.support_ids),),
-                ).fetchall()
-                if {row[0] for row in eligible} != set(result.support_ids):
-                    raise ValueError("Insight support became ineligible")
-                connection.execute(
-                    "INSERT INTO insights(tenant_id,user_id,insight_id,revision,synthesis_text,"
-                    "subtype,input_digest,recipe_id,generation_id,visible_from) "
-                    "VALUES (%s,%s,%s,1,%s,%s,%s,'oam-insight-v2',%s,%s) ON CONFLICT DO NOTHING",
-                    (
-                        *store.key,
-                        identifier,
-                        result.text,
-                        result.subtype,
-                        digest,
-                        store.generation_id,
-                        store.source["accepted_seq"],
-                    ),
-                )
-                for memory_id in result.support_ids:
-                    connection.execute(
-                        "INSERT INTO insight_support VALUES "
-                        "(%s,%s,%s,1,%s,%s) ON CONFLICT DO NOTHING",
-                        (*store.key, identifier, memory_id, MEMORY_REVISION),
-                    )
-                store.insert_unit(
-                    connection,
-                    unit_id=identifier,
-                    kind="insight",
-                    text=result.text,
-                    vector=vector["vectors"][0],
-                    locator={
-                        "support_ids": list(result.support_ids),
-                        "seed_ids": examined_group,
-                        "retrieval_text": result.retrieval_text,
-                    },
-                    insight_id=identifier,
-                )
-            log_insight_indexed(store, result, identifier, 1, insight_started)
-        with store.transaction() as connection:
-            store.guard(connection)
-            store.mark_l2_group(connection, examined_group, result.outcome)
-            store.readiness(connection, insights_ready=False, insight_outcome=result.outcome)
-
-
-def _insight_temporal_annotation(value):
-    from oam.contracts.evidence import TemporalAnnotation
-
-    if not isinstance(value, dict):
-        raise ValueError("invalid persisted Insight temporal annotation")
-    return TemporalAnnotation.model_validate(
-        {key: value[key] for key in TemporalAnnotation.model_fields if key in value}
-    )
+    consolidate_source(store, models, new_fact_ids)

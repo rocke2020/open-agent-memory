@@ -89,6 +89,10 @@ def _render_citations(citations: list[dict], sources: dict | None = None) -> str
             f"{source_id}@{citation['source_version']} "
             f"{locator['role']} message:{locator['message_id']}"
         )
+        if "span" not in citation and isinstance(citation.get("passage_id"), str):
+            reference += f" chunk:{citation['passage_id']}"
+            if "passage_index" in locator:
+                reference += f" index:{locator['passage_index']}"
         if "span" in citation:
             reference += f" quote:{locator['quote']!r}"
         chat.append(reference)
@@ -316,25 +320,34 @@ def pack_ranked(
     return chosen
 
 
-def source_window_ids(seed_items: list[dict], passage_locators: list[dict]) -> list[str]:
-    """Find cited passages and adjacent user turns within eligible source revisions."""
+def source_window_ids(
+    seed_items: list[dict], passage_locators: list[dict], *, policy: str = "l1_window"
+) -> list[str]:
+    """Select stable direct chunks, with adjacent user turns only for ordinary facts."""
+    if policy not in {"l1_window", "l2_direct"}:
+        raise ValueError("unknown source selection policy")
+    direct_only = policy == "l2_direct"
+
+    def position(row):
+        return (
+            row["locator"].get("message_index", float("inf")),
+            row["locator"].get("passage_index", 0),
+            row["unit_id"],
+        )
+
     by_source = {}
     by_id = {}
     for row in passage_locators:
         locator = row["locator"]
-        if not isinstance(locator, dict) or type(locator.get("message_index")) is not int:
+        if not isinstance(locator, dict) or (
+            not direct_only and type(locator.get("message_index")) is not int
+        ):
             continue
         key = (row["source_id"], row["source_version"])
         by_source.setdefault(key, []).append(row)
         by_id[row["passage_id"]] = row
     for group in by_source.values():
-        group.sort(
-            key=lambda row: (
-                row["locator"]["message_index"],
-                row["locator"].get("passage_index", 0),
-                row["unit_id"],
-            )
-        )
+        group.sort(key=position)
 
     groups = {}
     seen = set()
@@ -344,27 +357,22 @@ def source_window_ids(seed_items: list[dict], passage_locators: list[dict]) -> l
         for citation in item["citations"]:
             key = (citation.get("source_id"), citation.get("source_version"))
             index = citation.get("span", {}).get("message_index")
-            if type(index) is not int or key not in by_source:
+            if (not direct_only and type(index) is not int) or key not in by_source:
                 continue
             passages = by_source[key]
             direct = by_id.get(citation.get("passage_id"))
             selected = [direct] if direct is not None and direct in passages else []
-            user_rows = [row for row in passages if row["locator"].get("role") == "user"]
-            before = [row for row in user_rows if row["locator"]["message_index"] < index]
-            after = [row for row in user_rows if row["locator"]["message_index"] > index]
-            selected.extend(before[-1:] + after[:1])
+            if not direct_only:
+                user_rows = [row for row in passages if row["locator"].get("role") == "user"]
+                before = [row for row in user_rows if row["locator"]["message_index"] < index]
+                after = [row for row in user_rows if row["locator"]["message_index"] > index]
+                selected.extend(before[-1:] + after[:1])
             for row in selected:
                 if row["unit_id"] not in seen:
                     groups.setdefault(key, []).append(row)
                     seen.add(row["unit_id"])
     for group in groups.values():
-        group.sort(
-            key=lambda row: (
-                row["locator"]["message_index"],
-                row["locator"].get("passage_index", 0),
-                row["unit_id"],
-            )
-        )
+        group.sort(key=position)
     return [
         group[index]["unit_id"]
         for index in range(max(map(len, groups.values()), default=0))
@@ -392,12 +400,49 @@ def assemble_context(
     detail_fraction: float,
     max_results: int,
     costs: ContextUnitCosts | None = None,
+    evidence_groups: list[list[dict]] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Protect ranked facts and bounded source windows, then fill from ranked evidence."""
     costs = costs or ContextUnitCosts()
     primary = [item for item in seed_items if primary_seed_eligible(item)]
     primary_budget = int(seed_budget * (1 - detail_fraction))
     detail_budget = int(seed_budget * detail_fraction)
+    if evidence_groups:
+        groups = {group[0]["unit_id"]: group for group in evidence_groups}
+        candidate_rank = {item["unit_id"]: index for index, item in enumerate(candidates)}
+        primary.sort(key=lambda item: candidate_rank.get(item["unit_id"], len(candidates)))
+        pool = [*candidates, *source_passages, *(item for g in evidence_groups for item in g)]
+        chosen, budget_omissions = [], []
+
+        def append_complete(group, token_limit):
+            counter = ContextUnits(chosen, pool, costs)
+            additions = [item for item in group if item["unit_id"] not in counter.selected_ids]
+            if len(chosen) + len(additions) > max_results:
+                return False
+            for item in additions:
+                counter.add(item)
+            if estimated_tokens(counter.units) > token_limit:
+                return False
+            chosen.extend(additions)
+            return True
+
+        # Admit complete groups before ordinary source details can consume their room.
+        for item in primary:
+            group = groups.get(item["unit_id"])
+            if group is not None:
+                if not append_complete(group, budget):
+                    budget_omissions.append(item["unit_id"])
+            else:
+                append_complete([item], min(budget, primary_budget))
+        details = pack_ranked(source_passages, detail_budget, max_results, costs=costs)
+        for item in details:
+            append_complete([item], budget)
+        for item in candidates:
+            if item["unit_id"] in groups:
+                continue  # An omitted Insight must never re-enter through ordinary fill.
+            if not append_complete([item], budget):
+                budget_omissions.append(item["unit_id"])
+        return chosen, list(dict.fromkeys(budget_omissions))
     primary_selected = pack_ranked(primary, primary_budget, max_results, costs=costs)
     detail_selected = pack_ranked(source_passages, detail_budget, max_results, costs=costs)
     chosen = pack_ranked(primary_selected + detail_selected, seed_budget, max_results, costs=costs)

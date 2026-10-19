@@ -36,7 +36,11 @@ class StaleIndexWork(RuntimeError):
     """The claim or accepted source no longer permits publication."""
 
 
-class StaleConsolidationPolicy(StaleIndexWork):
+class StaleConsolidationInputs(StaleIndexWork):
+    """Consolidation must reload changed inputs before retrying publication."""
+
+
+class StaleConsolidationPolicy(StaleConsolidationInputs):
     """Consolidation must restart from the current eligible support policy."""
 
 
@@ -473,7 +477,9 @@ class IndexStore:
         state["l2_examined_ids"] = sorted(
             {value for value in existing if isinstance(value, str)} | set(unit_ids)
         )
-        state["last_insight_outcome"] = outcome
+        state["last_insight_outcome"] = (
+            "insight" if state.get("last_insight_outcome") == "insight" else outcome
+        )
         connection.execute(
             "UPDATE operations SET stage_state=%s,updated_at=clock_timestamp() "
             "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
@@ -767,10 +773,10 @@ class IndexStore:
         retryable = isinstance(error, httpx.ConnectTimeout) or (
             isinstance(error, ExtractionError) and known_usage is not None and error.retryable
         )
-        policy_changed = (
-            isinstance(error, StaleConsolidationPolicy) and not self._unsettled_model_stages
+        inputs_changed = (
+            isinstance(error, StaleConsolidationInputs) and not self._unsettled_model_stages
         )
-        retryable = retryable or policy_changed
+        retryable = retryable or inputs_changed
         # The source coordinator drains all producers before failure settlement.
         # One error cannot settle several stages with unsaved outcomes.
         if len(self._unsettled_model_stages) > 1:
@@ -800,7 +806,7 @@ class IndexStore:
                 ),
             ).fetchone()
             if owned:
-                if (not_dispatched and known_usage is None) or semantic or policy_changed:
+                if (not_dispatched and known_usage is None) or semantic or inputs_changed:
                     connection.execute(
                         "UPDATE attempts SET disposition='failed',usage=NULL,response_ref=NULL,"
                         "finished_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
