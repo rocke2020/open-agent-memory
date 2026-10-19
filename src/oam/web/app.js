@@ -3,6 +3,7 @@
 
   const byId = (id) => document.getElementById(id);
   const current = (generation) => generation === state.generation;
+  const currentDetail = (generation, view, requestId) => current(generation) && view === state.view && requestId === state.detailRequest;
   const state = {
     credential: "",
     tenant: "",
@@ -14,6 +15,7 @@
     draftKey: null,
     profileRequest: 0,
     detailRequest: 0,
+    listRequest: 0,
     savedProfileInstruction: "",
   };
   function element(tag, text, className) {
@@ -30,12 +32,15 @@
   }
 
   function resetContent() {
+    clearSourceMessages();
     state.generation += 1;
     state.items = [];
     state.nextAfter = null;
     state.draftKey = null;
     state.profileRequest += 1;
     state.detailRequest += 1;
+    state.listRequest += 1;
+    byId("recall-level").value = "fast";
     byId("query").value = "";
     state.savedProfileInstruction = "";
     byId("profile-instruction").value = "";
@@ -45,9 +50,16 @@
     byId("profile-customization").open = false;
     byId("profile-use-default").hidden = true;
     byId("item-list").replaceChildren();
+    byId("list-summary").textContent = "";
     byId("detail").replaceChildren(element("p", "Select an item to inspect its source and readiness."));
     byId("load-more").hidden = true;
     byId("workspace").hidden = true;
+  }
+
+  function clearSourceMessages() {
+    byId("source-panel").hidden = true;
+    byId("source-messages").replaceChildren();
+    byId("workspace-grid").classList.remove("with-memory");
   }
 
   function route(suffix) {
@@ -136,25 +148,36 @@
   }
 
   function setView(view, initial) {
+    clearSourceMessages();
     state.view = view;
     state.detailRequest += 1;
+    state.listRequest += 1;
     state.items = [];
     state.nextAfter = null;
     byId("item-list").replaceChildren();
     byId("detail").replaceChildren();
-    byId("list-title").textContent = {resources: "Resources", "profile-data": "Profile Data", profiles: "User Profile", memories: "Memories"}[view];
+    byId("list-summary").textContent = "";
+    byId("load-more").hidden = true;
+    byId("list-title").textContent = {resources: "Resources", "profile-data": "Profile Data", profiles: "User Profile", memories: "Memories", insights: "Insights", retrieve: "Retrieved evidence"}[view];
     byId("new-resource").hidden = !["resources", "profile-data"].includes(view);
     byId("new-resource").textContent = view === "profile-data" ? "Add Profile Data" : "Add Resource";
-    byId("search-form").hidden = view !== "memories";
+    byId("search-form").hidden = !["memories", "retrieve"].includes(view);
+    byId("query-label").textContent = view === "retrieve" ? "What would you like to retrieve?" : "Search current memory";
+    byId("retrieval-mode-field").hidden = view !== "retrieve";
+    byId("search-form").querySelector("button").textContent = view === "retrieve" ? "Retrieve evidence" : "Search";
     byId("profile-form").hidden = view !== "profiles";
     byId("refresh-profile").hidden = view !== "profiles";
     byId("detail-title").textContent = view === "profiles" ? "User Profile" : "Details";
     document.querySelector(".list-panel").hidden = view === "profiles";
     byId("workspace-grid").classList.toggle("profile-view", view === "profiles");
     byId("item-list").hidden = view === "profiles";
-    byId("refresh-list").hidden = view === "profiles";
+    byId("refresh-list").hidden = ["profiles", "retrieve"].includes(view);
     for (const tab of document.querySelectorAll("[data-view]")) {
       tab.setAttribute("aria-pressed", String(tab.dataset.view === view));
+    }
+    if (view === "retrieve") {
+      byId("detail").append(element("p", "Enter a query to retrieve cited evidence. Open a result to inspect it."));
+      return;
     }
     if (view === "profiles") {
       byId("load-more").hidden = true;
@@ -353,17 +376,23 @@
 
   async function loadList(append) {
     const view = state.view;
+    if (!["memories", "insights", "resources", "profile-data"].includes(view)) return;
     const generation = state.generation;
-    const after = append && state.nextAfter ? `?after=${encodeURIComponent(state.nextAfter)}` : "";
+    const requestId = ++state.listRequest;
+    const params = new URLSearchParams();
+    if (append && state.nextAfter) params.set("after", state.nextAfter);
+    if (view === "insights") params.set("memory_type", "insight");
+    const endpoint = view === "insights" ? "memories" : view;
+    const suffix = params.size ? `?${params}` : "";
     status(`Loading ${view}…`);
     try {
-      const data = await json(route(`${view}${after}`));
-      if (current(generation) && view === state.view) {
+      const data = await json(route(`${endpoint}${suffix}`));
+      if (current(generation) && view === state.view && requestId === state.listRequest) {
         applyList(data, append);
         status(`${state.items.length} current ${view} shown.`);
       }
     } catch (error) {
-      if (current(generation)) throw error;
+      if (current(generation) && view === state.view && requestId === state.listRequest) throw error;
     }
   }
 
@@ -374,36 +403,265 @@
     list.replaceChildren();
     for (const item of state.items) {
       const id = state.view === "resources" ? item.resource_id : state.view === "profile-data" ? item.profile_data_id
-        : item.kind === "insight" ? item.insight_id : item.memory_id;
+        : item.kind === "insight" ? item.insight_id : item.memory_id || item.unit_id;
       const kind = state.view === "resources" ? "Resource" : state.view === "profile-data" ? "Profile Data"
         : item.kind === "insight" && item.subtype ? `insight · ${item.subtype}` : item.kind;
       const caption = ["resources", "profile-data"].includes(state.view) ? `${item.media_type} · version ${item.active_version}` : item.text;
       const row = element("li");
-      const control = button(id, () => openItem(item), "list-item");
-      control.append(element("small", `${kind} · ${String(caption || "").slice(0, 110)}`));
+      const control = button(["resources", "profile-data"].includes(state.view) ? id : String(item.text || id), () => openItem(item), "list-item");
+      if (!["resources", "profile-data"].includes(state.view)) control.replaceChildren(element("span", item.text || id, "item-title"));
+      control.dataset.unitId = item.unit_id || id;
+      control.append(element("small", ["resources", "profile-data"].includes(state.view) ? `${kind} · ${String(caption || "").slice(0, 110)}` : `${kind} · ${id}`));
       row.append(control);
       list.append(row);
     }
     byId("load-more").hidden = !state.nextAfter;
+    byId("list-summary").textContent = `${state.items.length}${data.total == null ? "" : ` of ${data.total}`} shown${state.view === "insights" ? " · supported by memories" : ""}`;
     if (!state.items.length) byId("detail").replaceChildren(element("p", `No current ${state.view} are available.`));
   }
 
   async function openItem(item) {
+    clearSourceMessages();
+    if (state.view === "retrieve" && ["fact", "insight"].includes(item.kind)) {
+      openMemory(item.kind === "insight" ? item.insight_id : item.memory_id, item.kind);
+      return;
+    }
     const generation = state.generation;
     const requestId = ++state.detailRequest;
+    const view = state.view;
+    byId("detail").replaceChildren(element("p", "Loading details…"));
     try {
       if (["resources", "profile-data"].includes(state.view)) {
         const view = state.view;
         const detail = await json(route(itemPath(item)));
         if (current(generation) && state.view === view && requestId === state.detailRequest) showResource(detail);
+      } else if (state.view === "retrieve") {
+        byId("detail").replaceChildren(element("h3", "Retrieved passage"), element("p", item.text, "source-text"));
+        for (const citation of item.citations || []) {
+          byId("detail").append(labelValue("Source", citation.source_id), labelValue("Passage", citation.passage_id));
+        }
       } else {
-        await showMemory(item, generation, requestId);
+        const isInsight = item.kind === "insight";
+        const id = isInsight ? item.insight_id : item.memory_id;
+        const data = await json(route(`memories/${encodeURIComponent(id)}?memory_type=${isInsight ? "insight" : "basic"}`));
+        if (!current(generation) || state.view !== view || requestId !== state.detailRequest) return;
+        for (const control of byId("item-list").querySelectorAll(".list-item")) {
+          control.setAttribute("aria-current", String(control.dataset.unitId === data.unit_id));
+        }
+        await showMemory(data, generation, requestId);
       }
     } catch (error) {
-      if (!current(generation)) return;
+      if (!current(generation) || state.view !== view || requestId !== state.detailRequest) return;
       showError(error);
       byId("detail").replaceChildren(element("p", "This item is no longer available under current policy."));
     }
+  }
+
+  function openMemory(id, kind = "fact") {
+    if (state.view !== "memories") setView("memories");
+    openItem(kind === "insight" ? { kind, insight_id: id } : { kind, memory_id: id });
+  }
+
+  function relationshipLabel(link) {
+    const incoming = link.direction === "incoming";
+    if (link.kind === "caused_by") return incoming ? "Led to" : "Caused by";
+    if (link.kind === "updates") return incoming ? "Updated by" : "Updates";
+    if (link.kind === "shared_entity") return `Shared entity · ${link.entity_name}`;
+    if (link.kind === "temporal") {
+      const basis = { event: "Event time", referenced: "Referenced time", mentioned: "Mentioned time", created: "Source created", updated: "Source updated" }[link.time_basis] || "Time-related";
+      const seconds = link.gap_seconds;
+      if (seconds === 0) return `${basis} · overlapping or same time`;
+      const [size, unit] = seconds >= 86400 ? [86400, "day"] : seconds >= 3600 ? [3600, "hour"] : [60, "minute"];
+      const amount = Math.max(1, Math.round(seconds / size));
+      return `${basis} · ${amount} ${unit}${amount === 1 ? "" : "s"} apart`;
+    }
+    return "Similar meaning";
+  }
+
+  const MAP_NEIGHBORS_PER_PAGE = 6;
+  const MAP_ROW_HEIGHT_PX = 145;
+  const connectionKinds = {
+    caused_by: ["Cause & effect", "causal"], updates: ["Updates", "updates"],
+    temporal: ["Time", "temporal"], shared_entity: ["Shared entity", "entity"],
+    semantic: ["Similar meaning", "semantic"],
+  };
+
+  function connectionMap(item, links, page, changePage) {
+    const region = element("section", undefined, "connection-map");
+    region.setAttribute("aria-label", "Connection map");
+    const peers = new Map();
+    for (const link of links) {
+      const id = link.memory_kind === "insight" ? link.insight_id : link.memory_id;
+      const key = `${link.memory_kind}:${id}`;
+      if (!peers.has(key)) peers.set(key, { id, kind: link.memory_kind, text: link.text, links: [] });
+      peers.get(key).links.push(link);
+    }
+    const neighbors = [...peers.values()];
+    const start = page * MAP_NEIGHBORS_PER_PAGE;
+    const shown = neighbors.slice(start, start + MAP_NEIGHBORS_PER_PAGE);
+    const sides = [[], []];
+    for (const peer of shown) {
+      const directed = peer.links.find(link => ["caused_by", "updates"].includes(link.kind));
+      const side = directed ? Number(directed.direction === "incoming") : Number(sides[0].length > sides[1].length);
+      sides[side].push(peer);
+    }
+    const height = Math.max(380, (Math.max(...sides.map(side => side.length)) + 1) * MAP_ROW_HEIGHT_PX);
+    const canvas = element("div", undefined, "map-canvas");
+    canvas.style.height = `${height}px`;
+    const svgElement = (tag, attributes) => {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+      return node;
+    };
+    const svg = svgElement("svg", { viewBox: `0 0 1000 ${height}`, preserveAspectRatio: "none", "aria-hidden": "true" });
+    const defs = svgElement("defs", {});
+    for (const kind of ["caused_by", "updates"]) {
+      const marker = svgElement("marker", { id: `map-arrow-${kind}`, viewBox: "0 0 8 8", refX: "7", refY: "4", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+      marker.append(svgElement("path", { d: "M0,0 L8,4 L0,8 Z", class: `map-arrow ${connectionKinds[kind][1]}` }));
+      defs.append(marker);
+    }
+    svg.append(defs);
+    canvas.append(svg);
+    const currentNode = element("div", undefined, "map-node map-current");
+    currentNode.style.left = "50%";
+    currentNode.style.top = "50%";
+    currentNode.append(element("strong", "This memory"), element("span", item.text, "map-node-text"));
+    currentNode.title = item.text;
+    canvas.append(currentNode);
+    for (const [sideIndex, side] of sides.entries()) {
+      for (const [index, peer] of side.entries()) {
+        const y = height * (index + 1) / (side.length + 1);
+        const edgeGroups = new Map();
+        for (const link of peer.links) edgeGroups.set(`${link.kind}:${link.direction}`, link);
+        const edgePaths = [];
+        for (const [edgeIndex, link] of [...edgeGroups.values()].entries()) {
+          const offset = (edgeIndex - (edgeGroups.size - 1) / 2) * 7;
+          const x1 = sideIndex ? 640 : 300;
+          const x2 = sideIndex ? 700 : 360;
+          const y1 = (sideIndex ? height / 2 : y) + offset;
+          const y2 = (sideIndex ? y : height / 2) + offset;
+          const middle = (x1 + x2) / 2;
+          const path = svgElement("path", { d: `M${x1},${y1} C${middle},${y1} ${middle},${y2} ${x2},${y2}`, class: `map-edge ${connectionKinds[link.kind][1]}`, "data-kind": link.kind });
+          if (["caused_by", "updates"].includes(link.kind)) {
+            const pointsToPeer = link.kind === "caused_by" ? link.direction === "incoming" : link.direction === "outgoing";
+            path.setAttribute(pointsToPeer === Boolean(sideIndex) ? "marker-end" : "marker-start", `url(#map-arrow-${link.kind})`);
+          }
+          svg.append(path);
+          edgePaths.push(path);
+        }
+        const node = button("", () => openMemory(peer.id, peer.kind), "map-node secondary");
+        node.setAttribute("aria-label", `Open connected memory ${peer.id}`);
+        node.style.left = sideIndex ? "84%" : "16%";
+        node.style.top = `${y / height * 100}%`;
+        const labels = [...new Set(peer.links.map(relationshipLabel))];
+        node.title = `${labels.join("; ")}\n${peer.text}`;
+        node.append(element("span", peer.text, "map-node-text"), element("small", [...new Set(peer.links.map(link => connectionKinds[link.kind][0]))].join(" · ")));
+        const highlight = (active) => edgePaths.forEach(path => path.classList.toggle("map-edge-active", active));
+        node.addEventListener("pointerenter", () => highlight(true));
+        node.addEventListener("pointerleave", () => highlight(false));
+        node.addEventListener("focus", () => highlight(true));
+        node.addEventListener("blur", () => highlight(false));
+        canvas.append(node);
+      }
+    }
+    const legend = element("div", undefined, "map-legend");
+    for (const kind of [...new Set(links.map(link => link.kind))]) {
+      const [label, className] = connectionKinds[kind];
+      legend.append(element("span", label, className));
+    }
+    region.append(canvas, legend);
+    const footer = element("div", undefined, "map-footer");
+    footer.append(element("small", `${start + 1}–${start + shown.length} of ${neighbors.length} connected memories`));
+    if (neighbors.length > MAP_NEIGHBORS_PER_PAGE) {
+      const previous = button("Previous", () => changePage(page - 1));
+      previous.disabled = page === 0;
+      const next = button("Next", () => changePage(page + 1));
+      next.disabled = start + shown.length >= neighbors.length;
+      footer.append(previous, next);
+    }
+    region.append(footer);
+    return region;
+  }
+
+  function memoryConnections(item) {
+    const wrapper = element("div");
+    const entities = element("section", undefined, "memory-section");
+    const entityTitle = item.kind === "insight" ? "Entities in supporting memories" : "Entities in this memory";
+    entities.setAttribute("aria-label", entityTitle);
+    entities.append(element("h4", entityTitle));
+    const chips = element("div", undefined, "entity-chips");
+    const connections = element("section", undefined, "memory-section");
+    connections.setAttribute("aria-label", "Memory connections");
+    const links = item.relationships || [];
+    let filter = "all";
+    let selectedEntity = null;
+    let layout = links.length ? "map" : "list";
+    let mapPage = 0;
+    const layouts = element("div", undefined, "connection-layouts");
+    const map = element("div");
+    const filters = element("div", undefined, "connection-filters");
+    filters.setAttribute("aria-label", "Filter connections");
+    const list = element("ul", undefined, "connection-list");
+    const render = () => {
+      for (const control of filters.children) control.setAttribute("aria-pressed", String(!selectedEntity && control.dataset.filter === filter));
+      for (const chip of chips.children) chip.setAttribute("aria-pressed", String(chip.dataset.entityId === selectedEntity));
+      list.replaceChildren();
+      map.replaceChildren();
+      for (const control of layouts.children) control.setAttribute("aria-pressed", String(control.dataset.layout === layout));
+      list.hidden = layout !== "list";
+      map.hidden = layout !== "map";
+      const visible = links.filter(link => selectedEntity ? link.entity_id === selectedEntity
+        : filter === "all" || (filter === "causal" ? link.kind === "caused_by" : filter === "time" ? link.kind === "temporal" : filter === "entities" ? link.kind === "shared_entity" : ["updates", "semantic"].includes(link.kind)));
+      if (layout === "map" && visible.length) map.append(connectionMap(item, visible, mapPage, page => { mapPage = page; render(); }));
+      for (const link of layout === "list" ? visible : []) {
+        const row = element("li", undefined, "connection-item");
+        row.append(element("span", relationshipLabel(link), "connection-label"));
+        if (link.kind === "temporal" && link.time) {
+          const formatTime = (start, end) => start ? `${new Date(start).toLocaleString()}${end && end !== start ? ` – ${new Date(end).toLocaleString()}` : ""}` : "Not recorded";
+          row.append(element("p", `This memory: ${formatTime(link.time.memory_start, link.time.memory_end)}`, "form-note"));
+          row.append(element("p", `Related memory: ${formatTime(link.time.related_start, link.time.related_end)}`, "form-note"));
+        }
+        row.append(element("p", link.text));
+        const id = link.memory_kind === "insight" ? link.insight_id : link.memory_id;
+        const control = button("Open memory →", () => openMemory(id, link.memory_kind));
+        control.setAttribute("aria-label", `Open memory ${id}`);
+        row.append(control);
+        list.append(row);
+      }
+      if (!visible.length) (layout === "map" ? map : list).append(element("p", links.length ? "No connections match this filter." : "No stored connections.", "form-note"));
+    };
+    for (const entity of item.entities || []) {
+      const chip = button(entity.name, () => { selectedEntity = selectedEntity === entity.entity_id ? null : entity.entity_id; mapPage = 0; render(); }, "entity-chip secondary");
+      chip.dataset.entityId = entity.entity_id;
+      chip.title = `Mentioned as ${entity.mention}. Show connections through this entity.`;
+      chips.append(chip);
+    }
+    entities.append(chips);
+    if (!chips.children.length) entities.append(element("p", "No supported entities recorded.", "form-note"));
+    if (chips.children.length > 1 && item.kind !== "insight") {
+      entities.append(element("p", `Mentioned together: ${item.entities.map(entity => entity.name).join(" ↔ ")}`, "form-note"));
+      entities.append(element("p", "The memory above describes their relationship; co-mentions alone do not establish a typed relationship.", "form-note"));
+    }
+    connections.append(element("h4", "Memory connections"));
+    if (links.length) {
+      for (const [key, label] of [["map", "Map"], ["list", "List"]]) {
+        const control = button(label, () => { layout = key; render(); });
+        control.dataset.layout = key;
+        layouts.append(control);
+      }
+      connections.append(layouts);
+      for (const [key, label] of [["all", "All"], ["causal", "Causal"], ["time", "Time"], ["entities", "Shared entities"], ["other", "Updates & similar"]]) {
+        const control = button(label, () => { filter = key; selectedEntity = null; mapPage = 0; render(); });
+        control.dataset.filter = key;
+        filters.append(control);
+      }
+      connections.append(filters);
+    }
+    connections.append(map, list);
+    if (item.relationships_truncated) connections.append(element("p", "Showing the first 50 connections. Causal and update links appear first.", "form-note"));
+    render();
+    wrapper.append(entities, connections);
+    return wrapper;
   }
 
   async function showMemory(item, generation, requestId) {
@@ -412,16 +670,18 @@
     const isInsight = item.kind === "insight";
     const targetId = isInsight ? item.insight_id : item.memory_id;
     const revision = item.insight_revision ?? item.memory_revision ?? item.revision;
-    const sourceMessages = element("div");
-    sourceMessages.append(element("h4", "Source messages"));
+    const sourceMessages = byId("source-messages");
+    sourceMessages.replaceChildren();
+    byId("source-panel").hidden = false;
+    byId("workspace-grid").classList.add("with-memory");
     if (citations.length) sourceMessages.append(element("p", "Loading source messages…"));
     else sourceMessages.append(element("p", "No source messages available."));
     detail.replaceChildren(
-      element("span", item.kind === "insight" ? "Insight" : "L1 Memory", "badge"),
+      element("span", item.kind === "insight" ? "Insight" : "Memory", "badge"),
       element("h3", targetId),
       element("h4", item.kind === "insight" ? "Insight" : "Extracted fact"),
       element("p", item.text, "source-text"),
-      sourceMessages,
+      memoryConnections(item),
       labelValue("Origin", item.origin),
       labelValue("Canonical ID", targetId),
       labelValue("Revision", revision),
@@ -431,6 +691,9 @@
     if (item.supports?.length) {
       for (const support of item.supports) {
         detail.append(labelValue("Memory", support.memory_id));
+        const control = button("Open supporting memory →", () => openMemory(support.memory_id));
+        control.setAttribute("aria-label", `Open supporting memory ${support.memory_id}`);
+        detail.append(control);
         if (support.support_revision !== undefined) detail.append(labelValue("Support revision", support.support_revision));
       }
     } else {
@@ -438,7 +701,7 @@
     }
     const affected = item.affected_insight_ids || [];
     detail.append(element("h4", "Affected dependent Insights"));
-    if (affected.length) for (const insightId of affected) detail.append(element("p", insightId));
+    if (affected.length) for (const insightId of affected) detail.append(button(insightId, () => openMemory(insightId, "insight")));
     else detail.append(element("p", "No dependent Insights are affected."));
     detail.append(element("div", undefined, "actions"));
     detail.lastElementChild.append(
@@ -462,8 +725,8 @@
       try { return await json(route(`evidence/${encodeURIComponent(sourceId)}`)); }
       catch (_) { return null; }
     }));
-    if (!current(generation) || state.view !== "memories" || requestId !== state.detailRequest) return;
-    sourceMessages.replaceChildren(element("h4", "Source messages"));
+    if (!current(generation) || !["memories", "insights"].includes(state.view) || requestId !== state.detailRequest) return;
+    sourceMessages.replaceChildren();
     for (const [index, source] of sources.entries()) {
       const group = element("div", undefined, "citation");
       group.append(element("h4", sourceIds[index]));
@@ -515,13 +778,17 @@
   }
 
   async function inspectSource(sourceId) {
+    clearSourceMessages();
     const generation = state.generation;
+    const view = state.view;
+    const requestId = ++state.detailRequest;
     try {
       const source = await json(route(`evidence/${encodeURIComponent(sourceId)}`));
-      if (!current(generation)) return;
+      if (!currentDetail(generation, view, requestId)) return;
+      clearSourceMessages();
       const detail = byId("detail");
       detail.replaceChildren(
-        element("span", "L0 Source Evidence", "badge"),
+        element("span", "Source Evidence", "badge"),
         element("h3", sourceId),
         labelValue("Active version", source.active_version),
         labelValue("SHA-256", source.sha256),
@@ -536,7 +803,7 @@
         }
       }
       status(`Current source ${sourceId} opened.`);
-    } catch (error) { if (current(generation)) showError(error); }
+    } catch (error) { if (currentDetail(generation, view, requestId)) showError(error); }
   }
 
   const itemId = (item) => item.profile_data_id ?? item.resource_id;
@@ -774,6 +1041,7 @@
   }
 
   function showReceipt(operationId, receipt) {
+    clearSourceMessages();
     const detail = byId("detail");
     detail.replaceChildren(
       element("h3", "Durable operation"),
@@ -837,50 +1105,77 @@
   async function search(event) {
     event.preventDefault();
     const generation = state.generation;
+    const view = state.view;
+    const requestId = ++state.detailRequest;
+    const listRequest = ++state.listRequest;
     const query = byId("query").value.trim();
     if (!query) return;
+    clearSourceMessages();
+    const mode = view === "retrieve" ? byId("recall-level").value : "fast";
+    const started = performance.now();
     try {
       status("Searching current evidence…");
       const result = await json("/v1/recall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: state.user, query, recall_level: "fast", allow_partial: true }),
+        body: JSON.stringify({ user_id: state.user, query, recall_level: mode, allow_partial: true }),
       });
-      if (!current(generation)) return;
-      const detail = byId("detail");
-      detail.replaceChildren(
-        element("h3", "Current search context"),
-        labelValue("Estimated tokens", result.context_tokens),
-        labelValue("Coverage", result.diagnostics?.partial ? "Partial" : "Current"),
-        element("pre", result.context || "No matching current evidence.", "source-text"),
-      );
-      if (result.trace_id) detail.append(button("Explain this search", () => explain(result.trace_id)));
+      if (!current(generation) || state.view !== view || requestId !== state.detailRequest || listRequest !== state.listRequest) return;
+      const retrieval = { result, query, mode, duration: ((performance.now() - started) / 1000).toFixed(2) };
+      if (view === "retrieve") {
+        applyList({ items: result.items, next_after: null }, false);
+      }
+      showRetrieval(retrieval);
       status(`${result.items.length} cited items returned.`);
-    } catch (error) { if (current(generation)) showError(error); }
+    } catch (error) {
+      if (current(generation) && state.view === view && requestId === state.detailRequest) showError(error);
+    }
+  }
+
+  function showRetrieval({ result, query, mode, duration }) {
+    const detail = byId("detail");
+    detail.replaceChildren(
+      element("h3", "Current search context"),
+      element("p", query),
+      labelValue("Mode", mode),
+      labelValue("Elapsed", `${duration}s`),
+      labelValue("Estimated tokens", result.context_tokens),
+      labelValue("Coverage", result.diagnostics?.partial ? "Partial" : "Current"),
+      element("pre", result.context || "No matching current evidence.", "source-text"),
+    );
+    if (result.diagnostics?.partial) detail.append(element("p", "Some indexing or retrieval stages are incomplete.", "form-note"));
+    if (result.trace_id) detail.append(button("Explain this search", () => explain(result.trace_id)));
   }
 
   async function explain(traceId) {
     const generation = state.generation;
+    const view = state.view;
+    const requestId = ++state.detailRequest;
     try {
       const trace = await json(route(`debug/traces/${encodeURIComponent(traceId)}`));
-      if (!current(generation)) return;
+      if (!currentDetail(generation, view, requestId)) return;
+      clearSourceMessages();
       byId("detail").replaceChildren(
         element("h3", `Trace ${traceId}`),
         labelValue("Recorded status", trace.status),
         element("pre", JSON.stringify(trace.decisions || {}, null, 2), "source-text"),
       );
       status(`Trace ${trace.status}.`);
-    } catch (error) { if (current(generation)) showError(error); }
+    } catch (error) { if (currentDetail(generation, view, requestId)) showError(error); }
   }
 
   async function createExport() {
+    clearSourceMessages();
     const generation = state.generation;
+    const view = state.view;
+    const requestId = ++state.detailRequest;
     try {
       status("Capturing current export…");
       const receipt = await json(route("exports"), { method: "POST" });
-      if (!current(generation)) return;
+      if (!currentDetail(generation, view, requestId)) return;
       const manifest = await json(route(`exports/${encodeURIComponent(receipt.export_id)}`));
-      if (!current(generation)) return;
+      if (!currentDetail(generation, view, requestId)) return;
+      clearSourceMessages();
       byId("detail").replaceChildren(
         element("h3", `Export ${receipt.export_id}`),
         labelValue("State", receipt.state),
@@ -889,7 +1184,7 @@
         element("p", "Download the manifest, record parts, and originals through the public API. Place them at their manifest paths and run oam validate-export on that directory."),
       );
       status(`Export ${receipt.export_id} is ready under the current source policy.`);
-    } catch (error) { if (current(generation)) showError(error); }
+    } catch (error) { if (currentDetail(generation, view, requestId)) showError(error); }
   }
 
   byId("connect-form").addEventListener("submit", connect);

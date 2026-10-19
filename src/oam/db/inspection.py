@@ -18,6 +18,7 @@ from oam.contracts.memory import (
 )
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
+from oam.db.inspection_relationships import memory_connections
 from oam.profiles.resources import map_profile_data, public_profile_data_support
 
 INSPECTION_PAGE_SIZE = 50
@@ -388,6 +389,8 @@ class SourceInspector:
                     (kind, memory_id),
                 )
                 row = cursor.fetchone()
+            if row is not None:
+                row.update(memory_connections(connection, row))
             self._check_policy(connection, authority, epoch)
             return (
                 None

@@ -22,7 +22,8 @@ class QuietHandler(SimpleHTTPRequestHandler):
         pass
 
 
-def test_memory_source_messages_and_profile_create_flow(tmp_path):
+@pytest.mark.parametrize("delayed_action", ["source", "export"])
+def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action):
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", 9222)):
             pytest.skip("Existing debug Chrome is unavailable")
@@ -40,6 +41,8 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
     calls = []
     profile_data = None
     profile_data_version = 0
+    pause_action = False
+    paused_actions = []
 
     def respond(route):
         nonlocal \
@@ -51,6 +54,11 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
             profile_data_version
         path = route.request.url
         calls.append((route.request.method, path, route.request.post_data))
+        memory_id = None
+        if "/memories/" in path and route.request.method == "GET":
+            path, memory_id = path.split("/memories/", 1)
+            memory_id = memory_id.split("?", 1)[0]
+            path += "/memories"
         if path.endswith("/recall"):
             request = RecallRequest.model_validate_json(route.request.post_data)
             assert request.user_id == "alice"
@@ -129,6 +137,16 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     "messages": [{"role": "user", "content": "Please keep replies brief."}]
                 }
             }
+            if pause_action and delayed_action == "source":
+                paused_actions.append((route, data))
+                return
+        elif path.endswith("/exports"):
+            data = {"export_id": "export-one", "state": "ready"}
+        elif path.endswith("/exports/export-one"):
+            data = {"counts": {"memory": 1}, "originals": []}
+            if pause_action and delayed_action == "export":
+                paused_actions.append((route, data))
+                return
         elif "/profile/refresh" in path:
             if profile_indexing:
                 route.fulfill(
@@ -178,6 +196,12 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
             data.update(profile_overrides)
         else:
             raise AssertionError(f"Unexpected request: {path}")
+        if memory_id:
+            data = next(
+                item
+                for item in data["items"]
+                if item.get("memory_id", item.get("insight_id")) == memory_id
+            )
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
 
     try:
@@ -192,18 +216,47 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 page.locator("#connect-form button").click()
                 page.locator("#item-list button").first.click()
                 detail = page.locator("#detail")
-                detail.get_by_text("Please keep replies brief.").wait_for()
+                sources = page.get_by_role("region", name="Source messages", exact=True)
+                sources.get_by_text("Please keep replies brief.").wait_for()
                 assert detail.get_by_text("Prefers concise replies.").is_visible()
-                assert detail.get_by_text("Source messages").is_visible()
+                assert detail.get_by_text("Please keep replies brief.").count() == 0
+                assert sources.bounding_box()["x"] > detail.bounding_box()["x"]
+                page.set_viewport_size({"width": 390, "height": 844})
+                assert sources.bounding_box()["y"] > detail.bounding_box()["y"]
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.set_viewport_size({"width": 1440, "height": 1000})
                 assert len([call for call in calls if "/evidence/chat-1" in call[1]]) == 1
                 assert "insight · preferences" in page.locator("#item-list").inner_text()
+                pause_action = True
+                pending_path = (
+                    "**/evidence/chat-1" if delayed_action == "source" else "**/exports/export-one"
+                )
+                with page.expect_request(pending_path):
+                    page.get_by_role(
+                        "button",
+                        name="Inspect source" if delayed_action == "source" else "Create export",
+                        exact=True,
+                    ).click()
                 page.locator("#item-list button").nth(1).click()
+                detail.get_by_text("Subtype", exact=True).wait_for()
+                paused_route, payload = paused_actions[0]
+                with page.expect_response(pending_path) as pending_response:
+                    paused_route.fulfill(
+                        status=200, content_type="application/json", body=json.dumps(payload)
+                    )
+                pending_response.value.finished()
+                page.evaluate("() => new Promise(requestAnimationFrame)")
+                assert detail.get_by_role("heading", name="insight-1", exact=True).is_visible()
+                pause_action = False
                 assert detail.get_by_text("Subtype", exact=True).is_visible()
                 assert detail.get_by_text("preferences", exact=True).is_visible()
+                sources.get_by_text("No source messages available.", exact=True).wait_for()
+                assert sources.get_by_text("Please keep replies brief.").count() == 0
 
                 page.locator("#query").fill("brief replies")
                 page.locator("#search-form button").click()
                 detail.get_by_text("Current search context", exact=True).wait_for()
+                assert sources.is_hidden()
                 assert "Please keep replies brief." in detail.locator("pre").inner_text()
                 assert not any("/profile" in call[1] for call in calls)
                 assert "include_profile" not in json.loads(calls[-1][2])
@@ -452,7 +505,10 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
 
 
 @pytest.mark.parametrize("target_kind", ["memory", "insight"])
-def test_unit_removal_preserves_sources_and_invalidates_pending_reads(tmp_path, target_kind):
+@pytest.mark.parametrize("navigate_while_removing", [False, True])
+def test_unit_removal_preserves_sources_and_invalidates_pending_reads(
+    tmp_path, target_kind, navigate_while_removing
+):
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", 9222)):
             pytest.skip("Existing debug Chrome is unavailable")
@@ -466,6 +522,7 @@ def test_unit_removal_preserves_sources_and_invalidates_pending_reads(tmp_path, 
     memory_present = True
     insight_present = True
     paused_reads = []
+    paused_deletes = []
     pause_reads = False
     memory = {
         "unit_id": "search-fact-42",
@@ -510,6 +567,8 @@ def test_unit_removal_preserves_sources_and_invalidates_pending_reads(tmp_path, 
             if pause_reads:
                 paused_reads.append((route, data))
                 return
+        elif "/memories/" in path and route.request.method == "GET":
+            data = insight if "/memories/insight-7?" in path else memory
         elif path.endswith("/recall"):
             paused_reads.append(
                 (
@@ -556,6 +615,9 @@ def test_unit_removal_preserves_sources_and_invalidates_pending_reads(tmp_path, 
             data = {"items": [], "next_after": None}
         else:
             raise AssertionError(f"Unexpected request: {path}")
+        if navigate_while_removing and route.request.method == "DELETE":
+            paused_deletes.append((route, data))
+            return
         fulfill(route, data)
 
     try:
@@ -612,7 +674,11 @@ def test_unit_removal_preserves_sources_and_invalidates_pending_reads(tmp_path, 
                 assert len(paused_reads) == 2
                 pause_reads = False
                 page.once("dialog", lambda dialog: dialog.accept())
-                detail.get_by_role("button", name=action, exact=True).click()
+                with page.expect_request("**" + endpoint):
+                    detail.get_by_role("button", name=action, exact=True).click()
+                if navigate_while_removing:
+                    page.get_by_role("button", name="Retrieve", exact=True).click()
+                    fulfill(*paused_deletes[0])
                 detail.get_by_text(f'"operation_id": "{operation_id}"', exact=False).wait_for()
                 receipt = json.loads(detail.locator("pre").inner_text())
                 assert receipt["target_kind"] == target_kind
@@ -623,6 +689,7 @@ def test_unit_removal_preserves_sources_and_invalidates_pending_reads(tmp_path, 
                 deletes = [path for method, path, _ in calls if method == "DELETE"]
                 assert len(deletes) == 1
                 assert deletes[0].endswith(endpoint)
+                assert not any(path.endswith("/retrieve") for _, path, _ in calls)
 
                 completed = page.evaluate("window.completedReads")
                 for route, data in paused_reads:
@@ -631,11 +698,13 @@ def test_unit_removal_preserves_sources_and_invalidates_pending_reads(tmp_path, 
                 page.evaluate("() => new Promise(requestAnimationFrame)")
                 assert json.loads(detail.locator("pre").inner_text()) == receipt
                 assert page.locator("#item-list button").count() == (
-                    0 if target_kind == "memory" else 1
+                    0 if target_kind == "memory" or navigate_while_removing else 1
                 )
-                if target_kind == "insight":
+                if target_kind == "insight" and not navigate_while_removing:
                     page.locator("#item-list button").first.click()
-                    detail.get_by_text("Please keep replies brief.", exact=True).wait_for()
+                    page.get_by_role("region", name="Source messages", exact=True).get_by_text(
+                        "Please keep replies brief.", exact=True
+                    ).wait_for()
             finally:
                 context.close()
                 browser.close()
