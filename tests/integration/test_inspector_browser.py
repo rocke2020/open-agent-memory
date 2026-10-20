@@ -46,7 +46,9 @@ def test_browser_reads_insights_connections_and_retrieval_from_public_api(
                 assert "Memory Inspector" in response.read().decode()
             with playwright.sync_playwright() as api:
                 browser = api.chromium.connect_over_cdp(websocket_url)
-                context = browser.new_context(viewport={"width": 1440, "height": 1000})
+                context = browser.new_context(
+                    locale="en-US", viewport={"width": 1440, "height": 1000}
+                )
                 page = context.new_page()
                 page.set_default_timeout(10000)
                 errors = []
@@ -91,9 +93,16 @@ def test_browser_reads_insights_connections_and_retrieval_from_public_api(
                     connections.get_by_text("Led to", exact=True).wait_for()
                     page.set_viewport_size({"width": 390, "height": 844})
                     page.emulate_media(color_scheme="dark")
-                    assert sources.bounding_box()["y"] > detail.bounding_box()["y"]
+                    page.locator("#language").select_option("zh-CN")
+                    assert page.get_by_role("button", name="检索", exact=True).is_visible()
+                    assert page.get_by_role("heading", name="来源消息", exact=True).is_visible()
+                    assert (
+                        page.locator("#source-panel").bounding_box()["y"]
+                        > detail.bounding_box()["y"]
+                    )
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                     page.screenshot(path=str(tmp_path / "inspector-mobile.png"), full_page=True)
+                    page.locator("#language").select_option("en")
                     page.get_by_role("button", name="Retrieve", exact=True).click()
                     query = f"Synthetic claim {SURVIVING_MEMORY}"
                     page.locator("#query").fill(query)

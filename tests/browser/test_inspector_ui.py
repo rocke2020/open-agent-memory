@@ -22,8 +22,7 @@ class QuietHandler(SimpleHTTPRequestHandler):
         pass
 
 
-@pytest.mark.parametrize("delayed_action", ["source", "export"])
-def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action):
+def test_memory_source_messages_and_profile_create_flow(tmp_path):
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", 9222)):
             pytest.skip("Existing debug Chrome is unavailable")
@@ -39,10 +38,12 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
     profile_indexing = False
     profile_overrides = {}
     calls = []
-    profile_data = None
-    profile_data_version = 0
+    resource = None
+    resource_version = 0
     pause_action = False
     paused_actions = []
+    pause_resource_list = False
+    paused_resource_lists = []
 
     def respond(route):
         nonlocal \
@@ -50,8 +51,8 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
             profile_failed, \
             profile_blocked, \
             profile_indexing, \
-            profile_data, \
-            profile_data_version
+            resource, \
+            resource_version
         path = route.request.url
         calls.append((route.request.method, path, route.request.post_data))
         memory_id = None
@@ -95,56 +96,46 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
                 ],
                 "next_after": None,
             }
-        elif "/profile-data" in path:
+        elif "/resources" in path:
             if route.request.method in {"POST", "PUT"}:
-                profile_data = json.loads(route.request.post_data)
-                profile_data_version += 1
-                data = {"revision": profile_data_version, "operation_id": "data-op"}
+                if route.request.method == "PUT":
+                    assert route.request.headers["if-match"] == str(resource_version)
+                resource = json.loads(route.request.post_data)
+                resource_version += 1
+                data = {"revision": resource_version, "operation_id": "resource-op"}
             elif path.endswith("/original"):
-                data = profile_data
-            elif path.endswith("/profile-data"):
+                data = resource
+            elif path.endswith("/resources"):
                 data = {
                     "items": [
                         {
-                            "profile_data_id": "basic",
-                            "media_type": "application/json",
-                            "active_version": profile_data_version,
+                            "resource_id": "report",
+                            "media_type": "text/html",
+                            "active_version": resource_version,
                         }
                     ]
-                    if profile_data
+                    if resource
                     else [],
                     "next_after": None,
                 }
+                if pause_resource_list:
+                    paused_resource_lists.append((route, data))
+                    return
             else:
                 data = {
-                    "profile_data_id": "basic",
-                    "subtype": "basic-profile/v1",
-                    "media_type": "application/json",
-                    "active_version": profile_data_version,
-                    "mapped_fields": [
-                        {
-                            "section": "main",
-                            "key": "date_of_birth",
-                            "value": profile_data["content"]["date_of_birth"],
-                        }
-                    ],
+                    "resource_id": "report",
+                    "media_type": "text/html",
+                    "active_version": resource_version,
+                    "abstract_status": "ready",
+                    "abstract": resource["text"],
                 }
-        elif path.endswith("/resources"):
-            data = {"items": [], "next_after": None}
         elif path.endswith("/evidence/chat-1"):
             data = {
                 "original": {
                     "messages": [{"role": "user", "content": "Please keep replies brief."}]
                 }
             }
-            if pause_action and delayed_action == "source":
-                paused_actions.append((route, data))
-                return
-        elif path.endswith("/exports"):
-            data = {"export_id": "export-one", "state": "ready"}
-        elif path.endswith("/exports/export-one"):
-            data = {"counts": {"memory": 1}, "originals": []}
-            if pause_action and delayed_action == "export":
+            if pause_action:
                 paused_actions.append((route, data))
                 return
         elif "/profile/refresh" in path:
@@ -190,7 +181,8 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
                         "source_id": "chat-1",
                         "passage_id": "p1",
                         "event_time": "2026-09-29T12:30:00+00:00",
-                    }
+                    },
+                    {"kind": "profile_data", "profile_data_id": "basic"},
                 ],
             }
             data.update(profile_overrides)
@@ -207,13 +199,33 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
     try:
         with playwright.sync_playwright() as api:
             browser = api.chromium.connect_over_cdp(websocket_url)
-            context = browser.new_context()
+            context = browser.new_context(locale="en-US")
             page = context.new_page()
             page.route("**/v1/**", respond)
             try:
                 page.goto(f"http://127.0.0.1:{server.server_port}/ui/")
+                header = page.locator(".site-header")
+                assert header.bounding_box()["height"] <= 72
+                repository = header.get_by_role("link", name="GitHub", exact=False)
+                assert repository.get_attribute("href") == (
+                    "https://github.com/rocke2020/open-agent-memory"
+                )
+                assert repository.locator("svg").count() == 1
                 page.locator("#user").fill("alice")
                 page.locator("#connect-form button").click()
+                navigation = page.get_by_role("navigation", name="Inspector views")
+                navigation.wait_for()
+                assert (
+                    navigation.bounding_box()["x"]
+                    < page.locator("#workspace-grid").bounding_box()["x"]
+                )
+                assert navigation.bounding_box()["width"] <= 190
+                assert header.bounding_box()["height"] <= 72
+                assert header.locator("#scope-label").inner_text() == "default / alice"
+                assert (
+                    navigation.get_by_role("button", name="Profile Data", exact=True).count() == 0
+                )
+                assert page.get_by_role("button", name="Create export", exact=True).count() == 0
                 page.locator("#item-list button").first.click()
                 detail = page.locator("#detail")
                 sources = page.get_by_role("region", name="Source messages", exact=True)
@@ -221,20 +233,24 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
                 assert detail.get_by_text("Prefers concise replies.").is_visible()
                 assert detail.get_by_text("Please keep replies brief.").count() == 0
                 assert sources.bounding_box()["x"] > detail.bounding_box()["x"]
+                # The source column must not squeeze short headings/actions into fragments.
+                assert page.locator("#list-title").bounding_box()["height"] < 45
+                assert page.locator("#refresh-list").bounding_box()["height"] < 55
+                assert page.locator("#search-form button").bounding_box()["height"] < 55
                 page.set_viewport_size({"width": 390, "height": 844})
                 assert sources.bounding_box()["y"] > detail.bounding_box()["y"]
+                assert header.bounding_box()["height"] <= 112
+                assert navigation.bounding_box()["width"] >= 300
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 assert len([call for call in calls if "/evidence/chat-1" in call[1]]) == 1
                 assert "insight · preferences" in page.locator("#item-list").inner_text()
                 pause_action = True
-                pending_path = (
-                    "**/evidence/chat-1" if delayed_action == "source" else "**/exports/export-one"
-                )
+                pending_path = "**/evidence/chat-1"
                 with page.expect_request(pending_path):
                     page.get_by_role(
                         "button",
-                        name="Inspect source" if delayed_action == "source" else "Create export",
+                        name="Inspect source",
                         exact=True,
                     ).click()
                 page.locator("#item-list button").nth(1).click()
@@ -261,33 +277,43 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
                 assert not any("/profile" in call[1] for call in calls)
                 assert "include_profile" not in json.loads(calls[-1][2])
 
-                page.locator('[data-view="profile-data"]').click()
-                page.get_by_role("button", name="Add Profile Data", exact=True).click()
-                page.get_by_label("Profile Data ID", exact=True).fill("basic")
-                page.get_by_label("Date of birth", exact=True).fill("1990-05-10")
-                page.get_by_role("button", name="Create Profile Data", exact=True).click()
-                page.get_by_role("button", name="basic", exact=False).click()
-                detail.get_by_text("1990-05-10", exact=True).wait_for()
-                detail.get_by_role("button", name="Revise", exact=True).click()
-                page.get_by_label("Date of birth", exact=True).fill("1991-05-10")
-                page.get_by_role("button", name="Create immutable revision", exact=True).click()
-                page.get_by_role("button", name="basic", exact=False).click()
-                detail.get_by_text("1991-05-10", exact=True).wait_for()
-                writes = [
-                    call
-                    for call in calls
-                    if call[0] in {"POST", "PUT"} and "/profile-data" in call[1]
-                ]
-                assert [call[0] for call in writes] == ["POST", "PUT"]
-                assert json.loads(writes[-1][2]) == {
-                    "profile_data_id": "basic",
-                    "subtype": "basic-profile/v1",
-                    "content": {"date_of_birth": "1991-05-10"},
-                }
+                pause_resource_list = True
                 page.locator('[data-view="resources"]').click()
                 page.get_by_role("button", name="Add Resource", exact=True).click()
                 assert page.get_by_label("Resource type", exact=True).count() == 0
-                assert page.get_by_label("Date of birth", exact=True).is_hidden()
+                assert page.get_by_label("Date of birth", exact=True).count() == 0
+                page.get_by_label("Resource ID", exact=True).fill("report")
+                page.get_by_label("Original text", exact=True).fill("The first report.")
+                pending_list, empty_list = paused_resource_lists.pop()
+                pause_resource_list = False
+                with page.expect_response("**/resources"):
+                    pending_list.fulfill(
+                        status=200, content_type="application/json", body=json.dumps(empty_list)
+                    )
+                assert page.locator(".resource-form").is_visible()
+                page.locator("#language").select_option("zh-CN")
+                assert page.locator(".resource-form input[required]").input_value() == "report"
+                assert page.locator(".resource-form textarea").input_value() == "The first report."
+                page.locator("#language").select_option("en")
+                page.get_by_role("button", name="Create Resource", exact=True).click()
+                page.locator("#item-list").get_by_role("button", name="report", exact=False).click()
+                detail.get_by_text("The first report.", exact=True).wait_for()
+                detail.get_by_role("button", name="Revise", exact=True).click()
+                page.get_by_label("Original text", exact=True).fill("The revised report.")
+                page.get_by_role("button", name="Create immutable revision", exact=True).click()
+                page.locator("#item-list").get_by_role("button", name="report", exact=False).click()
+                detail.get_by_text("The revised report.", exact=True).wait_for()
+                writes = [
+                    call for call in calls if call[0] in {"POST", "PUT"} and "/resources" in call[1]
+                ]
+                assert [call[0] for call in writes] == ["POST", "PUT"]
+                assert json.loads(writes[-1][2]) == {
+                    "input_type": "document",
+                    "document_id": "report",
+                    "user_id": "alice",
+                    "update_mode": "replace",
+                    "text": "The revised report.",
+                }
 
                 page.locator('[data-view="profiles"]').click()
                 detail.locator(".profile-content").wait_for()
@@ -342,6 +368,10 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
                 assert reference.is_visible()
                 assert detail.get_by_text("Support · fact", exact=True).count() == 0
                 assert detail.get_by_text("Conversation", exact=True).is_visible()
+                assert detail.get_by_text("[2] Provided profile details", exact=True).is_visible()
+                assert detail.get_by_text("basic", exact=True).is_visible()
+                assert detail.get_by_role("button", name="Inspect Profile Data").count() == 0
+                assert not any("/profile-data" in call[1] for call in calls)
                 assert calls[-1][1].endswith("/profile")
 
                 page.locator("#profile-instruction").fill("Return JSON.")
@@ -491,10 +521,28 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path, delayed_action
                 detail.locator("pre.source-text").wait_for()
                 assert detail.bounding_box()["y"] < 844
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.set_viewport_size({"width": 320, "height": 844})
+                profile_heading = page.locator(".detail-panel .panel-heading")
+                refresh_bounds = page.locator("#refresh-profile").bounding_box()
+                heading_bounds = profile_heading.bounding_box()
+                assert refresh_bounds["x"] + refresh_bounds["width"] <= (
+                    heading_bounds["x"] + heading_bounds["width"] + 1
+                )
+                page.set_viewport_size({"width": 390, "height": 844})
                 page.get_by_role("button", name="Sign out", exact=True).click()
+                assert page.locator("#account").is_hidden()
+                assert page.locator("#scope-label").text_content() == ""
                 assert prompt.text_content() == ""
                 assert page.locator("#profile-instruction-status").text_content() == ""
                 assert not customization.evaluate("element => element.open")
+                page.locator("#language").select_option("zh-CN")
+                page.reload()
+                assert page.locator("html").get_attribute("lang") == "zh-CN"
+                assert page.locator("#language").input_value() == "zh-CN"
+                page.locator("#language").select_option("en")
+                page.reload()
+                assert page.locator("html").get_attribute("lang") == "en"
+                assert page.locator("#language").input_value() == "en"
             finally:
                 context.close()
                 browser.close()
@@ -623,7 +671,7 @@ def test_unit_removal_preserves_sources_and_invalidates_pending_reads(
     try:
         with playwright.sync_playwright() as api:
             browser = api.chromium.connect_over_cdp(websocket_url)
-            context = browser.new_context()
+            context = browser.new_context(locale="en-US")
             page = context.new_page()
             page.set_default_timeout(5000)
             page.add_init_script("""

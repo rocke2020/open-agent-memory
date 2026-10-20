@@ -86,6 +86,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
     pause_detail = False
     pause_trace = False
     pending_traces = []
+    fail_retrieval = False
     retrievals = []
 
     def respond(route):
@@ -93,6 +94,13 @@ def test_insights_entities_and_memory_connections(tmp_path):
         query = parse_qs(parsed.query)
         if parsed.path.endswith("/recall"):
             retrievals.append(json.loads(route.request.post_data))
+            if fail_retrieval:
+                route.fulfill(
+                    status=503,
+                    content_type="application/json",
+                    body=json.dumps({"detail": {"code": "RecallUnavailable"}}),
+                )
+                return
             data = {
                 "items": [fact],
                 "context": "Alice joined Atlas [1].",
@@ -126,7 +134,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
     try:
         with playwright.sync_playwright() as api:
             browser = api.chromium.connect_over_cdp(websocket_url)
-            context = browser.new_context()
+            context = browser.new_context(locale="en-US")
             page = context.new_page()
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
@@ -146,6 +154,16 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 page.get_by_role("button", name="Open supporting memory one", exact=True).click()
                 entities = page.get_by_role("region", name="Entities in this memory", exact=True)
                 entities.get_by_role("button", name="Atlas", exact=True).wait_for()
+                page.locator("#language").select_option("zh-CN")
+                assert page.locator("html").get_attribute("lang") == "zh-CN"
+                assert page.get_by_role("button", name="记忆", exact=True).is_visible()
+                assert page.get_by_role("button", name="洞察", exact=True).is_visible()
+                assert page.get_by_role("button", name="检索", exact=True).is_visible()
+                assert page.get_by_role("button", name="共同实体", exact=True).is_visible()
+                assert page.get_by_role("heading", name="来源消息", exact=True).is_visible()
+                assert page.locator("#detail .source-text").inner_text() == fact["text"]
+                assert page.get_by_role("button", name="Atlas", exact=True).is_visible()
+                page.locator("#language").select_option("en")
                 assert entities.get_by_text("Mentioned together", exact=False).is_visible()
                 connections = page.get_by_role("region", name="Memory connections", exact=True)
                 graph = connections.get_by_role("region", name="Connection map", exact=True)
@@ -184,6 +202,13 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 assert connections.get_by_text("Caused by", exact=True).is_visible()
                 assert connections.get_by_text("Updated by", exact=True).is_visible()
                 assert connections.get_by_text("Event time · 1 day apart", exact=True).is_visible()
+                page.locator("#language").select_option("zh-CN")
+                assert (
+                    page.get_by_role("region", name="记忆关系", exact=True)
+                    .get_by_text("后续更新", exact=True)
+                    .is_visible()
+                )
+                page.locator("#language").select_option("en")
                 entities.get_by_role("button", name="Atlas", exact=True).click()
                 assert connections.locator(".connection-item").count() == 1
                 assert connections.get_by_text("Shared entity · Atlas", exact=True).is_visible()
@@ -195,8 +220,11 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 page.locator("#item-list .list-item").first.click()
                 entities.get_by_role("button", name="Atlas", exact=True).wait_for()
                 page.set_viewport_size({"width": 390, "height": 844})
+                page.locator("#language").select_option("zh-CN")
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 page.emulate_media(color_scheme="dark")
+                assert page.get_by_role("button", name="共同实体", exact=True).is_visible()
+                page.locator("#language").select_option("en")
                 assert entities.is_visible()
                 assert not errors
                 page.get_by_role("button", name="Retrieve", exact=True).click()
@@ -234,6 +262,37 @@ def test_insights_entities_and_memory_connections(tmp_path):
                     "Enter a query to retrieve cited evidence.", exact=False
                 ).wait_for()
                 assert page.locator("#item-list .list-item").count() == 0
+                page.locator("#search-form button").click()
+                page.locator("#detail").get_by_text(
+                    "Alice joined Atlas [1].", exact=True
+                ).wait_for()
+                fail_retrieval = True
+                page.locator("#query").fill("openclaw")
+                page.locator("#search-form button").click()
+                page.locator("#detail").get_by_role(
+                    "heading", name="Retrieval failed", exact=True
+                ).wait_for()
+                assert page.locator("#item-list .list-item").count() == 0
+                assert (
+                    page.locator("#detail")
+                    .get_by_text("Alice joined Atlas [1].", exact=True)
+                    .count()
+                    == 0
+                )
+                page.locator("#language").select_option("zh-CN")
+                assert (
+                    page.locator("#detail")
+                    .get_by_role("heading", name="检索失败", exact=True)
+                    .is_visible()
+                )
+                page.locator("#language").select_option("en")
+                fail_retrieval = False
+                page.locator("#search-form button").click()
+                page.locator("#detail").get_by_text(
+                    "Alice joined Atlas [1].", exact=True
+                ).wait_for()
+                assert page.locator("#item-list .list-item").count() == 1
+                assert not errors
                 page.get_by_role("button", name="Memories", exact=True).click()
                 page.locator("#item-list .list-item").first.wait_for()
                 pause_detail = True
