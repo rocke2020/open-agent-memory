@@ -69,9 +69,6 @@ extraction:
   reference_max_input_tokens: 2048
 
 search:
-  # Default stored entity/alias and causal expansion for fast recall; requests may override.
-  # Semantic-neighbor expansion remains excluded from fast graph.
-  fast_graph: false
   # Per-query limit measured with the local token estimate.
   max_query_tokens: 512
   # Maximum queries in a batch or generated decomposition plan.
@@ -123,17 +120,21 @@ search:
   # Per mode: channel_candidates caps each arm; fused_candidates caps rank fusion.
   # rerank_candidates caps optional reranker input; source_seed_results caps seed items.
   # max_results caps returned items after source-detail assembly.
+  # graph: off skips expansion; light uses stored entity/alias and causal links;
+  # full adds semantic neighbors. Quote "off" so YAML does not parse it as false.
   fast:
+    graph: "off"
     channel_candidates: 64
     fused_candidates: 128
     source_seed_results: 36
     max_results: 96
   normal:
+    graph: light
     channel_candidates: 64
-    fused_candidates: 128
+    fused_candidates: 154
     rerank_candidates: 48
     source_seed_results: 36
-    max_results: 96
+    max_results: 154
 
 index:
   # Maximum UTF-8 bytes for both the original entity name and its normalized lookup key.

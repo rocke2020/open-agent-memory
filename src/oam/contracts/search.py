@@ -63,8 +63,8 @@ class SearchOutputOptions(FrozenContract):
         default=None,
         strict=True,
         description=(
-            "Override stored entity/alias and causal graph expansion in fast mode. "
-            "Omitted or null inherits search.fast_graph from configuration."
+            "Override fast graph selection: true selects light, false selects off. "
+            "Omitted or null inherits search.fast.graph from configuration."
         ),
     )
     max_context_tokens: PositiveInt | None = None

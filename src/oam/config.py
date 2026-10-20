@@ -81,6 +81,7 @@ class ExtractionConfig(FrozenModel):
 
 
 class SearchTier(FrozenModel):
+    graph: Literal["off", "light", "full"]
     channel_candidates: PositiveInt
     fused_candidates: PositiveInt
     source_seed_results: PositiveInt
@@ -104,7 +105,6 @@ class NormalArmWeights(FrozenModel):
 
 
 class SearchConfig(FrozenModel):
-    fast_graph: bool = Field(strict=True)
     max_query_tokens: PositiveInt
     max_queries: PositiveInt
     query_concurrency: PositiveInt

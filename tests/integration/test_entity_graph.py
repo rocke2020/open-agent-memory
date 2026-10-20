@@ -200,8 +200,8 @@ def test_partial_revalidation_keeps_other_graph_paths_and_independent_direct_hit
                 {"unit_id": node, "kind": "fact", "score": 1.0} for node in ("seed", "other_seed")
             ]
 
-        def ordinary(self, seeds, query_vector):
-            result = super().ordinary(seeds, query_vector)
+        def ordinary(self, seeds, query_vector, *, include_semantic=True):
+            result = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
             connection.execute(
                 "UPDATE evidence SET learning_eligible=false WHERE tenant_id=%s AND user_id=%s "
                 "AND evidence_id='definition'",
@@ -271,8 +271,8 @@ def test_replacement_witness_preserves_same_graph_path_under_strict_recall(recal
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector):
-            _, paths = super().ordinary(seeds, query_vector)
+        def ordinary(self, seeds, query_vector, *, include_semantic=True):
+            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
             selected = paths["continuation"]
             chosen = selected[0]["alias_witnesses"][0]
             replaced.append(chosen["support_id"])
@@ -325,8 +325,8 @@ def test_unfit_alias_proof_drops_graph_vote_and_keeps_independently_admitted_fac
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector):
-            _, paths = super().ordinary(seeds, query_vector)
+        def ordinary(self, seeds, query_vector, *, include_semantic=True):
+            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
             return ("continuation",), {"continuation": paths["continuation"]}
 
         def related_user_fact(self, unit_ids):
@@ -355,7 +355,9 @@ def test_unfit_alias_proof_drops_graph_vote_and_keeps_independently_admitted_fac
     assert "continuation" not in trace["arms"]["graph"]
 
 
-def test_unfit_entity_proof_recomputes_graph_rank_from_surviving_semantic_paths(recall_database):
+def test_unfit_entity_proof_recomputes_graph_rank_from_surviving_semantic_paths(
+    recall_database, tmp_path
+):
     from oam.tokens import estimate_units, estimated_tokens
 
     connection, authority = recall_database
@@ -382,8 +384,8 @@ def test_unfit_entity_proof_recomputes_graph_rank_from_surviving_semantic_paths(
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector):
-            _, paths = super().ordinary(seeds, query_vector)
+        def ordinary(self, seeds, query_vector, *, include_semantic=True):
+            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
             return ("continuation", "healthy"), {
                 name: paths[name] for name in ("continuation", "healthy")
             }
@@ -391,7 +393,9 @@ def test_unfit_entity_proof_recomputes_graph_rank_from_surviving_semantic_paths(
         def related_user_fact(self, unit_ids):
             return None
 
-    service = recall_service(connection, repository.config, vector, SemanticTargetRepository)
+    path = tmp_path / "oam.yaml"
+    path.write_text("search:\n  normal:\n    graph: full\n")
+    service = recall_service(connection, load_config(path).config, vector, SemanticTargetRepository)
 
     result = service.search(
         authority,

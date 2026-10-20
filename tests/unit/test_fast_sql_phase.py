@@ -122,13 +122,15 @@ def test_partial_and_temporal_fast_keep_independent_transactions(options):
     ("failure", "error"),
     [("sql", RecallUnavailable), ("deadline", TimeoutError), ("commit", RuntimeError)],
 )
-def test_fast_phase_failure_releases_owner_and_never_publishes_trace(failure, error):
+def test_fast_phase_failure_releases_owner_and_never_publishes_trace(failure, error, caplog):
+    caplog.set_level("INFO", logger="oam.retrieval.service")
     service = PhaseService(failure)
     with pytest.raises(error):
         service.search(object(), request())
     assert not service.owners and not service.traces
     assert len(service.closed) == service.next_token
     assert any(outcome == "rollback" for _, outcome in service.closed)
+    assert "outcome=ok" not in caplog.text
 
 
 def test_inferred_temporal_fast_keeps_independent_transactions():

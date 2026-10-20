@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
@@ -78,13 +79,25 @@ class RecallService:
         *,
         deadline_at: datetime | None = None,
     ) -> dict:
+        started = time.monotonic()
         try:
             with ExitStack() as sql_phase:
-                return self._search(
+                result = self._search(
                     authority, request, deadline_at=deadline_at, sql_phase=sql_phase
                 )
         except psycopg.errors.QueryCanceled as error:
             raise TimeoutError("recall SQL deadline exceeded") from error
+        diagnostics = result["diagnostics"]
+        logging.getLogger(__name__).info(
+            "oam.recall trace_id=%s mode=%s graph=%s arms=%s outcome=%s duration_ms=%.1f",
+            result["trace_id"],
+            diagnostics["recall_level"],
+            diagnostics["graph"],
+            ",".join(diagnostics["executed_arms"]),
+            "partial" if diagnostics["partial"] else "ok",
+            (time.monotonic() - started) * 1000,
+        )
+        return result
 
     def _search(self, authority, request, *, deadline_at, sql_phase: ExitStack) -> dict:
         request.validate_limits(self.config)
@@ -93,16 +106,17 @@ class RecallService:
         if estimated_tokens(estimate_units(request.query)) > self.config.search.max_query_tokens:
             raise ValueError("query exceeds configured token limit")
         started = time.monotonic()
+        trace_id = f"trace_{uuid4().hex}"
         mode = request.recall_level.value
-        fast_graph = mode == "fast" and (
-            self.config.search.fast_graph if request.fast_graph is None else request.fast_graph
-        )
+        tier = getattr(self.config.search, mode)
+        graph = tier.graph
+        if mode == "fast" and request.fast_graph is not None:
+            graph = "light" if request.fast_graph else "off"
         deadline = started + getattr(self.config.recall, f"{mode}_deadline_seconds")
         if deadline_at is not None:
             if deadline_at.utcoffset() is None:
                 raise ValueError("caller deadline must include an explicit offset")
             deadline = min(deadline, started + (deadline_at - datetime.now(UTC)).total_seconds())
-        tier = getattr(self.config.search, mode)
         executed, degraded, timing = [], [], {}
         usage, paths, arms = {}, {}, {}
         temporal_stop = None
@@ -127,7 +141,7 @@ class RecallService:
         shared_repository = None
         sql_phase_ready = False
 
-        def read(method, *args):
+        def read(method, *args, **kwargs):
             nonlocal shared_repository
             if (
                 sql_phase_ready
@@ -139,9 +153,9 @@ class RecallService:
                     shared_repository = sql_phase.enter_context(
                         self._repository(authority, request, deadline)
                     )
-                return getattr(shared_repository, method)(*args)
+                return getattr(shared_repository, method)(*args, **kwargs)
             with self._repository(authority, request, deadline) as repository:
-                return getattr(repository, method)(*args)
+                return getattr(repository, method)(*args, **kwargs)
 
         def stage(name, call):
             began = time.monotonic()
@@ -150,6 +164,15 @@ class RecallService:
             except (PermissionError, TimeoutError, psycopg.errors.QueryCanceled):
                 raise
             except (RuntimeError, ValueError, httpx.HTTPError, psycopg.Error) as exc:
+                if name == "graph":
+                    logging.getLogger(__name__).warning(
+                        "oam.recall.graph trace_id=%s mode=%s graph=%s outcome=%s reason=%s",
+                        trace_id,
+                        mode,
+                        graph,
+                        "partial" if request.allow_partial else "failed",
+                        type(exc).__name__,
+                    )
                 if not request.allow_partial:
                     raise RecallUnavailable(f"{name} stage failed") from exc
                 degraded.append(name)
@@ -208,7 +231,7 @@ class RecallService:
             usage["embedding"] = embedding.usage.model_dump(mode="json")
             pool_limit = (
                 tier.channel_candidates
-                if mode == "fast" and not fast_graph
+                if graph == "off"
                 else max(tier.channel_candidates, self.config.search.graph_seed_max)
             )
             dense_pool = stage("dense", lambda: read("dense", vector, pool_limit)) or []
@@ -220,15 +243,15 @@ class RecallService:
                 if row["kind"] == "fact"
                 and row["score"] >= self.config.search.graph_seed_min_similarity
             )[: self.config.search.graph_seed_max]
-            if fast_graph and seeds:
-                expansion = stage("graph", lambda: read("fast_graph", seeds, vector))
-                if expansion is not None:
-                    ranks, evidence = expansion
-                    arms["graph"] = ranks
-                    for node_id, node_paths in evidence.items():
-                        paths.setdefault(node_id, []).extend(node_paths)
-            if mode == "normal":
-                expansion = stage("graph", lambda: read("ordinary", seeds, vector))
+            if graph != "off" and (seeds or mode == "normal"):
+                expansion = stage(
+                    "graph",
+                    lambda: (
+                        read("fast_graph", seeds, vector)
+                        if mode == "fast" and graph == "light"
+                        else read("ordinary", seeds, vector, include_semantic=graph == "full")
+                    ),
+                )
                 if expansion is not None:
                     ranks, evidence = expansion
                     arms["graph"] = ranks
@@ -915,6 +938,7 @@ class RecallService:
             "tokenizer": ESTIMATOR,
             "diagnostics": {
                 "recall_level": mode,
+                "graph": graph,
                 "generation_id": self.generation_id,
                 "executed_arms": list(arms),
                 "executed_stages": [
@@ -986,7 +1010,6 @@ class RecallService:
             }
             for candidate in fused
         ]
-        trace_id = f"trace_{uuid4().hex}"
         decisions = {
             "query_hash": hashlib.sha256(request.query.encode()).hexdigest(),
             "options": request.model_dump(mode="json", exclude={"query"}),

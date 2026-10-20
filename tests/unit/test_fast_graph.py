@@ -79,13 +79,13 @@ class CausalService(RecallService):
 
 @pytest.mark.parametrize(
     ("configured", "override", "expected"),
-    [(False, None, False), (True, None, True), (True, False, False), (False, True, True)],
+    [("off", None, False), ("light", None, True), ("light", False, False), ("off", True, True)],
 )
 def test_fast_graph_uses_yaml_default_unless_request_overrides(
     tmp_path: Path, configured, override, expected
 ):
     path = tmp_path / "oam.yaml"
-    path.write_text(f"search:\n  fast_graph: {str(configured).lower()}\n")
+    path.write_text(f'search:\n  fast:\n    graph: "{configured}"\n')
     service = CausalService(config=load_config(path).config)
     options = {} if override is None else {"fast_graph": override}
     result = service.search(
@@ -99,14 +99,25 @@ def test_fast_graph_uses_yaml_default_unless_request_overrides(
 
 
 @pytest.mark.parametrize("planned", [False, True])
-def test_batch_and_planner_keep_inherited_fast_graph_default(tmp_path: Path, planned):
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize(
+    ("graph", "expected"),
+    [
+        ("off", {"effect"}),
+        ("light", {"effect", "cause", "origin"}),
+        ("full", {"effect", "cause", "origin", "semantic"}),
+    ],
+)
+def test_batch_and_planner_inherit_mode_graph_config(
+    tmp_path: Path, planned, mode, graph, expected
+):
     from oam.api.search import decompose_and_search, search_many
     from oam.models.runtime import ModelResult, Usage
 
     path = tmp_path / "oam.yaml"
-    path.write_text("search:\n  fast_graph: true\n")
+    path.write_text(f'search:\n  {mode}:\n    graph: "{graph}"\n')
     config = load_config(path).config
-    service = CausalService(config=config)
+    service = GraphService(config=config)
 
     def one(request, deadline):
         return service.search(object(), request, deadline_at=deadline)
@@ -131,29 +142,122 @@ def test_batch_and_planner_keep_inherited_fast_graph_default(tmp_path: Path, pla
             }
         )
         result = decompose_and_search(
-            config, SearchRequest(query="why move", recall_level=RecallLevel.FAST), one, Planner()
+            config, SearchRequest(query="why move", recall_level=mode), one, Planner()
         )
     else:
         result = search_many(
             config,
-            SearchManyRequest(queries=["why move"], recall_level=RecallLevel.FAST),
+            SearchManyRequest(queries=["why move"], recall_level=mode),
             one,
         )
     assert result["status"] == "ok"
-    assert {item["unit_id"] for item in result["results"][0]["result"]["items"]} == {
-        "effect",
-        "cause",
-        "origin",
-    }
+    child = result["results"][0]["result"]
+    assert {item["unit_id"] for item in child["items"]} == expected
+    assert child["diagnostics"]["graph"] == graph
     if planned:
         assert result["planner"]["status"] == "used"
 
 
-def test_fast_graph_yaml_rejects_nonboolean_values(tmp_path: Path):
+@pytest.mark.parametrize("value", [False, True, "false"])
+def test_config_rejects_removed_global_fast_graph(tmp_path: Path, value):
     path = tmp_path / "oam.yaml"
-    path.write_text('search:\n  fast_graph: "false"\n')
+    import yaml
+
+    path.write_text(yaml.safe_dump({"search": {"fast_graph": value}}))
     with pytest.raises(ConfigurationError, match="fast_graph"):
         load_config(path)
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("value", [False, True, "auto", "false"])
+def test_graph_config_rejects_invalid_selections(tmp_path: Path, mode, value):
+    import yaml
+
+    path = tmp_path / "oam.yaml"
+    path.write_text(yaml.safe_dump({"search": {mode: {"graph": value}}}))
+    with pytest.raises(ConfigurationError, match="graph"):
+        load_config(path)
+
+
+class GraphRepository(CausalRepository):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.rows["semantic"] = {"text": "A related moving announcement."}
+
+    def ordinary(self, seeds, vector, *, include_semantic=True):
+        self.calls.append(("ordinary", include_semantic))
+        ranks, paths = super().fast_graph(seeds, vector)
+        if include_semantic:
+            ranks = (*ranks, "semantic")
+            paths["semantic"] = [
+                {"arm": "graph", "relation": "semantic", "nodes": ["effect", "semantic"]}
+            ]
+        return ranks, paths
+
+
+class GraphService(CausalService):
+    @contextmanager
+    def _repository(self, authority, request, deadline):
+        yield GraphRepository(request, self.calls, self.failure)
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize(
+    ("graph", "expected"),
+    [
+        ("off", {"effect"}),
+        ("light", {"effect", "cause", "origin"}),
+        ("full", {"effect", "cause", "origin", "semantic"}),
+    ],
+)
+def test_mode_graph_config_controls_final_context(tmp_path: Path, caplog, mode, graph, expected):
+    caplog.set_level("INFO", logger="oam.retrieval.service")
+    path = tmp_path / "oam.yaml"
+    path.write_text(f'search:\n  {mode}:\n    graph: "{graph}"\n')
+    service = GraphService(config=load_config(path).config)
+    result = service.search(
+        AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
+        SearchRequest(query="why move", recall_level=mode),
+    )
+
+    assert {item["unit_id"] for item in result["items"]} == expected
+    assert "I moved because my rent increased." in result["context"]
+    assert ("My rent increased because the lease changed." in result["context"]) == (graph != "off")
+    assert ("A related moving announcement." in result["context"]) == (graph == "full")
+    assert result["diagnostics"]["graph"] == graph
+    assert ("graph" in result["diagnostics"]["executed_arms"]) == (graph != "off")
+    assert "dense" in result["diagnostics"]["executed_arms"]
+    assert result["diagnostics"]["generative_calls"] == 0
+    assert result["context_tokens"] <= service.config.context.default_tokens
+    assert f"graph={graph}" in caplog.text
+    assert result["trace_id"] in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_canonical_graph_defaults_reach_final_context(mode):
+    result = GraphService().search(object(), SearchRequest(query="why move", recall_level=mode))
+    assert {item["unit_id"] for item in result["items"]} == (
+        {"effect"} if mode == "fast" else {"effect", "cause", "origin"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        (None, {"effect", "cause", "origin", "semantic"}),
+        (False, {"effect"}),
+        (True, {"effect", "cause", "origin"}),
+    ],
+)
+def test_fast_request_boolean_overrides_configured_full_graph(tmp_path: Path, override, expected):
+    path = tmp_path / "oam.yaml"
+    path.write_text("search:\n  fast:\n    graph: full\n")
+    service = GraphService(config=load_config(path).config)
+    result = service.search(
+        AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
+        SearchRequest(query="why move", recall_level=RecallLevel.FAST, fast_graph=override),
+    )
+    assert {item["unit_id"] for item in result["items"]} == expected
 
 
 @pytest.mark.parametrize("options", [{}, {"fast_graph": False}])

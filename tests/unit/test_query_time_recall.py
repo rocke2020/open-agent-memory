@@ -62,7 +62,7 @@ class DatedRepository:
     def temporal_candidates(self, vector, limit):
         return ()
 
-    def ordinary(self, seeds, vector):
+    def ordinary(self, seeds, vector, *, include_semantic=True):
         return (), {}
 
     def valid_paths(self, paths, vector):
@@ -487,7 +487,7 @@ def test_fast_temporal_deadline_cannot_report_complete_recall(monkeypatch):
 @pytest.mark.parametrize("allow_partial", [False, True])
 def test_normal_graph_failure_obeys_partial_policy(allow_partial):
     class FailedGraphRepository(DatedRepository):
-        def ordinary(self, seeds, vector):
+        def ordinary(self, seeds, vector, *, include_semantic=True):
             raise RuntimeError("expansion failed")
 
     class FailedGraphService(RecallService):
@@ -514,7 +514,7 @@ class DirectEvidenceRepository(DatedRepository):
     def dense(self, vector, limit):
         return [{"unit_id": "z_direct", "kind": "fact", "score": 0.9}]
 
-    def ordinary(self, seeds, vector):
+    def ordinary(self, seeds, vector, *, include_semantic=True):
         return ("a_graph",), {}
 
     def hydrate(self, unit_ids):
@@ -565,7 +565,7 @@ class OverlappingGraphRepository(DirectEvidenceRepository):
             {"unit_id": "z_unrelated", "kind": "fact", "score": 0.2},
         ]
 
-    def ordinary(self, seeds, vector):
+    def ordinary(self, seeds, vector, *, include_semantic=True):
         assert seeds == ("z_seed",)
         return ("z_unrelated",), {}
 
@@ -614,7 +614,7 @@ class ConversationRepository(DatedRepository):
             {"unit_id": "b_noise", "kind": "fact", "score": 0.8},
         ]
 
-    def ordinary(self, seeds, vector):
+    def ordinary(self, seeds, vector, *, include_semantic=True):
         return ("a_noise",), {}
 
     def hydrate(self, unit_ids):

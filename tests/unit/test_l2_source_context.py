@@ -299,7 +299,7 @@ def test_insight_reached_only_by_secondary_expansion_does_not_expand(monkeypatch
     monkeypatch.setattr(
         InsightRepository,
         "ordinary",
-        lambda *args: (
+        lambda *args, include_semantic=True: (
             ("insight",),
             {
                 "insight": [

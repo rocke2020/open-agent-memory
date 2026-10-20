@@ -69,7 +69,7 @@ class SourceRepository(DatedRepository):
     def dense(self, vector, limit):
         return []
 
-    def ordinary(self, seeds, vector):
+    def ordinary(self, seeds, vector, *, include_semantic=True):
         return tuple(self.graph_paths), self.graph_paths
 
     def hydrate(self, unit_ids):

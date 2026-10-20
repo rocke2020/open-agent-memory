@@ -120,6 +120,56 @@ def test_fast_opt_in_recovers_graph_only_cause_with_cited_final_context(recall_d
             assert result["diagnostics"]["generative_calls"] == 0
 
 
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize(
+    ("graph", "expected"),
+    [
+        ("off", {"effect"}),
+        ("light", {"effect", "rent", "job"}),
+        ("full", {"effect", "rent", "job", "semantic"}),
+    ],
+)
+def test_configured_graph_selection_reaches_real_sql_context(
+    recall_database, tmp_path, mode, graph, expected
+):
+    connection, authority = recall_database
+    history(connection, authority)
+    path = tmp_path / "oam.yaml"
+    path.write_text(f'search:\n  {mode}:\n    graph: "{graph}"\n    channel_candidates: 1\n')
+    config = load_config(path).config
+    service = RecallService(
+        config,
+        TransactionPool(connection),
+        FixedModels(config.index.embedding_dimensions),
+        generation_id="generation",
+    )
+    result = service.search(
+        authority, SearchRequest(query="anchorword", recall_level=mode, max_context_tokens=2048)
+    )
+    assert {item["unit_id"] for item in result["items"]} == expected
+    assert ("An unrelated semantic neighbor." in result["context"]) == (graph == "full")
+    assert result["diagnostics"]["graph"] == graph
+    assert ("graph" in result["diagnostics"]["executed_arms"]) == (graph != "off")
+    assert result["diagnostics"]["generative_calls"] == 0
+    assert result["context_tokens"] <= 2048
+    assert len(result["items"]) <= getattr(config.search, mode).max_results
+    assert all(item["citations"] for item in result["items"])
+
+
+def test_graph_cannot_add_candidates_when_every_fact_is_a_seed(recall_database):
+    from test_entity_graph import alias_history
+
+    connection, authority = recall_database
+    repository, vector, _ = alias_history(connection, authority)
+    connection.execute(
+        "INSERT INTO unit_links VALUES (%s,%s,'seed','continuation','caused_by',1)",
+        (authority.tenant_id, authority.user_id),
+    )
+    seeds = ("definition", "seed", "continuation")
+    for include_semantic in (False, True):
+        assert repository.ordinary(seeds, vector, include_semantic=include_semantic) == ((), {})
+
+
 def test_fast_alias_only_target_reaches_cited_context_and_revocation_drops_its_path(
     recall_database,
 ):
