@@ -97,13 +97,13 @@ def test_search_accepts_explicit_ranking_window_and_output_budget() -> None:
             "start": "2026-06-01T00:00:00Z",
             "end": "2026-07-01T00:00:00Z",
         },
-        max_context_tokens=1024,
+        max_tokens=1024,
         include={"chunks": {"max_tokens": 2048}},
     )
 
     assert request.recall_level is RecallLevel.NORMAL
     assert request.time_window.start == datetime(2026, 6, 1, tzinfo=UTC)
-    assert request.max_context_tokens == 1024
+    assert request.max_tokens == 1024
     assert request.include.chunks is not None
     assert request.include.chunks.max_tokens == 2048
 
@@ -152,19 +152,28 @@ def test_search_batch_limit_follows_selected_config(tmp_path: Path, limit: int) 
 
 
 @pytest.mark.parametrize("request_type", [SearchRequest, SearchManyRequest])
-def test_search_output_budgets_follow_selected_config(tmp_path: Path, request_type: type) -> None:
+def test_search_text_budgets_have_no_configured_ceiling(tmp_path: Path, request_type: type) -> None:
     path = tmp_path / "operator.yaml"
     path.write_text(
-        "context:\n  default_tokens: 10\n  max_tokens: 20\n"
-        "chunk:\n  recall:\n    default_tokens: 30\n    max_tokens: 40\n"
+        "context:\n  facts_default_tokens: 10\nchunk:\n  recall:\n    default_tokens: 30\n"
     )
     config = load_config(path).config
     query = {"query": "q"} if request_type is SearchRequest else {"queries": ["q"]}
 
     request_type(
-        **query, max_context_tokens=20, include={"chunks": {"max_tokens": 40}}
+        **query, max_tokens=100_000, include={"chunks": {"max_tokens": 200_000}}
     ).validate_limits(config)
-    with pytest.raises(ValueError, match="20"):
-        request_type(**query, max_context_tokens=21).validate_limits(config)
-    with pytest.raises(ValueError, match="40"):
-        request_type(**query, include={"chunks": {"max_tokens": 41}}).validate_limits(config)
+
+
+@pytest.mark.parametrize("request_type", [SearchRequest, SearchManyRequest])
+def test_search_accepts_zero_text_budgets_and_rejects_the_removed_aggregate_name(request_type):
+    query = {"query": "q"} if request_type is SearchRequest else {"queries": ["q"]}
+    request = request_type(**query, max_tokens=0, include={"chunks": {"max_tokens": 0}})
+    assert request.max_tokens == 0
+    assert request.include.chunks.max_tokens == 0
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        request_type(**query, max_context_tokens=1)
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        request_type(**query, max_tokens=-1)
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        request_type(**query, include={"chunks": {"max_tokens": -1}})

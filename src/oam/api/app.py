@@ -984,8 +984,8 @@ def _register_reserved_routes(
         user_id: str,
         max_tokens: int | None = Query(default=None, ge=0),
     ) -> dict:
-        budget = max_tokens if max_tokens is not None else config.context.max_tokens
-        if budget > config.context.max_tokens:
+        budget = max_tokens if max_tokens is not None else config.profile.max_response_tokens
+        if budget > config.profile.max_response_tokens:
             raise HTTPException(422, detail={"code": "InputLimitExceeded"})
         return await run_in_threadpool(
             lambda: _content_call(

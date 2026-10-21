@@ -90,7 +90,6 @@ class DatedRepository:
         assert decisions["query_hash"]
         assert decisions["fusion"][0]["contributions"]
         assert decisions["packing"]["selected_ids"] == [item["unit_id"] for item in result["items"]]
-        assert result["items"]
         return trace_id
 
 
@@ -154,7 +153,7 @@ def test_window_pool_preserves_disconnected_evidence_with_existing_time_matches(
 
     result = WindowService(
         CONFIG, None, CompleteQueryEmbedding(), generation_id="generation"
-    ).search(object(), SearchRequest(query=query, recall_level=mode))
+    ).search(object(), SearchRequest(include={"chunks": {}}, query=query, recall_level=mode))
 
     items = {item["unit_id"]: item for item in result["items"]}
     assert set(items) == {"old", "new", "late"}
@@ -207,7 +206,10 @@ def test_temporal_window_pool_is_independent_of_direct_matches_and_roots(mode, e
     result = RecoveryService(CONFIG, None, EmbeddingOnly(), generation_id="generation").search(
         object(),
         SearchRequest(
-            query="apple harvest in 2024", recall_level=mode, allow_partial=existing == "failed"
+            include={"chunks": {}},
+            query="apple harvest in 2024",
+            recall_level=mode,
+            allow_partial=existing == "failed",
         ),
     )
 
@@ -239,7 +241,10 @@ def test_window_pool_failure_does_not_publish_existing_temporal_votes(mode, allo
 
     service = FailedPoolService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
-        query="apple harvest in 2024", recall_level=mode, allow_partial=allow_partial
+        include={"chunks": {}},
+        query="apple harvest in 2024",
+        recall_level=mode,
+        allow_partial=allow_partial,
     )
     if not allow_partial:
         with pytest.raises(RecallUnavailable, match="temporal stage failed"):
@@ -280,7 +285,9 @@ def test_recall_rejects_policy_change_after_hydration():
     service = ChangedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
 
     with pytest.raises(RecallUnavailable, match="policy"):
-        service.search(object(), SearchRequest(query="apple", recall_level="fast"))
+        service.search(
+            object(), SearchRequest(include={"chunks": {}}, query="apple", recall_level="fast")
+        )
 
 
 class EmbeddingOnly:
@@ -305,7 +312,12 @@ def test_fast_recall_ranks_date_match_without_excluding_ordinary_candidates(quer
 
     result = service.search(
         object(),
-        SearchRequest(query=query, recall_level="fast", reference_time="2026-09-23T12:00:00Z"),
+        SearchRequest(
+            include={"chunks": {}},
+            query=query,
+            recall_level="fast",
+            reference_time="2026-09-23T12:00:00Z",
+        ),
     )
 
     assert [item["unit_id"] for item in result["items"]] == ["new", "old"]
@@ -316,7 +328,9 @@ def test_fast_recall_ranks_date_match_without_excluding_ordinary_candidates(quer
 def test_recall_returns_a_recorded_trace_identity():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
 
-    result = service.search(object(), SearchRequest(query="apple", recall_level="fast"))
+    result = service.search(
+        object(), SearchRequest(include={"chunks": {}}, query="apple", recall_level="fast")
+    )
 
     assert result["trace_id"].startswith("trace_")
 
@@ -324,6 +338,7 @@ def test_recall_returns_a_recorded_trace_identity():
 def test_explicit_window_overrides_date_in_query():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
+        include={"chunks": {}},
         query="apple harvest in 2025",
         recall_level="fast",
         time_basis="event",
@@ -341,6 +356,7 @@ def test_normal_keeps_temporal_rank_and_out_of_window_direct_evidence():
         CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
     request = SearchRequest(
+        include={"chunks": {}},
         query="apple harvest in 2025",
         recall_level="normal",
         reference_time="2026-09-23T12:00:00Z",
@@ -360,6 +376,7 @@ def test_normal_keeps_temporal_rank_and_out_of_window_direct_evidence():
 def test_ambiguous_query_retains_ordinary_recall_with_diagnostic():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
+        include={"chunks": {}},
         query="Compare apple harvest in 2024 and 2025",
         recall_level="fast",
     )
@@ -371,10 +388,11 @@ def test_ambiguous_query_retains_ordinary_recall_with_diagnostic():
     assert "temporal" in result["diagnostics"]["omitted_stages"]
 
 
-def test_context_budget_reports_estimate_of_complete_rendered_blocks():
+def test_context_reports_estimated_tokens_of_complete_rendered_blocks():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     result = service.search(
-        object(), SearchRequest(query="apple", recall_level="fast", max_context_tokens=64)
+        object(),
+        SearchRequest(include={"chunks": {}}, query="apple", recall_level="fast", max_tokens=64),
     )
     assert result["tokenizer"] == ESTIMATOR
     assert result["context_tokens"] == estimated_tokens(estimate_units(result["context"]))
@@ -387,7 +405,9 @@ def test_query_budget_uses_unicode_estimate():
     )
     service = DatedService(config, None, EmbeddingOnly(), generation_id="generation")
     with pytest.raises(ValueError, match="query exceeds"):
-        service.search(object(), SearchRequest(query="甲乙", recall_level="fast"))
+        service.search(
+            object(), SearchRequest(include={"chunks": {}}, query="甲乙", recall_level="fast")
+        )
 
 
 @pytest.mark.parametrize(
@@ -473,11 +493,21 @@ def test_fast_temporal_deadline_cannot_report_complete_recall(monkeypatch):
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
 
     with pytest.raises(RecallUnavailable, match="temporal"):
-        service.search(object(), SearchRequest(query="apple harvest in 2025", recall_level="fast"))
+        service.search(
+            object(),
+            SearchRequest(
+                include={"chunks": {}}, query="apple harvest in 2025", recall_level="fast"
+            ),
+        )
 
     partial = service.search(
         object(),
-        SearchRequest(query="apple harvest in 2025", recall_level="fast", allow_partial=True),
+        SearchRequest(
+            include={"chunks": {}},
+            query="apple harvest in 2025",
+            recall_level="fast",
+            allow_partial=True,
+        ),
     )
     assert {item["unit_id"] for item in partial["items"]} == {"new", "old"}
     assert partial["diagnostics"]["temporal_stop"] == "deadline"
@@ -496,7 +526,9 @@ def test_normal_graph_failure_obeys_partial_policy(allow_partial):
             yield FailedGraphRepository(request)
 
     service = FailedGraphService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
-    request = SearchRequest(query="apple", recall_level="normal", allow_partial=allow_partial)
+    request = SearchRequest(
+        include={"chunks": {}}, query="apple", recall_level="normal", allow_partial=allow_partial
+    )
     if allow_partial:
         result = service.search(object(), request)
         assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
@@ -549,7 +581,9 @@ def test_normal_equal_arm_weights_use_stable_id_for_dense_graph_tie():
         equal_config, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
 
-    result = service.search(object(), SearchRequest(query="apple", recall_level="normal"))
+    result = service.search(
+        object(), SearchRequest(include={"chunks": {}}, query="apple", recall_level="normal")
+    )
 
     assert [item["unit_id"] for item in result["items"]] == ["a_graph", "z_direct"]
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
@@ -581,7 +615,9 @@ def test_graph_and_dense_each_vote_for_a_shared_candidate():
         CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
 
-    result = service.search(object(), SearchRequest(query="apple", recall_level="normal"))
+    result = service.search(
+        object(), SearchRequest(include={"chunks": {}}, query="apple", recall_level="normal")
+    )
 
     assert [item["unit_id"] for item in result["items"]][:2] == ["z_unrelated", "a_relevant"]
     expected_arms = ["lexical", "dense", "graph"]
@@ -596,7 +632,10 @@ def test_normal_partial_embedding_failure_keeps_lexical_arm_weight():
     service = DatedService(CONFIG, None, FailedEmbedding(), generation_id="generation")
 
     result = service.search(
-        object(), SearchRequest(query="apple", recall_level="normal", allow_partial=True)
+        object(),
+        SearchRequest(
+            include={"chunks": {}}, query="apple", recall_level="normal", allow_partial=True
+        ),
     )
 
     assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
@@ -665,10 +704,16 @@ def test_normal_context_respects_fused_relevance_under_item_cap():
     )
 
     result = service.search(
-        object(), SearchRequest(query="recommend something", recall_level="normal")
+        object(),
+        SearchRequest(include={"chunks": {}}, query="recommend something", recall_level="normal"),
     )
 
-    assert [item["unit_id"] for item in result["items"]] == ["a_noise", "z_user"]
+    assert [item["unit_id"] for item in result["items"]] == [
+        "a_noise",
+        "b_noise",
+        "z_user",
+        "z_reply",
+    ]
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
 
 
@@ -773,7 +818,9 @@ def test_calendar_range_recall_preserves_query_and_outside_evidence(mode):
             return super().embed(texts, **kwargs)
 
     service = DatedService(CONFIG, None, RecordingEmbedding(), generation_id="generation")
-    result = service.search(object(), SearchRequest(query=query, recall_level=mode))
+    result = service.search(
+        object(), SearchRequest(include={"chunks": {}}, query=query, recall_level=mode)
+    )
 
     assert result["diagnostics"]["query_time"]["window"] == {
         "start": "2025-09-01T00:00:00Z",

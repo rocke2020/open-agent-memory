@@ -850,7 +850,7 @@
       const detail = byId("detail");
       detail.replaceChildren(
         element("h3", "Current search context"),
-        labelValue("Estimated tokens", result.context_tokens),
+        labelValue("Estimated context tokens", result.context_tokens),
         labelValue("Coverage", result.diagnostics?.partial ? "Partial" : "Current"),
         element("pre", result.context || "No matching current evidence.", "source-text"),
       );

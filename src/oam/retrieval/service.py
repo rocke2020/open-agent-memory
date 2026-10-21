@@ -25,18 +25,17 @@ from oam.retrieval.algorithms import (
     temporal_spread,
 )
 from oam.retrieval.context import (
-    ContextUnitCosts,
+    CONTEXT_TOKENIZER,
+    ORIGINAL_KINDS,
     assemble_context,
-    pack_ranked,
-    primary_seed_eligible,
+    context_token_count,
     render_context,
-    render_item,
     source_diverse_seed_order,
     source_window_ids,
 )
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.repository import RecallRepository
-from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
+from oam.tokens import estimate_units, estimated_tokens
 
 SUPPORT_COMPANION_LIMIT = 16
 RELATED_SOURCE_WINDOW_OFFSETS = (0, 1, -1, 2, -2, 3)
@@ -88,21 +87,27 @@ class RecallService:
         except psycopg.errors.QueryCanceled as error:
             raise TimeoutError("recall SQL deadline exceeded") from error
         diagnostics = result["diagnostics"]
+        budgets = diagnostics["text_budgets"]
         logging.getLogger(__name__).info(
-            "oam.recall trace_id=%s mode=%s graph=%s arms=%s outcome=%s duration_ms=%.1f",
+            "oam.recall trace_id=%s mode=%s graph=%s arms=%s outcome=%s "
+            "facts=%d/%d originals=%d/%d truncated=%d context_tokens=%d duration_ms=%.1f",
             result["trace_id"],
             diagnostics["recall_level"],
             diagnostics["graph"],
             ",".join(diagnostics["executed_arms"]),
             "partial" if diagnostics["partial"] else "ok",
+            budgets["facts"]["used"],
+            budgets["facts"]["limit"],
+            budgets["chunks"]["used"],
+            budgets["chunks"]["limit"],
+            len(budgets["chunks"]["truncated_ids"]),
+            result["context_tokens"],
             (time.monotonic() - started) * 1000,
         )
         return result
 
     def _search(self, authority, request, *, deadline_at, sql_phase: ExitStack) -> dict:
         request.validate_limits(self.config)
-        if request.include.chunks is not None:
-            raise NotImplementedError("separate recalled chunks are unavailable")
         if estimated_tokens(estimate_units(request.query)) > self.config.search.max_query_tokens:
             raise ValueError("query exceeds configured token limit")
         started = time.monotonic()
@@ -443,51 +448,33 @@ class RecallService:
             raise RecallUnavailable("PDF parse became incomplete during recall")
         hydrated = read("hydrate", final_ids)
         hydrated_passages = {row["unit_id"]: row for row in hydrated if row["kind"] == "passage"}
-        budget = request.max_context_tokens or self.config.context.default_tokens
+        fact_budget = (
+            self.config.context.facts_default_tokens
+            if request.max_tokens is None
+            else request.max_tokens
+        )
+        chunks = request.include.chunks
+        chunk_budget = (
+            chunks.max_tokens
+            if chunks is not None and chunks.max_tokens is not None
+            else self.config.chunk.recall.default_tokens
+        )
         candidates = []
-        alias_budget_changed = False
         for row in hydrated:
             item = {key: value for key, value in row.items() if key != "locator"}
             item["paths"] = paths.get(item["unit_id"], [])
-            if any(path.get("alias_witnesses") for path in item["paths"]) and (
-                estimated_tokens(estimate_units(render_item(item))) > budget
-            ):
-                item["paths"] = [path for path in item["paths"] if not path.get("alias_witnesses")]
-                paths[item["unit_id"]] = item["paths"]
-                if not any(path["arm"] == "graph" for path in item["paths"]):
-                    arms["graph"] = tuple(
-                        node for node in arms.get("graph", ()) if node != item["unit_id"]
-                    )
-                alias_budget_changed = True
             candidates.append(item)
-        if alias_budget_changed:
-            rescore_graph_paths()
-            final_ids = final_order()
-            if related_tail_id is not None and related_tail_id not in final_ids:
-                final_ids = (*final_ids, related_tail_id)
-            by_id = {item["unit_id"]: item for item in candidates}
-            candidates = [by_id[node] for node in final_ids if node in by_id]
-        seed_budget = min(budget, self.config.context.source_seed_tokens)
-        context_costs = ContextUnitCosts()
         seed_limit = min(tier.source_seed_results, tier.max_results)
         ranked_candidates = [item for item in candidates if item["unit_id"] != related_tail_id]
-        seed_order = source_diverse_seed_order(ranked_candidates)
-        discovery_seed_items = pack_ranked(seed_order, seed_budget, seed_limit, costs=context_costs)
-        seed_items = pack_ranked(
-            [item for item in seed_order if primary_seed_eligible(item)],
-            seed_budget,
-            seed_limit,
-            costs=context_costs,
-        )
+        discovery_seed_items = source_diverse_seed_order(ranked_candidates)[:seed_limit]
+        seed_items = ranked_candidates[:seed_limit]
         source_seed_items = seed_items
         if related_tail_id is not None:
             related_item = next(
                 (item for item in candidates if item["unit_id"] == related_tail_id), None
             )
             if related_item is not None:
-                source_seed_items = pack_ranked(
-                    [related_item], seed_budget, seed_limit, source_seed_items, costs=context_costs
-                )
+                source_seed_items = [*source_seed_items, related_item][:seed_limit]
         source_ids = tuple(
             dict.fromkeys(
                 citation["source_id"]
@@ -694,16 +681,9 @@ class RecallService:
                         )
                 if expanded_detail_ids:
                     by_id = {item["unit_id"]: item for item in source_passages}
-                    detail_cap = min(
-                        self.config.context.default_tokens,
-                        int(seed_budget * self.config.context.source_detail_budget_fraction),
-                    )
-                    expanded = pack_ranked(
-                        [by_id[unit_id] for unit_id in expanded_detail_ids if unit_id in by_id],
-                        detail_cap,
-                        tier.max_results,
-                        costs=context_costs,
-                    )
+                    expanded = [
+                        by_id[unit_id] for unit_id in expanded_detail_ids if unit_id in by_id
+                    ]
                     selected = set(original_detail_ids) | set(l2_detail_ids)
                     source_passages = [
                         *(
@@ -860,13 +840,11 @@ class RecallService:
         ]
         items, budget_omissions = assemble_context(
             candidates,
-            seed_items,
             source_passages,
-            budget=budget,
-            seed_budget=seed_budget,
-            detail_fraction=self.config.context.source_detail_budget_fraction,
+            fact_budget=fact_budget,
+            chunk_budget=chunk_budget,
+            include_chunks=chunks is not None,
             max_results=tier.max_results,
-            costs=context_costs,
             evidence_groups=evidence_groups,
         )
         selected_insights = [
@@ -905,6 +883,13 @@ class RecallService:
         independent = {
             item["unit_id"] for item in (*candidates, *source_passages) if item["kind"] != "insight"
         }
+        if chunks is not None:
+            independent.update(
+                item["unit_id"]
+                for group in evidence_groups
+                for item in group
+                if item["kind"] in ORIGINAL_KINDS
+            )
         allowed = independent | {
             item["unit_id"]
             for group in evidence_groups
@@ -927,15 +912,34 @@ class RecallService:
                 if path.get("arm") != "l2_source" or path["insight_id"] in retained_identities
             ]
         context = render_context(items)
-        context_tokens = estimated_tokens(estimate_units(context))
-        if context_tokens > budget:
-            raise RecallUnavailable("rendered context exceeds requested token estimate")
+        context_tokens = context_token_count(context)
+        fact_tokens = estimated_tokens(
+            sum(
+                estimate_units(item["text"]) for item in items if item["kind"] not in ORIGINAL_KINDS
+            )
+        )
+        chunk_tokens = estimated_tokens(
+            sum(estimate_units(item["text"]) for item in items if item["kind"] in ORIGINAL_KINDS)
+        )
+        text_budgets = {
+            "facts": {
+                "limit": fact_budget,
+                "used": fact_tokens,
+                "oversized_first": fact_tokens > fact_budget,
+            },
+            "chunks": {
+                "enabled": chunks is not None,
+                "limit": chunk_budget,
+                "used": chunk_tokens,
+                "truncated_ids": [item["unit_id"] for item in items if item.get("truncated")],
+            },
+        }
         _remaining(deadline)
         result = {
             "items": items,
             "context": context,
             "context_tokens": context_tokens,
-            "tokenizer": ESTIMATOR,
+            "tokenizer": CONTEXT_TOKENIZER,
             "diagnostics": {
                 "recall_level": mode,
                 "graph": graph,
@@ -966,6 +970,7 @@ class RecallService:
                 "readiness": index_state["readiness"],
                 "partial": index_state["readiness"] != "ready" or bool(degraded),
                 "generative_calls": 0,
+                "text_budgets": text_budgets,
                 "l2_source_expansion": l2_diagnostics,
                 "temporal_stop": temporal_stop,
                 "query_time": {
@@ -1021,7 +1026,7 @@ class RecallService:
             "result_ids": [item["unit_id"] for item in items],
             "l2_source_expansion": l2_diagnostics,
             "packing": {
-                "token_limit": budget,
+                "text_budgets": text_budgets,
                 "selected_ids": [item["unit_id"] for item in items],
                 "budget_omissions": budget_omissions,
                 "hydration_omissions": [

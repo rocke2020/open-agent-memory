@@ -228,7 +228,10 @@ def test_mode_graph_config_controls_final_context(tmp_path: Path, caplog, mode, 
     assert ("graph" in result["diagnostics"]["executed_arms"]) == (graph != "off")
     assert "dense" in result["diagnostics"]["executed_arms"]
     assert result["diagnostics"]["generative_calls"] == 0
-    assert result["context_tokens"] <= service.config.context.default_tokens
+    assert (
+        result["diagnostics"]["text_budgets"]["facts"]["used"]
+        <= service.config.context.facts_default_tokens
+    )
     assert f"graph={graph}" in caplog.text
     assert result["trace_id"] in caplog.text
 
@@ -327,7 +330,7 @@ def test_batch_and_planner_children_keep_opt_in():
             "diagnostics": {"generative_calls": 0},
         }
 
-    options = {"recall_level": "fast", "fast_graph": True, "max_context_tokens": 100}
+    options = {"recall_level": "fast", "fast_graph": True, "max_tokens": 100}
     search_many(CONFIG, SearchManyRequest(queries=["why move", "why rent"], **options), one)
 
     class Planner:

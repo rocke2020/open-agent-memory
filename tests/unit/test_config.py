@@ -194,11 +194,10 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
         config.search.normal.source_seed_results,
         config.search.normal.max_results,
     ) == (64, 154, 36, 154)
-    assert (config.context.default_tokens, config.context.max_tokens) == (2048, 18000)
-    assert config.context.source_seed_tokens == 8192
-    assert config.context.source_detail_budget_fraction == 0.4
+    assert config.context.facts_default_tokens == 4096
     assert config.context.tokenizer == "oam-unicode-quarter-v1"
-    assert (config.chunk.recall.default_tokens, config.chunk.recall.max_tokens) == (8192, 8192)
+    assert config.chunk.recall.default_tokens == 8192
+    assert config.profile.max_response_tokens == 18000
     assert config.profile.max_content_bytes == 16384
     assert config.profile.max_output_tokens == 4096
     assert config.profile.attempt_timeout_seconds == 180
@@ -264,7 +263,7 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
     (config_directory / "oam.yaml").write_text(yaml.safe_dump(base))
     override = tmp_path / "operator.yaml"
     override.write_text(
-        "search:\n  fast:\n    max_results: 19\nchunk:\n  recall:\n    max_tokens: 203\n"
+        "search:\n  fast:\n    max_results: 19\ncontext:\n  facts_default_tokens: 203\n"
     )
 
     output = subprocess.check_output(
@@ -275,7 +274,7 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
             "c = load_config(sys.argv[1]).config; "
             "print(c.resource.max_bytes, c.search.fast.fused_candidates, "
             "c.search.fast.max_results, c.chunk.ingestion.target_estimated_tokens, "
-            "c.chunk.recall.default_tokens, c.chunk.recall.max_tokens, "
+            "c.chunk.recall.default_tokens, c.context.facts_default_tokens, "
             "c.index.insight_consolidation_delay_hours)",
             str(override),
         ],

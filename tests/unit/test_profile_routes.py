@@ -53,6 +53,31 @@ async def test_unchanged_profile_refresh_returns_200_without_operation() -> None
     assert response.json()["generation_calls"] == 0
 
 
+async def test_profile_response_budget_is_independent_of_recall(tmp_path: Path) -> None:
+    calls = []
+
+    class Runtime:
+        def get_profile(self, actor, user_id, max_tokens):
+            calls.append(max_tokens)
+            return {"content": "Ready", "freshness": "current", "generation_calls": 0}
+
+    config = tmp_path / "oam.yaml"
+    config.write_text("context:\n  facts_default_tokens: 1\nprofile:\n  max_response_tokens: 7\n")
+    app = create_app(config, runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": "Bearer synthetic"},
+    ) as client:
+        default = await client.get("/v1/users/alice/profile")
+        accepted = await client.get("/v1/users/alice/profile?max_tokens=7")
+        rejected = await client.get("/v1/users/alice/profile?max_tokens=8")
+
+    assert default.status_code == accepted.status_code == 200
+    assert rejected.status_code == 422
+    assert calls == [7, 7]
+
+
 async def test_profile_data_and_document_resources_have_separate_admission() -> None:
     accepted = []
 

@@ -48,7 +48,7 @@ def test_recall_dispatch_uses_full_budget_without_profile_access(
     runtime = DatabaseRuntime(config, cast(ConnectionPool, Pool()), models=object())
     try:
         request = RecallRequest(
-            user_id="alice", query="q", recall_level=RecallLevel.FAST, max_context_tokens=8192
+            user_id="alice", query="q", recall_level=RecallLevel.FAST, max_tokens=8192
         )
         result = runtime.search("caller", "alice", request)
     finally:
@@ -59,5 +59,5 @@ def test_recall_dispatch_uses_full_budget_without_profile_access(
     authority, dispatched, deadline = searched[0]
     assert authority == "authorized-alice"
     assert dispatched is request
-    assert dispatched.max_context_tokens == 8192
+    assert dispatched.max_tokens == 8192
     assert deadline is None

@@ -664,7 +664,7 @@ def test_underscore_identifier_uses_exact_anchor_instead_of_partial_fts(recall_d
     assert [row["unit_id"] for row in repository.anchors("patient_42", 10)] == ["exact"]
 
 
-def test_fast_service_returns_cited_context_with_estimated_budget(recall_database):
+def test_fast_service_returns_cited_context_with_independent_text_budget(recall_database):
     from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
@@ -675,13 +675,14 @@ def test_fast_service_returns_cited_context_with_estimated_budget(recall_databas
     service = RecallService(config, TransactionPool(connection), models, generation_id="generation")
 
     result = service.search(
-        authority, SearchRequest(query="apple", recall_level="fast", max_context_tokens=256)
+        authority, SearchRequest(query="apple", recall_level="fast", max_tokens=256)
     )
 
     assert result["items"][0]["unit_id"] == "apple"
     assert "apple trees" in result["context"]
     assert "source_id" in result["context"]
-    assert 0 < result["context_tokens"] <= 256
+    assert result["context_tokens"] > 0
+    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= 256
     assert result["diagnostics"]["executed_stages"] == [
         "fts",
         "anchors",
@@ -691,7 +692,7 @@ def test_fast_service_returns_cited_context_with_estimated_budget(recall_databas
     ]
     assert result["diagnostics"]["generative_calls"] == 0
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
-    empty = service.search(authority, SearchRequest(query="apple", max_context_tokens=1))
+    empty = service.search(authority, SearchRequest(query="apple", max_tokens=0))
     assert empty["context"] == ""
     assert empty["items"] == []
 
@@ -1068,7 +1069,7 @@ def test_normal_follows_causal_direction_without_expanding_l2_siblings(recall_da
     )
 
     result = service.search(
-        authority, SearchRequest(query="anchorword", recall_level=mode, max_context_tokens=2048)
+        authority, SearchRequest(query="anchorword", recall_level=mode, max_tokens=2048)
     )
 
     ids = {item["unit_id"] for item in result["items"]}
@@ -1124,14 +1125,14 @@ def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_databa
         SearchRequest(
             query="last week what I did",
             recall_level="fast",
-            max_context_tokens=2048,
+            max_tokens=2048,
             reference_time="2026-01-14T12:00:00Z",
         )
         if mode == "fast"
         else SearchRequest(
             query="anchorword",
             recall_level="normal",
-            max_context_tokens=2048,
+            max_tokens=2048,
             time_basis="event",
             time_window={"start": "2026-01-01T00:00:00Z", "end": "2026-01-11T00:00:00Z"},
         )

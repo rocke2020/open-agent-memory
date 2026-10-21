@@ -143,28 +143,12 @@ class RecallConfig(FrozenModel):
 
 
 class ContextConfig(FrozenModel):
-    default_tokens: PositiveInt
-    max_tokens: PositiveInt
-    source_seed_tokens: PositiveInt
-    source_detail_budget_fraction: float = Field(gt=0, lt=1)
+    facts_default_tokens: PositiveInt
     tokenizer: Literal["oam-unicode-quarter-v1"]
-
-    @model_validator(mode="after")
-    def validate_budget(self) -> ContextConfig:
-        if self.default_tokens > self.max_tokens:
-            raise ValueError("default_tokens cannot exceed max_tokens")
-        return self
 
 
 class RecalledChunksConfig(FrozenModel):
     default_tokens: PositiveInt
-    max_tokens: PositiveInt
-
-    @model_validator(mode="after")
-    def validate_budget(self) -> RecalledChunksConfig:
-        if self.default_tokens > self.max_tokens:
-            raise ValueError("default_tokens cannot exceed max_tokens")
-        return self
 
 
 class ChunkConfig(FrozenModel):
@@ -174,6 +158,7 @@ class ChunkConfig(FrozenModel):
 
 class ProfileConfig(FrozenModel):
     enabled: bool = True
+    max_response_tokens: PositiveInt
     max_content_bytes: PositiveInt
     max_output_tokens: PositiveInt
     attempt_timeout_seconds: PositiveFloat
