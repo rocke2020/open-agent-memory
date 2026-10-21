@@ -17,26 +17,75 @@ def context_token_count(text: str) -> int:
 
 def render_context(items: list[dict]) -> str:
     """Render compact references within conservative standalone packing costs."""
-    references = {item["unit_id"]: str(index) for index, item in enumerate(items, 1)}
-    sources = {}
-    for item in items:
-        for citation in item["citations"]:
-            if isinstance(source := citation.get("source_id"), str):
-                sources.setdefault(source, f"S{len(sources) + 1}")
-    blocks, compact_blocks = [], []
-    for group in _source_groups(items):
-        passage = group[-1] if len(group) > 1 and group[-1]["kind"] == "passage" else None
-        source_id = passage["unit_id"] if passage is not None else None
-        ordered = [passage, *group[:-1]] if passage is not None else group
-        for item in ordered:
-            fact_source = source_id if item["kind"] == "fact" else None
-            blocks.append(render_item(item, fact_source))
-            compact_blocks.append(
-                _render_compact_item(item, references, sources, passage if fact_source else None)
-            )
-    legacy = "\n\n".join(blocks)
-    compact = "\n\n".join(compact_blocks)
-    return compact if estimate_units(compact) <= estimate_units(legacy) else legacy
+    return _ContextRenderer().render(items)[0]
+
+
+class _ContextRenderer:
+    """Reuse immutable item blocks only within one packing operation."""
+
+    def __init__(self):
+        self.blocks = {}
+
+    def _block(self, key, render, *args):
+        if key not in self.blocks:
+            text = render(*args)
+            self.blocks[key] = (text, estimate_units(text))
+        return self.blocks[key]
+
+    def render(self, items):
+        references = {item["unit_id"]: str(index) for index, item in enumerate(items, 1)}
+        sources = {}
+        for item in items:
+            for citation in item["citations"]:
+                if isinstance(source := citation.get("source_id"), str):
+                    sources.setdefault(source, f"S{len(sources) + 1}")
+        blocks, compact_blocks = [], []
+        for group in _source_groups(items):
+            passage = group[-1] if len(group) > 1 and group[-1]["kind"] == "passage" else None
+            source_id = passage["unit_id"] if passage is not None else None
+            ordered = [passage, *group[:-1]] if passage is not None else group
+            for item in ordered:
+                fact_source = source_id if item["kind"] == "fact" else None
+                owner = passage if fact_source else None
+                blocks.append(
+                    self._block(("full", id(item), fact_source), render_item, item, fact_source)
+                )
+                citations = [
+                    *item["citations"],
+                    *(
+                        witness["citation"]
+                        for path in item.get("paths", ())
+                        for witness in path.get("alias_witnesses", ())
+                    ),
+                ]
+                labels = tuple(
+                    sources.get(source)
+                    if isinstance(source := citation.get("source_id"), str)
+                    else None
+                    for citation in citations
+                )
+                key = (
+                    "compact",
+                    id(item),
+                    references[item["unit_id"]],
+                    id(owner),
+                    references.get(fact_source),
+                    labels,
+                )
+                compact_blocks.append(
+                    self._block(key, _render_compact_item, item, references, sources, owner)
+                )
+        # The Unicode estimator is additive; round only after summing all blocks
+        # and separators, exactly as when counting the complete joined string.
+        separators = max(0, len(blocks) - 1) * 2
+        legacy_units = sum(units for _, units in blocks) + separators
+        compact_units = sum(units for _, units in compact_blocks) + separators
+        chosen, units = (
+            (compact_blocks, compact_units)
+            if compact_units <= legacy_units
+            else (blocks, legacy_units)
+        )
+        return "\n\n".join(text for text, _ in chosen), units
 
 
 def _render_compact_item(item, references, sources, passage):
@@ -342,6 +391,7 @@ def assemble_context(
         if item["kind"] == "fact" and item["unit_id"] in groups
     }
     oversized_single_fact = False
+    renderer = _ContextRenderer()
     for item in [*candidates, *source_passages]:
         identity = item["unit_id"]
         if identity in considered:
@@ -364,7 +414,7 @@ def assemble_context(
         if originals > max_results or len(tentative) - originals > max_results:
             omissions.append(identity)
             continue
-        if context_token_count(render_context(tentative)) > context_max_tokens:
+        if estimated_tokens(renderer.render(tentative)[1]) > context_max_tokens:
             if (
                 context_max_tokens > 0
                 and not admitted

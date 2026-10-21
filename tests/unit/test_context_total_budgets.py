@@ -52,6 +52,29 @@ def ranked_service(rows, mode="normal", budget=2048, **tier_options):
     return RankedService(rows, config=config)
 
 
+def test_packing_does_not_recount_unchanged_rendered_blocks(evidence_rows, monkeypatch):
+    from oam.retrieval import context
+
+    original = deepcopy(evidence_rows[2])
+    original["text"] = "Complete source content. 甲乙🎯 " * 20
+    rows = [{**deepcopy(original), "unit_id": f"body-{i}"} for i in range(80)]
+    scanned_characters = 0
+    estimate = context.estimate_units
+
+    def measured(text):
+        nonlocal scanned_characters
+        scanned_characters += len(text)
+        return estimate(text)
+
+    monkeypatch.setattr(context, "estimate_units", measured)
+    selected, omitted, _, oversized = context.assemble_context(
+        rows, [], context_max_tokens=32768, include_chunks=True, max_results=96
+    )
+    rendered = context.render_context(selected)
+    assert selected == rows and not omitted and not oversized
+    assert scanned_characters < len(rendered) * 16
+
+
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize(
     "answer", ["Mira Chen directs the observatory.", "The repair shop is on Willow Street."]
