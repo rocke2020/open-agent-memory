@@ -482,14 +482,14 @@ async def test_public_pdf_and_image_retain_to_cited_recall(
     assert ("extraction" in models.generation_calls) is uses_vision
 
 
-async def test_structured_native_pdf_late_detail_reaches_fast_and_mid_context(
+async def test_structured_native_pdf_late_detail_reaches_fast_and_normal_context(
     core_database, tmp_path
 ):
     from oam.config import load_config
     from oam.contracts.resources import ResourceMediaType
     from oam.resources.originals import OriginalDescriptor
     from oam.resources.pdf import parse_pdf
-    from oam.tokens import estimate_units, estimated_tokens
+    from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
     from oam.workers.index_source import process_one
 
     dsn, tenant, headers = core_database
@@ -560,7 +560,7 @@ async def test_structured_native_pdf_late_detail_reaches_fast_and_mid_context(
         measurements = []
         for mode, query in (
             (mode, query)
-            for mode in ("fast", "mid")
+            for mode in ("fast", "normal")
             for query in (
                 "seal broken sealed backup restart",
                 "What should I do when the seal is broken?",
@@ -572,14 +572,16 @@ async def test_structured_native_pdf_late_detail_reaches_fast_and_mid_context(
                     "user_id": "scope",
                     "query": query,
                     "recall_level": mode,
-                    "max_context_tokens": 1500,
+                    "max_tokens": 1500,
+                    "include": {"chunks": {}},
                 },
             )
             assert recalled.status_code == 200, recalled.text
             payload = recalled.json()
             assert target in payload["context"]
+            assert payload["tokenizer"] == ESTIMATOR
             assert payload["context_tokens"] == estimated_tokens(estimate_units(payload["context"]))
-            assert payload["context_tokens"] <= 1500
+            assert payload["diagnostics"]["text_budgets"]["facts"]["used"] <= 1500
             selected = next(item for item in payload["items"] if target in item["text"])
             citation = selected["citations"][0]
             assert selected["origin"] == "evidence"
@@ -1091,14 +1093,15 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
         )
         app.state.runtime.models = models
         generation_calls = list(models.generation_calls)
-        for mode in ("fast", "mid", "deep"):
+        for mode in ("fast", "normal"):
             recalled = await client.post(
                 "/v1/recall",
                 json={
                     "user_id": "scope",
                     "query": "Lin brief glucose 92 mg/dL",
                     "recall_level": mode,
-                    "max_context_tokens": 2048,
+                    "max_tokens": 2048,
+                    "include": {"chunks": {}},
                 },
             )
             assert recalled.status_code == 200, recalled.text
@@ -1113,7 +1116,7 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
             assert "Glucose 92 mg/dL" in payload["context"]
             assert payload["tokenizer"] == ESTIMATOR
             assert payload["context_tokens"] == estimated_tokens(estimate_units(payload["context"]))
-            assert payload["context_tokens"] <= 2048
+            assert payload["diagnostics"]["text_budgets"]["facts"]["used"] <= 2048
             assert payload["diagnostics"]["generative_calls"] == 0
         assert models.generation_calls == generation_calls
     with psycopg.connect(dsn) as connection:
@@ -1598,7 +1601,10 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
         assert "brief explanations" in recalled.json()["context"]
         assert "Profile-only portrait" not in recalled.json()["context"]
         assert "1990-05-10" not in recalled.json()["context"]
-        assert recalled.json()["context_tokens"] <= config.context.default_tokens
+        assert (
+            recalled.json()["diagnostics"]["text_budgets"]["facts"]["used"]
+            <= config.context.facts_default_tokens
+        )
         assert recalled.json()["diagnostics"]["generative_calls"] == 0
         assert len(models.generation_calls) == calls
         assert "Profile-only portrait" in payload["content"]
@@ -1625,14 +1631,14 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
                         "user_id": "scope",
                         "query": "brief explanations",
                         "recall_level": "fast",
-                        "max_context_tokens": 1024,
+                        "max_tokens": 1024,
                     },
                 )
                 assert independent.status_code == 200, independent.text
                 assert "brief explanations" in independent.json()["context"]
                 assert "profile" not in independent.json()
                 assert "Profile-only portrait" not in independent.json()["context"]
-                assert independent.json()["context_tokens"] <= 1024
+                assert independent.json()["diagnostics"]["text_budgets"]["facts"]["used"] <= 1024
                 assert independent.json()["diagnostics"]["generative_calls"] == 0
                 batch = await client.post(
                     "/v1/users/scope/search-many",

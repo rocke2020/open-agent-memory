@@ -229,7 +229,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 assert not errors
                 page.get_by_role("button", name="Retrieve", exact=True).click()
                 page.locator("#query").fill("What connects Alice to Atlas?")
-                page.get_by_label("Retrieval mode", exact=True).select_option("mid")
+                page.get_by_label("Retrieval mode", exact=True).select_option("normal")
                 page.locator("#search-form button").click()
                 page.locator("#detail").get_by_text(
                     "Alice joined Atlas [1].", exact=True
@@ -238,7 +238,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                     {
                         "user_id": "alice",
                         "query": "What connects Alice to Atlas?",
-                        "recall_level": "mid",
+                        "recall_level": "normal",
                         "allow_partial": True,
                     }
                 ]

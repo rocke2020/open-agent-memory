@@ -10,8 +10,8 @@ import pytest
 from test_query_time_recall import CONFIG, DatedRepository, EmbeddingOnly
 
 from oam.contracts.search import SearchRequest
+from oam.retrieval.context import context_token_count
 from oam.retrieval.service import RecallService
-from oam.tokens import estimate_units, estimated_tokens
 
 
 @pytest.fixture
@@ -69,11 +69,8 @@ class SourceRepository(DatedRepository):
     def dense(self, vector, limit):
         return []
 
-    def ordinary(self, seeds, vector):
+    def ordinary(self, seeds, vector, *, include_semantic=True):
         return tuple(self.graph_paths), self.graph_paths
-
-    def hierarchy(self, seeds, vector):
-        return (), {}
 
     def hydrate(self, unit_ids):
         return [deepcopy(self.rows[unit_id]) for unit_id in unit_ids]
@@ -111,8 +108,8 @@ class SourceService(RecallService):
         yield SourceRepository(request, self.rows, self.graph_paths)
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
-def test_assistant_original_does_not_consume_the_only_protected_fact_slot(evidence_rows, mode):
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_assistant_original_does_not_consume_the_only_fact_slot(evidence_rows, mode):
     assistant = deepcopy(evidence_rows[2])
     assistant.update(
         unit_id="assistant_guide",
@@ -141,17 +138,18 @@ def test_assistant_original_does_not_consume_the_only_protected_fact_slot(eviden
             yield RankedRepository(request, self.rows, self.graph_paths)
 
     tier = getattr(CONFIG.search, mode).model_copy(
-        update={"source_seed_results": 1, "max_results": 2}
+        update={"source_seed_results": 1, "max_results": 1}
     )
     config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={mode: tier})})
     result = RankedService([assistant, evidence_rows[0], evidence_rows[2]], config=config).search(
-        object(), SearchRequest(query="missed workshops", recall_level=mode)
+        object(), SearchRequest(include={"chunks": {}}, query="missed workshops", recall_level=mode)
     )
 
-    assert [item["unit_id"] for item in result["items"]] == ["fact", "original"]
+    assert [item["unit_id"] for item in result["items"]] == ["fact", "assistant_guide"]
     assert "The user missed the workshop on June 3." in result["context"]
     assert evidence_rows[2]["text"] in result["context"]
-    assert result["items"][1]["citations"] == evidence_rows[2]["citations"]
+    assert result["items"][1]["citations"] == assistant["citations"]
+    assert assistant["text"] in result["context"]
     assert result["diagnostics"]["generative_calls"] == 0
 
 
@@ -161,10 +159,59 @@ def test_trace_statement_timeout_preserves_recall_deadline_error(evidence_rows, 
 
     monkeypatch.setattr(SourceRepository, "record_trace", timed_out)
     with pytest.raises(TimeoutError, match="deadline"):
-        SourceService(evidence_rows).search(object(), SearchRequest(query="missed workshops"))
+        SourceService(evidence_rows).search(
+            object(), SearchRequest(include={"chunks": {}}, query="missed workshops")
+        )
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize(
+    ("query", "answer"),
+    [
+        ("observatory director", "Mira Chen directs the observatory."),
+        ("repair shop location", "The repair shop is on Willow Street."),
+    ],
+)
+def test_original_budget_preserves_user_article_beside_full_fact_pool(
+    evidence_rows, mode, query, answer
+):
+    assistant = deepcopy(evidence_rows[2])
+    assistant.update(unit_id="assistant", text="Here are the entities from that document.")
+    assistant["citations"][0].update(role="assistant", message_id="1", message_index=1)
+    original = deepcopy(evidence_rows[2])
+    original["text"] = answer
+    unrelated = deepcopy(evidence_rows[0])
+    unrelated.update(unit_id="unrelated", text="The user likes painting.")
+    unrelated["citations"][0].update(source_id="other_source", passage_id="other_passage")
+    unrelated["citations"][0]["span"].update(source_id="other_source")
+
+    class RankedRepository(SourceRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": node} for node in ("assistant", "original", "unrelated")]
+
+    class RankedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RankedRepository(request, self.rows, self.graph_paths)
+
+    tier = getattr(CONFIG.search, mode).model_copy(
+        update={"source_seed_results": 1, "max_results": 2}
+    )
+    config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={mode: tier})})
+    result = RankedService([assistant, original, unrelated], config=config).search(
+        object(), SearchRequest(include={"chunks": {}}, query=query, recall_level=mode)
+    )
+
+    assert {item["unit_id"] for item in result["items"]} == {"assistant", "original", "unrelated"}
+    assert answer in result["context"]
+    assert (
+        next(item for item in result["items"] if item["unit_id"] == "original")["citations"]
+        == original["citations"]
+    )
+    assert result["diagnostics"]["generative_calls"] == 0
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_passage_seed_recovers_query_relevant_user_original_without_a_fact(evidence_rows, mode):
     seed = deepcopy(evidence_rows[0])
     seed.update(
@@ -197,17 +244,20 @@ def test_passage_seed_recovers_query_relevant_user_original_without_a_fact(evide
             yield PassageRepository(request, self.rows, self.graph_paths)
 
     result = PassageService([seed, evidence_rows[2]]).search(
-        object(), SearchRequest(query="missed workshops", recall_level=mode)
+        object(), SearchRequest(include={"chunks": {}}, query="missed workshops", recall_level=mode)
     )
 
     assert "On June 3, I missed the workshop while covering an extra shift." in result["context"]
     original = next(item for item in result["items"] if item["unit_id"] == "original")
     assert original["citations"][0]["role"] == "user"
     assert result["diagnostics"]["generative_calls"] == 0
-    assert result["context_tokens"] <= CONFIG.context.default_tokens
+    assert (
+        result["diagnostics"]["text_budgets"]["facts"]["used"]
+        <= CONFIG.context.facts_default_tokens
+    )
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("max_results", [5, 6])
 def test_supplemental_original_does_not_displace_ranked_evidence(evidence_rows, mode, max_results):
     guide = deepcopy(evidence_rows[2])
@@ -243,18 +293,20 @@ def test_supplemental_original_does_not_displace_ranked_evidence(evidence_rows, 
     config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={mode: tier})})
     rows = [*evidence_rows[:3], guide, ranked_fact, recovered]
     result = RankedService(rows, config=config).search(
-        object(), SearchRequest(query="missed workshops", recall_level=mode)
+        object(), SearchRequest(include={"chunks": {}}, query="missed workshops", recall_level=mode)
     )
     ids = {item["unit_id"] for item in result["items"]}
     assert {"fact", "original", "ranked_fact"} <= ids
-    assert ("recovered" in ids) == (max_results == 6)
-    assert len(ids) <= max_results
+    assert "recovered" in ids
+    assert sum(item["kind"] == "fact" for item in result["items"]) <= max_results
+    assert sum(item["kind"] == "passage" for item in result["items"]) <= max_results
+    assert len(ids) <= 2 * max_results
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid", "deep"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_grouped_context_preserves_facts_and_shows_source_once(evidence_rows, mode):
     result = SourceService(evidence_rows).search(
-        object(), SearchRequest(query="missed workshops", recall_level=mode)
+        object(), SearchRequest(include={"chunks": {}}, query="missed workshops", recall_level=mode)
     )
 
     assert [row["unit_id"] for row in result["items"]] == [
@@ -271,7 +323,7 @@ def test_grouped_context_preserves_facts_and_shows_source_once(evidence_rows, mo
     assert "June 10" in result["context"]
     assert result["items"][0]["citations"] == evidence_rows[0]["citations"]
     assert result["items"][2]["citations"] == evidence_rows[2]["citations"]
-    assert result["context_tokens"] == estimated_tokens(estimate_units(result["context"]))
+    assert result["context_tokens"] == context_token_count(result["context"])
 
 
 @pytest.mark.parametrize(
@@ -287,7 +339,9 @@ def test_grouped_context_preserves_facts_and_shows_source_once(evidence_rows, mo
 )
 def test_inconsistent_support_keeps_fact(evidence_rows, field, value):
     evidence_rows[0]["citations"][0]["span"][field] = value
-    result = SourceService(evidence_rows).search(object(), SearchRequest(query="workshops"))
+    result = SourceService(evidence_rows).search(
+        object(), SearchRequest(include={"chunks": {}}, query="workshops")
+    )
     assert {row["unit_id"] for row in result["items"]} == {
         "fact",
         "other",
@@ -304,7 +358,7 @@ def test_unique_time_and_graph_evidence_remain_on_the_fact(evidence_rows, unique
     path = {"arm": "graph", "nodes": ["seed", "fact"]}
     paths = {"fact": [path]} if unique_evidence == "path" else {}
     result = SourceService(evidence_rows, graph_paths=paths).search(
-        object(), SearchRequest(query="workshops")
+        object(), SearchRequest(include={"chunks": {}}, query="workshops")
     )
     fact = next(row for row in result["items"] if row["unit_id"] == "fact")
     original = next(row for row in result["items"] if row["unit_id"] == "original")
@@ -317,21 +371,25 @@ def test_unique_time_and_graph_evidence_remain_on_the_fact(evidence_rows, unique
 
 
 @pytest.mark.parametrize(
-    ("cap", "expected"), [(2, ["fact", "other"]), (3, ["fact", "other", "original"])]
+    ("cap", "expected"),
+    [
+        (2, ["fact", "other", "original", "second_event"]),
+        (3, ["fact", "other", "original", "second_event"]),
+    ],
 )
-def test_grouping_neither_fetches_nor_backfills_beyond_item_cap(evidence_rows, cap, expected):
+def test_grouping_preserves_independent_fact_and_original_item_caps(evidence_rows, cap, expected):
     config = CONFIG.model_copy(
         update={
             "search": CONFIG.search.model_copy(
-                update={"mid": CONFIG.search.mid.model_copy(update={"max_results": cap})}
+                update={"normal": CONFIG.search.normal.model_copy(update={"max_results": cap})}
             )
         }
     )
     result = SourceService(evidence_rows, config=config).search(
-        object(), SearchRequest(query="workshops")
+        object(), SearchRequest(include={"chunks": {}}, query="workshops")
     )
     assert [row["unit_id"] for row in result["items"]] == expected
-    assert ("source=[3]" in result["context"]) == (cap == 3)
+    assert "source=[3]" in result["context"]
 
 
 @pytest.mark.parametrize("correct_quote", [True, False])
@@ -341,7 +399,9 @@ def test_coverage_checks_exact_unicode_quote(evidence_rows, correct_quote):
     evidence_rows[0]["citations"][0]["span"]["quote"] = (
         "检修完成。" if correct_quote else "检修完成!"
     )
-    result = SourceService(evidence_rows).search(object(), SearchRequest(query="检修"))
+    result = SourceService(evidence_rows).search(
+        object(), SearchRequest(include={"chunks": {}}, query="检修")
+    )
     assert "fact" in {row["unit_id"] for row in result["items"]}
     assert ("source=[3]" in result["context"]) is correct_quote
 
@@ -350,7 +410,9 @@ def test_one_uncovered_support_prevents_grouping(evidence_rows):
     other = deepcopy(evidence_rows[0]["citations"][0])
     other["span"]["source_version"] = 2
     evidence_rows[0]["citations"].append(other)
-    result = SourceService(evidence_rows).search(object(), SearchRequest(query="workshops"))
+    result = SourceService(evidence_rows).search(
+        object(), SearchRequest(include={"chunks": {}}, query="workshops")
+    )
     assert "fact" in {row["unit_id"] for row in result["items"]}
     assert "source=[3]" not in result["context"]
 
@@ -362,7 +424,7 @@ def test_resolved_subject_and_date_survive_an_ambiguous_source(evidence_rows):
     fact["text"] = "Maya missed the workshop on June 3."
     fact["citations"][0]["span"].update(quote=source)
     result = SourceService(evidence_rows).search(
-        object(), SearchRequest(query="Who missed the workshop?")
+        object(), SearchRequest(include={"chunks": {}}, query="Who missed the workshop?")
     )
 
     assert fact["text"] in result["context"]
@@ -378,7 +440,7 @@ def test_multiple_facts_share_one_source_without_losing_metadata(evidence_rows):
     before = deepcopy(evidence_rows)
     path = {"arm": "graph", "relation": "causal", "nodes": ["fact", "shift"]}
     result = SourceService(evidence_rows, graph_paths={"shift": [path]}).search(
-        object(), SearchRequest(query="What happened at the workshop?")
+        object(), SearchRequest(include={"chunks": {}}, query="What happened at the workshop?")
     )
 
     assert evidence_rows == before
@@ -414,12 +476,12 @@ def test_recall_recovers_adjacent_user_source_before_tail_candidates(evidence_ro
             yield WindowRepository(request, self.rows, self.graph_paths)
 
     result = WindowService(evidence_rows).search(
-        object(), SearchRequest(query="missed workshops", max_context_tokens=2048)
+        object(), SearchRequest(include={"chunks": {}}, query="missed workshops", max_tokens=2048)
     )
 
     assert "The user missed the workshop on June 3." in result["context"]
     assert "On June 10, I missed another workshop" in result["context"]
-    assert result["context_tokens"] <= 2048
+    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= 2048
 
 
 @pytest.mark.parametrize("mixed", [False, True])
@@ -440,7 +502,9 @@ def test_source_windows_reuse_hydrated_passages_and_fetch_only_missing_rows(evid
         def _repository(self, authority, request, deadline):
             yield TrackingRepository(request, self.rows, self.graph_paths)
 
-    result = TrackingService(evidence_rows).search(object(), SearchRequest(query="workshops"))
+    result = TrackingService(evidence_rows).search(
+        object(), SearchRequest(include={"chunks": {}}, query="workshops")
+    )
 
     assert "June 3" in result["context"] and "June 10" in result["context"]
     if mixed:
@@ -480,7 +544,9 @@ def test_source_policy_change_during_passage_reuse_rejects_result(evidence_rows)
             yield RevisedRepository(request, self.rows, self.graph_paths)
 
     with pytest.raises(RecallUnavailable, match="source policy changed before trace publication"):
-        RevisedService(evidence_rows).search(object(), SearchRequest(query="workshops"))
+        RevisedService(evidence_rows).search(
+            object(), SearchRequest(include={"chunks": {}}, query="workshops")
+        )
 
 
 def test_recall_keeps_related_user_fact_with_its_source_dialogue(evidence_rows):
@@ -529,11 +595,11 @@ def test_recall_keeps_related_user_fact_with_its_source_dialogue(evidence_rows):
             yield RelatedRepository(request, self.rows, self.graph_paths)
 
     result = RelatedService([*evidence_rows, related, request, response]).search(
-        object(), SearchRequest(query="medical research", max_context_tokens=2048)
+        object(), SearchRequest(include={"chunks": {}}, query="medical research", max_tokens=2048)
     )
     selected = {item["unit_id"] for item in result["items"]}
     assert {"related", "research_request_unit", "research_response_unit"} <= selected
-    assert result["context_tokens"] <= 2048
+    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= 2048
 
 
 def test_related_user_fact_does_not_displace_the_only_query_ranked_result(evidence_rows):
@@ -558,14 +624,17 @@ def test_related_user_fact_does_not_displace_the_only_query_ranked_result(eviden
     fast = CONFIG.search.fast.model_copy(update={"source_seed_results": 1, "max_results": 1})
     config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={"fast": fast})})
     result = RelatedService([evidence_rows[0], unrelated], config=config).search(
-        object(), SearchRequest(query="Which workshop did I miss?", recall_level="fast")
+        object(),
+        SearchRequest(
+            include={"chunks": {}}, query="Which workshop did I miss?", recall_level="fast"
+        ),
     )
 
     assert [item["unit_id"] for item in result["items"]] == ["fact"]
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
-def test_related_fact_does_not_displace_a_seed_exceeding_its_primary_budget(evidence_rows, mode):
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_related_fact_does_not_displace_the_query_ranked_fact(evidence_rows, mode):
     ranked = deepcopy(evidence_rows[0])
     ranked["text"] = "Query ranked detail. " * 110
     related = deepcopy(evidence_rows[0])
@@ -591,18 +660,20 @@ def test_related_fact_does_not_displace_a_seed_exceeding_its_primary_budget(evid
     config = CONFIG.model_copy(
         update={
             "search": CONFIG.search.model_copy(update={mode: tier}),
-            "context": CONFIG.context.model_copy(update={"source_detail_budget_fraction": 0.5}),
         }
     )
     result = RelatedService([ranked, evidence_rows[2], related], config=config).search(
         object(),
         SearchRequest(
-            query="Which workshop did I miss?", recall_level=mode, max_context_tokens=1000
+            include={"chunks": {}},
+            query="Which workshop did I miss?",
+            recall_level=mode,
+            max_tokens=1000,
         ),
     )
 
-    assert {item["unit_id"] for item in result["items"]} == {"fact", "original"}
-    assert result["context_tokens"] <= 1000
+    assert {item["unit_id"] for item in result["items"]} == {"fact", "original", "related"}
+    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= 1000
 
 
 def test_related_source_detail_does_not_displace_ranked_facts_original(evidence_rows):
@@ -630,7 +701,12 @@ def test_related_source_detail_does_not_displace_ranked_facts_original(evidence_
     config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={"fast": fast})})
     result = RelatedService(
         [evidence_rows[0], evidence_rows[2], related, related_passage], config=config
-    ).search(object(), SearchRequest(query="Which workshop did I miss?", recall_level="fast"))
+    ).search(
+        object(),
+        SearchRequest(
+            include={"chunks": {}}, query="Which workshop did I miss?", recall_level="fast"
+        ),
+    )
 
     assert {"fact", "original"} <= {item["unit_id"] for item in result["items"]}
 
@@ -655,10 +731,13 @@ def test_supported_fact_does_not_displace_the_query_matched_passage(evidence_row
     fast = CONFIG.search.fast.model_copy(update={"source_seed_results": 1, "max_results": 1})
     config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={"fast": fast})})
     result = CompanionService([evidence_rows[2], companion], config=config).search(
-        object(), SearchRequest(query="What date did I miss the workshop?", recall_level="fast")
+        object(),
+        SearchRequest(
+            include={"chunks": {}}, query="What date did I miss the workshop?", recall_level="fast"
+        ),
     )
 
-    assert [item["unit_id"] for item in result["items"]] == ["original"]
+    assert [item["unit_id"] for item in result["items"]] == ["companion", "original"]
     assert "June 3" in result["context"]
 
 
@@ -686,13 +765,14 @@ def test_supported_fact_does_not_displace_a_later_query_ranked_seed(evidence_row
     result = CompanionService([evidence_rows[2], later_seed, companion], config=config).search(
         object(),
         SearchRequest(
+            include={"chunks": {}},
             query="Which workshop and other topic?",
             recall_level="fast",
-            max_context_tokens=context_budget,
+            max_tokens=context_budget,
         ),
     )
 
-    assert [item["unit_id"] for item in result["items"]] == ["original", "other"]
+    assert [item["unit_id"] for item in result["items"]] == ["other", "companion", "original"]
 
 
 def test_related_source_reads_a_bounded_window_around_a_late_request(evidence_rows):
@@ -757,7 +837,7 @@ def test_related_source_reads_a_bounded_window_around_a_late_request(evidence_ro
 
     TrackingRepository.hydrated_ids = []
     result = TrackingService([*evidence_rows, related, *passages]).search(
-        object(), SearchRequest(query="astronomy club", max_context_tokens=2048)
+        object(), SearchRequest(include={"chunks": {}}, query="astronomy club", max_tokens=2048)
     )
 
     assert response_text in result["context"]
@@ -817,58 +897,9 @@ def test_related_source_keeps_companion_from_original_source_window(evidence_row
             yield CompanionRepository(request, self.rows, self.graph_paths)
 
     result = CompanionService([*evidence_rows, related, *expanded, companion]).search(
-        object(), SearchRequest(query="missed workshops", max_context_tokens=5000)
+        object(), SearchRequest(include={"chunks": {}}, query="missed workshops", max_tokens=5000)
     )
     assert "companion" in {item["unit_id"] for item in result["items"]}
-
-
-def test_incremental_context_cost_bounds_compact_rendering(evidence_rows):
-    from oam.retrieval.context import ContextUnits, render_context
-
-    evidence_rows[0]["text"] = "用户在 June 3 错过 workshop 👋。"
-    for order in (
-        evidence_rows,
-        [evidence_rows[2], evidence_rows[0], evidence_rows[3], evidence_rows[1]],
-    ):
-        counter = ContextUnits([], order)
-        selected = []
-        for item in order:
-            selected.append(item)
-            assert counter.candidate_units(item) >= estimate_units(render_context(selected))
-            counter.add(item)
-            assert counter.units >= estimate_units(render_context(selected))
-
-
-def test_context_assembly_estimates_each_item_variant_once(evidence_rows, monkeypatch):
-    from oam.retrieval import context
-
-    render_item = context.render_item
-    render_counts = Counter()
-
-    def counting_render(item, source_id=None):
-        render_counts[(id(item), source_id)] += 1
-        return render_item(item, source_id)
-
-    monkeypatch.setattr(context, "render_item", counting_render)
-    chosen, omissions = context.assemble_context(
-        evidence_rows,
-        evidence_rows[:2],
-        evidence_rows[2:],
-        budget=2048,
-        seed_budget=1024,
-        detail_fraction=0.5,
-        max_results=4,
-    )
-
-    assert [item["unit_id"] for item in chosen] == [
-        "fact",
-        "other",
-        "original",
-        "second_event",
-    ]
-    assert omissions == []
-    assert render_counts[(id(evidence_rows[0]), "original")] == 1
-    assert render_counts and max(render_counts.values()) == 1
 
 
 def test_recall_reuses_seed_estimates_during_assembly(evidence_rows, monkeypatch):
@@ -882,16 +913,28 @@ def test_recall_reuses_seed_estimates_during_assembly(evidence_rows, monkeypatch
         return render_item(item, source_id)
 
     monkeypatch.setattr(context, "render_item", counting_render)
-    result = SourceService(evidence_rows).search(object(), SearchRequest(query="workshops"))
+    result = SourceService(evidence_rows).search(
+        object(), SearchRequest(include={"chunks": {}}, query="workshops")
+    )
 
     assert "The user missed the workshop on June 3." in result["context"]
     assert render_counts and max(render_counts.values()) <= 2
 
 
-def test_recorded_replay_reassembles_the_same_grouped_context(evidence_rows):
+@pytest.mark.parametrize("method", ["oam-unicode-quarter-v1", "o200k_base"])
+def test_recorded_replay_reassembles_the_same_grouped_context(evidence_rows, method):
     from oam.debug.traces import TraceRepository
 
-    result = SourceService(evidence_rows).search(object(), SearchRequest(query="workshops"))
+    result = SourceService(evidence_rows).search(
+        object(), SearchRequest(include={"chunks": {}}, query="workshops")
+    )
+    if method == "o200k_base":
+        import tiktoken
+
+        result["tokenizer"] = method
+        result["context_tokens"] = len(
+            tiktoken.get_encoding(method).encode_ordinary(result["context"])
+        )
 
     class RecordedTrace(TraceRepository):
         def get(self, connection, authority, trace_id):
@@ -1037,12 +1080,18 @@ def test_recall_restores_facts_supported_by_direct_and_windowed_user_passages(ev
         def _repository(self, authority, request, deadline):
             yield CompanionRepository(request, self.rows, self.graph_paths)
 
-    for mode in ("fast", "mid"):
+    for mode in ("fast", "normal"):
         result = CompanionService(rows).search(
-            object(), SearchRequest(query="Which workshop was missed?", recall_level=mode)
+            object(),
+            SearchRequest(
+                include={"chunks": {}}, query="Which workshop was missed?", recall_level=mode
+            ),
         )
         selected = {item["unit_id"] for item in result["items"]}
         assert {"fact", "original", "second_event", "direct_detail", "window_detail"} <= selected
         assert "unrelated" not in selected
         assert result["diagnostics"]["generative_calls"] == 0
-        assert result["context_tokens"] <= CONFIG.context.default_tokens
+        assert (
+            result["diagnostics"]["text_budgets"]["facts"]["used"]
+            <= CONFIG.context.facts_default_tokens
+        )

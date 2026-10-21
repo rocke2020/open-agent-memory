@@ -4,7 +4,7 @@
 
 Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for agent developers. It preserves eligible interaction evidence, derives source-backed memory, keeps HTML/PDF/image Resources separate, retrieves both origins together with citations, and builds the read-only User Profile only when explicitly requested.
 
-The repository is implementing v0.0.1. The user-qualified retain/recall API, source-backed facts, typed Insights, stored User Profile, joint fast/mid/deep retrieval, Resource revision/deletion, recorded inspection, portable export and browser Inspector have isolated PostgreSQL or browser functional coverage. Separate API/worker processes with configured real models have produced and recalled supported L2 plus HTML Evidence through the current API. No complete LongMemEval stage is available. Live User Profile model quality, document-vision quality and release-level recovery remain later gates, so this is not a release candidate.
+The repository is implementing v0.0.1. The user-qualified retain/recall API, source-backed facts, typed Insights, stored User Profile, joint fast/normal retrieval, Resource revision/deletion, recorded inspection, portable export and browser Inspector have isolated PostgreSQL or browser functional coverage. Separate API/worker processes with configured real models have produced and recalled supported L2 plus HTML Evidence through the current API. No complete LongMemEval stage is available. Live User Profile model quality, document-vision quality and release-level recovery remain later gates, so this is not a release candidate.
 
 ## Product Model
 
@@ -16,6 +16,8 @@ The repository is implementing v0.0.1. The user-qualified retain/recall API, sou
 - **Resources:** retained text/HTML/PDF/image originals, detailed passages, locators, and abstracts that remain searchable evidence and never automatically become L1–L3.
 
 In `api_key` mode, one credential-derived tenant and one key-bound `user_id` identify a personal memory collection. An administrator creates it with `POST /v1/users` and receives that user's first key once; the host uses the user key for `POST /v1/retain` interactions, `POST /v1/users/{user_id}/resources` document originals, `POST /v1/users/{user_id}/profile-data` structured user inputs, and `POST /v1/recall`. The administrator key cannot read or write personal content directly. Local `dev` mode admits requests without a key and makes no privacy claim; `trusted` mode uses gateway-asserted tenant/user headers, with a root key required on nonlocal requests. Interactions need no caller-managed source/message IDs. Documents use a stable `document_id` with explicit `replace` or text-only `append`; OAM allocates revisions. The [HTTP API](docs/api.md) documents mode selection, JSON and multipart examples, user-key rotation, retry keys and operation readiness.
+
+Recall budgets learned text and originals independently: request `max_tokens` defaults to 4,096, and `include.chunks: {}` enables an 8,192-token original-text budget with its own optional `max_tokens`. Both are approximate text budgets measured with `oam-unicode-quarter-v1`; complete rendered `context_tokens` is also estimated, includes citations and metadata, and has no aggregate hard cap. Original chunks keep their indexed boundaries: include the whole chunk that reaches or crosses the positive original-text target, then stop; zero excludes ordinary originals. Required Insight support stays complete. Exact `o200k_base` counting belongs to offline evaluation. Hosts own the final model-input budget.
 
 ## Architecture
 
@@ -30,7 +32,7 @@ trusted application -> user-authorized retain -> PostgreSQL receipt + immutable 
                          Resources -> passages + abstract
                                       |
                                       v
-                         joint fast/mid/deep recall + citations
+                         joint fast/normal recall + citations
 
 explicit User Profile refresh -> unchanged: zero calls
                          -> changed: durable operation -> L3
@@ -64,7 +66,7 @@ The default `worker.embedded_enabled: true` requires the API, queue and worker-c
 
 ## Release Boundary
 
-v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/mid/deep joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and mid are the primary everyday recall modes; deep is an explicit higher-budget option. The Python SDK, targeted fact controls, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
+v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/normal joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and normal are the supported recall modes. The Python SDK, targeted fact controls, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
 
 No Dockerfile or public image exists yet. Packaging and publication are the final release phase after the complete source-level acceptance matrix passes.
 

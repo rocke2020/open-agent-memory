@@ -200,8 +200,8 @@ def test_partial_revalidation_keeps_other_graph_paths_and_independent_direct_hit
                 {"unit_id": node, "kind": "fact", "score": 1.0} for node in ("seed", "other_seed")
             ]
 
-        def ordinary(self, seeds, query_vector):
-            result = super().ordinary(seeds, query_vector)
+        def ordinary(self, seeds, query_vector, *, include_semantic=True):
+            result = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
             connection.execute(
                 "UPDATE evidence SET learning_eligible=false WHERE tenant_id=%s AND user_id=%s "
                 "AND evidence_id='definition'",
@@ -215,7 +215,8 @@ def test_partial_revalidation_keeps_other_graph_paths_and_independent_direct_hit
     service = recall_service(connection, config, vector, ChangedAliasRepository)
 
     result = service.search(
-        authority, SearchRequest(query="research projects", recall_level="mid", allow_partial=True)
+        authority,
+        SearchRequest(query="research projects", recall_level="normal", allow_partial=True),
     )
 
     by_id = {item["unit_id"]: item for item in result["items"]}
@@ -270,8 +271,8 @@ def test_replacement_witness_preserves_same_graph_path_under_strict_recall(recal
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector):
-            _, paths = super().ordinary(seeds, query_vector)
+        def ordinary(self, seeds, query_vector, *, include_semantic=True):
+            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
             selected = paths["continuation"]
             chosen = selected[0]["alias_witnesses"][0]
             replaced.append(chosen["support_id"])
@@ -288,7 +289,7 @@ def test_replacement_witness_preserves_same_graph_path_under_strict_recall(recal
     service = recall_service(connection, repository.config, vector, ReplacedSupportRepository)
 
     result = service.search(
-        authority, SearchRequest(query="research membership", recall_level="mid")
+        authority, SearchRequest(query="research membership", recall_level="normal")
     )
 
     target = next(item for item in result["items"] if item["unit_id"] == "continuation")
@@ -304,15 +305,10 @@ def test_replacement_witness_preserves_same_graph_path_under_strict_recall(recal
         "Nova Research, also called NR, " + "maintained the documented research program; " * 100,
     ],
 )
-def test_unfit_alias_proof_drops_graph_vote_and_keeps_independently_admitted_fact(
-    recall_database, definition
-):
-    from oam.tokens import estimate_units, estimated_tokens
-
+def test_alias_metadata_preserves_graph_vote_under_fact_text_budget(recall_database, definition):
     connection, authority = recall_database
     repository, vector, _ = alias_history(connection, authority, definition_quote=definition)
-    target = repository.hydrate(("continuation",))[0]
-    budget = max(64, estimated_tokens(estimate_units(render_item(target))) + 8)
+    budget = 64
 
     class DirectTargetRepository(RecallRepository):
         def lexical(self, query, limit):
@@ -324,8 +320,8 @@ def test_unfit_alias_proof_drops_graph_vote_and_keeps_independently_admitted_fac
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector):
-            _, paths = super().ordinary(seeds, query_vector)
+        def ordinary(self, seeds, query_vector, *, include_semantic=True):
+            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
             return ("continuation",), {"continuation": paths["continuation"]}
 
         def related_user_fact(self, unit_ids):
@@ -335,24 +331,24 @@ def test_unfit_alias_proof_drops_graph_vote_and_keeps_independently_admitted_fac
 
     result = service.search(
         authority,
-        SearchRequest(query="research membership", recall_level="mid", max_context_tokens=budget),
+        SearchRequest(query="research membership", recall_level="normal", max_tokens=budget),
     )
 
     selected = next(item for item in result["items"] if item["unit_id"] == "continuation")
     assert selected["text"] == "I joined NR in June, the organization I mentioned before."
-    assert selected["paths"] == []
-    assert "Alias:" not in result["context"]
-    assert result["context_tokens"] <= budget
+    assert selected["paths"][0]["alias_witnesses"]
+    assert "Alias:" in result["context"]
+    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= budget
     trace = connection.execute(
         "SELECT decisions FROM traces WHERE tenant_id=%s AND user_id=%s AND trace_id=%s",
         (authority.tenant_id, authority.user_id, result["trace_id"]),
     ).fetchone()[0]
     contribution = next(row for row in trace["fusion"] if row["unit_id"] == "continuation")
-    assert {entry["arm"] for entry in contribution["contributions"]} == {"lexical"}
-    assert "continuation" not in trace["arms"]["graph"]
+    assert {entry["arm"] for entry in contribution["contributions"]} == {"lexical", "graph"}
+    assert "continuation" in trace["arms"]["graph"]
 
 
-def test_unfit_entity_proof_recomputes_graph_rank_from_surviving_semantic_paths(recall_database):
+def test_entity_and_semantic_paths_survive_text_only_budget(recall_database, tmp_path):
     from oam.tokens import estimate_units, estimated_tokens
 
     connection, authority = recall_database
@@ -379,8 +375,8 @@ def test_unfit_entity_proof_recomputes_graph_rank_from_surviving_semantic_paths(
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector):
-            _, paths = super().ordinary(seeds, query_vector)
+        def ordinary(self, seeds, query_vector, *, include_semantic=True):
+            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
             return ("continuation", "healthy"), {
                 name: paths[name] for name in ("continuation", "healthy")
             }
@@ -388,20 +384,22 @@ def test_unfit_entity_proof_recomputes_graph_rank_from_surviving_semantic_paths(
         def related_user_fact(self, unit_ids):
             return None
 
-    service = recall_service(connection, repository.config, vector, SemanticTargetRepository)
+    path = tmp_path / "oam.yaml"
+    path.write_text("search:\n  normal:\n    graph: full\n")
+    service = recall_service(connection, load_config(path).config, vector, SemanticTargetRepository)
 
     result = service.search(
         authority,
-        SearchRequest(query="research membership", recall_level="mid", max_context_tokens=budget),
+        SearchRequest(query="research membership", recall_level="normal", max_tokens=budget),
     )
 
     target = next(item for item in result["items"] if item["unit_id"] == "continuation")
-    assert [path["relation"] for path in target["paths"]] == ["semantic"]
+    assert {path["relation"] for path in target["paths"]} >= {"entity", "semantic"}
     trace = connection.execute(
         "SELECT decisions FROM traces WHERE tenant_id=%s AND user_id=%s AND trace_id=%s",
         (authority.tenant_id, authority.user_id, result["trace_id"]),
     ).fetchone()[0]
-    assert trace["arms"]["graph"] == ["healthy", "continuation"]
+    assert set(trace["arms"]["graph"]) == {"healthy", "continuation"}
 
 
 def test_same_alias_endpoints_keep_one_witness_until_definition_is_revoked(recall_database):

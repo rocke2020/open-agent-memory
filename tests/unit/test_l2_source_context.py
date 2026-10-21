@@ -119,7 +119,7 @@ class InsightService(RecallService):
         yield self.repository
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_primary_insight_restores_complete_direct_code_without_independent_fact_hit(mode):
     service = InsightService()
     result = service.search(
@@ -162,12 +162,12 @@ def test_direct_selection_does_not_require_message_index_or_expand_siblings():
 @pytest.mark.parametrize("hard_limit", ["tokens", "results"])
 def test_incomplete_group_is_omitted_without_insight_fill_reentry(hard_limit):
     config = CONFIG
-    options = {"max_context_tokens": 160} if hard_limit == "tokens" else {}
+    options = {"max_tokens": 1} if hard_limit == "tokens" else {}
     if hard_limit == "results":
         config = CONFIG.model_copy(
             update={
                 "search": CONFIG.search.model_copy(
-                    update={"fast": CONFIG.search.fast.model_copy(update={"max_results": 3})}
+                    update={"fast": CONFIG.search.fast.model_copy(update={"max_results": 2})}
                 )
             }
         )
@@ -198,17 +198,35 @@ def test_expansion_read_errors_fail_even_when_partial_allowed(monkeypatch, metho
         )
 
 
-def test_required_direct_chunk_can_exceed_soft_detail_fraction():
-    config = CONFIG.model_copy(
-        update={
-            "context": CONFIG.context.model_copy(update={"source_detail_budget_fraction": 0.01})
-        }
-    )
-    result = InsightService(config=config).search(
-        object(), SearchRequest(query="batch implementation")
+def test_required_originals_are_complete_when_ordinary_chunks_are_disabled():
+    result = InsightService().search(
+        object(), SearchRequest(query="batch implementation", max_tokens=128)
     )
     assert ORIGINAL in result["context"]
     assert result["diagnostics"]["l2_source_expansion"][0]["status"] == "included"
+    assert not any(item.get("truncated") for item in result["items"])
+
+
+def test_insight_is_omitted_when_complete_original_exceeds_chunk_budget():
+    result = InsightService().search(
+        object(),
+        SearchRequest(
+            query="batch implementation", max_tokens=128, include={"chunks": {"max_tokens": 1}}
+        ),
+    )
+    assert "insight" not in {item["unit_id"] for item in result["items"]}
+    assert result["diagnostics"]["l2_source_expansion"][0]["status"] == "budget_omitted"
+
+
+def test_zero_learned_budget_keeps_requested_originals_from_insight_candidates():
+    result = InsightService().search(
+        object(),
+        SearchRequest(query="batch implementation", max_tokens=0, include={"chunks": {}}),
+    )
+    assert {item["unit_id"] for item in result["items"]} == {"code"}
+    assert ORIGINAL in result["context"]
+    assert result["diagnostics"]["l2_source_expansion"][0]["status"] == "budget_omitted"
+    assert all(not item["paths"] for item in result["items"])
 
 
 def test_shared_original_preserves_every_insight_and_fact_edge_once(monkeypatch):
@@ -299,7 +317,7 @@ def test_insight_reached_only_by_secondary_expansion_does_not_expand(monkeypatch
     monkeypatch.setattr(
         InsightRepository,
         "ordinary",
-        lambda *args: (
+        lambda *args, include_semantic=True: (
             ("insight",),
             {
                 "insight": [
@@ -319,7 +337,7 @@ def test_insight_reached_only_by_secondary_expansion_does_not_expand(monkeypatch
 
     monkeypatch.setattr(InsightRepository, "insight_support_units", forbidden)
     result = InsightService(rows).search(
-        object(), SearchRequest(query="batch implementation", recall_level="mid")
+        object(), SearchRequest(query="batch implementation", recall_level="normal")
     )
     assert result["diagnostics"]["l2_source_expansion"] == []
     assert ORIGINAL not in result["context"]
@@ -361,7 +379,7 @@ def test_higher_ranked_complete_group_survives_lower_group_hard_limit(monkeypatc
     config = CONFIG.model_copy(
         update={
             "search": CONFIG.search.model_copy(
-                update={"fast": CONFIG.search.fast.model_copy(update={"max_results": 4})}
+                update={"fast": CONFIG.search.fast.model_copy(update={"max_results": 3})}
             )
         }
     )

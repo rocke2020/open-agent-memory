@@ -103,7 +103,7 @@ def l2_database(core_database):
         yield connection, authority
 
 
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_l2_only_direct_candidate_restores_full_code_in_actual_context(l2_database, mode):
     connection, authority = l2_database
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config

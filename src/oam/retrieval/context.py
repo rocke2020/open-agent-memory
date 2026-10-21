@@ -4,7 +4,15 @@ import json
 from datetime import datetime
 
 from oam.quotes import unique_quote
-from oam.tokens import estimate_units, estimated_tokens
+from oam.tokens import ESTIMATOR, UNITS_PER_TOKEN, estimate_units, estimated_tokens
+
+CONTEXT_TOKENIZER = ESTIMATOR
+ORIGINAL_KINDS = frozenset({"passage", "resource_passage"})
+
+
+def context_token_count(text: str) -> int:
+    """Estimate recall tokens with the compiled Unicode regex counter."""
+    return estimated_tokens(estimate_units(text))
 
 
 def render_context(items: list[dict]) -> str:
@@ -33,6 +41,8 @@ def render_context(items: list[dict]) -> str:
 
 def _render_compact_item(item, references, sources, passage):
     header = f"[{references[item['unit_id']]}] {item['kind']} {item['origin']}"
+    if item.get("truncated"):
+        header += " native_truncated=true"
     inherited_time = bool(
         passage and item["time_evidence"] and item["time_evidence"] == passage["time_evidence"]
     )
@@ -52,7 +62,10 @@ def render_item(item: dict, source_id: str | None = None) -> str:
     reference = (
         f"Source: [{source_id}]" if source_id is not None else _render_citations(item["citations"])
     )
-    rendered = f"[{item['unit_id']}] {item['kind']} {item['origin']}\n{item['text']}\n{reference}"
+    marker = " native_truncated=true" if item.get("truncated") else ""
+    rendered = (
+        f"[{item['unit_id']}] {item['kind']} {item['origin']}{marker}\n{item['text']}\n{reference}"
+    )
     if item["time_evidence"]:
         rendered += "\n" + _render_time(item["time_evidence"])
     return rendered + _render_aliases(item)
@@ -190,76 +203,6 @@ def _supported_passage_id(item: dict, passages: dict[str, dict]) -> str | None:
     return passage["unit_id"]
 
 
-class ContextUnitCosts:
-    """Reuse rendered token costs while one recall assembles its context."""
-
-    def __init__(self):
-        self._costs: dict[tuple[int, str | None], tuple[dict, int]] = {}
-
-    def units(self, item: dict, source_id: str | None = None) -> int:
-        key = (id(item), source_id)
-        if key not in self._costs:
-            self._costs[key] = (item, estimate_units(render_item(item, source_id)))
-        return self._costs[key][1]
-
-
-class ContextUnits:
-    """Maintain the conservative standalone estimate while ranked items are appended."""
-
-    def __init__(
-        self, initial: list[dict], pool: list[dict], costs: ContextUnitCosts | None = None
-    ):
-        costs = costs or ContextUnitCosts()
-        items = {item["unit_id"]: item for item in [*initial, *pool]}
-        passages = {
-            identifier: item for identifier, item in items.items() if item["kind"] == "passage"
-        }
-        self.fact_sources = {
-            identifier: source
-            for identifier, item in items.items()
-            if (source := _supported_passage_id(item, passages)) is not None
-        }
-        self.passage_facts: dict[str, list[str]] = {}
-        for fact_id, passage_id in self.fact_sources.items():
-            self.passage_facts.setdefault(passage_id, []).append(fact_id)
-        self.raw_units = {identifier: costs.units(item) for identifier, item in items.items()}
-        self.grouped_units = {
-            identifier: costs.units(items[identifier], source)
-            for identifier, source in self.fact_sources.items()
-        }
-        self.selected_ids: set[str] = set()
-        self.selected_passages: set[str] = set()
-        self.units = 0
-        for item in initial:
-            self.add(item)
-
-    def candidate_units(self, item: dict) -> int:
-        identifier = item["unit_id"]
-        if identifier in self.selected_ids:
-            return self.units
-        source = self.fact_sources.get(identifier)
-        item_units = (
-            self.grouped_units[identifier]
-            if source in self.selected_passages
-            else self.raw_units[identifier]
-        )
-        change = item_units + (2 if self.selected_ids else 0)
-        if item["kind"] == "passage":
-            for fact_id in self.passage_facts.get(identifier, []):
-                if fact_id in self.selected_ids:
-                    change += self.grouped_units[fact_id] - self.raw_units[fact_id]
-        return self.units + change
-
-    def add(self, item: dict) -> None:
-        identifier = item["unit_id"]
-        if identifier in self.selected_ids:
-            return
-        self.units = self.candidate_units(item)
-        self.selected_ids.add(identifier)
-        if item["kind"] == "passage":
-            self.selected_passages.add(identifier)
-
-
 def source_diverse_seed_order(items: list[dict]) -> list[dict]:
     """Protect the highest-ranked user fact or original from each source."""
     groups: dict[tuple, list[dict]] = {}
@@ -293,30 +236,22 @@ def source_diverse_seed_order(items: list[dict]) -> list[dict]:
     return [*representatives, *(item for item in items if item["unit_id"] not in protected)]
 
 
-def pack_ranked(
-    items: list[dict],
-    budget: int,
-    limit: int,
-    initial: list[dict] | None = None,
-    *,
-    costs: ContextUnitCosts | None = None,
-):
-    """Admit ranked items against the declared online token estimate."""
-    costs = costs or ContextUnitCosts()
+def pack_ranked(items: list[dict], budget: int, limit: int, initial: list[dict] | None = None):
+    """Pack rendered blocks for historical trace diagnostics using their original estimate."""
     chosen = list(initial or [])
     seen = {item["unit_id"] for item in chosen}
-    units = sum(costs.units(item) + 2 for item in chosen)
+    units = sum(estimate_units(render_item(item)) + 2 for item in chosen)
     for item in items:
         if len(chosen) >= limit:
             break
         if item["unit_id"] in seen:
             continue
-        additional = costs.units(item) + 2
-        if estimated_tokens(units + additional) > budget:
+        cost = estimate_units(render_item(item)) + 2
+        if estimated_tokens(units + cost) > budget:
             continue
         chosen.append(item)
         seen.add(item["unit_id"])
-        units += additional
+        units += cost
     return chosen
 
 
@@ -381,84 +316,87 @@ def source_window_ids(
     ]
 
 
-def primary_seed_eligible(item: dict) -> bool:
-    """Assistant originals support discovery without reserving primary context."""
-    return not (
-        item["kind"] == "passage"
-        and item["citations"]
-        and item["citations"][0].get("role") == "assistant"
-    )
-
-
 def assemble_context(
     candidates: list[dict],
-    seed_items: list[dict],
     source_passages: list[dict],
     *,
-    budget: int,
-    seed_budget: int,
-    detail_fraction: float,
+    fact_budget: int,
+    chunk_budget: int,
+    include_chunks: bool,
     max_results: int,
-    costs: ContextUnitCosts | None = None,
     evidence_groups: list[list[dict]] | None = None,
 ) -> tuple[list[dict], list[str]]:
-    """Protect ranked facts and bounded source windows, then fill from ranked evidence."""
-    costs = costs or ContextUnitCosts()
-    primary = [item for item in seed_items if primary_seed_eligible(item)]
-    primary_budget = int(seed_budget * (1 - detail_fraction))
-    detail_budget = int(seed_budget * detail_fraction)
-    if evidence_groups:
-        groups = {group[0]["unit_id"]: group for group in evidence_groups}
-        candidate_rank = {item["unit_id"]: index for index, item in enumerate(candidates)}
-        primary.sort(key=lambda item: candidate_rank.get(item["unit_id"], len(candidates)))
-        pool = [*candidates, *source_passages, *(item for g in evidence_groups for item in g)]
-        chosen, budget_omissions = [], []
-
-        def append_complete(group, token_limit):
-            counter = ContextUnits(chosen, pool, costs)
-            additions = [item for item in group if item["unit_id"] not in counter.selected_ids]
-            if len(chosen) + len(additions) > max_results:
-                return False
-            for item in additions:
-                counter.add(item)
-            if estimated_tokens(counter.units) > token_limit:
-                return False
-            chosen.extend(additions)
-            return True
-
-        # Admit complete groups before ordinary source details can consume their room.
-        for item in primary:
-            group = groups.get(item["unit_id"])
-            if group is not None:
-                if not append_complete(group, budget):
-                    budget_omissions.append(item["unit_id"])
-            else:
-                append_complete([item], min(budget, primary_budget))
-        details = pack_ranked(source_passages, detail_budget, max_results, costs=costs)
-        for item in details:
-            append_complete([item], budget)
-        for item in candidates:
-            if item["unit_id"] in groups:
-                continue  # An omitted Insight must never re-enter through ordinary fill.
-            if not append_complete([item], budget):
-                budget_omissions.append(item["unit_id"])
-        return chosen, list(dict.fromkeys(budget_omissions))
-    primary_selected = pack_ranked(primary, primary_budget, max_results, costs=costs)
-    detail_selected = pack_ranked(source_passages, detail_budget, max_results, costs=costs)
-    chosen = pack_ranked(primary_selected + detail_selected, seed_budget, max_results, costs=costs)
-    chosen = pack_ranked(primary + source_passages, seed_budget, max_results, chosen, costs=costs)
-    seen = {item["unit_id"] for item in chosen}
-    counter = ContextUnits(chosen, candidates, costs)
-    budget_omissions = []
+    """Select learned text and originals independently, preserving complete support groups."""
+    groups = {group[0]["unit_id"]: group for group in evidence_groups or []}
+    pool = {
+        item["unit_id"]: item
+        for item in [*candidates, *source_passages, *(item for g in groups.values() for item in g)]
+    }
+    costs = {key: estimate_units(item["text"]) for key, item in pool.items()}
+    fact_limit = fact_budget * UNITS_PER_TOKEN
+    chunk_limit = chunk_budget * UNITS_PER_TOKEN
+    facts: dict[str, dict] = {}
+    originals: dict[str, dict] = {}
+    fact_units = chunk_units = 0
+    omissions = []
+    first_ordinary = None
     for item in candidates:
-        if len(chosen) >= max_results:
-            break
-        if item["unit_id"] in seen:
+        identifier = item["unit_id"]
+        if item["kind"] in ORIGINAL_KINDS or identifier in facts:
             continue
-        if estimated_tokens(counter.candidate_units(item)) > budget:
-            budget_omissions.append(item["unit_id"])
+        if item["kind"] != "insight" and first_ordinary is None:
+            first_ordinary = item
+        group = groups.get(identifier)
+        if item["kind"] == "insight" and group is None:
+            omissions.append(identifier)
             continue
-        chosen.append(item)
-        seen.add(item["unit_id"])
-        counter.add(item)
-    return chosen, budget_omissions
+        additions = {row["unit_id"]: row for row in group or [item]}
+        new_facts = {
+            key: row
+            for key, row in additions.items()
+            if row["kind"] not in ORIGINAL_KINDS and key not in facts
+        }
+        new_originals = {
+            key: row
+            for key, row in additions.items()
+            if row["kind"] in ORIGINAL_KINDS and key not in originals
+        }
+        added_fact_units = sum(costs[key] for key in new_facts)
+        added_original_units = sum(costs[key] for key in new_originals)
+        if (
+            fact_units + added_fact_units > fact_limit
+            or chunk_units + added_original_units > chunk_limit
+            or len(facts) + len(new_facts) > max_results
+            or len(originals) + len(new_originals) > max_results
+        ):
+            omissions.append(identifier)
+            continue
+        facts.update(new_facts)
+        originals.update(new_originals)
+        fact_units += added_fact_units
+        chunk_units += added_original_units
+    if not facts and fact_budget > 0 and first_ordinary is not None:
+        identifier = first_ordinary["unit_id"]
+        facts[identifier] = first_ordinary
+        omissions = [node for node in omissions if node != identifier]
+    if include_chunks:
+        original_pool = [
+            *candidates,
+            *source_passages,
+            *(
+                item
+                for group in groups.values()
+                for item in group
+                if item["kind"] in ORIGINAL_KINDS
+            ),
+        ]
+        for item in original_pool:
+            identifier = item["unit_id"]
+            if item["kind"] not in ORIGINAL_KINDS or identifier in originals:
+                continue
+            if len(originals) >= max_results or chunk_units >= chunk_limit:
+                omissions.append(identifier)
+                continue
+            originals[identifier] = item
+            chunk_units += costs[identifier]
+    return [*facts.values(), *originals.values()], list(dict.fromkeys(omissions))

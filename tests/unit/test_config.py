@@ -174,7 +174,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
         0.7,
         20,
     )
-    assert config.search.mid_arm_weights.model_dump() == {
+    assert config.search.normal_arm_weights.model_dump() == {
         "lexical": 1.0,
         "dense": 1.0,
         "graph": 0.1,
@@ -182,23 +182,22 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     }
     assert config.search.graph_seed_min_similarity == 0.3
     assert config.search.graph_seed_max == 12
-    assert config.search.mid.source_seed_results == 36
+    assert config.search.normal.source_seed_results == 36
     assert config.search.relation_hops == 2
     assert config.search.relation_candidates == 32
     assert config.search.entity_candidates_per_entity == 200
     assert config.search.ann_iterative_scan == "strict_order"
     assert config.search.ann_scan_max_tuples == 20_000
     assert (
-        config.search.mid.channel_candidates,
-        config.search.mid.fused_candidates,
-        config.search.mid.source_seed_results,
-        config.search.mid.max_results,
-    ) == (64, 128, 36, 96)
-    assert (config.context.default_tokens, config.context.max_tokens) == (2048, 18000)
-    assert config.context.source_seed_tokens == 8192
-    assert config.context.source_detail_budget_fraction == 0.4
+        config.search.normal.channel_candidates,
+        config.search.normal.fused_candidates,
+        config.search.normal.source_seed_results,
+        config.search.normal.max_results,
+    ) == (64, 154, 36, 154)
+    assert config.context.facts_default_tokens == 4096
     assert config.context.tokenizer == "oam-unicode-quarter-v1"
-    assert (config.chunk.recall.default_tokens, config.chunk.recall.max_tokens) == (8192, 8192)
+    assert config.chunk.recall.default_tokens == 8192
+    assert config.profile.max_response_tokens == 18000
     assert config.profile.max_content_bytes == 16384
     assert config.profile.max_output_tokens == 4096
     assert config.profile.attempt_timeout_seconds == 180
@@ -264,7 +263,7 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
     (config_directory / "oam.yaml").write_text(yaml.safe_dump(base))
     override = tmp_path / "operator.yaml"
     override.write_text(
-        "search:\n  fast:\n    max_results: 19\nchunk:\n  recall:\n    max_tokens: 203\n"
+        "search:\n  fast:\n    max_results: 19\ncontext:\n  facts_default_tokens: 203\n"
     )
 
     output = subprocess.check_output(
@@ -275,7 +274,7 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
             "c = load_config(sys.argv[1]).config; "
             "print(c.resource.max_bytes, c.search.fast.fused_candidates, "
             "c.search.fast.max_results, c.chunk.ingestion.target_estimated_tokens, "
-            "c.chunk.recall.default_tokens, c.chunk.recall.max_tokens, "
+            "c.chunk.recall.default_tokens, c.context.facts_default_tokens, "
             "c.index.insight_consolidation_delay_hours)",
             str(override),
         ],

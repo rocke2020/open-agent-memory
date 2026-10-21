@@ -42,11 +42,24 @@ chunk:
     extractable_overlap_estimated_tokens: 0
     # The prior passage's tail is context only; it cannot support a new fact.
     previous_context_estimated_tokens: 128
-  # Reserved response budget for include.chunks; separate recalled chunks are not yet served.
-  # These limits do not control ingestion splitting or extraction grouping.
+  # Approximate text target across recalled originals, not a per-chunk limit.
+  # Ordinary originals include the whole chunk that reaches/crosses the target, then stop.
+  # Separate from the learned-text budget in context.facts_default_tokens; metadata is excluded.
+  # API include.chunks enables ordinary originals; include.chunks.max_tokens overrides the default.
+  # This does not control ingestion splitting or extraction grouping.
   recall:
     default_tokens: 8192
-    max_tokens: 8192
+
+context:
+  # Default approximate token budget for learned fact and Insight text only.
+  # This does not cap the complete returned context.
+  # Original chunk text uses a separate budget: chunk.recall.default_tokens (8192).
+  # Headers, citations, timestamps and path metadata are outside both text budgets.
+  # There is no combined limit on facts + chunks + metadata.
+  # API request max_tokens overrides this default.
+  facts_default_tokens: 4096
+  # Unicode estimate for both text budgets and complete-context reporting.
+  tokenizer: oam-unicode-quarter-v1
 
 extraction:
   # Complete model input, including instructions, passage metadata and references.
@@ -69,9 +82,6 @@ extraction:
   reference_max_input_tokens: 2048
 
 search:
-  # Default stored entity/alias and causal expansion for fast recall; requests may override.
-  # Semantic-neighbor expansion remains excluded from fast graph.
-  fast_graph: false
   # Per-query limit measured with the local token estimate.
   max_query_tokens: 512
   # Maximum queries in a batch or generated decomposition plan.
@@ -84,8 +94,8 @@ search:
   # D applies to all indexed units; current HTML passages may also supply C/B/A.
   # Higher weights favor those structural fields when present.
   fts_rank_weights: [0.1, 0.2, 0.4, 1.0]
-  # Only mid uses these arm weights; fast and deep use equal fusion weights.
-  mid_arm_weights:
+  # Only normal uses these arm weights; fast uses equal fusion weights.
+  normal_arm_weights:
     lexical: 1.0
     dense: 1.0
     # Entity, semantic, and causal neighbors are indirect evidence.
@@ -106,10 +116,6 @@ search:
   entities_per_seed: 8
   # Cap each semantic direction and causal hop at this many links.
   links_per_seed: 16
-  # Maximum L2 parent Insights expanded per dense fact seed in deep mode.
-  hierarchy_parents_per_seed: 2
-  # Maximum related child facts expanded per L2 parent in deep mode.
-  hierarchy_children_per_parent: 8
   # Maximum temporal seeds selected before spreading.
   temporal_seed_max: 10
   # Spread temporal seeds across the requested time window.
@@ -126,24 +132,23 @@ search:
   ann_scan_max_tuples: 20000
   # Per mode: channel_candidates caps each arm; fused_candidates caps rank fusion.
   # rerank_candidates caps optional reranker input; source_seed_results caps seed items.
-  # max_results caps returned items after source-detail assembly.
+  # max_results caps each learned-text and original-text pool independently.
+  # The combined response can contain up to twice this many items.
+  # graph: off skips expansion; light uses stored entity/alias and causal links;
+  # full adds semantic neighbors. Quote "off" so YAML does not parse it as false.
   fast:
+    graph: "off"
     channel_candidates: 64
     fused_candidates: 128
     source_seed_results: 36
     max_results: 96
-  mid:
+  normal:
+    graph: light
     channel_candidates: 64
-    fused_candidates: 128
+    fused_candidates: 154
     rerank_candidates: 48
     source_seed_results: 36
-    max_results: 96
-  deep:
-    channel_candidates: 64
-    fused_candidates: 128
-    rerank_candidates: 64
-    source_seed_results: 56
-    max_results: 96
+    max_results: 154
 
 index:
   # Maximum UTF-8 bytes for both the original entity name and its normalized lookup key.
@@ -184,25 +189,13 @@ recall:
   turn_deadline_seconds: 10
   # Maximum fast-search duration; caller and trusted-turn deadlines may shorten it.
   fast_deadline_seconds: 3
-  # Maximum mid-search duration; caller and trusted-turn deadlines may shorten it.
-  mid_deadline_seconds: 5
-  # Maximum deep-search duration; caller and trusted-turn deadlines may shorten it.
-  deep_deadline_seconds: 10
-
-context:
-  # Returned context budget when the caller omits max_context_tokens.
-  default_tokens: 2048
-  # Largest context budget a caller may request; measured with the local token estimate.
-  max_tokens: 18000
-  # Maximum budget for initial ranked seeds and their source detail.
-  source_seed_tokens: 8192
-  # Initial share of the seed budget allocated to source passages.
-  source_detail_budget_fraction: 0.4
-  # Local Unicode-based token estimate used for context budgeting.
-  tokenizer: oam-unicode-quarter-v1
+  # Maximum normal-search duration; caller and trusted-turn deadlines may shorten it.
+  normal_deadline_seconds: 5
 
 profile:
   enabled: true
+  # Stored Profile content budget for read/unchanged responses, using the local token estimate.
+  max_response_tokens: 18000
   # Maximum accepted UTF-8 Profile content: 16 KB; separate from the model's token cap.
   max_content_bytes: 16384
   # Completion-token cap for Profile refresh generation.
@@ -362,5 +355,5 @@ models:
     api_key_env: OAM_EMBEDDING_KEY
     # Declared capabilities; embedding roles require embeddings.
     capabilities: [embeddings]
-  # null disables the optional reranking stage; a binding enables it for mid/deep search.
+  # null disables the optional reranking stage; a binding enables it for normal search.
   reranker: null

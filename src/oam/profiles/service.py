@@ -237,7 +237,7 @@ class ProfileService:
                         self.config,
                         inputs,
                         snapshot,
-                        self.config.context.max_tokens,
+                        self.config.profile.max_response_tokens,
                     ),
                 }
             if (

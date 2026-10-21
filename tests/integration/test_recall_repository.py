@@ -664,7 +664,7 @@ def test_underscore_identifier_uses_exact_anchor_instead_of_partial_fts(recall_d
     assert [row["unit_id"] for row in repository.anchors("patient_42", 10)] == ["exact"]
 
 
-def test_fast_service_returns_cited_context_with_estimated_budget(recall_database):
+def test_fast_service_returns_cited_context_with_independent_text_budget(recall_database):
     from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
@@ -675,13 +675,14 @@ def test_fast_service_returns_cited_context_with_estimated_budget(recall_databas
     service = RecallService(config, TransactionPool(connection), models, generation_id="generation")
 
     result = service.search(
-        authority, SearchRequest(query="apple", recall_level="fast", max_context_tokens=256)
+        authority, SearchRequest(query="apple", recall_level="fast", max_tokens=256)
     )
 
     assert result["items"][0]["unit_id"] == "apple"
     assert "apple trees" in result["context"]
     assert "source_id" in result["context"]
-    assert 0 < result["context_tokens"] <= 256
+    assert result["context_tokens"] > 0
+    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= 256
     assert result["diagnostics"]["executed_stages"] == [
         "fts",
         "anchors",
@@ -691,7 +692,7 @@ def test_fast_service_returns_cited_context_with_estimated_budget(recall_databas
     ]
     assert result["diagnostics"]["generative_calls"] == 0
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
-    empty = service.search(authority, SearchRequest(query="apple", max_context_tokens=1))
+    empty = service.search(authority, SearchRequest(query="apple", max_tokens=0))
     assert empty["context"] == ""
     assert empty["items"] == []
 
@@ -1033,8 +1034,8 @@ def test_recall_planning_settings_are_transaction_local(recall_database):
     assert connection.execute("SHOW plan_cache_mode").fetchone()[0] == "force_generic_plan"
 
 
-@pytest.mark.parametrize("mode", ["mid", "deep"])
-def test_expanded_modes_follow_causal_direction_and_sibling_hierarchy(recall_database, mode):
+@pytest.mark.parametrize("mode", ["normal"])
+def test_normal_follows_causal_direction_without_expanding_l2_siblings(recall_database, mode):
     from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
@@ -1068,116 +1069,17 @@ def test_expanded_modes_follow_causal_direction_and_sibling_hierarchy(recall_dat
     )
 
     result = service.search(
-        authority, SearchRequest(query="anchorword", recall_level=mode, max_context_tokens=2048)
+        authority, SearchRequest(query="anchorword", recall_level=mode, max_tokens=2048)
     )
 
     ids = {item["unit_id"] for item in result["items"]}
-    assert ids == ({"move", "rent", "job", "cheap"} if mode == "deep" else {"move", "rent", "job"})
+    assert ids == {"move", "rent", "job"}
     assert "graph" in result["diagnostics"]["executed_stages"]
-    assert ("hierarchy" in result["diagnostics"]["executed_stages"]) == (mode == "deep")
     assert "rerank" in result["diagnostics"]["omitted_stages"]
     assert result["diagnostics"]["degraded"] == []
 
 
-def test_hierarchy_applies_eligibility_before_parent_and_sibling_limits(recall_database):
-    from oam.retrieval.repository import RecallRepository
-
-    connection, authority = recall_database
-    add_fact(connection, authority, "seed", "Seed fact")
-    add_fact(connection, authority, "hidden", "Hidden support", eligible=False)
-    add_fact(connection, authority, "alpha", "First sibling", direction=0.8)
-    add_fact(connection, authority, "beta", "Second sibling", direction=0.8)
-    add_insight(connection, authority, "a_bad", ("seed", "hidden"))
-    add_insight(connection, authority, "b_good", ("seed", "alpha", "beta"))
-    connection.execute(
-        "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
-        "source_version,evidence_id,memory_id,generation_id,content_text,locator,embedding,"
-        "lexical_text) SELECT tenant_id,user_id,'a_stale',kind,origin,source_id,"
-        "source_version,evidence_id,memory_id,'stale',content_text,locator,"
-        "(SELECT embedding FROM search_units WHERE tenant_id=%s AND unit_id='seed'),"
-        "lexical_text FROM search_units WHERE tenant_id=%s AND unit_id='alpha'",
-        (authority.tenant_id, authority.tenant_id),
-    )
-    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    config = config.model_copy(
-        update={
-            "search": config.search.model_copy(
-                update={"hierarchy_parents_per_seed": 1, "hierarchy_children_per_parent": 1}
-            )
-        }
-    )
-    connection.execute("SET LOCAL ROLE oam_api")
-    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
-    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
-
-    assert repository.hierarchy(("seed",), vector) == (
-        ("alpha",),
-        {"alpha": [{"arm": "hierarchy", "nodes": ["seed", "b_good", "alpha"]}]},
-    )
-
-
-def test_hierarchy_retains_all_valid_parent_paths_for_one_sibling(recall_database):
-    from oam.retrieval.repository import RecallRepository
-
-    connection, authority = recall_database
-    add_fact(connection, authority, "seed", "Seed fact")
-    add_fact(connection, authority, "sibling", "Shared sibling")
-    add_insight(connection, authority, "first", ("seed", "sibling"))
-    add_insight(connection, authority, "second", ("seed", "sibling"))
-    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    connection.execute("SET LOCAL ROLE oam_api")
-    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
-    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
-
-    assert repository.hierarchy(("seed",), vector) == (
-        ("sibling",),
-        {
-            "sibling": [
-                {"arm": "hierarchy", "nodes": ["seed", "first", "sibling"]},
-                {"arm": "hierarchy", "nodes": ["seed", "second", "sibling"]},
-            ]
-        },
-    )
-
-
-def test_hierarchy_rechecks_source_revision_and_generation(recall_database):
-    from oam.retrieval.repository import RecallRepository
-
-    connection, authority = recall_database
-    add_fact(connection, authority, "seed", "Seed fact")
-    add_fact(connection, authority, "sibling", "Sibling fact")
-    add_insight(connection, authority, "parent", ("seed", "sibling"))
-    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
-    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
-    assert repository.hierarchy(("seed",), vector)[0] == ("sibling",)
-
-    connection.execute(
-        "UPDATE source_versions SET status='superseded' WHERE tenant_id=%s AND source_id='sibling'",
-        (authority.tenant_id,),
-    )
-    assert repository.hierarchy(("seed",), vector) == ((), {})
-    connection.execute(
-        "UPDATE source_versions SET status='active' WHERE tenant_id=%s AND source_id='sibling'",
-        (authority.tenant_id,),
-    )
-    connection.execute(
-        "UPDATE sources SET status='deleted' WHERE tenant_id=%s AND source_id='sibling'",
-        (authority.tenant_id,),
-    )
-    assert repository.hierarchy(("seed",), vector) == ((), {})
-    connection.execute(
-        "UPDATE sources SET status='active' WHERE tenant_id=%s AND source_id='sibling'",
-        (authority.tenant_id,),
-    )
-    connection.execute(
-        "UPDATE users SET index_generation_id='new' WHERE tenant_id=%s AND user_id=%s",
-        (authority.tenant_id, authority.user_id),
-    )
-    assert repository.hierarchy(("seed",), vector) == ((), {})
-
-
-@pytest.mark.parametrize("mode", ["fast", "mid"])
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_database, mode):
     from datetime import UTC, datetime
 
@@ -1223,14 +1125,14 @@ def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_databa
         SearchRequest(
             query="last week what I did",
             recall_level="fast",
-            max_context_tokens=2048,
+            max_tokens=2048,
             reference_time="2026-01-14T12:00:00Z",
         )
         if mode == "fast"
         else SearchRequest(
             query="anchorword",
-            recall_level="mid",
-            max_context_tokens=2048,
+            recall_level="normal",
+            max_tokens=2048,
             time_basis="event",
             time_window={"start": "2026-01-01T00:00:00Z", "end": "2026-01-11T00:00:00Z"},
         )
@@ -1285,7 +1187,7 @@ def test_configured_reranker_failure_obeys_partial_policy(recall_database, allow
         FailingReranker(config.index.embedding_dimensions),
         generation_id="generation",
     )
-    request = SearchRequest(query="apple", recall_level="mid", allow_partial=allow_partial)
+    request = SearchRequest(query="apple", recall_level="normal", allow_partial=allow_partial)
     if not allow_partial:
         with pytest.raises(RecallUnavailable, match="rerank"):
             service.search(authority, request)
@@ -1295,7 +1197,7 @@ def test_configured_reranker_failure_obeys_partial_policy(recall_database, allow
         assert result["diagnostics"]["degraded"] == ["rerank"]
 
 
-@pytest.mark.parametrize("mode", ["mid", "deep"])
+@pytest.mark.parametrize("mode", ["normal"])
 def test_configured_reranker_scores_once_and_controls_final_order(recall_database, mode):
     from oam.config import ModelsConfig
     from oam.models.runtime import RerankResult
@@ -1587,7 +1489,7 @@ def test_point_time_basis_is_visible_in_returned_evidence(recall_database):
     assert {"role": "mentioned", "at": "2026-01-03T00:00:00+00:00"} in row["time_evidence"]
 
 
-@pytest.mark.parametrize(("mode", "limit"), [("fast", 64), ("mid", 1)])
+@pytest.mark.parametrize(("mode", "limit"), [("fast", 64), ("normal", 1)])
 def test_exact_dense_ties_use_stable_identity_after_similarity(recall_database, mode, limit):
     from oam.retrieval.repository import RecallRepository
 

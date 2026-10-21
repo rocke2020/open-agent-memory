@@ -8,8 +8,8 @@ from oam.auth.credentials import AuthorizedUser
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.db.entity_eligibility import ELIGIBLE_ENTITY_NAME_SUPPORT
-from oam.retrieval.context import render_context
-from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
+from oam.retrieval.context import context_token_count, render_context
+from oam.tokens import ESTIMATOR
 
 
 class TraceNotFound(LookupError):
@@ -123,11 +123,18 @@ class TraceRepository:
         if mode != "reassemble_recorded":
             raise ValueError("unsupported recorded replay mode")
         context = render_context(result["items"])
-        tokens = estimated_tokens(estimate_units(context))
+        if result["tokenizer"] == ESTIMATOR:
+            tokens = context_token_count(context)
+        elif result["tokenizer"] == "o200k_base":
+            import tiktoken
+
+            tokens = len(tiktoken.get_encoding("o200k_base").encode_ordinary(context))
+        else:
+            tokens = None
         exact = (
             context == result["context"]
             and tokens == result["context_tokens"]
-            and result["tokenizer"] == ESTIMATOR
+            and result["tokenizer"] in {ESTIMATOR, "o200k_base"}
         )
         return {
             "trace_id": trace_id,

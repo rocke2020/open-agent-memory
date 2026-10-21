@@ -9,15 +9,29 @@ from oam.contracts.retain import RecallRequest
 from oam.contracts.search import RecallLevel, SearchManyRequest, SearchRequest
 
 
-def test_search_defaults_to_mid_without_profile_selection() -> None:
+def test_search_defaults_to_normal_without_profile_selection() -> None:
     request = SearchRequest(query="What changed?")
     batch = SearchManyRequest(queries=["What changed?"])
 
-    assert request.recall_level is RecallLevel.MID
-    assert batch.recall_level is RecallLevel.MID
+    assert request.recall_level.value == "normal"
+    assert batch.recall_level.value == "normal"
     assert request.allow_partial is False
     assert "include_profile" not in SearchRequest.model_json_schema()["properties"]
     assert "include_profile" not in SearchManyRequest.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize(
+    ("request_type", "query"),
+    [
+        (RecallRequest, {"user_id": "alice", "query": "q"}),
+        (SearchRequest, {"query": "q"}),
+        (SearchManyRequest, {"queries": ["q"]}),
+    ],
+)
+@pytest.mark.parametrize("level", ["deep", "mid"])
+def test_search_rejects_removed_recall_modes(request_type, query, level) -> None:
+    with pytest.raises(ValidationError, match="Input should be 'fast' or 'normal'"):
+        request_type(**query, recall_level=level)
 
 
 @pytest.mark.parametrize("profile_selection", [True, False])
@@ -39,14 +53,14 @@ def test_search_rejects_blank_query() -> None:
         SearchRequest(query="  ")
 
 
-def test_mid_accepts_a_strict_time_basis_and_window() -> None:
+def test_normal_accepts_a_strict_time_basis_and_window() -> None:
     request = SearchRequest(
         query="What happened in March?",
-        recall_level="mid",
+        recall_level="normal",
         time_basis="event",
         time_window={"start": "2026-03-01T00:00:00Z", "end": "2026-04-01T00:00:00Z"},
     )
-    assert request.recall_level.value == "mid"
+    assert request.recall_level.value == "normal"
     assert request.time_basis.value == "event"
     assert request.time_window.end == datetime(2026, 4, 1, tzinfo=UTC)
 
@@ -77,19 +91,19 @@ def test_search_many_rejects_the_entire_oversized_batch() -> None:
 def test_search_accepts_explicit_ranking_window_and_output_budget() -> None:
     request = SearchRequest(
         query="Where did Lin live in June?",
-        recall_level="deep",
+        recall_level="normal",
         time_basis="event",
         time_window={
             "start": "2026-06-01T00:00:00Z",
             "end": "2026-07-01T00:00:00Z",
         },
-        max_context_tokens=1024,
+        max_tokens=1024,
         include={"chunks": {"max_tokens": 2048}},
     )
 
-    assert request.recall_level is RecallLevel.DEEP
+    assert request.recall_level is RecallLevel.NORMAL
     assert request.time_window.start == datetime(2026, 6, 1, tzinfo=UTC)
-    assert request.max_context_tokens == 1024
+    assert request.max_tokens == 1024
     assert request.include.chunks is not None
     assert request.include.chunks.max_tokens == 2048
 
@@ -138,19 +152,28 @@ def test_search_batch_limit_follows_selected_config(tmp_path: Path, limit: int) 
 
 
 @pytest.mark.parametrize("request_type", [SearchRequest, SearchManyRequest])
-def test_search_output_budgets_follow_selected_config(tmp_path: Path, request_type: type) -> None:
+def test_search_text_budgets_have_no_configured_ceiling(tmp_path: Path, request_type: type) -> None:
     path = tmp_path / "operator.yaml"
     path.write_text(
-        "context:\n  default_tokens: 10\n  max_tokens: 20\n"
-        "chunk:\n  recall:\n    default_tokens: 30\n    max_tokens: 40\n"
+        "context:\n  facts_default_tokens: 10\nchunk:\n  recall:\n    default_tokens: 30\n"
     )
     config = load_config(path).config
     query = {"query": "q"} if request_type is SearchRequest else {"queries": ["q"]}
 
     request_type(
-        **query, max_context_tokens=20, include={"chunks": {"max_tokens": 40}}
+        **query, max_tokens=100_000, include={"chunks": {"max_tokens": 200_000}}
     ).validate_limits(config)
-    with pytest.raises(ValueError, match="20"):
-        request_type(**query, max_context_tokens=21).validate_limits(config)
-    with pytest.raises(ValueError, match="40"):
-        request_type(**query, include={"chunks": {"max_tokens": 41}}).validate_limits(config)
+
+
+@pytest.mark.parametrize("request_type", [SearchRequest, SearchManyRequest])
+def test_search_accepts_zero_text_budgets_and_rejects_the_removed_aggregate_name(request_type):
+    query = {"query": "q"} if request_type is SearchRequest else {"queries": ["q"]}
+    request = request_type(**query, max_tokens=0, include={"chunks": {"max_tokens": 0}})
+    assert request.max_tokens == 0
+    assert request.include.chunks.max_tokens == 0
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        request_type(**query, max_context_tokens=1)
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        request_type(**query, max_tokens=-1)
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        request_type(**query, include={"chunks": {"max_tokens": -1}})

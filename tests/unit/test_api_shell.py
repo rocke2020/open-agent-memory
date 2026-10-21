@@ -149,22 +149,22 @@ async def test_binding_names_alone_cannot_make_the_foundation_ready(tmp_path) ->
         ("search:\n  max_queries: 1\n", "search-many", {"queries": ["one", "two"]}, 422),
         ("search:\n  max_queries: 5\n", "search-many", {"queries": ["q"] * 5}, 200),
         (
-            "context:\n  default_tokens: 16\n  max_tokens: 32\n",
+            "context:\n  facts_default_tokens: 16\n",
             "search",
             {
                 "query": "q",
-                "max_context_tokens": 33,
+                "max_tokens": 33,
             },
-            422,
+            200,
         ),
         (
-            "chunk:\n  recall:\n    default_tokens: 16\n    max_tokens: 32\n",
+            "chunk:\n  recall:\n    default_tokens: 16\n",
             "decompose-and-search",
             {
                 "query": "q",
                 "include": {"chunks": {"max_tokens": 33}},
             },
-            422,
+            200,
         ),
     ],
 )
@@ -177,6 +177,12 @@ async def test_http_admission_uses_selected_config_limits(
 
         def search_many(self, actor, user_id, body):
             return {"queries": body.queries}
+
+        def search(self, actor, user_id, body):
+            return {"max_tokens": body.max_tokens}
+
+        def decompose_and_search(self, actor, user_id, body):
+            return {"chunks": body.include.chunks.model_dump()}
 
     config = tmp_path / "oam.yaml"
     config.write_text(config_text, encoding="utf-8")
@@ -220,9 +226,53 @@ async def test_http_admission_uses_selected_config_limits(
 
 async def test_openapi_search_contracts_exclude_profile_selection(client) -> None:
     schemas = (await client.get("/openapi.json")).json()["components"]["schemas"]
+    assert schemas["RecallLevel"]["enum"] == ["fast", "normal"]
     for name in ("RecallRequest", "SearchRequest", "SearchManyRequest"):
         assert "include_profile" not in schemas[name]["properties"]
+        assert "max_context_tokens" not in schemas[name]["properties"]
+        assert schemas[name]["properties"]["max_tokens"]["anyOf"][0]["minimum"] == 0
         assert schemas[name]["additionalProperties"] is False
+    assert schemas["RecalledChunkOptions"]["properties"]["max_tokens"]["anyOf"][0]["minimum"] == 0
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/v1/recall", {"user_id": "scope", "query": "q"}),
+        ("/v1/users/scope/search-many", {"queries": ["q"]}),
+        ("/v1/users/scope/decompose-and-search", {"query": "q"}),
+    ],
+)
+@pytest.mark.parametrize("level", ["deep", "mid"])
+async def test_http_rejects_removed_modes_before_retrieval(tmp_path, path, payload, level) -> None:
+    class AdmissionRuntime:
+        def authenticate(self, secret):
+            pass
+
+        def search(self, actor, user_id, body):
+            return {}
+
+        def search_many(self, actor, user_id, body):
+            return {}
+
+        def decompose_and_search(self, actor, user_id, body):
+            return {}
+
+    config = tmp_path / "oam.yaml"
+    config.write_text("{}\n")
+    transport = httpx.ASGITransport(app=create_app(config, runtime=AdmissionRuntime()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            path,
+            json={**payload, "recall_level": level},
+            headers={"Authorization": "Bearer synthetic-key"},
+        )
+
+    assert response.status_code == 422
+    assert any(
+        error["loc"] == ["body", "recall_level"] and error["type"] == "enum"
+        for error in response.json()["detail"]
+    )
 
 
 async def test_capabilities_publish_limits_without_secrets(client) -> None:
@@ -233,7 +283,11 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["contract_version"] == "0.0.1"
     assert payload["limits"]["resource"]["max_bytes"] == 100 * 1024 * 1024
     assert payload["limits"]["chunk"]["ingestion"]["max_estimated_tokens"] == 4096
-    assert payload["limits"]["chunk"]["recall"]["max_tokens"] == 8192
+    assert payload["limits"]["chunk"]["recall"] == {"default_tokens": 8192}
+    assert payload["limits"]["context"] == {
+        "facts_default_tokens": 4096,
+        "tokenizer": "oam-unicode-quarter-v1",
+    }
     assert payload["features"]["source_lifecycle"] is True
     assert payload["features"]["recorded_debug"] is True
     assert payload["features"]["portable_export"] is True
@@ -242,7 +296,8 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["limits"]["model"]["attempt_timeout_seconds"] == 60
     assert payload["limits"]["user"]["max_chats"] == 1000
     assert payload["features"]["python_sdk"] is False
-    assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "mid", "deep"))
+    assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "normal"))
+    assert "deep_recall" not in payload["features"]
     assert payload["features"]["batch_recall"] is True
     assert payload["features"]["planner"] is False
     assert "api_key" not in response.text.lower()

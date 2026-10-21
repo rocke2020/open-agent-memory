@@ -49,8 +49,7 @@ class RecallDeadlineCoordinator:
         now = self._aware(self._clock(), "clock")
         level_seconds = {
             RecallLevel.FAST: self._config.fast_deadline_seconds,
-            RecallLevel.MID: self._config.mid_deadline_seconds,
-            RecallLevel.DEEP: self._config.deep_deadline_seconds,
+            RecallLevel.NORMAL: self._config.normal_deadline_seconds,
         }[recall_level]
         candidates = [now + timedelta(seconds=level_seconds)]
         if caller_deadline is not None:

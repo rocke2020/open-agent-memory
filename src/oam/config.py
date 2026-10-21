@@ -81,6 +81,7 @@ class ExtractionConfig(FrozenModel):
 
 
 class SearchTier(FrozenModel):
+    graph: Literal["off", "light", "full"]
     channel_candidates: PositiveInt
     fused_candidates: PositiveInt
     source_seed_results: PositiveInt
@@ -96,7 +97,7 @@ class SearchTier(FrozenModel):
         return self
 
 
-class MidArmWeights(FrozenModel):
+class NormalArmWeights(FrozenModel):
     lexical: PositiveFloat
     dense: PositiveFloat
     graph: PositiveFloat
@@ -104,13 +105,12 @@ class MidArmWeights(FrozenModel):
 
 
 class SearchConfig(FrozenModel):
-    fast_graph: bool = Field(strict=True)
     max_query_tokens: PositiveInt
     max_queries: PositiveInt
     query_concurrency: PositiveInt
     rrf_k: PositiveInt
     fts_rank_weights: tuple[float, float, float, float]
-    mid_arm_weights: MidArmWeights
+    normal_arm_weights: NormalArmWeights
     graph_seed_min_similarity: float = Field(ge=0, le=1)
     graph_seed_max: PositiveInt
     relation_hops: Literal[2]
@@ -118,8 +118,6 @@ class SearchConfig(FrozenModel):
     entity_candidates_per_entity: PositiveInt
     entities_per_seed: PositiveInt
     links_per_seed: PositiveInt
-    hierarchy_parents_per_seed: PositiveInt
-    hierarchy_children_per_parent: PositiveInt
     temporal_seed_max: PositiveInt
     temporal_coverage_buckets: PositiveInt
     temporal_neighbors: PositiveInt
@@ -128,8 +126,7 @@ class SearchConfig(FrozenModel):
     ann_iterative_scan: Literal["strict_order"]
     ann_scan_max_tuples: PositiveInt
     fast: SearchTier
-    mid: SearchTier
-    deep: SearchTier
+    normal: SearchTier
 
     @field_validator("fts_rank_weights")
     @classmethod
@@ -142,33 +139,16 @@ class SearchConfig(FrozenModel):
 class RecallConfig(FrozenModel):
     turn_deadline_seconds: PositiveFloat
     fast_deadline_seconds: PositiveFloat
-    mid_deadline_seconds: PositiveFloat
-    deep_deadline_seconds: PositiveFloat
+    normal_deadline_seconds: PositiveFloat
 
 
 class ContextConfig(FrozenModel):
-    default_tokens: PositiveInt
-    max_tokens: PositiveInt
-    source_seed_tokens: PositiveInt
-    source_detail_budget_fraction: float = Field(gt=0, lt=1)
+    facts_default_tokens: PositiveInt
     tokenizer: Literal["oam-unicode-quarter-v1"]
-
-    @model_validator(mode="after")
-    def validate_budget(self) -> ContextConfig:
-        if self.default_tokens > self.max_tokens:
-            raise ValueError("default_tokens cannot exceed max_tokens")
-        return self
 
 
 class RecalledChunksConfig(FrozenModel):
     default_tokens: PositiveInt
-    max_tokens: PositiveInt
-
-    @model_validator(mode="after")
-    def validate_budget(self) -> RecalledChunksConfig:
-        if self.default_tokens > self.max_tokens:
-            raise ValueError("default_tokens cannot exceed max_tokens")
-        return self
 
 
 class ChunkConfig(FrozenModel):
@@ -178,6 +158,7 @@ class ChunkConfig(FrozenModel):
 
 class ProfileConfig(FrozenModel):
     enabled: bool = True
+    max_response_tokens: PositiveInt
     max_content_bytes: PositiveInt
     max_output_tokens: PositiveInt
     attempt_timeout_seconds: PositiveFloat

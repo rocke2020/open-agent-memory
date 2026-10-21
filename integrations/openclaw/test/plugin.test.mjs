@@ -8,6 +8,7 @@ let server;
 let baseUrl;
 const requests = [];
 let stallRecall = false;
+let recallResponse;
 let removalResponse;
 let retainResponses = {};
 
@@ -25,7 +26,7 @@ before(async () => {
         });
         if (response.destroyed) return;
       }
-      response.end(JSON.stringify({ context: '[source: s1] Lin prefers concise answers.', context_tokens: 16, items: [{ source_id: 's1' }] }));
+      response.end(JSON.stringify(recallResponse ?? { context: '[source: s1] Lin prefers concise answers.', context_tokens: 16, items: [{ source_id: 's1' }] }));
     } else if (request.url === '/v1/retain') {
       const retained = JSON.parse(body);
       const configured = retainResponses[retained.input_type];
@@ -628,6 +629,8 @@ test('authorized direct turn recalls cited context and captures exact keyed huma
   assert.deepEqual(requests.map((request) => request.path), ['/v1/recall', '/v1/retain']);
   assert.equal(requests[0].body.user_id, 'u1');
   assert.equal(requests[0].body.recall_level, 'fast');
+  assert.equal(requests[0].body.max_tokens, 1024);
+  assert.equal('max_context_tokens' in requests[0].body, false);
   assert.equal(requests[0].body.query, 'What does Lin prefer?');
   assert.deepEqual(requests[1].body.messages.map(({ role, content }) => ({ role, content })), [
     { role: 'user', content: 'Remember I prefer concise answers.' },
@@ -816,7 +819,7 @@ test('local control recall suppression preserves owner admission and frozen capt
   assert.equal(requests.length, 0);
 });
 
-test('explicit search uses the fixed user and defaults to mid recall', async () => {
+test('explicit search uses the fixed user and defaults to normal recall', async () => {
   requests.length = 0;
   const { tool } = await installedPlugin();
   const search = tool.create({
@@ -827,9 +830,41 @@ test('explicit search uses the fixed user and defaults to mid recall', async () 
   assert.match(result.content[0].text, /Lin prefers concise answers/);
   assert.deepEqual(requests.map(({ path }) => path), ['/v1/recall']);
   assert.equal(requests[0].body.user_id, 'u1');
-  assert.equal(requests[0].body.recall_level, 'mid');
+  assert.equal(requests[0].body.recall_level, 'normal');
+  assert.equal(requests[0].body.max_tokens, 1024);
+  assert.equal('max_context_tokens' in requests[0].body, false);
   assert.equal(requests[0].body.query, 'Lin preference');
   assert.equal('include_profile' in requests[0].body, false);
+});
+
+test('host context ceiling rejects valid server results above its injection budget', async () => {
+  const { hooks, tool } = await installedPlugin({ maxContextTokens: 8 });
+  recallResponse = { context: 'Supported evidence with metadata.', context_tokens: 9, items: [] };
+  try {
+    const recalled = await hooks.before_prompt_build({ prompt: 'Lin preference', messages: [] }, route);
+    assert.equal(recalled, undefined);
+    const search = tool.create({
+      agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7',
+      conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {},
+    });
+    const result = await search.execute('oversized', { query: 'Lin preference' });
+    assert.equal(result.isError, true);
+  } finally { recallResponse = undefined; }
+});
+
+test('explicit search rejects removed modes without dispatching recall', async () => {
+  requests.length = 0;
+  const { tool } = await installedPlugin();
+  const search = tool.create({
+    agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7',
+    conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {},
+  });
+  for (const recall_level of ['deep', 'mid']) {
+    const result = await search.execute('removed-mode', { query: 'Lin preference', recall_level });
+    assert.equal(result.isError, true);
+  }
+  assert.deepEqual(requests, []);
+  assert.deepEqual(search.parameters.properties.recall_level.enum, ['fast', 'normal']);
 });
 
 test('memory_remove deletes exactly one memory or Insight ID through its typed route', async () => {

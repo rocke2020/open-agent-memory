@@ -769,7 +769,7 @@ async def test_source_publishes_recall_before_queued_links_complete(core_databas
                 == 2
             )
         app.state.runtime.models = models
-        for mode in ("fast", "mid"):
+        for mode in ("fast", "normal"):
             recalled = await client.post(
                 "/v1/recall",
                 json={

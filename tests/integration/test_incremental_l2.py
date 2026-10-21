@@ -118,7 +118,7 @@ async def retain_and_consolidate(client, dsn, tenant, config, models, key, texts
     return accepted.json()
 
 
-async def test_two_increments_keep_identity_support_and_current_fast_mid_context(core_database):
+async def test_two_increments_keep_identity_support_and_current_fast_normal_context(core_database):
     dsn, tenant, headers = core_database
     config = load_config(ROOT / "configs/oam.yaml").config
     models = PolicyModels()
@@ -169,7 +169,7 @@ async def test_two_increments_keep_identity_support_and_current_fast_mid_context
                 (tenant, original_id),
             ).fetchone()[0]
             assert supports == 3
-        for mode in ("fast", "mid"):
+        for mode in ("fast", "normal"):
             recalled = await client.post(
                 "/v1/recall",
                 json={

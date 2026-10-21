@@ -7,7 +7,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PositiveInt,
+    NonNegativeInt,
     StringConstraints,
     field_validator,
     model_validator,
@@ -24,8 +24,7 @@ class FrozenContract(BaseModel):
 
 class RecallLevel(StrEnum):
     FAST = "fast"
-    MID = "mid"
-    DEEP = "deep"
+    NORMAL = "normal"
 
 
 class TimeBasis(StrEnum):
@@ -51,7 +50,7 @@ class TimeWindow(FrozenContract):
 
 
 class RecalledChunkOptions(FrozenContract):
-    max_tokens: PositiveInt | None = None
+    max_tokens: NonNegativeInt | None = None
 
 
 class SearchIncludeOptions(FrozenContract):
@@ -59,16 +58,16 @@ class SearchIncludeOptions(FrozenContract):
 
 
 class SearchOutputOptions(FrozenContract):
-    recall_level: RecallLevel = RecallLevel.MID
+    recall_level: RecallLevel = RecallLevel.NORMAL
     fast_graph: bool | None = Field(
         default=None,
         strict=True,
         description=(
-            "Override stored entity/alias and causal graph expansion in fast mode. "
-            "Omitted or null inherits search.fast_graph from configuration."
+            "Override fast graph selection: true selects light, false selects off. "
+            "Omitted or null inherits search.fast.graph from configuration."
         ),
     )
-    max_context_tokens: PositiveInt | None = None
+    max_tokens: NonNegativeInt | None = None
     include: SearchIncludeOptions = Field(default_factory=SearchIncludeOptions)
     allow_partial: bool = False
     deadline_at: datetime | None = None
@@ -87,18 +86,7 @@ class SearchOutputOptions(FrozenContract):
         return value
 
     def validate_limits(self, config: OAMConfig) -> None:
-        if (
-            self.max_context_tokens is not None
-            and self.max_context_tokens > config.context.max_tokens
-        ):
-            raise ValueError(f"max_context_tokens exceeds {config.context.max_tokens}")
-        chunks = self.include.chunks
-        if (
-            chunks is not None
-            and chunks.max_tokens is not None
-            and chunks.max_tokens > config.chunk.recall.max_tokens
-        ):
-            raise ValueError(f"include.chunks.max_tokens exceeds {config.chunk.recall.max_tokens}")
+        """Text budgets have no shared ceiling; subclasses validate other limits."""
 
 
 class SearchQueryOptions(SearchOutputOptions):

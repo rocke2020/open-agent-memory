@@ -21,7 +21,7 @@ from oam.models.runtime import (
 )
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.service import RecallUnavailable
-from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
+from oam.tokens import estimate_units, estimated_tokens
 
 SearchOne = Callable[[SearchRequest, datetime], dict]
 PLANNER_SYSTEM_TEMPLATE = (
@@ -46,7 +46,6 @@ def decompose_and_search(
     models,
 ) -> dict:
     request.validate_limits(config)
-    _validate_options(request)
     _validate_queries(config, [request.query])
     if config.models.binding_for("planner") is None:
         raise NotImplementedError("the optional planner role is not configured")
@@ -143,7 +142,7 @@ def _planned_batch(
         queries=[request.query, *queries],
         recall_level=request.recall_level,
         fast_graph=request.fast_graph,
-        max_context_tokens=request.max_context_tokens,
+        max_tokens=request.max_tokens,
         include=request.include,
         allow_partial=request.allow_partial,
         deadline_at=deadline,
@@ -155,11 +154,6 @@ def _planned_batch(
     return batch.model_copy(update={"queries": list(dict.fromkeys(batch.queries))})
 
 
-def _validate_options(request: SearchManyRequest | SearchRequest) -> None:
-    if request.include.chunks is not None:
-        raise NotImplementedError("separate recalled chunks are unavailable")
-
-
 def _validate_queries(config: OAMConfig, queries: list[str]) -> None:
     for query in queries:
         if estimated_tokens(estimate_units(query)) > config.search.max_query_tokens:
@@ -168,7 +162,6 @@ def _validate_queries(config: OAMConfig, queries: list[str]) -> None:
 
 def _validate_batch(config: OAMConfig, request: SearchManyRequest) -> None:
     request.validate_limits(config)
-    _validate_options(request)
     _validate_queries(config, request.queries)
 
 
@@ -191,21 +184,41 @@ def _run_batch(
 ) -> dict:
     if deadline <= datetime.now(UTC):
         raise TimeoutError("recall deadline is exhausted")
-    total_budget = request.max_context_tokens or config.context.default_tokens
+    total_budget = (
+        request.max_tokens
+        if request.max_tokens is not None
+        else config.context.facts_default_tokens
+    )
     share, extra = divmod(total_budget, len(request.queries))
     budgets = [share + (index < extra) for index in range(len(request.queries))]
+    chunks = request.include.chunks
+    chunk_budgets = None
+    if chunks is not None:
+        total_chunks = (
+            chunks.max_tokens
+            if chunks.max_tokens is not None
+            else config.chunk.recall.default_tokens
+        )
+        chunk_share, chunk_extra = divmod(total_chunks, len(request.queries))
+        chunk_budgets = [
+            chunk_share + (index < chunk_extra) for index in range(len(request.queries))
+        ]
     reference_time = request.reference_time or datetime.now(UTC)
 
     def run(index: int, query: str) -> dict:
         if deadline <= datetime.now(UTC):
             raise TimeoutError("recall deadline is exhausted")
-        budget = budgets[index]
+        include = request.include
+        if chunks is not None and chunk_budgets is not None:
+            include = include.model_copy(
+                update={"chunks": chunks.model_copy(update={"max_tokens": chunk_budgets[index]})}
+            )
         child = SearchRequest(
             query=query,
             recall_level=request.recall_level,
             fast_graph=request.fast_graph,
-            max_context_tokens=max(1, budget),
-            include=request.include,
+            max_tokens=budgets[index],
+            include=include,
             allow_partial=request.allow_partial,
             deadline_at=deadline,
             time_basis=request.time_basis,
@@ -213,12 +226,7 @@ def _run_batch(
             reference_time=reference_time,
             reference_timezone=request.reference_timezone,
         )
-        result = search_one(child, deadline)
-        if budget == 0:
-            result = {**result, "items": [], "context": "", "context_tokens": 0}
-        if result["context_tokens"] > budget:
-            raise RecallUnavailable("query exceeded its context reservation")
-        return result
+        return search_one(child, deadline)
 
     results = []
     executor = ThreadPoolExecutor(
@@ -258,7 +266,7 @@ def _run_batch(
         "status": "partial" if partial else "ok",
         "results": results,
         "context_tokens": sum(row["result"]["context_tokens"] for row in successes),
-        "tokenizer": ESTIMATOR,
+        "tokenizer": config.context.tokenizer,
         "diagnostics": {
             "recall_level": request.recall_level.value,
             "deadline_at": deadline.isoformat(),

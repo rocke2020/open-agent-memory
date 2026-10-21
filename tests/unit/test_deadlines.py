@@ -40,12 +40,12 @@ def test_two_processes_share_the_first_turn_deadline() -> None:
     )
 
     first_admission = first.admit(RecallLevel.FAST, trusted_turn_key="turn-1")
-    clock.now += timedelta(seconds=4)
-    second_admission = second.admit(RecallLevel.DEEP, trusted_turn_key="turn-1")
+    clock.now += timedelta(seconds=7)
+    second_admission = second.admit(RecallLevel.NORMAL, trusted_turn_key="turn-1")
 
     assert first_admission.deadline_at == started + timedelta(seconds=3)
     assert second_admission.turn_deadline_at == started + timedelta(seconds=10)
-    assert second_admission.remaining_seconds == 6
+    assert second_admission.remaining_seconds == 3
 
 
 def test_expired_turn_dispatches_nothing() -> None:
@@ -58,7 +58,7 @@ def test_expired_turn_dispatches_nothing() -> None:
     clock.now += timedelta(seconds=10)
 
     with pytest.raises(TurnDeadlineExhausted):
-        coordinator.admit(RecallLevel.DEEP, trusted_turn_key="turn-1")
+        coordinator.admit(RecallLevel.NORMAL, trusted_turn_key="turn-1")
 
 
 def test_trusted_turn_requires_shared_repository() -> None:
@@ -71,9 +71,9 @@ def test_trusted_turn_requires_shared_repository() -> None:
         coordinator.admit(RecallLevel.FAST, trusted_turn_key="turn-1")
 
 
-def test_mid_uses_its_selected_cap_and_later_react_call_has_fresh_budget(tmp_path) -> None:
+def test_normal_uses_its_selected_cap_and_later_react_call_has_fresh_budget(tmp_path) -> None:
     path = tmp_path / "operator.yaml"
-    path.write_text("recall:\n  mid_deadline_seconds: 2\n")
+    path.write_text("recall:\n  normal_deadline_seconds: 2\n")
     config = load_config(path).config.recall
     started = datetime(2026, 9, 22, tzinfo=UTC)
     clock = MutableClock(started)
@@ -81,7 +81,7 @@ def test_mid_uses_its_selected_cap_and_later_react_call_has_fresh_budget(tmp_pat
     coordinator.admit(RecallLevel.FAST)
     clock.now += timedelta(seconds=30)
 
-    admitted = coordinator.admit(RecallLevel.MID)
+    admitted = coordinator.admit(RecallLevel.NORMAL)
 
     assert admitted.deadline_at == started + timedelta(seconds=32)
     assert admitted.remaining_seconds == 2

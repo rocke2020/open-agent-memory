@@ -138,7 +138,7 @@ async function request(config, path, body, timeoutMs, idempotencyKey, requestSig
 function recallBody(config, query, recallLevel) {
   return {
     user_id: config.userId, query, recall_level: recallLevel,
-    max_context_tokens: config.maxContextTokens, allow_partial: false,
+    max_tokens: config.maxContextTokens, allow_partial: false,
   };
 }
 
@@ -296,17 +296,17 @@ const plugin = {
             type: 'object', additionalProperties: false, required: ['query'],
             properties: {
               query: { type: 'string', minLength: 1 },
-              recall_level: { type: 'string', enum: ['fast', 'mid', 'deep'] },
+              recall_level: { type: 'string', enum: ['fast', 'normal'] },
             },
           },
           async execute(_toolCallId, params, signal) {
             try {
               ctx.assertInvocationCurrent();
               const query = params?.query?.trim();
-              if (!query || !['fast', 'mid', 'deep'].includes(params.recall_level ?? 'mid')) {
+              if (!query || !['fast', 'normal'].includes(params.recall_level ?? 'normal')) {
                 throw new Error('invalid search request');
               }
-              const result = await request(config, '/v1/recall', recallBody(config, query, params.recall_level ?? 'mid'), TOOL_RECALL_TIMEOUT_MS, undefined, signal);
+              const result = await request(config, '/v1/recall', recallBody(config, query, params.recall_level ?? 'normal'), TOOL_RECALL_TIMEOUT_MS, undefined, signal);
               ctx.assertInvocationCurrent();
               const context = checkedRecall(result, config.maxContextTokens);
               return { content: [{ type: 'text', text: context ? memoryContext(context) : 'No matching memory.' }] };
