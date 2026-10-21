@@ -138,7 +138,7 @@ async function request(config, path, body, timeoutMs, idempotencyKey, requestSig
 function recallBody(config, query, recallLevel) {
   return {
     user_id: config.userId, query, recall_level: recallLevel,
-    max_context_tokens: config.maxContextTokens, allow_partial: false,
+    max_tokens: config.maxContextTokens, allow_partial: false,
   };
 }
 

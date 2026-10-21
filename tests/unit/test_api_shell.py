@@ -38,12 +38,17 @@ async def test_liveness_only_claims_process_health(client) -> None:
 async def test_inspector_serves_a_same_origin_script_under_its_csp(client) -> None:
     page = await client.get("/ui/")
     script = await client.get("/ui/app.js")
+    locales = await client.get("/ui/locales.js")
 
     assert page.status_code == 200
     assert '<script src="/ui/app.js" defer></script>' in page.text
     assert "script-src 'self'" in page.headers["content-security-policy"]
     assert script.status_code == 200
     assert script.headers["content-type"].startswith("text/javascript")
+    assert '<script src="/ui/locales.js" defer></script>' in page.text
+    assert page.text.index("/ui/locales.js") < page.text.index("/ui/app.js")
+    assert locales.status_code == 200
+    assert locales.headers["content-type"].startswith("text/javascript")
 
 
 async def test_inspector_serves_its_logo_and_uses_it_as_the_favicon(client) -> None:
