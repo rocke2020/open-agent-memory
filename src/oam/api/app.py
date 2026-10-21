@@ -119,7 +119,6 @@ PUBLIC_LIMIT_SECTIONS = (
     "search",
     "index",
     "recall",
-    "context",
     "profile",
     "planner",
     "request",

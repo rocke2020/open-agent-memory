@@ -107,12 +107,9 @@ def test_recall_tuning_does_not_invalidate_indexed_content_but_model_change_does
     tuned = config.model_copy(
         update={
             "search": config.search.model_copy(
-                update={"normal": config.search.normal.model_copy(update={"max_results": 12})}
-            ),
-            "chunk": config.chunk.model_copy(
                 update={
-                    "recall": config.chunk.recall.model_copy(
-                        update={"default_tokens": 100, "max_tokens": 200}
+                    "normal": config.search.normal.model_copy(
+                        update={"max_results": 12, "context_max_tokens": 13}
                     )
                 }
             ),

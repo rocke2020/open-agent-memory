@@ -7,7 +7,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    NonNegativeInt,
+    PrivateAttr,
     StringConstraints,
     field_validator,
     model_validator,
@@ -49,12 +49,8 @@ class TimeWindow(FrozenContract):
         return self
 
 
-class RecalledChunkOptions(FrozenContract):
-    max_tokens: NonNegativeInt | None = None
-
-
 class SearchIncludeOptions(FrozenContract):
-    chunks: RecalledChunkOptions | None = None
+    chunks: bool = Field(default=True, strict=True)
 
 
 class SearchOutputOptions(FrozenContract):
@@ -67,7 +63,7 @@ class SearchOutputOptions(FrozenContract):
             "Omitted or null inherits search.fast.graph from configuration."
         ),
     )
-    max_tokens: NonNegativeInt | None = None
+    _context_max_tokens: int | None = PrivateAttr(default=None)
     include: SearchIncludeOptions = Field(default_factory=SearchIncludeOptions)
     allow_partial: bool = False
     deadline_at: datetime | None = None
@@ -86,7 +82,12 @@ class SearchOutputOptions(FrozenContract):
         return value
 
     def validate_limits(self, config: OAMConfig) -> None:
-        """Text budgets have no shared ceiling; subclasses validate other limits."""
+        """Subclasses validate request-specific limits."""
+
+    def context_limit(self, config: OAMConfig) -> int:
+        if self._context_max_tokens is not None:
+            return self._context_max_tokens
+        return getattr(config.search, self.recall_level.value).context_max_tokens
 
 
 class SearchQueryOptions(SearchOutputOptions):

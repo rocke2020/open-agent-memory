@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 
 from oam.quotes import unique_quote
-from oam.tokens import ESTIMATOR, UNITS_PER_TOKEN, estimate_units, estimated_tokens
+from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 CONTEXT_TOKENIZER = ESTIMATOR
 ORIGINAL_KINDS = frozenset({"passage", "resource_passage"})
@@ -316,87 +316,67 @@ def source_window_ids(
     ]
 
 
+def bundle_items(bundles: list[list[dict]]) -> list[dict]:
+    """Return the unique items required by actually admitted roots, in admission order."""
+    return list({item["unit_id"]: item for bundle in bundles for item in bundle}.values())
+
+
 def assemble_context(
     candidates: list[dict],
     source_passages: list[dict],
     *,
-    fact_budget: int,
-    chunk_budget: int,
+    context_max_tokens: int,
     include_chunks: bool,
     max_results: int,
     evidence_groups: list[list[dict]] | None = None,
-) -> tuple[list[dict], list[str]]:
-    """Select learned text and originals independently, preserving complete support groups."""
+) -> tuple[list[dict], list[str], list[list[dict]], bool]:
+    """Admit complete representations in root relevance order under one rendered cap."""
     groups = {group[0]["unit_id"]: group for group in evidence_groups or []}
-    pool = {
-        item["unit_id"]: item
-        for item in [*candidates, *source_passages, *(item for g in groups.values() for item in g)]
+    admitted: list[list[dict]] = []
+    selected: list[dict] = []
+    omissions: list[str] = []
+    considered: set[str] = set()
+    eligible_facts = {
+        item["unit_id"]
+        for item in candidates
+        if item["kind"] == "fact" and item["unit_id"] in groups
     }
-    costs = {key: estimate_units(item["text"]) for key, item in pool.items()}
-    fact_limit = fact_budget * UNITS_PER_TOKEN
-    chunk_limit = chunk_budget * UNITS_PER_TOKEN
-    facts: dict[str, dict] = {}
-    originals: dict[str, dict] = {}
-    fact_units = chunk_units = 0
-    omissions = []
-    first_ordinary = None
-    for item in candidates:
-        identifier = item["unit_id"]
-        if item["kind"] in ORIGINAL_KINDS or identifier in facts:
+    oversized_single_fact = False
+    for item in [*candidates, *source_passages]:
+        identity = item["unit_id"]
+        if identity in considered:
             continue
-        if item["kind"] != "insight" and first_ordinary is None:
-            first_ordinary = item
-        group = groups.get(identifier)
-        if item["kind"] == "insight" and group is None:
-            omissions.append(identifier)
-            continue
-        additions = {row["unit_id"]: row for row in group or [item]}
-        new_facts = {
-            key: row
-            for key, row in additions.items()
-            if row["kind"] not in ORIGINAL_KINDS and key not in facts
-        }
-        new_originals = {
-            key: row
-            for key, row in additions.items()
-            if row["kind"] in ORIGINAL_KINDS and key not in originals
-        }
-        added_fact_units = sum(costs[key] for key in new_facts)
-        added_original_units = sum(costs[key] for key in new_originals)
-        if (
-            fact_units + added_fact_units > fact_limit
-            or chunk_units + added_original_units > chunk_limit
-            or len(facts) + len(new_facts) > max_results
-            or len(originals) + len(new_originals) > max_results
-        ):
-            omissions.append(identifier)
-            continue
-        facts.update(new_facts)
-        originals.update(new_originals)
-        fact_units += added_fact_units
-        chunk_units += added_original_units
-    if not facts and fact_budget > 0 and first_ordinary is not None:
-        identifier = first_ordinary["unit_id"]
-        facts[identifier] = first_ordinary
-        omissions = [node for node in omissions if node != identifier]
-    if include_chunks:
-        original_pool = [
-            *candidates,
-            *source_passages,
-            *(
-                item
-                for group in groups.values()
-                for item in group
-                if item["kind"] in ORIGINAL_KINDS
-            ),
+        considered.add(identity)
+        if item["kind"] in ORIGINAL_KINDS:
+            if not include_chunks:
+                continue
+            group = [item]
+        else:
+            group = groups.get(identity)
+            if group is None:
+                omissions.append(identity)
+                continue
+        representation = [
+            row for row in group if include_chunks or row["kind"] not in ORIGINAL_KINDS
         ]
-        for item in original_pool:
-            identifier = item["unit_id"]
-            if item["kind"] not in ORIGINAL_KINDS or identifier in originals:
+        tentative = bundle_items([*admitted, representation])
+        originals = sum(row["kind"] in ORIGINAL_KINDS for row in tentative)
+        if originals > max_results or len(tentative) - originals > max_results:
+            omissions.append(identity)
+            continue
+        if context_token_count(render_context(tentative)) > context_max_tokens:
+            if (
+                context_max_tokens > 0
+                and not admitted
+                and item["kind"] == "fact"
+                and eligible_facts == {identity}
+            ):
+                oversized_single_fact = True
+            else:
+                omissions.append(identity)
                 continue
-            if len(originals) >= max_results or chunk_units >= chunk_limit:
-                omissions.append(identifier)
-                continue
-            originals[identifier] = item
-            chunk_units += costs[identifier]
-    return [*facts.values(), *originals.values()], list(dict.fromkeys(omissions))
+        admitted.append(representation)
+        selected = tentative
+        if oversized_single_fact:
+            break
+    return selected, omissions, admitted, oversized_single_fact

@@ -40,7 +40,9 @@ def recall_database(core_database):
         yield connection, authority
 
 
-def add_fact(connection, authority, node_id, text, *, eligible=True, direction=1.0):
+def add_fact(
+    connection, authority, node_id, text, *, eligible=True, direction=1.0, with_original=False
+):
     tenant, scope = authority.tenant_id, authority.user_id
     original = text.encode()
     connection.execute(
@@ -98,6 +100,24 @@ def add_fact(connection, authority, node_id, text, *, eligible=True, direction=1
             streams.simple,
         ),
     )
+
+    if with_original:
+        connection.execute(
+            "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
+            "source_version,evidence_id,passage_id,generation_id,content_text,locator,"
+            "embedding,lexical_text,lexical_english,lexical_simple) "
+            "SELECT tenant_id,user_id,unit_id || '_passage','passage',origin,source_id,"
+            "source_version,evidence_id,%s,generation_id,content_text,%s,%s::vector,'',''::tsvector,"
+            "''::tsvector FROM search_units WHERE tenant_id=%s AND user_id=%s AND unit_id=%s",
+            (
+                node_id,
+                Jsonb({"source_id": node_id, "source_version": 1}),
+                str([-1.0] + [0.0] * (dimensions - 1)),
+                tenant,
+                scope,
+                node_id,
+            ),
+        )
 
 
 def test_bilingual_fts_keeps_partial_candidates_and_ranks_primary_and_modifiers(recall_database):
@@ -664,35 +684,47 @@ def test_underscore_identifier_uses_exact_anchor_instead_of_partial_fts(recall_d
     assert [row["unit_id"] for row in repository.anchors("patient_42", 10)] == ["exact"]
 
 
-def test_fast_service_returns_cited_context_with_independent_text_budget(recall_database):
+def test_fast_service_returns_cited_context_with_mode_total(recall_database):
     from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
-    add_fact(connection, authority, "apple", "I plant apple trees in my orchard.")
+    add_fact(
+        connection,
+        authority,
+        "apple",
+        "I plant apple trees in my orchard.",
+        with_original=True,
+    )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     models = FixedModels(config.index.embedding_dimensions)
     connection.execute("SET LOCAL ROLE oam_api")
     service = RecallService(config, TransactionPool(connection), models, generation_id="generation")
 
     result = service.search(
-        authority, SearchRequest(query="apple", recall_level="fast", max_tokens=256)
+        authority, SearchRequest(query="apple", recall_level="fast", include={"chunks": False})
     )
 
     assert result["items"][0]["unit_id"] == "apple"
     assert "apple trees" in result["context"]
     assert "source_id" in result["context"]
     assert result["context_tokens"] > 0
-    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= 256
+    assert result["context_tokens"] <= config.search.fast.context_max_tokens
     assert result["diagnostics"]["executed_stages"] == [
         "fts",
         "anchors",
         "embedding",
         "dense",
         "related_user_fact",
+        "source_user_originals",
     ]
     assert result["diagnostics"]["generative_calls"] == 0
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
-    empty = service.search(authority, SearchRequest(query="apple", max_tokens=0))
+    zero_share = SearchRequest(
+        query="apple",
+        include={"chunks": False},
+    )
+    zero_share._context_max_tokens = 0
+    empty = service.search(authority, zero_share)
     assert empty["context"] == ""
     assert empty["items"] == []
 
@@ -701,7 +733,13 @@ def test_recall_reports_pending_partial_and_ready_from_current_index_operation(r
     from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
-    add_fact(connection, authority, "apple", "Apple orchard")
+    add_fact(
+        connection,
+        authority,
+        "apple",
+        "Apple orchard",
+        with_original=True,
+    )
     connection.execute(
         "INSERT INTO principals(tenant_id,principal_id,role,state) "
         "VALUES (%s,'reader','service','active')",
@@ -726,7 +764,11 @@ def test_recall_reports_pending_partial_and_ready_from_current_index_operation(r
         FixedModels(config.index.embedding_dimensions),
         generation_id="generation",
     )
-    request = SearchRequest(query="apple", recall_level="fast")
+    request = SearchRequest(
+        query="apple",
+        recall_level="fast",
+        include={"chunks": False},
+    )
     pending = service.search(authority, request)
     assert pending["items"][0]["unit_id"] == "apple"
     assert pending["diagnostics"]["readiness"] == "pending"
@@ -761,7 +803,13 @@ def test_generation_drift_fails_before_embedding_dispatch(recall_database):
         config, TransactionPool(connection), MustNotDispatch(), generation_id="new"
     )
     with pytest.raises(RecallUnavailable, match="generation"):
-        service.search(authority, SearchRequest(query="apple"))
+        service.search(
+            authority,
+            SearchRequest(
+                query="apple",
+                include={"chunks": False},
+            ),
+        )
 
 
 def test_readiness_selects_current_operations_without_rescanning_each_history(recall_database):
@@ -1046,6 +1094,7 @@ def test_normal_follows_causal_direction_without_expanding_l2_siblings(recall_da
             node,
             "anchorword" if node == "move" else node,
             direction=1.0 if node == "move" else -1.0,
+            with_original=True,
         )
     for source, target in (
         ("move", "rent"),
@@ -1069,7 +1118,12 @@ def test_normal_follows_causal_direction_without_expanding_l2_siblings(recall_da
     )
 
     result = service.search(
-        authority, SearchRequest(query="anchorword", recall_level=mode, max_tokens=2048)
+        authority,
+        SearchRequest(
+            query="anchorword",
+            recall_level=mode,
+            include={"chunks": False},
+        ),
     )
 
     ids = {item["unit_id"] for item in result["items"]}
@@ -1095,6 +1149,7 @@ def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_databa
             node,
             "anchorword" if index == 0 else f"Linked event {index}",
             direction=1 if index == 0 else 0.2,
+            with_original=True,
         )
         connection.execute(
             "INSERT INTO unit_times VALUES (%s,%s,%s,%s,'event',%s,'{}')",
@@ -1125,16 +1180,16 @@ def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_databa
         SearchRequest(
             query="last week what I did",
             recall_level="fast",
-            max_tokens=2048,
             reference_time="2026-01-14T12:00:00Z",
+            include={"chunks": False},
         )
         if mode == "fast"
         else SearchRequest(
             query="anchorword",
             recall_level="normal",
-            max_tokens=2048,
             time_basis="event",
             time_window={"start": "2026-01-01T00:00:00Z", "end": "2026-01-11T00:00:00Z"},
+            include={"chunks": False},
         )
     )
 
@@ -1161,7 +1216,13 @@ def test_configured_reranker_failure_obeys_partial_policy(recall_database, allow
     from oam.retrieval.service import RecallService, RecallUnavailable
 
     connection, authority = recall_database
-    add_fact(connection, authority, "apple", "Apple orchard")
+    add_fact(
+        connection,
+        authority,
+        "apple",
+        "Apple orchard",
+        with_original=True,
+    )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     from oam.config import ModelsConfig
 
@@ -1187,7 +1248,12 @@ def test_configured_reranker_failure_obeys_partial_policy(recall_database, allow
         FailingReranker(config.index.embedding_dimensions),
         generation_id="generation",
     )
-    request = SearchRequest(query="apple", recall_level="normal", allow_partial=allow_partial)
+    request = SearchRequest(
+        query="apple",
+        recall_level="normal",
+        allow_partial=allow_partial,
+        include={"chunks": False},
+    )
     if not allow_partial:
         with pytest.raises(RecallUnavailable, match="rerank"):
             service.search(authority, request)
@@ -1204,8 +1270,20 @@ def test_configured_reranker_scores_once_and_controls_final_order(recall_databas
     from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
-    add_fact(connection, authority, "a", "Apple orchard A")
-    add_fact(connection, authority, "b", "Apple orchard B")
+    add_fact(
+        connection,
+        authority,
+        "a",
+        "Apple orchard A",
+        with_original=True,
+    )
+    add_fact(
+        connection,
+        authority,
+        "b",
+        "Apple orchard B",
+        with_original=True,
+    )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     config = config.model_copy(
         update={
@@ -1227,12 +1305,24 @@ def test_configured_reranker_scores_once_and_controls_final_order(recall_databas
 
         def rerank(self, query, documents, *, timeout_seconds):
             self.calls += 1
-            assert query == "apple" and documents == ("Apple orchard A", "Apple orchard B")
-            return RerankResult(scores=(0.2, 0.9), usage=Usage())
+            assert query == "apple" and documents == (
+                "Apple orchard A",
+                "Apple orchard B",
+                "Apple orchard A",
+                "Apple orchard B",
+            )
+            return RerankResult(scores=(0.2, 0.9, 0.1, 0.1), usage=Usage())
 
     models = ScoringModels(config.index.embedding_dimensions)
     service = RecallService(config, TransactionPool(connection), models, generation_id="generation")
-    result = service.search(authority, SearchRequest(query="apple", recall_level=mode))
+    result = service.search(
+        authority,
+        SearchRequest(
+            query="apple",
+            recall_level=mode,
+            include={"chunks": False},
+        ),
+    )
     assert [item["unit_id"] for item in result["items"]] == ["b", "a"]
     assert models.calls == 1
     assert "rerank" in result["diagnostics"]["executed_stages"]
@@ -1242,7 +1332,13 @@ def test_failed_embedding_preserves_completed_text_arm_when_partial_allowed(reca
     from oam.retrieval.service import RecallService, RecallUnavailable
 
     connection, authority = recall_database
-    add_fact(connection, authority, "apple", "Apple orchard")
+    add_fact(
+        connection,
+        authority,
+        "apple",
+        "Apple orchard",
+        with_original=True,
+    )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
 
     class FailedEmbedding:
@@ -1253,12 +1349,25 @@ def test_failed_embedding_preserves_completed_text_arm_when_partial_allowed(reca
         config, TransactionPool(connection), FailedEmbedding(), generation_id="generation"
     )
 
-    result = service.search(authority, SearchRequest(query="apple", allow_partial=True))
+    result = service.search(
+        authority,
+        SearchRequest(
+            query="apple",
+            allow_partial=True,
+            include={"chunks": False},
+        ),
+    )
 
     assert result["items"][0]["unit_id"] == "apple"
     assert result["diagnostics"]["degraded"] == ["embedding"]
     with pytest.raises(RecallUnavailable, match="embedding"):
-        service.search(authority, SearchRequest(query="apple"))
+        service.search(
+            authority,
+            SearchRequest(
+                query="apple",
+                include={"chunks": False},
+            ),
+        )
 
 
 def test_embedding_overlaps_real_lexical_read_and_both_drain(recall_database, monkeypatch):
@@ -1268,7 +1377,13 @@ def test_embedding_overlaps_real_lexical_read_and_both_drain(recall_database, mo
     from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
-    add_fact(connection, authority, "apple", "Apple orchard")
+    add_fact(
+        connection,
+        authority,
+        "apple",
+        "Apple orchard",
+        with_original=True,
+    )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     text_started, embedding_started, text_finished = Event(), Event(), Event()
     original = RecallRepository.lexical
@@ -1296,7 +1411,13 @@ def test_embedding_overlaps_real_lexical_read_and_both_drain(recall_database, mo
         generation_id="generation",
     )
 
-    result = service.search(authority, SearchRequest(query="apple"))
+    result = service.search(
+        authority,
+        SearchRequest(
+            query="apple",
+            include={"chunks": False},
+        ),
+    )
 
     assert result["items"][0]["unit_id"] == "apple"
     assert text_finished.is_set()
@@ -1467,7 +1588,10 @@ def test_expired_host_deadline_dispatches_no_model_request(recall_database):
     with pytest.raises(TimeoutError, match="deadline"):
         service.search(
             authority,
-            SearchRequest(query="apple"),
+            SearchRequest(
+                query="apple",
+                include={"chunks": False},
+            ),
             deadline_at=datetime.now(UTC) - timedelta(seconds=1),
         )
 

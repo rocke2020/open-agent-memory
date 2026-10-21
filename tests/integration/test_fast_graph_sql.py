@@ -33,6 +33,7 @@ def history(connection, authority):
             node,
             text,
             eligible=node != "hidden",
+            with_original=True,
             direction=1.0 if node == "effect" else -1.0,
         )
     for source, target, kind in (
@@ -104,10 +105,10 @@ def test_fast_opt_in_recovers_graph_only_cause_with_cited_final_context(recall_d
         result = service.search(
             authority,
             SearchRequest(
+                include={"chunks": False},
                 query="anchorword",
                 recall_level="fast",
                 fast_graph=enabled,
-                max_tokens=2048,
             ),
         )
         ids = {item["unit_id"] for item in result["items"]}
@@ -144,14 +145,14 @@ def test_configured_graph_selection_reaches_real_sql_context(
         generation_id="generation",
     )
     result = service.search(
-        authority, SearchRequest(query="anchorword", recall_level=mode, max_tokens=2048)
+        authority, SearchRequest(include={"chunks": False}, query="anchorword", recall_level=mode)
     )
     assert {item["unit_id"] for item in result["items"]} == expected
     assert ("An unrelated semantic neighbor." in result["context"]) == (graph == "full")
     assert result["diagnostics"]["graph"] == graph
     assert ("graph" in result["diagnostics"]["executed_arms"]) == (graph != "off")
     assert result["diagnostics"]["generative_calls"] == 0
-    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= 2048
+    assert result["context_tokens"] <= getattr(config.search, mode).context_max_tokens
     assert len(result["items"]) <= getattr(config.search, mode).max_results
     assert all(item["citations"] for item in result["items"])
 
@@ -195,10 +196,15 @@ def test_fast_alias_only_target_reaches_cited_context_and_revocation_drops_its_p
     service = RecallService(
         config, TransactionPool(connection), FixedModels(1024), generation_id="generation"
     )
-    direct = service.search(authority, SearchRequest(query="moved", recall_level="fast"))
+    direct = service.search(
+        authority, SearchRequest(include={"chunks": False}, query="moved", recall_level="fast")
+    )
     assert {item["unit_id"] for item in direct["items"]} == {"seed"}
     enabled = service.search(
-        authority, SearchRequest(query="moved", recall_level="fast", fast_graph=True)
+        authority,
+        SearchRequest(
+            include={"chunks": False}, query="moved", recall_level="fast", fast_graph=True
+        ),
     )
     assert "I joined NR in June" in enabled["context"]
     assert "Nova Research, also called NR" in enabled["context"]
@@ -210,7 +216,10 @@ def test_fast_alias_only_target_reaches_cited_context_and_revocation_drops_its_p
         (authority.tenant_id,),
     )
     revoked = service.search(
-        authority, SearchRequest(query="moved", recall_level="fast", fast_graph=True)
+        authority,
+        SearchRequest(
+            include={"chunks": False}, query="moved", recall_level="fast", fast_graph=True
+        ),
     )
     assert {item["unit_id"] for item in revoked["items"]} == {"seed"}
     assert "continuation" not in repository.fast_graph(("seed",), vector)[0]
@@ -275,6 +284,7 @@ async def test_public_http_fast_graph_option_reaches_real_sql_context(core_datab
                     "query": "anchorword",
                     "recall_level": "fast",
                     "fast_graph": enabled,
+                    "include": {"chunks": False},
                 },
             )
             assert response.status_code == 200, response.text
@@ -287,7 +297,12 @@ async def test_public_http_fast_graph_option_reaches_real_sql_context(core_datab
                 assert all(item["citations"] for item in result["items"])
         batch = await client.post(
             "/v1/users/scope/search-many",
-            json={"queries": ["anchorword"], "recall_level": "fast", "fast_graph": True},
+            json={
+                "queries": ["anchorword"],
+                "recall_level": "fast",
+                "fast_graph": True,
+                "include": {"chunks": False},
+            },
         )
         assert batch.status_code == 200, batch.text
         assert {item["unit_id"] for item in batch.json()["results"][0]["result"]["items"]} == {

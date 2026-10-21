@@ -27,11 +27,11 @@ def test_batch_shares_one_budget_and_runs_two_queries_concurrently() -> None:
     def search_one(request, deadline_at):
         barrier.wait(timeout=2)
         with lock:
-            calls.append((request.query, request.max_tokens, deadline_at))
+            calls.append((request.query, request.context_limit(config), deadline_at))
         return {
             "items": [{"unit_id": request.query}],
-            "context": "x" * (4 * request.max_tokens),
-            "context_tokens": request.max_tokens,
+            "context": "x" * (4 * request.context_limit(config)),
+            "context_tokens": request.context_limit(config),
             "tokenizer": "oam-unicode-quarter-v1",
             "diagnostics": {"generative_calls": 0},
         }
@@ -41,7 +41,6 @@ def test_batch_shares_one_budget_and_runs_two_queries_concurrently() -> None:
         SearchManyRequest(
             queries=["current city", "preferred style"],
             recall_level="fast",
-            max_tokens=6,
         ),
         search_one,
     )
@@ -51,8 +50,8 @@ def test_batch_shares_one_budget_and_runs_two_queries_concurrently() -> None:
         "current city",
         "preferred style",
     ]
-    assert response["context_tokens"] == 6
-    assert sorted(budget for _, budget, _ in calls) == [3, 3]
+    assert response["context_tokens"] == 18000
+    assert sorted(budget for _, budget, _ in calls) == [9000, 9000]
     assert len({deadline for _, _, deadline in calls}) == 1
     assert response["diagnostics"]["generative_calls"] == 0
 
@@ -105,14 +104,21 @@ def test_batch_query_overlap_stays_within_configured_cap() -> None:
     assert peak == 2
 
 
-def test_batch_splits_independent_text_budgets_without_erasing_zero_fact_share() -> None:
+def test_batch_splits_total_in_stable_order_without_erasing_zero_share() -> None:
     from oam.api.search import search_many
 
     config = load_config("configs/oam.yaml").config
+    config = config.model_copy(
+        update={
+            "search": config.search.model_copy(
+                update={"normal": config.search.normal.model_copy(update={"context_max_tokens": 2})}
+            )
+        }
+    )
     calls = {}
 
     def search_one(request, deadline_at):
-        calls[request.query] = (request.max_tokens, request.include.chunks.max_tokens)
+        calls[request.query] = (request.context_limit(config), request.include.chunks)
         return {
             "items": [{"unit_id": request.query, "kind": "passage"}],
             "context": "Original with citations and qualifiers",
@@ -125,27 +131,26 @@ def test_batch_splits_independent_text_budgets_without_erasing_zero_fact_share()
         config,
         SearchManyRequest(
             queries=["one", "two", "three"],
-            max_tokens=2,
-            include={"chunks": {"max_tokens": 5}},
+            include={"chunks": False},
         ),
         search_one,
     )
 
-    assert calls == {"one": (1, 2), "two": (1, 2), "three": (0, 1)}
+    assert calls == {"one": (1, False), "two": (1, False), "three": (0, False)}
     assert response["status"] == "ok"
     assert response["context_tokens"] == 30
     assert response["tokenizer"] == "oam-unicode-quarter-v1"
     assert all(row["result"]["items"] for row in response["results"])
 
 
-def test_batch_resolves_original_default_before_splitting() -> None:
+def test_batch_resolves_mode_default_before_splitting() -> None:
     from oam.api.search import search_many
 
     config = load_config("configs/oam.yaml").config
     calls = []
 
     def search_one(request, deadline_at):
-        calls.append((request.max_tokens, request.include.chunks.max_tokens))
+        calls.append((request.context_limit(config), request.include.chunks))
         return {
             "items": [],
             "context": "",
@@ -156,10 +161,10 @@ def test_batch_resolves_original_default_before_splitting() -> None:
 
     search_many(
         config,
-        SearchManyRequest(queries=["one", "two"], max_tokens=0, include={"chunks": {}}),
+        SearchManyRequest(queries=["one", "two"]),
         search_one,
     )
-    assert calls == [(0, 4096), (0, 4096)]
+    assert calls == [(16384, True), (16384, True)]
 
 
 def test_invalid_later_batch_query_dispatches_nothing() -> None:
@@ -417,7 +422,7 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
 
     def search_one(request, deadline_at):
         searched.append((request.query, deadline_at, request.time_basis))
-        budgets[request.query] = (request.max_tokens, request.include.chunks.max_tokens)
+        budgets[request.query] = (request.context_limit(config), request.include.chunks)
         return {
             "items": [],
             "context": "",
@@ -432,8 +437,7 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
             config,
             SearchRequest(
                 query="Lin city and response style",
-                max_tokens=8,
-                include={"chunks": {"max_tokens": 5}},
+                include={"chunks": False},
                 time_basis="event",
                 time_window={"start": "2026-06-01T00:00:00Z", "end": "2026-07-01T00:00:00Z"},
             ),
@@ -451,9 +455,9 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
     assert len({deadline for _, deadline, _ in searched}) == 1
     assert all(basis.value == "event" for _, _, basis in searched)
     assert budgets == {
-        "Lin city and response style": (3, 2),
-        "Lin city": (3, 2),
-        "Lin response style": (2, 1),
+        "Lin city and response style": (10923, False),
+        "Lin city": (10923, False),
+        "Lin response style": (10922, False),
     }
     assert result["planner"]["status"] == "used"
     assert result["planner"]["calls"] == 1
@@ -516,7 +520,7 @@ def test_invalid_plan_falls_back_to_direct_query_with_measured_usage(tmp_path: P
         models = RuntimeModels(config, {"MODEL_URL": "http://planner.test"}, http)
         result = decompose_and_search(
             config,
-            SearchRequest(query="Lin city and response style", max_tokens=8),
+            SearchRequest(query="Lin city and response style"),
             search_one,
             models,
         )

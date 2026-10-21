@@ -62,7 +62,9 @@ async def test_profile_response_budget_is_independent_of_recall(tmp_path: Path) 
             return {"content": "Ready", "freshness": "current", "generation_calls": 0}
 
     config = tmp_path / "oam.yaml"
-    config.write_text("context:\n  facts_default_tokens: 1\nprofile:\n  max_response_tokens: 7\n")
+    config.write_text(
+        "search:\n  normal:\n    context_max_tokens: 1\nprofile:\n  max_response_tokens: 7\n"
+    )
     app = create_app(config, runtime=Runtime())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),

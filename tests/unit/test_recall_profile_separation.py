@@ -47,9 +47,7 @@ def test_recall_dispatch_uses_full_budget_without_profile_access(
     monkeypatch.setattr(RecallService, "search", search)
     runtime = DatabaseRuntime(config, cast(ConnectionPool, Pool()), models=object())
     try:
-        request = RecallRequest(
-            user_id="alice", query="q", recall_level=RecallLevel.FAST, max_tokens=8192
-        )
+        request = RecallRequest(user_id="alice", query="q", recall_level=RecallLevel.FAST)
         result = runtime.search("caller", "alice", request)
     finally:
         runtime._http.close()
@@ -59,5 +57,5 @@ def test_recall_dispatch_uses_full_budget_without_profile_access(
     authority, dispatched, deadline = searched[0]
     assert authority == "authorized-alice"
     assert dispatched is request
-    assert dispatched.max_tokens == 8192
+    assert dispatched.context_limit(config) == config.search.fast.context_max_tokens
     assert deadline is None

@@ -29,7 +29,7 @@ def alias_history(connection, authority, *, definition_quote=None):
         "continuation": "I joined NR in June, the organization I mentioned before.",
     }
     for memory_id, text in texts.items():
-        add_fact(connection, authority, memory_id, text)
+        add_fact(connection, authority, memory_id, text, with_original=True)
     entities = EntityRepository(
         connection,
         config,
@@ -178,7 +178,7 @@ def test_partial_revalidation_keeps_other_graph_paths_and_independent_direct_hit
         ("other_seed", "Vega opened a workshop."),
         ("healthy", "Vega, the project I mentioned, hired me."),
     ):
-        add_fact(connection, authority, memory_id, text)
+        add_fact(connection, authority, memory_id, text, with_original=True)
         entities.publish_fact(
             memory_id,
             ("Vega",),
@@ -308,7 +308,6 @@ def test_replacement_witness_preserves_same_graph_path_under_strict_recall(recal
 def test_alias_metadata_preserves_graph_vote_under_fact_text_budget(recall_database, definition):
     connection, authority = recall_database
     repository, vector, _ = alias_history(connection, authority, definition_quote=definition)
-    budget = 64
 
     class DirectTargetRepository(RecallRepository):
         def lexical(self, query, limit):
@@ -331,14 +330,16 @@ def test_alias_metadata_preserves_graph_vote_under_fact_text_budget(recall_datab
 
     result = service.search(
         authority,
-        SearchRequest(query="research membership", recall_level="normal", max_tokens=budget),
+        SearchRequest(
+            query="research membership", recall_level="normal", include={"chunks": False}
+        ),
     )
 
     selected = next(item for item in result["items"] if item["unit_id"] == "continuation")
     assert selected["text"] == "I joined NR in June, the organization I mentioned before."
     assert selected["paths"][0]["alias_witnesses"]
     assert "Alias:" in result["context"]
-    assert result["diagnostics"]["text_budgets"]["facts"]["used"] <= budget
+    assert result["context_tokens"] <= repository.config.search.normal.context_max_tokens
     trace = connection.execute(
         "SELECT decisions FROM traces WHERE tenant_id=%s AND user_id=%s AND trace_id=%s",
         (authority.tenant_id, authority.user_id, result["trace_id"]),
@@ -349,21 +350,21 @@ def test_alias_metadata_preserves_graph_vote_under_fact_text_budget(recall_datab
 
 
 def test_entity_and_semantic_paths_survive_text_only_budget(recall_database, tmp_path):
-    from oam.tokens import estimate_units, estimated_tokens
-
     connection, authority = recall_database
     repository, vector, _ = alias_history(connection, authority)
-    add_fact(connection, authority, "healthy", "The research team expanded its laboratory.")
+    add_fact(
+        connection,
+        authority,
+        "healthy",
+        "The research team expanded its laboratory.",
+        with_original=True,
+    )
     for target, weight in (("continuation", 0.2), ("healthy", 0.6)):
         connection.execute(
             "INSERT INTO unit_links(tenant_id,user_id,source_id,target_id,kind,weight) "
             "VALUES (%s,%s,'seed',%s,'semantic',%s)",
             (authority.tenant_id, authority.user_id, target, weight),
         )
-    budget = max(
-        64,
-        estimated_tokens(estimate_units(render_item(repository.hydrate(("continuation",))[0]))) + 8,
-    )
 
     class SemanticTargetRepository(RecallRepository):
         def lexical(self, query, limit):
@@ -390,7 +391,9 @@ def test_entity_and_semantic_paths_survive_text_only_budget(recall_database, tmp
 
     result = service.search(
         authority,
-        SearchRequest(query="research membership", recall_level="normal", max_tokens=budget),
+        SearchRequest(
+            query="research membership", recall_level="normal", include={"chunks": False}
+        ),
     )
 
     target = next(item for item in result["items"] if item["unit_id"] == "continuation")

@@ -42,24 +42,6 @@ chunk:
     extractable_overlap_estimated_tokens: 0
     # The prior passage's tail is context only; it cannot support a new fact.
     previous_context_estimated_tokens: 128
-  # Approximate text target across recalled originals, not a per-chunk limit.
-  # Ordinary originals include the whole chunk that reaches/crosses the target, then stop.
-  # Separate from the learned-text budget in context.facts_default_tokens; metadata is excluded.
-  # API include.chunks enables ordinary originals; include.chunks.max_tokens overrides the default.
-  # This does not control ingestion splitting or extraction grouping.
-  recall:
-    default_tokens: 8192
-
-context:
-  # Default approximate token budget for learned fact and Insight text only.
-  # This does not cap the complete returned context.
-  # Original chunk text uses a separate budget: chunk.recall.default_tokens (8192).
-  # Headers, citations, timestamps and path metadata are outside both text budgets.
-  # There is no combined limit on facts + chunks + metadata.
-  # API request max_tokens overrides this default.
-  facts_default_tokens: 4096
-  # Unicode estimate for both text budgets and complete-context reporting.
-  tokenizer: oam-unicode-quarter-v1
 
 extraction:
   # Complete model input, including instructions, passage metadata and references.
@@ -137,12 +119,14 @@ search:
   # graph: off skips expansion; light uses stored entity/alias and causal links;
   # full adds semantic neighbors. Quote "off" so YAML does not parse it as false.
   fast:
+    context_max_tokens: 18000
     graph: "off"
     channel_candidates: 64
     fused_candidates: 128
     source_seed_results: 36
     max_results: 96
   normal:
+    context_max_tokens: 32768
     graph: light
     channel_candidates: 64
     fused_candidates: 154

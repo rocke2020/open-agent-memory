@@ -81,6 +81,7 @@ class ExtractionConfig(FrozenModel):
 
 
 class SearchTier(FrozenModel):
+    context_max_tokens: PositiveInt
     graph: Literal["off", "light", "full"]
     channel_candidates: PositiveInt
     fused_candidates: PositiveInt
@@ -142,18 +143,8 @@ class RecallConfig(FrozenModel):
     normal_deadline_seconds: PositiveFloat
 
 
-class ContextConfig(FrozenModel):
-    facts_default_tokens: PositiveInt
-    tokenizer: Literal["oam-unicode-quarter-v1"]
-
-
-class RecalledChunksConfig(FrozenModel):
-    default_tokens: PositiveInt
-
-
 class ChunkConfig(FrozenModel):
     ingestion: IngestionChunkConfig
-    recall: RecalledChunksConfig
 
 
 class ProfileConfig(FrozenModel):
@@ -389,7 +380,6 @@ class OAMConfig(FrozenModel):
     search: SearchConfig
     index: IndexConfig
     recall: RecallConfig
-    context: ContextConfig
     profile: ProfileConfig
     planner: PlannerConfig
     request: RequestConfig

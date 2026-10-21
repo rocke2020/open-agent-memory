@@ -111,7 +111,6 @@ async def test_aliases_reach_public_worker_and_cited_recall(reference_client):
             "user_id": "lin",
             "query": "When did I join Nova Research?",
             "recall_level": "normal",
-            "max_tokens": 2048,
         },
     )
     assert response.status_code == 200, response.text
@@ -402,7 +401,6 @@ async def test_public_normal_discovers_alias_target_absent_from_direct_arms(
                 "user_id": "lin",
                 "query": "Nova Research laboratory",
                 "recall_level": mode,
-                "max_tokens": 2048,
             },
         )
         assert response.status_code == 200, response.text

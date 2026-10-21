@@ -107,7 +107,7 @@ async def test_http_overflow_consumes_all_source_spans_and_keeps_role_budgets(
                 ) as client:
                     await use_created_user_key(client, "overflow")
                     capabilities = (await client.get("/v1/capabilities")).json()
-                    assert capabilities["limits"]["chunk"]["recall"]["max_tokens"] == 8192
+                    assert capabilities["limits"]["search"]["fast"]["context_max_tokens"] == 18000
                     assert capabilities["limits"]["resource"]["max_output_tokens"] == 4096
                     assert capabilities["limits"]["extraction"]["max_output_tokens"] == 64000
                     texts = (

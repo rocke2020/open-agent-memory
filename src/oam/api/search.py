@@ -21,7 +21,7 @@ from oam.models.runtime import (
 )
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.service import RecallUnavailable
-from oam.tokens import estimate_units, estimated_tokens
+from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 SearchOne = Callable[[SearchRequest, datetime], dict]
 PLANNER_SYSTEM_TEMPLATE = (
@@ -142,7 +142,6 @@ def _planned_batch(
         queries=[request.query, *queries],
         recall_level=request.recall_level,
         fast_graph=request.fast_graph,
-        max_tokens=request.max_tokens,
         include=request.include,
         allow_partial=request.allow_partial,
         deadline_at=deadline,
@@ -184,41 +183,18 @@ def _run_batch(
 ) -> dict:
     if deadline <= datetime.now(UTC):
         raise TimeoutError("recall deadline is exhausted")
-    total_budget = (
-        request.max_tokens
-        if request.max_tokens is not None
-        else config.context.facts_default_tokens
-    )
-    share, extra = divmod(total_budget, len(request.queries))
+    share, extra = divmod(request.context_limit(config), len(request.queries))
     budgets = [share + (index < extra) for index in range(len(request.queries))]
-    chunks = request.include.chunks
-    chunk_budgets = None
-    if chunks is not None:
-        total_chunks = (
-            chunks.max_tokens
-            if chunks.max_tokens is not None
-            else config.chunk.recall.default_tokens
-        )
-        chunk_share, chunk_extra = divmod(total_chunks, len(request.queries))
-        chunk_budgets = [
-            chunk_share + (index < chunk_extra) for index in range(len(request.queries))
-        ]
     reference_time = request.reference_time or datetime.now(UTC)
 
     def run(index: int, query: str) -> dict:
         if deadline <= datetime.now(UTC):
             raise TimeoutError("recall deadline is exhausted")
-        include = request.include
-        if chunks is not None and chunk_budgets is not None:
-            include = include.model_copy(
-                update={"chunks": chunks.model_copy(update={"max_tokens": chunk_budgets[index]})}
-            )
         child = SearchRequest(
             query=query,
             recall_level=request.recall_level,
             fast_graph=request.fast_graph,
-            max_tokens=budgets[index],
-            include=include,
+            include=request.include,
             allow_partial=request.allow_partial,
             deadline_at=deadline,
             time_basis=request.time_basis,
@@ -226,6 +202,7 @@ def _run_batch(
             reference_time=reference_time,
             reference_timezone=request.reference_timezone,
         )
+        child._context_max_tokens = budgets[index]
         return search_one(child, deadline)
 
     results = []
@@ -266,7 +243,7 @@ def _run_batch(
         "status": "partial" if partial else "ok",
         "results": results,
         "context_tokens": sum(row["result"]["context_tokens"] for row in successes),
-        "tokenizer": config.context.tokenizer,
+        "tokenizer": ESTIMATOR,
         "diagnostics": {
             "recall_level": request.recall_level.value,
             "deadline_at": deadline.isoformat(),

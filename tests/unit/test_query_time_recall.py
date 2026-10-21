@@ -153,7 +153,7 @@ def test_window_pool_preserves_disconnected_evidence_with_existing_time_matches(
 
     result = WindowService(
         CONFIG, None, CompleteQueryEmbedding(), generation_id="generation"
-    ).search(object(), SearchRequest(include={"chunks": {}}, query=query, recall_level=mode))
+    ).search(object(), SearchRequest(include={"chunks": True}, query=query, recall_level=mode))
 
     items = {item["unit_id"]: item for item in result["items"]}
     assert set(items) == {"old", "new", "late"}
@@ -206,7 +206,7 @@ def test_temporal_window_pool_is_independent_of_direct_matches_and_roots(mode, e
     result = RecoveryService(CONFIG, None, EmbeddingOnly(), generation_id="generation").search(
         object(),
         SearchRequest(
-            include={"chunks": {}},
+            include={"chunks": True},
             query="apple harvest in 2024",
             recall_level=mode,
             allow_partial=existing == "failed",
@@ -241,7 +241,7 @@ def test_window_pool_failure_does_not_publish_existing_temporal_votes(mode, allo
 
     service = FailedPoolService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
-        include={"chunks": {}},
+        include={"chunks": True},
         query="apple harvest in 2024",
         recall_level=mode,
         allow_partial=allow_partial,
@@ -286,7 +286,7 @@ def test_recall_rejects_policy_change_after_hydration():
 
     with pytest.raises(RecallUnavailable, match="policy"):
         service.search(
-            object(), SearchRequest(include={"chunks": {}}, query="apple", recall_level="fast")
+            object(), SearchRequest(include={"chunks": True}, query="apple", recall_level="fast")
         )
 
 
@@ -313,7 +313,7 @@ def test_fast_recall_ranks_date_match_without_excluding_ordinary_candidates(quer
     result = service.search(
         object(),
         SearchRequest(
-            include={"chunks": {}},
+            include={"chunks": True},
             query=query,
             recall_level="fast",
             reference_time="2026-09-23T12:00:00Z",
@@ -329,7 +329,7 @@ def test_recall_returns_a_recorded_trace_identity():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
 
     result = service.search(
-        object(), SearchRequest(include={"chunks": {}}, query="apple", recall_level="fast")
+        object(), SearchRequest(include={"chunks": True}, query="apple", recall_level="fast")
     )
 
     assert result["trace_id"].startswith("trace_")
@@ -338,7 +338,7 @@ def test_recall_returns_a_recorded_trace_identity():
 def test_explicit_window_overrides_date_in_query():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
-        include={"chunks": {}},
+        include={"chunks": True},
         query="apple harvest in 2025",
         recall_level="fast",
         time_basis="event",
@@ -356,7 +356,7 @@ def test_normal_keeps_temporal_rank_and_out_of_window_direct_evidence():
         CONFIG, SimpleNamespace(max_size=1), EmbeddingOnly(), generation_id="generation"
     )
     request = SearchRequest(
-        include={"chunks": {}},
+        include={"chunks": True},
         query="apple harvest in 2025",
         recall_level="normal",
         reference_time="2026-09-23T12:00:00Z",
@@ -376,7 +376,7 @@ def test_normal_keeps_temporal_rank_and_out_of_window_direct_evidence():
 def test_ambiguous_query_retains_ordinary_recall_with_diagnostic():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
-        include={"chunks": {}},
+        include={"chunks": True},
         query="Compare apple harvest in 2024 and 2025",
         recall_level="fast",
     )
@@ -392,7 +392,7 @@ def test_context_reports_estimated_tokens_of_complete_rendered_blocks():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     result = service.search(
         object(),
-        SearchRequest(include={"chunks": {}}, query="apple", recall_level="fast", max_tokens=64),
+        SearchRequest(include={"chunks": True}, query="apple", recall_level="fast"),
     )
     assert result["tokenizer"] == ESTIMATOR
     assert result["context_tokens"] == estimated_tokens(estimate_units(result["context"]))
@@ -406,7 +406,7 @@ def test_query_budget_uses_unicode_estimate():
     service = DatedService(config, None, EmbeddingOnly(), generation_id="generation")
     with pytest.raises(ValueError, match="query exceeds"):
         service.search(
-            object(), SearchRequest(include={"chunks": {}}, query="甲乙", recall_level="fast")
+            object(), SearchRequest(include={"chunks": True}, query="甲乙", recall_level="fast")
         )
 
 
@@ -496,14 +496,14 @@ def test_fast_temporal_deadline_cannot_report_complete_recall(monkeypatch):
         service.search(
             object(),
             SearchRequest(
-                include={"chunks": {}}, query="apple harvest in 2025", recall_level="fast"
+                include={"chunks": True}, query="apple harvest in 2025", recall_level="fast"
             ),
         )
 
     partial = service.search(
         object(),
         SearchRequest(
-            include={"chunks": {}},
+            include={"chunks": True},
             query="apple harvest in 2025",
             recall_level="fast",
             allow_partial=True,
@@ -527,7 +527,7 @@ def test_normal_graph_failure_obeys_partial_policy(allow_partial):
 
     service = FailedGraphService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
-        include={"chunks": {}}, query="apple", recall_level="normal", allow_partial=allow_partial
+        include={"chunks": True}, query="apple", recall_level="normal", allow_partial=allow_partial
     )
     if allow_partial:
         result = service.search(object(), request)
@@ -539,7 +539,46 @@ def test_normal_graph_failure_obeys_partial_policy(allow_partial):
             service.search(object(), request)
 
 
-class DirectEvidenceRepository(DatedRepository):
+class SupportedFactsRepository(DatedRepository):
+    def source_passage_locators(self, source_ids):
+        return [
+            {
+                "unit_id": f"body_{name}",
+                "passage_id": f"body_{name}",
+                "source_id": name,
+                "source_version": 1,
+                "locator": {"role": "user", "message_index": 0},
+            }
+            for name in source_ids
+        ]
+
+    def hydrate(self, unit_ids):
+        rows = []
+        for unit_id in unit_ids:
+            owner = unit_id.removeprefix("body_")
+            text = self.rows.get(owner, {}).get("text", owner)
+            rows.append(
+                {
+                    "unit_id": unit_id,
+                    "kind": "passage" if unit_id.startswith("body_") else "fact",
+                    "origin": "memory",
+                    "text": text,
+                    "citations": [
+                        {
+                            "source_id": owner,
+                            "source_version": 1,
+                            "passage_id": f"body_{owner}",
+                            "span": {"quote": text},
+                        }
+                    ],
+                    "time_evidence": [],
+                    "locator": {"role": "user", "message_index": 0},
+                }
+            )
+        return rows
+
+
+class DirectEvidenceRepository(SupportedFactsRepository):
     def lexical(self, query, limit):
         return []
 
@@ -548,20 +587,6 @@ class DirectEvidenceRepository(DatedRepository):
 
     def ordinary(self, seeds, vector, *, include_semantic=True):
         return ("a_graph",), {}
-
-    def hydrate(self, unit_ids):
-        return [
-            {
-                "unit_id": unit_id,
-                "kind": "fact",
-                "origin": "memory",
-                "text": unit_id,
-                "citations": [],
-                "time_evidence": [],
-                "locator": {},
-            }
-            for unit_id in unit_ids
-        ]
 
 
 class DirectEvidenceService(RecallService):
@@ -582,7 +607,7 @@ def test_normal_equal_arm_weights_use_stable_id_for_dense_graph_tie():
     )
 
     result = service.search(
-        object(), SearchRequest(include={"chunks": {}}, query="apple", recall_level="normal")
+        object(), SearchRequest(include={"chunks": False}, query="apple", recall_level="normal")
     )
 
     assert [item["unit_id"] for item in result["items"]] == ["a_graph", "z_direct"]
@@ -616,7 +641,7 @@ def test_graph_and_dense_each_vote_for_a_shared_candidate():
     )
 
     result = service.search(
-        object(), SearchRequest(include={"chunks": {}}, query="apple", recall_level="normal")
+        object(), SearchRequest(include={"chunks": False}, query="apple", recall_level="normal")
     )
 
     assert [item["unit_id"] for item in result["items"]][:2] == ["z_unrelated", "a_relevant"]
@@ -634,7 +659,7 @@ def test_normal_partial_embedding_failure_keeps_lexical_arm_weight():
     result = service.search(
         object(),
         SearchRequest(
-            include={"chunks": {}}, query="apple", recall_level="normal", allow_partial=True
+            include={"chunks": True}, query="apple", recall_level="normal", allow_partial=True
         ),
     )
 
@@ -674,7 +699,7 @@ class ConversationRepository(DatedRepository):
         return [
             {
                 "unit_id": unit_id,
-                "kind": "passage" if unit_id.startswith("z_") else "fact",
+                "kind": "passage",
                 "origin": "memory",
                 "text": unit_id,
                 "citations": [],
@@ -705,14 +730,12 @@ def test_normal_context_respects_fused_relevance_under_item_cap():
 
     result = service.search(
         object(),
-        SearchRequest(include={"chunks": {}}, query="recommend something", recall_level="normal"),
+        SearchRequest(include={"chunks": True}, query="recommend something", recall_level="normal"),
     )
 
     assert [item["unit_id"] for item in result["items"]] == [
         "a_noise",
-        "b_noise",
         "z_user",
-        "z_reply",
     ]
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
 
@@ -819,7 +842,7 @@ def test_calendar_range_recall_preserves_query_and_outside_evidence(mode):
 
     service = DatedService(CONFIG, None, RecordingEmbedding(), generation_id="generation")
     result = service.search(
-        object(), SearchRequest(include={"chunks": {}}, query=query, recall_level=mode)
+        object(), SearchRequest(include={"chunks": True}, query=query, recall_level=mode)
     )
 
     assert result["diagnostics"]["query_time"]["window"] == {

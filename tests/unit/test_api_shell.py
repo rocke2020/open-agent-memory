@@ -149,22 +149,22 @@ async def test_binding_names_alone_cannot_make_the_foundation_ready(tmp_path) ->
         ("search:\n  max_queries: 1\n", "search-many", {"queries": ["one", "two"]}, 422),
         ("search:\n  max_queries: 5\n", "search-many", {"queries": ["q"] * 5}, 200),
         (
-            "context:\n  facts_default_tokens: 16\n",
+            "search:\n  normal:\n    context_max_tokens: 16\n",
             "search",
             {
                 "query": "q",
                 "max_tokens": 33,
             },
-            200,
+            422,
         ),
         (
-            "chunk:\n  recall:\n    default_tokens: 16\n",
+            "search:\n  normal:\n    context_max_tokens: 16\n",
             "decompose-and-search",
             {
                 "query": "q",
                 "include": {"chunks": {"max_tokens": 33}},
             },
-            200,
+            422,
         ),
     ],
 )
@@ -179,10 +179,10 @@ async def test_http_admission_uses_selected_config_limits(
             return {"queries": body.queries}
 
         def search(self, actor, user_id, body):
-            return {"max_tokens": body.max_tokens}
+            return {"chunks": body.include.chunks}
 
         def decompose_and_search(self, actor, user_id, body):
-            return {"chunks": body.include.chunks.model_dump()}
+            return {"chunks": body.include.chunks}
 
     config = tmp_path / "oam.yaml"
     config.write_text(config_text, encoding="utf-8")
@@ -230,9 +230,14 @@ async def test_openapi_search_contracts_exclude_profile_selection(client) -> Non
     for name in ("RecallRequest", "SearchRequest", "SearchManyRequest"):
         assert "include_profile" not in schemas[name]["properties"]
         assert "max_context_tokens" not in schemas[name]["properties"]
-        assert schemas[name]["properties"]["max_tokens"]["anyOf"][0]["minimum"] == 0
+        assert "max_tokens" not in schemas[name]["properties"]
         assert schemas[name]["additionalProperties"] is False
-    assert schemas["RecalledChunkOptions"]["properties"]["max_tokens"]["anyOf"][0]["minimum"] == 0
+    assert schemas["SearchIncludeOptions"]["properties"]["chunks"] == {
+        "default": True,
+        "title": "Chunks",
+        "type": "boolean",
+    }
+    assert "RecalledChunkOptions" not in schemas
 
 
 @pytest.mark.parametrize(
@@ -283,11 +288,10 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["contract_version"] == "0.0.1"
     assert payload["limits"]["resource"]["max_bytes"] == 100 * 1024 * 1024
     assert payload["limits"]["chunk"]["ingestion"]["max_estimated_tokens"] == 4096
-    assert payload["limits"]["chunk"]["recall"] == {"default_tokens": 8192}
-    assert payload["limits"]["context"] == {
-        "facts_default_tokens": 4096,
-        "tokenizer": "oam-unicode-quarter-v1",
-    }
+    assert "recall" not in payload["limits"]["chunk"]
+    assert "context" not in payload["limits"]
+    assert payload["limits"]["search"]["fast"]["context_max_tokens"] == 18000
+    assert payload["limits"]["search"]["normal"]["context_max_tokens"] == 32768
     assert payload["features"]["source_lifecycle"] is True
     assert payload["features"]["recorded_debug"] is True
     assert payload["features"]["portable_export"] is True

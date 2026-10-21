@@ -16,6 +16,7 @@ import psycopg
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.contracts.search import SearchRequest, TimeBasis
+from oam.quotes import unique_quote
 from oam.retrieval.algorithms import (
     GraphEdge,
     TimeRange,
@@ -28,6 +29,7 @@ from oam.retrieval.context import (
     CONTEXT_TOKENIZER,
     ORIGINAL_KINDS,
     assemble_context,
+    bundle_items,
     context_token_count,
     render_context,
     source_diverse_seed_order,
@@ -87,21 +89,23 @@ class RecallService:
         except psycopg.errors.QueryCanceled as error:
             raise TimeoutError("recall SQL deadline exceeded") from error
         diagnostics = result["diagnostics"]
-        budgets = diagnostics["text_budgets"]
+        budget = diagnostics["context_budget"]
         logging.getLogger(__name__).info(
             "oam.recall trace_id=%s mode=%s graph=%s arms=%s outcome=%s "
-            "facts=%d/%d originals=%d/%d truncated=%d context_tokens=%d duration_ms=%.1f",
+            "include_chunks=%s facts=%d originals=%d context_tokens=%d/%d "
+            "omissions=%d oversized_single_fact=%s duration_ms=%.1f",
             result["trace_id"],
             diagnostics["recall_level"],
             diagnostics["graph"],
             ",".join(diagnostics["executed_arms"]),
             "partial" if diagnostics["partial"] else "ok",
-            budgets["facts"]["used"],
-            budgets["facts"]["limit"],
-            budgets["chunks"]["used"],
-            budgets["chunks"]["limit"],
-            len(budgets["chunks"]["truncated_ids"]),
+            budget["include_chunks"],
+            budget["learned_count"],
+            budget["original_count"],
             result["context_tokens"],
+            budget["limit"],
+            len(budget["omitted_ids"]),
+            budget["oversized_single_fact"],
             (time.monotonic() - started) * 1000,
         )
         return result
@@ -448,17 +452,8 @@ class RecallService:
             raise RecallUnavailable("PDF parse became incomplete during recall")
         hydrated = read("hydrate", final_ids)
         hydrated_passages = {row["unit_id"]: row for row in hydrated if row["kind"] == "passage"}
-        fact_budget = (
-            self.config.context.facts_default_tokens
-            if request.max_tokens is None
-            else request.max_tokens
-        )
+        context_limit = request.context_limit(self.config)
         chunks = request.include.chunks
-        chunk_budget = (
-            chunks.max_tokens
-            if chunks is not None and chunks.max_tokens is not None
-            else self.config.chunk.recall.default_tokens
-        )
         candidates = []
         for row in hydrated:
             item = {key: value for key, value in row.items() if key != "locator"}
@@ -467,7 +462,9 @@ class RecallService:
         seed_limit = min(tier.source_seed_results, tier.max_results)
         ranked_candidates = [item for item in candidates if item["unit_id"] != related_tail_id]
         discovery_seed_items = source_diverse_seed_order(ranked_candidates)[:seed_limit]
-        seed_items = ranked_candidates[:seed_limit]
+        seed_items = [
+            item for item in ranked_candidates if chunks or item["kind"] not in ORIGINAL_KINDS
+        ][:seed_limit]
         source_seed_items = seed_items
         if related_tail_id is not None:
             related_item = next(
@@ -478,7 +475,7 @@ class RecallService:
         source_ids = tuple(
             dict.fromkeys(
                 citation["source_id"]
-                for item in source_seed_items
+                for item in candidates
                 if item["kind"] == "fact"
                 for citation in item["citations"]
                 if isinstance(citation.get("source_id"), str)
@@ -513,8 +510,10 @@ class RecallService:
                 }
                 links = [row for row in selected if row["insight_unit_id"] == identity]
                 facts = []
-                valid = len({link["memory_id"] for link in links}) == min(
-                    len(expected), SUPPORT_COMPANION_LIMIT
+                valid = (
+                    bool(expected)
+                    and len(expected) <= SUPPORT_COMPANION_LIMIT
+                    and {link["memory_id"] for link in links} == set(expected)
                 )
                 for link in links:
                     row = support_rows.get(link["unit_id"])
@@ -556,7 +555,13 @@ class RecallService:
                         ),
                         "direct_chunk_ids": [],
                         "status": "pending" if valid else "ineligible",
-                        "reason": None if valid else "missing_or_ineligible_support",
+                        "reason": (
+                            None
+                            if valid
+                            else "support_selection_limit"
+                            if len(expected) > SUPPORT_COMPANION_LIMIT
+                            else "missing_or_ineligible_support"
+                        ),
                     }
                 )
                 if valid:
@@ -576,6 +581,7 @@ class RecallService:
                 )
             )
         source_passages = []
+        by_citation = {}
         original_detail_ids = []
         expanded_detail_ids = []
         l2_detail_ids = []
@@ -583,7 +589,14 @@ class RecallService:
             locators = (l2_read if primary_insights else read)(
                 "source_passage_locators", source_ids
             )
-            original_detail_ids = source_window_ids(seed_items, locators)
+            original_detail_ids = list(
+                dict.fromkeys(
+                    [
+                        *source_window_ids(seed_items, locators),
+                        *source_window_ids(candidates, locators, policy="l2_direct"),
+                    ]
+                )
+            )
             by_citation = {
                 (row["source_id"], row["source_version"], row["passage_id"]): row
                 for row in locators
@@ -838,15 +851,109 @@ class RecallService:
         source_passages = [
             item for item in source_passages if item["unit_id"] in original_detail_set
         ]
-        items, budget_omissions = assemble_context(
-            candidates,
+        # Companion facts can be discovered after the initial bounded source window.
+        late_sources = tuple(
+            dict.fromkeys(
+                citation["source_id"]
+                for fact in candidates
+                if fact["kind"] == "fact"
+                for citation in fact["citations"]
+                if isinstance(citation.get("source_id"), str)
+                and citation["source_id"] not in source_ids
+            )
+        )
+        if late_sources:
+            for row in read("source_passage_locators", late_sources):
+                by_citation[(row["source_id"], row["source_version"], row["passage_id"])] = row
+        required_ids = tuple(
+            dict.fromkeys(
+                locator["unit_id"]
+                for fact in candidates
+                if fact["kind"] == "fact"
+                for citation in fact["citations"]
+                if (
+                    locator := by_citation.get(
+                        (
+                            citation.get("source_id"),
+                            citation.get("source_version"),
+                            citation.get("passage_id"),
+                        )
+                    )
+                )
+            )
+        )
+        missing_owners = [
+            identity for identity in required_ids if identity not in hydrated_passages
+        ]
+        if missing_owners:
+            hydrated_passages.update(
+                (row["unit_id"], row) for row in read("hydrate", missing_owners)
+            )
+        for identity in required_ids:
+            if identity in hydrated_passages and identity not in passages_by_id:
+                passage = hydrated_passages[identity]
+                passages_by_id[identity] = {
+                    **{key: value for key, value in passage.items() if key != "locator"},
+                    "paths": paths.get(identity, []),
+                }
+        source_omissions = []
+        for fact in candidates:
+            if fact["kind"] != "fact":
+                continue
+            required = []
+            for citation in fact["citations"]:
+                locator = by_citation.get(
+                    (
+                        citation.get("source_id"),
+                        citation.get("source_version"),
+                        citation.get("passage_id"),
+                    )
+                )
+                passage = passages_by_id.get(locator["unit_id"]) if locator else None
+                span = citation.get("span", {})
+                if (
+                    passage is None
+                    or not unique_quote(passage["text"], span.get("quote"))
+                    or any(
+                        span.get(key) != locator["locator"].get(key)
+                        for key in (
+                            "source_id",
+                            "source_version",
+                            "message_id",
+                            "message_index",
+                            "role",
+                            "passage_index",
+                        )
+                        if key in span
+                    )
+                ):
+                    break
+                required.append(passage)
+            else:
+                if required:
+                    evidence_groups.append([fact, *required])
+                    continue
+            source_omissions.append(fact["unit_id"])
+        grouped_roots = {group[0]["unit_id"] for group in evidence_groups}
+        support_limit_omissions = {
+            item["unit_id"]
+            for item in candidates
+            if item["kind"] == "insight" and item["unit_id"] not in grouped_roots
+        }
+        unavailable_roots = set(source_omissions) | support_limit_omissions
+        packing_candidates = [
+            item for item in candidates if item["unit_id"] not in unavailable_roots
+        ]
+        packing_started = time.monotonic()
+        items, budget_omissions, admitted_roots, oversized_single_fact = assemble_context(
+            packing_candidates,
             source_passages,
-            fact_budget=fact_budget,
-            chunk_budget=chunk_budget,
-            include_chunks=chunks is not None,
+            context_max_tokens=context_limit,
+            include_chunks=chunks,
             max_results=tier.max_results,
             evidence_groups=evidence_groups,
         )
+        timing["context_packing"] = (time.monotonic() - packing_started) * 1000
         selected_insights = [
             item for item in items if item["kind"] == "insight" and item["unit_id"] in l2_supports
         ]
@@ -878,61 +985,62 @@ class RecallService:
                 diagnostic.update(status="ineligible", reason="insight_changed_before_return")
             else:
                 diagnostic.update(status="included")
-        # Remove stale groups; shared evidence and independently selected items survive.
-        retained = {entry["unit_id"] for entry in l2_diagnostics if entry["status"] == "included"}
-        independent = {
-            item["unit_id"] for item in (*candidates, *source_passages) if item["kind"] != "insight"
-        }
-        if chunks is not None:
-            independent.update(
-                item["unit_id"]
-                for group in evidence_groups
-                for item in group
-                if item["kind"] in ORIGINAL_KINDS
-            )
-        allowed = independent | {
-            item["unit_id"]
-            for group in evidence_groups
-            if group[0]["unit_id"] in retained
-            for item in group
-        }
-        grouped_ids = {node["unit_id"] for group in evidence_groups for node in group}
-        items = [
-            item
-            for item in items
-            if item["unit_id"] in allowed or item["unit_id"] not in grouped_ids
-        ]
+        # Only admitted roots own output; hydration-pool membership is not admission.
+        invalid = {entry["unit_id"] for entry in l2_diagnostics if entry["status"] == "ineligible"}
+        admitted_roots = [group for group in admitted_roots if group[0]["unit_id"] not in invalid]
         retained_identities = {
-            entry["insight_id"] for entry in l2_diagnostics if entry["status"] == "included"
+            group[0]["insight_id"] for group in admitted_roots if group[0]["kind"] == "insight"
         }
-        for item in items:
+        for item in bundle_items(admitted_roots):
             item["paths"] = [
                 path
                 for path in item["paths"]
                 if path.get("arm") != "l2_source" or path["insight_id"] in retained_identities
             ]
+        items = bundle_items(admitted_roots)
         context = render_context(items)
+        while (
+            context_token_count(context) > context_limit
+            and admitted_roots
+            and not oversized_single_fact
+        ):
+            removed = admitted_roots.pop()
+            budget_omissions.append(removed[0]["unit_id"])
+            items = bundle_items(admitted_roots)
+            context = render_context(items)
         context_tokens = context_token_count(context)
-        fact_tokens = estimated_tokens(
-            sum(
-                estimate_units(item["text"]) for item in items if item["kind"] not in ORIGINAL_KINDS
-            )
-        )
-        chunk_tokens = estimated_tokens(
-            sum(estimate_units(item["text"]) for item in items if item["kind"] in ORIGINAL_KINDS)
-        )
-        text_budgets = {
-            "facts": {
-                "limit": fact_budget,
-                "used": fact_tokens,
-                "oversized_first": fact_tokens > fact_budget,
+        selected_ids = {item["unit_id"] for item in items}
+        for diagnostic in l2_diagnostics:
+            if diagnostic["status"] == "included" and diagnostic["unit_id"] not in selected_ids:
+                diagnostic.update(
+                    status="budget_omitted", reason="complete_group_exceeds_hard_limit"
+                )
+        context_budget = {
+            "limit": context_limit,
+            "used": context_tokens,
+            "oversized_single_fact": oversized_single_fact,
+            "overrun_tokens": max(0, context_tokens - context_limit),
+            "include_chunks": chunks,
+            "learned_count": sum(item["kind"] not in ORIGINAL_KINDS for item in items),
+            "original_count": sum(item["kind"] in ORIGINAL_KINDS for item in items),
+            "omitted_ids": list(
+                dict.fromkeys(
+                    [
+                        *budget_omissions,
+                        *source_omissions,
+                        *sorted(support_limit_omissions),
+                    ]
+                )
+            ),
+            "omission_reasons": {
+                **dict.fromkeys(budget_omissions, "context_or_result_limit"),
+                **dict.fromkeys(source_omissions, "missing_or_invalid_source_support"),
+                **dict.fromkeys(sorted(support_limit_omissions), "support_expansion_limit"),
+                **{
+                    entry["unit_id"]: entry["reason"] for entry in l2_diagnostics if entry["reason"]
+                },
             },
-            "chunks": {
-                "enabled": chunks is not None,
-                "limit": chunk_budget,
-                "used": chunk_tokens,
-                "truncated_ids": [item["unit_id"] for item in items if item.get("truncated")],
-            },
+            "source_omitted_ids": source_omissions,
         }
         _remaining(deadline)
         result = {
@@ -970,7 +1078,7 @@ class RecallService:
                 "readiness": index_state["readiness"],
                 "partial": index_state["readiness"] != "ready" or bool(degraded),
                 "generative_calls": 0,
-                "text_budgets": text_budgets,
+                "context_budget": context_budget,
                 "l2_source_expansion": l2_diagnostics,
                 "temporal_stop": temporal_stop,
                 "query_time": {
@@ -1026,7 +1134,7 @@ class RecallService:
             "result_ids": [item["unit_id"] for item in items],
             "l2_source_expansion": l2_diagnostics,
             "packing": {
-                "text_budgets": text_budgets,
+                "context_budget": context_budget,
                 "selected_ids": [item["unit_id"] for item in items],
                 "budget_omissions": budget_omissions,
                 "hydration_omissions": [

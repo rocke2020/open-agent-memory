@@ -162,7 +162,15 @@ def test_direct_selection_does_not_require_message_index_or_expand_siblings():
 @pytest.mark.parametrize("hard_limit", ["tokens", "results"])
 def test_incomplete_group_is_omitted_without_insight_fill_reentry(hard_limit):
     config = CONFIG
-    options = {"max_tokens": 1} if hard_limit == "tokens" else {}
+    options = {}
+    if hard_limit == "tokens":
+        config = CONFIG.model_copy(
+            update={
+                "search": CONFIG.search.model_copy(
+                    update={"fast": CONFIG.search.fast.model_copy(update={"context_max_tokens": 1})}
+                )
+            }
+        )
     if hard_limit == "results":
         config = CONFIG.model_copy(
             update={
@@ -198,35 +206,109 @@ def test_expansion_read_errors_fail_even_when_partial_allowed(monkeypatch, metho
         )
 
 
-def test_required_originals_are_complete_when_ordinary_chunks_are_disabled():
+def test_false_retains_insight_facts_and_quotes_without_original_bodies():
     result = InsightService().search(
-        object(), SearchRequest(query="batch implementation", max_tokens=128)
+        object(), SearchRequest(query="batch implementation", include={"chunks": False})
     )
-    assert ORIGINAL in result["context"]
+    assert {item["unit_id"] for item in result["items"]} == {"insight", "fact", "fact2"}
+    assert ORIGINAL not in result["context"]
+    assert "40 to 32 ms" in result["context"]
     assert result["diagnostics"]["l2_source_expansion"][0]["status"] == "included"
-    assert not any(item.get("truncated") for item in result["items"])
 
 
-def test_insight_is_omitted_when_complete_original_exceeds_chunk_budget():
-    result = InsightService().search(
-        object(),
-        SearchRequest(
-            query="batch implementation", max_tokens=128, include={"chunks": {"max_tokens": 1}}
-        ),
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_false_filters_originals_before_primary_support_seed_cap(monkeypatch, mode):
+    monkeypatch.setattr(
+        InsightRepository, "lexical", lambda *args: [{"unit_id": "code"}, {"unit_id": "insight"}]
     )
-    assert "insight" not in {item["unit_id"] for item in result["items"]}
+    config = CONFIG.model_copy(
+        update={
+            "search": CONFIG.search.model_copy(
+                update={
+                    mode: getattr(CONFIG.search, mode).model_copy(update={"source_seed_results": 1})
+                }
+            )
+        }
+    )
+    result = InsightService(config=config).search(
+        object(),
+        SearchRequest(query="batch implementation", recall_level=mode, include={"chunks": False}),
+    )
+    assert {item["unit_id"] for item in result["items"]} == {"insight", "fact", "fact2"}
+    assert ORIGINAL not in result["context"]
+
+
+def test_insight_has_no_singleton_fact_overshoot_exception():
+    config = CONFIG.model_copy(
+        update={
+            "search": CONFIG.search.model_copy(
+                update={"normal": CONFIG.search.normal.model_copy(update={"context_max_tokens": 1})}
+            )
+        }
+    )
+    result = InsightService(config=config).search(
+        object(), SearchRequest(query="batch implementation")
+    )
+    assert result["items"] == []
     assert result["diagnostics"]["l2_source_expansion"][0]["status"] == "budget_omitted"
 
 
-def test_zero_learned_budget_keeps_requested_originals_from_insight_candidates():
-    result = InsightService().search(
-        object(),
-        SearchRequest(query="batch implementation", max_tokens=0, include={"chunks": {}}),
+def test_zero_internal_share_returns_no_insight_or_original():
+    request = SearchRequest(query="batch implementation")
+    request._context_max_tokens = 0
+    result = InsightService().search(object(), request)
+    assert result["items"] == []
+    assert result["context_tokens"] == 0
+
+
+def test_insight_cannot_return_only_sixteen_of_seventeen_required_facts(monkeypatch):
+    rows = evidence()
+    rows[0]["supports"] = [{"memory_id": f"support{i}", "support_revision": 1} for i in range(17)]
+    rows.extend(
+        {**deepcopy(rows[1]), "unit_id": f"support{i}", "memory_id": f"support{i}"}
+        for i in range(17)
     )
-    assert {item["unit_id"] for item in result["items"]} == {"code"}
+
+    def supports(self, unit_ids, vector, limit):
+        return [
+            {
+                "insight_unit_id": "insight",
+                "unit_id": f"support{i}",
+                "memory_id": f"support{i}",
+                "support_revision": 1,
+            }
+            for i in range(17)
+        ][:limit]
+
+    monkeypatch.setattr(InsightRepository, "insight_support_units", supports)
+    result = InsightService(rows).search(object(), SearchRequest(query="batch implementation"))
+    assert result["items"] == []
+    assert result["diagnostics"]["l2_source_expansion"][0]["reason"] == "support_selection_limit"
+
+
+def test_invalid_insight_preserves_independently_admitted_fact_and_shared_source(monkeypatch):
+    original = InsightRepository.hydrate
+    calls = 0
+
+    def changed(self, unit_ids):
+        nonlocal calls
+        rows = original(self, unit_ids)
+        if "insight" in unit_ids:
+            calls += 1
+            if calls > 1:
+                return [row for row in rows if row["unit_id"] != "insight"]
+        return rows
+
+    monkeypatch.setattr(InsightRepository, "hydrate", changed)
+    monkeypatch.setattr(
+        InsightRepository, "lexical", lambda *args: [{"unit_id": "fact"}, {"unit_id": "insight"}]
+    )
+    result = InsightService().search(object(), SearchRequest(query="batch implementation"))
+    assert {row["unit_id"] for row in result["items"]} == {"fact", "code"}
     assert ORIGINAL in result["context"]
-    assert result["diagnostics"]["l2_source_expansion"][0]["status"] == "budget_omitted"
-    assert all(not item["paths"] for item in result["items"])
+    assert all(
+        not any(path["arm"] == "l2_source" for path in row["paths"]) for row in result["items"]
+    )
 
 
 def test_shared_original_preserves_every_insight_and_fact_edge_once(monkeypatch):

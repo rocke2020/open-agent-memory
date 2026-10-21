@@ -109,8 +109,20 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
                 authority = AuthorizedUser(
                     "key", tenant, "reader", "lin", frozenset({"memory:read"})
                 )
-                add_fact(connection, authority, "apple", "Lin grows apple trees in an orchard.")
-                add_fact(connection, authority, "pear", "Lin grows pear trees in an orchard.")
+                add_fact(
+                    connection,
+                    authority,
+                    "apple",
+                    "Lin grows apple trees in an orchard.",
+                    with_original=True,
+                )
+                add_fact(
+                    connection,
+                    authority,
+                    "pear",
+                    "Lin grows pear trees in an orchard.",
+                    with_original=True,
+                )
 
             client.headers["Authorization"] = f"Bearer {user_key}"
             body: dict[str, Any]
@@ -143,13 +155,7 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
         assert payload["context_tokens"] == sum(
             row["result"]["context_tokens"] for row in payload["results"]
         )
-        fact_budgets = [
-            row["result"]["diagnostics"]["text_budgets"]["facts"] for row in payload["results"]
-        ]
-        assert (
-            sum(budget["limit"] for budget in fact_budgets) == config.context.facts_default_tokens
-        )
-        assert all(budget["used"] <= budget["limit"] for budget in fact_budgets)
+        assert payload["context_tokens"] <= config.search.fast.context_max_tokens
         assert all(
             row["result"]["diagnostics"]["generative_calls"] == 0 for row in payload["results"]
         )

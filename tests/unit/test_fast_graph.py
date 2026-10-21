@@ -6,15 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
-from test_query_time_recall import CONFIG, DatedRepository, EmbeddingOnly
+from test_query_time_recall import CONFIG, EmbeddingOnly, SupportedFactsRepository
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import ConfigurationError, load_config
-from oam.contracts.search import RecallLevel, SearchManyRequest, SearchRequest
+from oam.contracts.search import RecallLevel, SearchIncludeOptions, SearchManyRequest, SearchRequest
 from oam.retrieval.service import RecallService, RecallUnavailable
 
 
-class CausalRepository(DatedRepository):
+class CausalRepository(SupportedFactsRepository):
     def __init__(self, request, calls, failure=False):
         super().__init__(request)
         self.calls, self.failure = calls, failure
@@ -30,9 +30,6 @@ class CausalRepository(DatedRepository):
     def dense(self, vector, limit):
         self.calls.append(("dense", limit))
         return [{"unit_id": "effect", "kind": "fact", "score": 1.0}]
-
-    def hydrate(self, ids):
-        return [{**row, "kind": "fact"} for row in super().hydrate(ids)]
 
     def ordinary(self, *args):
         raise AssertionError("fast must not execute entity/semantic ordinary SQL")
@@ -90,7 +87,12 @@ def test_fast_graph_uses_yaml_default_unless_request_overrides(
     options = {} if override is None else {"fast_graph": override}
     result = service.search(
         AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
-        SearchRequest(query="why move", recall_level=RecallLevel.FAST, **options),
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False),
+            query="why move",
+            recall_level=RecallLevel.FAST,
+            **options,
+        ),
     )
     assert {item["unit_id"] for item in result["items"]} == (
         {"effect", "cause", "origin"} if expected else {"effect"}
@@ -142,12 +144,19 @@ def test_batch_and_planner_inherit_mode_graph_config(
             }
         )
         result = decompose_and_search(
-            config, SearchRequest(query="why move", recall_level=mode), one, Planner()
+            config,
+            SearchRequest(
+                include=SearchIncludeOptions(chunks=False), query="why move", recall_level=mode
+            ),
+            one,
+            Planner(),
         )
     else:
         result = search_many(
             config,
-            SearchManyRequest(queries=["why move"], recall_level=mode),
+            SearchManyRequest(
+                include=SearchIncludeOptions(chunks=False), queries=["why move"], recall_level=mode
+            ),
             one,
         )
     assert result["status"] == "ok"
@@ -217,7 +226,9 @@ def test_mode_graph_config_controls_final_context(tmp_path: Path, caplog, mode, 
     service = GraphService(config=load_config(path).config)
     result = service.search(
         AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
-        SearchRequest(query="why move", recall_level=mode),
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False), query="why move", recall_level=mode
+        ),
     )
 
     assert {item["unit_id"] for item in result["items"]} == expected
@@ -228,17 +239,19 @@ def test_mode_graph_config_controls_final_context(tmp_path: Path, caplog, mode, 
     assert ("graph" in result["diagnostics"]["executed_arms"]) == (graph != "off")
     assert "dense" in result["diagnostics"]["executed_arms"]
     assert result["diagnostics"]["generative_calls"] == 0
-    assert (
-        result["diagnostics"]["text_budgets"]["facts"]["used"]
-        <= service.config.context.facts_default_tokens
-    )
+    assert result["context_tokens"] <= getattr(service.config.search, mode).context_max_tokens
     assert f"graph={graph}" in caplog.text
     assert result["trace_id"] in caplog.text
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_canonical_graph_defaults_reach_final_context(mode):
-    result = GraphService().search(object(), SearchRequest(query="why move", recall_level=mode))
+    result = GraphService().search(
+        object(),
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False), query="why move", recall_level=mode
+        ),
+    )
     assert {item["unit_id"] for item in result["items"]} == (
         {"effect"} if mode == "fast" else {"effect", "cause", "origin"}
     )
@@ -258,7 +271,12 @@ def test_fast_request_boolean_overrides_configured_full_graph(tmp_path: Path, ov
     service = GraphService(config=load_config(path).config)
     result = service.search(
         AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
-        SearchRequest(query="why move", recall_level=RecallLevel.FAST, fast_graph=override),
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False),
+            query="why move",
+            recall_level=RecallLevel.FAST,
+            fast_graph=override,
+        ),
     )
     assert {item["unit_id"] for item in result["items"]} == expected
 
@@ -267,7 +285,13 @@ def test_fast_request_boolean_overrides_configured_full_graph(tmp_path: Path, ov
 def test_disabled_fast_keeps_direct_context_and_original_dense_cap(options):
     service = CausalService()
     result = service.search(
-        object(), SearchRequest(query="why move", recall_level="fast", **options)
+        object(),
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False),
+            query="why move",
+            recall_level="fast",
+            **options,
+        ),
     )
     assert [item["unit_id"] for item in result["items"]] == ["effect"]
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
@@ -277,7 +301,13 @@ def test_disabled_fast_keeps_direct_context_and_original_dense_cap(options):
 def test_enabled_fast_delivers_two_supported_causes_in_final_context():
     service = CausalService()
     result = service.search(
-        object(), SearchRequest(query="why move", recall_level="fast", fast_graph=True)
+        object(),
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False),
+            query="why move",
+            recall_level="fast",
+            fast_graph=True,
+        ),
     )
     assert {item["unit_id"] for item in result["items"]} == {"effect", "cause", "origin"}
     assert "I moved because my rent increased." in result["context"]
@@ -290,20 +320,34 @@ def test_enabled_fast_delivers_two_supported_causes_in_final_context():
 @pytest.mark.parametrize("mode", ["normal"])
 def test_fast_only_option_rejects_nonfast_modes(mode):
     with pytest.raises(ValidationError, match="fast_graph"):
-        SearchRequest(query="why move", recall_level=mode, fast_graph=True)
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False),
+            query="why move",
+            recall_level=mode,
+            fast_graph=True,
+        )
 
 
 @pytest.mark.parametrize("value", ["true", 1])
 def test_fast_graph_does_not_coerce_nonboolean_input(value):
     with pytest.raises(ValidationError):
-        SearchRequest(query="why move", recall_level="fast", fast_graph=value)
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False),
+            query="why move",
+            recall_level="fast",
+            fast_graph=value,
+        )
 
 
 @pytest.mark.parametrize("partial", [False, True])
 def test_causal_stage_failure_obeys_existing_partial_contract(partial):
     service = CausalService(failure=True)
     request = SearchRequest(
-        query="why move", recall_level="fast", fast_graph=True, allow_partial=partial
+        include=SearchIncludeOptions(chunks=False),
+        query="why move",
+        recall_level="fast",
+        fast_graph=True,
+        allow_partial=partial,
     )
     if not partial:
         with pytest.raises(RecallUnavailable, match="graph"):
@@ -330,8 +374,14 @@ def test_batch_and_planner_children_keep_opt_in():
             "diagnostics": {"generative_calls": 0},
         }
 
-    options = {"recall_level": "fast", "fast_graph": True, "max_tokens": 100}
-    search_many(CONFIG, SearchManyRequest(queries=["why move", "why rent"], **options), one)
+    options = {"recall_level": "fast", "fast_graph": True}
+    search_many(
+        CONFIG,
+        SearchManyRequest(
+            include=SearchIncludeOptions(chunks=False), queries=["why move", "why rent"], **options
+        ),
+        one,
+    )
 
     class Planner:
         def generate(self, *args, **kwargs):
@@ -350,7 +400,12 @@ def test_batch_and_planner_children_keep_opt_in():
             )
         }
     )
-    decompose_and_search(config, SearchRequest(query="why move", **options), one, Planner())
+    decompose_and_search(
+        config,
+        SearchRequest(include=SearchIncludeOptions(chunks=False), query="why move", **options),
+        one,
+        Planner(),
+    )
     assert len(requests) == 3
 
 
@@ -373,7 +428,11 @@ def test_graph_work_cannot_reset_fast_deadline(monkeypatch, partial):
         CausalService().search(
             object(),
             SearchRequest(
-                query="why move", recall_level="fast", fast_graph=True, allow_partial=partial
+                include=SearchIncludeOptions(chunks=False),
+                query="why move",
+                recall_level="fast",
+                fast_graph=True,
+                allow_partial=partial,
             ),
         )
 
@@ -395,7 +454,13 @@ def test_enabled_fast_keeps_original_embedding_query_and_skips_graph_without_fac
     service.models = Embeddings()
     query = "Why did I move from 10 楼 to 十层?"
     result = service.search(
-        object(), SearchRequest(query=query, recall_level="fast", fast_graph=True)
+        object(),
+        SearchRequest(
+            include=SearchIncludeOptions(chunks=False),
+            query=query,
+            recall_level="fast",
+            fast_graph=True,
+        ),
     )
     assert seen == [query]
     assert "graph" not in result["diagnostics"]["executed_arms"]
