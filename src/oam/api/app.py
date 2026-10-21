@@ -408,9 +408,11 @@ def create_app(
         )
 
     @app.get("/ui/app.js", include_in_schema=False)
-    async def inspector_script() -> Response:
+    @app.get("/ui/locales.js", include_in_schema=False)
+    async def inspector_script(request: Request) -> Response:
+        name = "locales.js" if request.url.path.endswith("/locales.js") else "app.js"
         return Response(
-            files("oam.web").joinpath("app.js").read_text(encoding="utf-8"),
+            files("oam.web").joinpath(name).read_text(encoding="utf-8"),
             media_type="text/javascript",
             headers={"Content-Security-Policy": CSP},
         )

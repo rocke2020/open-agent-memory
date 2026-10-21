@@ -797,6 +797,22 @@ pre {
   }
 }
 
+@media (max-width: 24rem) {
+  .site-brand {
+    grid-column: 1 / -1;
+  }
+
+  .header-tools {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: end;
+  }
+
+  .account {
+    grid-row: 3;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     scroll-behavior: auto !important;
