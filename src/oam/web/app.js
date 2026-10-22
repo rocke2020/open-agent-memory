@@ -490,10 +490,6 @@
 
   async function openItem(item) {
     clearSourceMessages();
-    if (state.view === "retrieve" && ["fact", "insight"].includes(item.kind)) {
-      openMemory(item.kind === "insight" ? item.insight_id : item.memory_id, item.kind);
-      return;
-    }
     const generation = state.generation;
     const requestId = ++state.detailRequest;
     const view = state.view;
@@ -503,7 +499,7 @@
         const view = state.view;
         const detail = await json(route(resourcePath(item)));
         if (current(generation) && state.view === view && requestId === state.detailRequest) showResource(detail);
-      } else if (state.view === "retrieve") {
+      } else if (state.view === "retrieve" && !["fact", "insight"].includes(item.kind)) {
         byId("detail").replaceChildren(element("h3", msg("Retrieved passage")), element("p", item.text, "source-text"));
         for (const citation of item.citations || []) {
           byId("detail").append(labelValue(msg("Source"), citation.source_id), labelValue(msg("Passage"), citation.passage_id));
@@ -792,7 +788,7 @@
       try { return await json(route(`evidence/${encodeURIComponent(sourceId)}`)); }
       catch (_) { return null; }
     }));
-    if (!current(generation) || !["memories", "insights"].includes(state.view) || requestId !== state.detailRequest) return;
+    if (!current(generation) || !["memories", "insights", "retrieve"].includes(state.view) || requestId !== state.detailRequest) return;
     sourceMessages.replaceChildren();
     for (const [index, source] of sources.entries()) {
       const group = element("div", undefined, "citation");
