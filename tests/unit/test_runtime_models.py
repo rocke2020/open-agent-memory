@@ -378,6 +378,42 @@ def test_generation_rejects_unusable_or_nonterminal_visible_output(finish_reason
         }
 
 
+@pytest.mark.parametrize("content", ["", " \n\t", None])
+def test_completed_empty_generation_has_a_distinct_metered_error(content):
+    from oam.models.runtime import _generation_result
+
+    with pytest.raises(ModelOutputError) as captured:
+        _generation_result(
+            {
+                "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
+            }
+        )
+    assert type(captured.value).__name__ == "ModelEmptyContentError"
+    assert captured.value.usage.total_tokens == 10
+    assert captured.value.usage.coverage == "complete"
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "message"),
+    [
+        ("stop", {"content": "", "refusal": "refused"}),
+        ("stop", {"content": "", "reasoning_content": "hidden only"}),
+        ("stop", {"content": None, "tool_calls": [{"id": "call-1"}]}),
+        ("stop", {}),
+        ("stop", {"content": 0}),
+        ("length", {"content": ""}),
+        ("content_filter", {"content": ""}),
+    ],
+)
+def test_other_invalid_generation_is_not_classified_as_completed_empty(finish_reason, message):
+    from oam.models.runtime import _generation_result
+
+    with pytest.raises(ModelOutputError) as captured:
+        _generation_result({"choices": [{"finish_reason": finish_reason, "message": message}]})
+    assert type(captured.value).__name__ != "ModelEmptyContentError"
+
+
 def test_generation_rejects_low_output_budget_and_invalid_deadline_before_dispatch():
     def forbidden(request):
         pytest.fail("Invalid admission must not dispatch HTTP")

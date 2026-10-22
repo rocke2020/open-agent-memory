@@ -48,6 +48,7 @@ def test_one_group_call_validates_each_fact_against_its_own_message():
     assert [(f.passage_id, f.quote) for f in result.facts] == [
         ("p-user", "I prefer tea."),
         ("p-assistant", "Try green tea."),
+        ("p-user", "I prefer tea."),
     ]
     envelope = json.loads(requests[0]["messages"][1]["content"])
     assert [p["passage_id"] for p in envelope["passages"]] == ["p0", "p1"]
@@ -143,3 +144,141 @@ def test_group_rejects_unoffered_ownership_without_guessing(owner):
         )
     assert [(f.output_index, f.passage_id) for f in result.facts] == [(1, "canonical-b")]
     assert [(d.output_index, d.code) for d in result.diagnostics] == [(0, "invalid_passage")]
+
+
+@pytest.mark.parametrize("owner", [None, 0, "foreign"])
+def test_group_recovers_invalid_owner_only_from_unique_exact_source_quote(owner):
+    from oam.indexing.grouping import extract_group
+
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {"text": "A workshop was booked.", "quote": "I booked a workshop."},
+            {"passage_id": owner, "text": "A train was suggested.", "quote": "Take the train."},
+            {"passage_id": "p0", "text": "Wrong owner.", "quote": "Take the train."},
+            {
+                "passage_id": "p2",
+                "text": "The train was selected.",
+                "quote": "I'll take the train.",
+                "caused_by": [1, 2],
+            },
+        ],
+    }
+    requests = []
+    with extraction_models(reply, requests) as (models, config):
+        result = extract_group(
+            models,
+            passages=(
+                passage("booking", "I booked a workshop.", 0),
+                passage("recommendation", "Take the train.", 1, "assistant"),
+                passage("decision", "I'll take the train.", 2),
+            ),
+            config=config,
+            timeout_seconds=1,
+        )
+    assert len(requests) == 1
+    assert [(f.output_index, f.passage_id) for f in result.facts] == [
+        (0, "booking"),
+        (1, "recommendation"),
+        (3, "decision"),
+    ]
+    assert result.facts[-1].caused_by == (1,)
+    assert result.outcome == "partial"
+    assert [(d.output_index, d.code) for d in result.diagnostics] == [
+        (0, "recovered_passage"),
+        (1, "recovered_passage"),
+        (2, "invalid_fact"),
+        (3, "invalid_relation"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("texts", "quote"),
+    [
+        (("Tea. Tea.", "Coffee."), "Tea."),
+        (("aaa", "Coffee."), "aa"),
+        (("Tea.", "Tea. Tea."), "Tea."),
+        (("Tea.", "Coffee."), "I booked a workshop."),
+        (("Tea.", "Coffee."), "I bought a bicycle."),
+        (("Tea.", "Coffee."), "tea."),
+        (("Tea. Coffee.", "Milk. Water."), " "),
+        (("Tea.", "Coffee."), None),
+    ],
+)
+def test_group_rejects_ambiguous_missing_and_context_only_ownership(texts, quote):
+    from dataclasses import replace
+
+    from oam.indexing.grouping import extract_group
+
+    first = passage("a", texts[0], 0)
+    first = replace(first, chunk=replace(first.chunk, previous_context="I booked a workshop."))
+    reply = {"outcome": "facts", "facts": [{"text": "A claim.", "quote": quote}]}
+    with extraction_models(reply) as (models, config):
+        result = extract_group(
+            models,
+            passages=(first, passage("b", texts[1], 1)),
+            config=config,
+            timeout_seconds=1,
+            references=({"id": "old", "text": "I bought a bicycle.", "role": "user"},),
+        )
+    assert result.facts == ()
+    assert [(d.output_index, d.code) for d in result.diagnostics] == [(0, "invalid_passage")]
+
+
+def test_recovered_owner_still_validates_fact_metadata_and_singleton_ownership():
+    from oam.indexing.extraction import extract_facts
+    from oam.indexing.grouping import extract_group
+
+    reply = {
+        "outcome": "facts",
+        "facts": [
+            {
+                "text": "The user prefers tea.",
+                "quote": "I prefer tea.",
+                "entities": ["coffee"],
+                "annotations": [{"quote": "not in source"}],
+                "related_existing_ids": ["unoffered"],
+            },
+            {"text": " ", "quote": "I prefer tea."},
+        ],
+    }
+    with extraction_models(reply) as (models, config):
+        result = extract_group(
+            models,
+            passages=(passage("a", "I prefer tea.", 0),),
+            config=config,
+            timeout_seconds=1,
+        )
+    assert len(result.facts) == 1
+    fact = result.facts[0]
+    assert (fact.passage_id, fact.entities, fact.annotations, fact.related_existing_ids) == (
+        "a",
+        (),
+        (),
+        (),
+    )
+    assert [d.code for d in result.diagnostics] == [
+        "recovered_passage",
+        "invalid_reference",
+        "invalid_entity_name",
+        "invalid_annotation",
+        "recovered_passage",
+        "invalid_fact",
+    ]
+    singleton_reply = {
+        "outcome": "facts",
+        "facts": [
+            {"text": "Valid.", "quote": "I prefer tea."},
+            {"passage_id": "foreign", "text": "Invalid.", "quote": "I prefer tea."},
+        ],
+    }
+    with extraction_models(singleton_reply) as (models, config):
+        result = extract_facts(
+            models,
+            chunk=passage("a", "I prefer tea.", 0).chunk,
+            config=config,
+            message_role="user",
+            timeout_seconds=1,
+        )
+    assert [(f.output_index, f.passage_id) for f in result.facts] == [(0, None)]
+    assert [d.code for d in result.diagnostics] == ["invalid_passage"]

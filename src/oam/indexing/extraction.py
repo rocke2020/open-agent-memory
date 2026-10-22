@@ -622,12 +622,27 @@ def validate_fact_output(
             raw = dict(record)
             owner = raw.get("passage_id")
             if (owner is not None and not isinstance(owner, str)) or owner not in chunks:
-                diagnostics.append(
-                    ExtractionDiagnostic(
-                        output_index=index, field="passage_id", code="invalid_passage"
-                    )
+                quote = raw.get("quote")
+                matches = (
+                    [key for key, candidate in chunks.items() if quote in candidate.text]
+                    if None not in chunks and isinstance(quote, str) and quote.strip()
+                    else []
                 )
-                continue
+                if len(matches) == 1 and unique_quote(chunks[matches[0]].text, quote):
+                    owner = matches[0]
+                    raw["passage_id"] = owner
+                    diagnostics.append(
+                        ExtractionDiagnostic(
+                            output_index=index, field="passage_id", code="recovered_passage"
+                        )
+                    )
+                else:
+                    diagnostics.append(
+                        ExtractionDiagnostic(
+                            output_index=index, field="passage_id", code="invalid_passage"
+                        )
+                    )
+                    continue
             chunk = chunks[owner]
             supplied_ids = raw.pop("related_existing_ids", [])
             valid_ids = (

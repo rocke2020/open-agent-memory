@@ -32,6 +32,10 @@ class ModelOutputTooLongError(ModelOutputError):
     """The provider terminated generation at its completion-token limit."""
 
 
+class ModelEmptyContentError(ModelOutputError):
+    """Generation stopped without visible content, a refusal or another output."""
+
+
 class ModelDispatchUnavailable(httpx.ConnectTimeout):
     """Local model capacity expired before an HTTP request was sent."""
 
@@ -316,10 +320,16 @@ def _generation_result(body: dict[str, Any]) -> ModelResult:
             )
         if not isinstance(message, dict) or choice.get("finish_reason") != "stop":
             raise ValueError
-        content = message.get("content")
-        if message.get("refusal") or not isinstance(content, str) or not content.strip():
+        content = message["content"]
+        if message.get("refusal"):
             raise ValueError
-    except ModelOutputTooLongError:
+        if content is None or (isinstance(content, str) and not content.strip()):
+            if message.get("reasoning_content") or message.get("tool_calls"):
+                raise ValueError
+            raise ModelEmptyContentError("generation stopped with empty content", usage=usage)
+        if not isinstance(content, str):
+            raise ValueError
+    except (ModelOutputTooLongError, ModelEmptyContentError):
         raise
     except (KeyError, TypeError, ValueError) as exc:
         raise ModelOutputError(

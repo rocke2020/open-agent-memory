@@ -761,7 +761,7 @@ class IndexStore:
 
     def fail(self, error: Exception):
         from oam.indexing.extraction import ExtractionError, ExtractionInputTooLongError
-        from oam.models.runtime import ModelOutputError
+        from oam.models.runtime import ModelEmptyContentError, ModelOutputError
 
         diagnostic = {"error": type(error).__name__}
         if isinstance(error, (ExtractionError, ModelOutputError)):
@@ -770,8 +770,14 @@ class IndexStore:
             error.usage if isinstance(error, (ExtractionError, ModelOutputError)) else None
         )
         not_dispatched = isinstance(error, (httpx.ConnectTimeout, ExtractionInputTooLongError))
-        retryable = isinstance(error, httpx.ConnectTimeout) or (
-            isinstance(error, ExtractionError) and known_usage is not None and error.retryable
+        retryable = (
+            isinstance(error, httpx.ConnectTimeout)
+            or known_usage is not None
+            and (
+                isinstance(error, ModelEmptyContentError)
+                or isinstance(error, ExtractionError)
+                and error.retryable
+            )
         )
         inputs_changed = (
             isinstance(error, StaleConsolidationInputs) and not self._unsettled_model_stages

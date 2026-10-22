@@ -348,12 +348,14 @@ def test_extraction_keeps_grounded_records_and_original_reference_indices():
 
 def test_valid_no_facts_is_distinct_from_malformed_or_empty_generation():
     chunk = TextChunk("Hello.", 0, 6, "", 2)
-    with extraction_models({"outcome": "no_facts", "facts": []}) as (models, config):
+    requests = []
+    with extraction_models({"outcome": "no_facts", "facts": []}, requests) as (models, config):
         result = extract_facts(
             models, chunk=chunk, config=config, message_role="assistant", timeout_seconds=1
         )
     assert result.outcome == "no_facts"
     assert result.facts == () and result.diagnostics == ()
+    assert len(requests) == 1
     for reply in [
         "not JSON",
         {},

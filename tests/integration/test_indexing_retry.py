@@ -20,7 +20,7 @@ from oam.config import load_config
 from oam.indexing.extraction import ExtractionError
 from oam.indexing.identity import index_generation
 from oam.indexing.store import IndexStore
-from oam.models.runtime import ModelOutputError, ModelResult, Usage
+from oam.models.runtime import ModelOutputError, ModelResult, Usage, _generation_result
 from oam.workers.claims import claim_one
 from oam.workers.index_source import process_one
 
@@ -28,11 +28,12 @@ pytestmark = pytest.mark.integration
 
 
 class IntermittentModels(SyntheticIndexModels):
-    def __init__(self, failures, *, timeout=False, overbound_records=0):
+    def __init__(self, failures, *, timeout=False, overbound_records=0, empty_content=False):
         super().__init__()
         self.failures = failures
         self.timeout = timeout
         self.overbound_records = overbound_records
+        self.empty_content = empty_content
         self.first_calls = 0
 
     def generate(self, role, **kwargs):
@@ -45,6 +46,17 @@ class IntermittentModels(SyntheticIndexModels):
                 if self.timeout:
                     raise self.timeout("response outcome is unknown")
                 self.generation_calls.append(role)
+                if self.empty_content:
+                    return _generation_result(
+                        {
+                            "choices": [{"finish_reason": "stop", "message": {"content": ""}}],
+                            "usage": {
+                                "prompt_tokens": 20,
+                                "completion_tokens": 10,
+                                "total_tokens": 30,
+                            },
+                        }
+                    )
                 content = (
                     json.dumps(
                         {
@@ -785,16 +797,20 @@ async def test_failed_consolidation_keeps_completed_l1(accepted_source):
         )
 
 
-@pytest.mark.parametrize("overbound", [False, True])
+@pytest.mark.parametrize("failure_kind", ["empty_facts", "overbound", "empty_content"])
 async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_attempt(
-    accepted_source, overbound
+    accepted_source, failure_kind
 ):
     client, dsn, tenant, config, operation_id = accepted_source
     models = IntermittentModels(
-        2, overbound_records=config.extraction.max_facts_per_group + 1 if overbound else 0
+        2,
+        overbound_records=config.extraction.max_facts_per_group + 1
+        if failure_kind == "overbound"
+        else 0,
+        empty_content=failure_kind == "empty_content",
     )
     for _ in range(2):
-        with pytest.raises(ExtractionError):
+        with pytest.raises((ExtractionError, ModelOutputError)):
             run_source(dsn, config, models)
         operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
         assert operation["status"] == "processing"
@@ -827,16 +843,20 @@ async def test_known_invalid_responses_reuse_completed_stages_and_meter_every_at
         )
 
 
-@pytest.mark.parametrize("overbound", [False, True])
+@pytest.mark.parametrize("failure_kind", ["empty_facts", "overbound", "empty_content"])
 async def test_known_invalid_responses_stop_at_the_existing_claim_budget(
-    accepted_source, overbound
+    accepted_source, failure_kind
 ):
     client, dsn, tenant, config, operation_id = accepted_source
     models = IntermittentModels(
-        10, overbound_records=config.extraction.max_facts_per_group + 1 if overbound else 0
+        10,
+        overbound_records=config.extraction.max_facts_per_group + 1
+        if failure_kind == "overbound"
+        else 0,
+        empty_content=failure_kind == "empty_content",
     )
     for _ in range(config.retry.max_attempts):
-        with pytest.raises(ExtractionError):
+        with pytest.raises((ExtractionError, ModelOutputError)):
             run_source(dsn, config, models)
     assert run_source(dsn, config, models) is False
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
