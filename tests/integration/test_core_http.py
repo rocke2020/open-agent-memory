@@ -1349,7 +1349,6 @@ def insight_reply(envelope, result):
             {
                 "action": "CREATE",
                 "target_id": None,
-                "expected_revision": None,
                 "text": result["text"],
                 "retrieval_text": result.get("retrieval_text"),
                 "subtype": result["subtype"],

@@ -769,7 +769,7 @@ def test_invalid_temporal_annotation_preserves_the_supported_fact(annotation_cha
     "subtype",
     ["preferences", "patterns", "projects", "relationships", "experiences", "general_insights"],
 )
-def test_insight_requires_two_distinct_known_supports_and_preserves_source_references(subtype):
+def test_insight_requires_two_distinct_known_supports_and_keeps_provenance_private(subtype):
     from oam.indexing.extraction import InsightInput, synthesize_insight
 
     inputs = (
@@ -793,7 +793,8 @@ def test_insight_requires_two_distinct_known_supports_and_preserves_source_refer
     assert result.support_ids == ("f1", "f2")
     assert result.model_dump(mode="json")["usage"]["total_tokens"] == 20
     payload = json.loads(requests[0]["messages"][1]["content"])
-    assert payload["facts"][0]["source_refs"] == ["m1:0:35"]
+    assert "source_refs" not in payload["facts"][0]
+    assert inputs[0].model_dump(mode="json")["source_refs"] == ["m1:0:35"]
 
 
 @pytest.fixture
@@ -856,7 +857,7 @@ def test_insight_request_distinguishes_recording_time_from_supported_event_time(
     assert "Preserve unknown event timing" in system
     supplied = json.loads(requests[0]["messages"][1]["content"])["facts"]
     assert supplied[0]["mentioned_at"] == "2025-03-09T12:00:00Z"
-    assert supplied[0]["temporal_annotations"] == []
+    assert "temporal_annotations" not in supplied[0]
     assert supplied[1]["temporal_annotations"][0]["start"] == "2025-03-02T00:00:00Z"
 
 
@@ -983,8 +984,15 @@ def test_insight_request_preserves_source_roles_without_assuming_unknown_is_user
         synthesize_insight(models, facts=facts, config=config, timeout_seconds=1)
 
     supplied = json.loads(requests[0]["messages"][1]["content"])["facts"]
-    assert [fact["message_role"] for fact in supplied] == ["user", "assistant", "system", None]
-    assert [fact["source_refs"] for fact in supplied] == [["s1:1"], ["s2:1"], ["s3:1"], ["s4:1"]]
+    assert [fact.get("message_role") for fact in supplied] == ["user", "assistant", "system", None]
+    assert "message_role" not in supplied[-1]
+    assert all("source_refs" not in fact for fact in supplied)
+    assert [fact.model_dump(mode="json")["source_refs"] for fact in facts] == [
+        ["s1:1"],
+        ["s2:1"],
+        ["s3:1"],
+        ["s4:1"],
+    ]
     assert {fact["mentioned_at"] for fact in supplied} == {"2026-05-03T18:00:00Z"}
 
 

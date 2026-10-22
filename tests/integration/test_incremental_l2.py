@@ -52,9 +52,6 @@ class PolicyModels(SyntheticIndexModels):
                     {
                         "action": "UPDATE" if target and not distinct else "CREATE",
                         "target_id": target["id"] if target and not distinct else None,
-                        "expected_revision": target["revision"]
-                        if target and not distinct
-                        else None,
                         "text": text,
                         "retrieval_text": "Research Atlas rollback"
                         if distinct

@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 
 from psycopg.types.json import Jsonb
 
 from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.indexing.extraction import (
+    INSIGHT_SYSTEM,
     InsightInput,
     InsightResult,
+    insight_annotations,
+    insight_fact_projection,
     pack_insight_facts,
     synthesize_insight,
 )
-from oam.indexing.store import MEMORY_REVISION, log_insight_indexed, stable_id
+from oam.indexing.identity import INSIGHT_MODEL_RECIPE
+from oam.indexing.store import MEMORY_REVISION, input_digest, log_insight_indexed, stable_id
 
 
 def repair_insights(store, models) -> bool:
@@ -52,9 +54,13 @@ def repair_insights(store, models) -> bool:
             store.guard(connection)
             rows = connection.execute(
                 f"WITH eligible AS ({ELIGIBLE_UNITS}) "
-                "SELECT unit_id,memory_id,content_text,source_id,source_version,mentioned_at,"
-                "locator->>'role' AS message_role "
-                "FROM eligible WHERE kind='fact' AND memory_id=ANY(%s) "
+                "SELECT u.unit_id,u.memory_id,u.content_text,u.source_id,u.source_version,"
+                "u.mentioned_at,"
+                "u.locator->>'role' AS message_role,"
+                "(SELECT jsonb_agg(ut.detail ORDER BY ut.annotation_id) FROM unit_times ut WHERE "
+                "(ut.tenant_id,ut.user_id,ut.unit_id)="
+                "(u.tenant_id,u.user_id,u.unit_id)) AS annotations "
+                "FROM eligible u WHERE kind='fact' AND memory_id=ANY(%s) "
                 "ORDER BY memory_id,unit_id",
                 (list(support_ids),),
             ).fetchall()
@@ -94,6 +100,7 @@ def repair_insights(store, models) -> bool:
                     source_refs=(f"{row[3]}:{row[4]}",),
                     mentioned_at=row[5],
                     message_role=row[6],
+                    temporal_annotations=insight_annotations(row[7]),
                 )
                 for row in rows
             ),
@@ -103,7 +110,18 @@ def repair_insights(store, models) -> bool:
         if {fact.id for fact in facts} != captured_support:
             raise ValueError("Insight repair budget cannot fit the complete eligible support set")
 
-        input_values = [fact.model_dump(mode="json") for fact in facts]
+        input_values = {
+            "recipe": INSIGHT_MODEL_RECIPE,
+            "system": INSIGHT_SYSTEM,
+            "envelope": {"facts": [insight_fact_projection(fact) for fact in facts]},
+            "private_facts": [fact.model_dump(mode="json") for fact in facts],
+            "repair": repair,
+            "generation_id": store.generation_id,
+            "config": {
+                "index": store.config.index.model_dump(mode="json"),
+                "extraction": store.config.extraction.model_dump(mode="json"),
+            },
+        }
         insight_started = time.monotonic()
         result = InsightResult.model_validate(
             store.checkpoint(
@@ -138,7 +156,7 @@ def repair_insights(store, models) -> bool:
                 (text,), timeout_seconds=store.config.model.attempt_timeout_seconds
             ),
         )
-        digest = hashlib.sha256(json.dumps(input_values, sort_keys=True).encode()).digest()
+        digest = input_digest(input_values)
         with store.transaction() as connection:
             store.guard(connection)
             direct = connection.execute(

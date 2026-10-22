@@ -35,14 +35,14 @@ def test_insight_packing_bounds_complete_prompt_and_keeps_priority_order():
     assert (
         extraction.model_input_tokens(
             extraction.INSIGHT_SYSTEM,
-            {"facts": [fact.model_dump(mode="json") for fact in packed]},
+            {"facts": [{"id": fact.id, "text": fact.text} for fact in packed]},
         )
         <= config.extraction.max_input_tokens
     )
     assert (
         extraction.model_input_tokens(
             extraction.INSIGHT_SYSTEM,
-            {"facts": [fact.model_dump(mode="json") for fact in facts[: len(packed) + 1]]},
+            {"facts": [{"id": fact.id, "text": fact.text} for fact in facts[: len(packed) + 1]]},
         )
         > config.extraction.max_input_tokens
     )

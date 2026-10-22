@@ -38,12 +38,11 @@ class CorroboratingModels(PolicyModels):
             body = {
                 "actions": [
                     {
-                        "action": "UPDATE" if target else "CREATE",
+                        "action": "KEEP_TEXT" if target else "CREATE",
                         "target_id": target["id"] if target else None,
-                        "expected_revision": target["revision"] if target else None,
-                        "text": text,
-                        "retrieval_text": "Production Atlas rollback",
-                        "subtype": "projects",
+                        "text": None if target else text,
+                        "retrieval_text": None if target else "Production Atlas rollback",
+                        "subtype": None if target else "projects",
                         "support_ids": seeds,
                         "seed_ids": seeds,
                     }
@@ -52,7 +51,9 @@ class CorroboratingModels(PolicyModels):
         return ModelResult(content=json.dumps(body), usage=Usage())
 
 
-async def test_corroborating_increment_reuses_embedding_and_retains_old_support(core_database):
+async def test_corroborating_increment_reuses_embedding_and_retains_old_support(
+    core_database, capsys
+):
     dsn, tenant, headers = core_database
     config = load_config(ROOT / "configs/oam.yaml").config
     models = CorroboratingModels()
@@ -120,6 +121,53 @@ async def test_corroborating_increment_reuses_embedding_and_retains_old_support(
                 (tenant,),
             ).fetchone()[0]
             assert consolidation_embeddings == 1
+
+            # Re-examine the same retained seeds to exercise KEEP_TEXT's no-write outcome.
+            operation_id = connection.execute(
+                "SELECT operation_id FROM operations WHERE tenant_id=%s AND kind='consolidate' "
+                "ORDER BY accepted_seq DESC LIMIT 1",
+                (tenant,),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE operations SET status='accepted',stage_state=stage_state||"
+                '\'{"l2_examined_ids":[],"insights_ready":false}\'::jsonb '
+                "WHERE tenant_id=%s AND operation_id=%s",
+                (tenant, operation_id),
+            )
+            connection.execute(
+                "UPDATE work_units SET status='queued',available_at=clock_timestamp(),"
+                "owner_id=NULL,lease_expires_at=NULL WHERE tenant_id=%s AND operation_id=%s",
+                (tenant, operation_id),
+            )
+        from psycopg.conninfo import make_conninfo
+
+        from oam.workers.index_source import process_one
+
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="retained-support",
+        )
+        with psycopg.connect(dsn) as connection:
+            assert connection.execute(
+                "SELECT revision FROM insights WHERE tenant_id=%s ORDER BY revision",
+                (tenant,),
+            ).fetchall() == [(1,), (2,)]
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM index_stage_results WHERE tenant_id=%s "
+                    "AND stage_key='insight_embed'",
+                    (tenant,),
+                ).fetchone()[0]
+                == 1
+            )
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        final = [event for event in events if event["stage"] == "insight_published"][-1]
+        assert final["model_actions"] == ["KEEP_TEXT"]
+        assert final["actions"] == ["NO_CHANGE"]
+        assert final["published_count"] == 0
 
 
 @pytest.mark.parametrize("race", ["revision", "support", "direct_removal", "generation"])
@@ -242,7 +290,6 @@ class GroupModels(CorroboratingModels):
                         {
                             "action": "NO_INSIGHT",
                             "target_id": None,
-                            "expected_revision": None,
                             "text": None,
                             "retrieval_text": None,
                             "subtype": None,
@@ -374,7 +421,6 @@ class MultiActionModels(CorroboratingModels):
                         {
                             "action": "CREATE",
                             "target_id": None,
-                            "expected_revision": None,
                             "text": f"Supported synthesis {slot}.",
                             "retrieval_text": f"Project facet {slot}",
                             "subtype": "projects",

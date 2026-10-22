@@ -33,6 +33,9 @@ from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimate_units, estima
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Offset = Annotated[StrictInt, Field(ge=0)]
+InsightSubtype = Literal[
+    "preferences", "patterns", "projects", "relationships", "experiences", "general_insights"
+]
 REFERENCE_ABBREVIATIONS = frozenset(
     ("dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e")
 )
@@ -137,17 +140,7 @@ class InsightResult(FrozenProjection):
     retrieval_text: NonBlank | None = None
     support_ids: tuple[NonBlank, ...]
     outcome: Literal["insight", "no_insight"]
-    subtype: (
-        Literal[
-            "preferences",
-            "patterns",
-            "projects",
-            "relationships",
-            "experiences",
-            "general_insights",
-        ]
-        | None
-    )
+    subtype: InsightSubtype | None
     usage: Usage
 
     @property
@@ -163,37 +156,73 @@ class InsightResult(FrozenProjection):
         return self
 
 
-class InsightAction(FrozenProjection):
-    action: Literal["UPDATE", "CREATE", "NO_CHANGE", "NO_INSIGHT"]
-    target_id: NonBlank | None
-    expected_revision: Annotated[StrictInt, Field(ge=1)] | None
-    text: NonBlank | None
-    retrieval_text: NonBlank | None
-    subtype: (
-        Literal[
-            "preferences",
-            "patterns",
-            "projects",
-            "relationships",
-            "experiences",
-            "general_insights",
-        ]
-        | None
-    )
-    support_ids: tuple[NonBlank, ...]
+class InsightDecision(FrozenProjection):
+    """Model decisions contain semantic handles, never publication revisions."""
+
+    action: Literal["UPDATE", "CREATE", "KEEP_TEXT", "NO_INSIGHT"]
+    target_id: NonBlank | None = None
+    text: NonBlank | None = None
+    retrieval_text: NonBlank | None = None
+    subtype: InsightSubtype | None = None
+    support_ids: tuple[NonBlank, ...] = ()
     seed_ids: tuple[NonBlank, ...] = Field(min_length=1)
+
+
+class InsightAction(FrozenProjection):
+    """Validated backend outcome, bound to captured state before checkpointing."""
+
+    action: Literal["UPDATE", "CREATE", "NO_CHANGE", "NO_INSIGHT"]
+    target_id: NonBlank | None = None
+    expected_revision: Annotated[StrictInt, Field(ge=1)] | None = None
+    # Captured text and labels must survive support-only updates byte for byte.
+    text: str | None = None
+    retrieval_text: str | None = None
+    subtype: InsightSubtype | None = None
+    support_ids: tuple[NonBlank, ...] = ()
+    seed_ids: tuple[NonBlank, ...] = Field(min_length=1)
+
+
+class InsightDecisions(FrozenProjection):
+    actions: tuple[InsightDecision, ...] = Field(min_length=1)
 
 
 class ConsolidationResult(FrozenProjection):
     actions: tuple[InsightAction, ...] = Field(min_length=1)
+    model_actions: tuple[Literal["UPDATE", "CREATE", "KEEP_TEXT", "NO_INSIGHT"], ...] = ()
     usage: Usage
+
+
+def insight_fact_projection(fact: InsightInput) -> dict:
+    return fact.model_dump(
+        mode="json", exclude={"source_refs"}, exclude_none=True, exclude_defaults=True
+    )
+
+
+def insight_annotations(values) -> tuple[TemporalAnnotation, ...]:
+    return tuple(
+        TemporalAnnotation.model_validate(
+            {key: value[key] for key in TemporalAnnotation.model_fields if key in value}
+        )
+        for value in values or ()
+    )
 
 
 def consolidation_envelope(facts, seeds, targets) -> dict:
     return {
-        "facts": [fact.model_dump(mode="json") for fact in facts],
+        "facts": [insight_fact_projection(fact) for fact in facts],
         "seed_ids": list(seeds),
-        "targets": list(targets),
+        "targets": [
+            {
+                "id": target["id"],
+                "text": target["text"],
+                **(
+                    {"retrieval_text": target["retrieval_text"]}
+                    if target.get("retrieval_text")
+                    else {}
+                ),
+            }
+            for target in targets
+        ],
     }
 
 
@@ -228,7 +257,7 @@ def consolidate_insights(
         max_output_tokens=config.index.insight_max_output_tokens,
     )
     try:
-        result = ConsolidationResult.model_validate({**body, "usage": usage})
+        result = InsightDecisions.model_validate(body)
     except ValidationError as exc:
         raise ExtractionError("Insight actions are malformed", usage=usage, retryable=True) from exc
 
@@ -237,6 +266,7 @@ def consolidate_insights(
 
     covered: set[str] = set()
     used_targets: set[str] = set()
+    normalized = []
     for action in result.actions:
         addressed, support = set(action.seed_ids), set(action.support_ids)
         if (
@@ -249,40 +279,46 @@ def consolidate_insights(
             invalid("Insight action has duplicate, unknown or already addressed inputs")
         covered.update(addressed)
         target = target_by_id.get(action.target_id)
-        if action.action in {"UPDATE", "NO_CHANGE"}:
-            if (
-                target is None
-                or action.expected_revision != target["revision"]
-                or action.target_id in used_targets
-            ):
+        if action.action in {"UPDATE", "KEEP_TEXT"}:
+            if target is None or action.target_id in used_targets:
                 invalid("Insight action has an unknown, duplicate or stale target")
             used_targets.add(action.target_id)
-        elif action.target_id is not None or action.expected_revision is not None:
-            invalid("only UPDATE or NO_CHANGE may address an existing target")
+        elif action.target_id is not None:
+            invalid("only UPDATE or KEEP_TEXT may address an existing target")
+        retained = {item["id"] for item in target["supports"]} if target else set()
+        if action.action in {"CREATE", "UPDATE", "KEEP_TEXT"} and (
+            not addressed <= support or len(support | retained) < 2
+        ):
+            invalid("Insight requires a complete claim and at least two known supports")
         if action.action in {"CREATE", "UPDATE"}:
-            retained = {item["id"] for item in target["supports"]} if target else set()
-            if (
-                not action.text
-                or action.subtype is None
-                or not addressed <= support
-                or len(support | retained) < 2
-            ):
-                invalid("Insight requires a complete claim and at least two known supports")
+            if not action.text or action.subtype is None:
+                invalid("Insight requires a complete claim and descriptive subtype")
         else:
             if (
                 action.text is not None
                 or action.retrieval_text is not None
                 or action.subtype is not None
-                or support
+                or (action.action == "NO_INSIGHT" and support)
             ):
-                invalid("no-change/no-insight cannot contain claims or new support")
-            if action.action == "NO_CHANGE" and not addressed <= {
-                item["id"] for item in target["supports"]
-            }:
-                invalid("NO_CHANGE cannot discard additional corroborating support")
+                invalid("KEEP_TEXT/NO_INSIGHT cannot contain replacement claims")
+        values = action.model_dump()
+        values["expected_revision"] = target["revision"] if target else None
+        if action.action == "KEEP_TEXT":
+            values["action"] = "UPDATE" if support - retained else "NO_CHANGE"
+            if values["action"] == "UPDATE":
+                values.update(
+                    text=target["text"],
+                    retrieval_text=target.get("retrieval_text"),
+                    subtype=target["subtype"],
+                )
+        normalized.append(InsightAction.model_validate(values))
     if covered != set(seeds):
         invalid("every presented seed requires exactly one disposition")
-    return result
+    return ConsolidationResult(
+        actions=tuple(normalized),
+        model_actions=tuple(action.action for action in result.actions),
+        usage=usage,
+    )
 
 
 def model_input_tokens(system: str, envelope: dict) -> int:
@@ -301,7 +337,7 @@ def pack_insight_facts(
     packed = []
     for fact in facts[: config.extraction.max_facts_per_group]:
         candidate = [*packed, fact]
-        envelope = {"facts": [item.model_dump(mode="json") for item in candidate]}
+        envelope = {"facts": [insight_fact_projection(item) for item in candidate]}
         if model_input_tokens(INSIGHT_SYSTEM, envelope) > config.extraction.max_input_tokens:
             break
         packed = candidate
@@ -325,7 +361,7 @@ def synthesize_insight(
         models,
         "insights",
         INSIGHT_SYSTEM,
-        {"facts": [fact.model_dump(mode="json") for fact in facts]},
+        {"facts": [insight_fact_projection(fact) for fact in facts]},
         config,
         timeout_seconds,
     )
