@@ -27,7 +27,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
         "kind": "fact",
         "origin": "chat",
         "text": "Alice joined Atlas after its funding round.",
-        "citations": [],
+        "citations": [{"source_id": "chat-one", "source_version": 1, "passage_id": "p1"}],
         "supports": [],
         "affected_insight_ids": [],
     }
@@ -102,7 +102,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 )
                 return
             data = {
-                "items": [fact],
+                "items": [fact, insight],
                 "context": "Alice joined Atlas [1].",
                 "context_tokens": 8,
                 "diagnostics": {"partial": True},
@@ -125,6 +125,12 @@ def test_insights_entities_and_memory_connections(tmp_path):
             data = {**peer, "entities": [], "relationships": []}
         elif parsed.path.endswith("/memories/insight-one"):
             data = {**insight, "entities": [], "relationships": []}
+        elif parsed.path.endswith("/evidence/chat-one"):
+            data = {
+                "original": {
+                    "messages": [{"role": "user", "content": "I joined Atlas after funding."}]
+                }
+            }
         elif parsed.path.endswith("/resources"):
             data = {"items": [], "next_after": None}
         else:
@@ -243,6 +249,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                     }
                 ]
                 assert page.locator("#detail").get_by_text("Partial", exact=True).is_visible()
+                retrieved_items = page.locator("#item-list").inner_text()
                 pause_trace = True
                 with page.expect_request("**/debug/traces/trace-one"):
                     page.get_by_role("button", name="Explain this search", exact=True).click()
@@ -257,6 +264,37 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 traced.value.finished()
                 page.evaluate("() => new Promise(requestAnimationFrame)")
                 assert entities.get_by_role("button", name="Atlas", exact=True).is_visible()
+                assert (
+                    page.locator('[data-view="retrieve"]').get_attribute("aria-pressed") == "true"
+                )
+                assert page.locator("#list-title").inner_text() == "Retrieved evidence"
+                assert page.locator("#query").input_value() == "What connects Alice to Atlas?"
+                assert page.locator("#recall-level").input_value() == "normal"
+                assert page.locator("#list-summary").inner_text() == "2 shown"
+                assert page.locator("#item-list").inner_text() == retrieved_items
+                assert (
+                    page.locator('#item-list [aria-current="true"]').get_attribute("data-unit-id")
+                    == "unit-one"
+                )
+                page.locator("#source-messages").get_by_text(
+                    "I joined Atlas after funding.", exact=True
+                ).wait_for()
+                page.locator("#item-list .list-item").nth(1).click()
+                page.locator("#detail").get_by_role(
+                    "heading", name="insight-one", exact=True
+                ).wait_for()
+                assert page.locator("#detail .source-text").inner_text() == insight["text"]
+                assert (
+                    page.locator('[data-view="retrieve"]').get_attribute("aria-pressed") == "true"
+                )
+                assert page.locator("#item-list").inner_text() == retrieved_items
+                assert (
+                    page.locator('#item-list [aria-current="true"]').get_attribute("data-unit-id")
+                    == "unit-insight"
+                )
+                page.locator("#source-messages").get_by_text(
+                    "I joined Atlas after funding.", exact=True
+                ).wait_for()
                 page.get_by_role("button", name="Retrieve", exact=True).click()
                 page.locator("#detail").get_by_text(
                     "Enter a query to retrieve cited evidence.", exact=False
@@ -291,7 +329,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 page.locator("#detail").get_by_text(
                     "Alice joined Atlas [1].", exact=True
                 ).wait_for()
-                assert page.locator("#item-list .list-item").count() == 1
+                assert page.locator("#item-list .list-item").count() == 2
                 assert not errors
                 page.get_by_role("button", name="Memories", exact=True).click()
                 page.locator("#item-list .list-item").first.wait_for()
