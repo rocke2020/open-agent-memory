@@ -309,6 +309,10 @@ class ModelBinding(FrozenModel):
         return sorted(capability.value for capability in capabilities)
 
 
+class EmbeddingModelBinding(ModelBinding):
+    query_prefix: str = ""
+
+
 ReasoningEffort = Literal["none", "low", "high", "max"]
 
 
@@ -335,7 +339,7 @@ REQUIRED_MODEL_ROLES = frozenset({"extraction", "insights", "embedding", "abstra
 class ModelsConfig(FrozenModel):
     vlm: ModelBinding | None = None
     reasoning_effort: ReasoningEfforts = Field(default_factory=ReasoningEfforts)
-    embedding: ModelBinding | None = None
+    embedding: EmbeddingModelBinding | None = None
     reranker: ModelBinding | None = None
 
     @model_validator(mode="after")

@@ -4,7 +4,13 @@ from dataclasses import dataclass, field
 import httpx
 import pytest
 
-from oam.config import ModelBinding, ModelCapability, ModelsConfig, ReasoningEfforts
+from oam.config import (
+    EmbeddingModelBinding,
+    ModelBinding,
+    ModelCapability,
+    ModelsConfig,
+    ReasoningEfforts,
+)
 from oam.models.bindings import ResolvedModelBinding
 from oam.models.client import OpenAICompatibleProbeClient
 from oam.models.preflight import (
@@ -18,29 +24,25 @@ from oam.models.preflight import (
 
 
 def _models() -> ModelsConfig:
-    bindings = {
-        "chat": ModelBinding(
+    return ModelsConfig(
+        vlm=ModelBinding(
             protocol="openai_chat",
             model="chat-model",
             endpoint_env="CHAT_URL",
             capabilities=frozenset({ModelCapability.TEXT, ModelCapability.VISION}),
         ),
-        "embedding": ModelBinding(
+        embedding=EmbeddingModelBinding(
             protocol="openai_compatible",
             model="embedding-model",
             endpoint_env="EMBEDDING_URL",
             capabilities=frozenset({ModelCapability.EMBEDDINGS}),
         ),
-    }
-    return ModelsConfig(
         reasoning_effort=ReasoningEfforts(
             extraction="low",
             insights="low",
             abstract="low",
             profile="low",
         ),
-        vlm=bindings["chat"],
-        embedding=bindings["embedding"],
     )
 
 

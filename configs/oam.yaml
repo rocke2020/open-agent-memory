@@ -329,6 +329,9 @@ models:
     # Reasoning setting for query decomposition; null disables this role.
     planner: null
   embedding:
+    # Optional query-only encoder instruction, including syntax and trailing separator.
+    # Document embeddings and the complete original query remain unchanged.
+    query_prefix: ""
     # Embedding wire protocol; only OpenAI-compatible embeddings is supported.
     protocol: openai_compatible
     # Environment variable holding the embedding model identifier.

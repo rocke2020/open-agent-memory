@@ -92,13 +92,15 @@ class RecallService:
         budget = diagnostics["context_budget"]
         logging.getLogger(__name__).info(
             "oam.recall trace_id=%s mode=%s graph=%s arms=%s outcome=%s "
-            "include_chunks=%s facts=%d originals=%d context_tokens=%d/%d "
+            "admission=relevance_order query_prefix=%s include_chunks=%s "
+            "facts=%d originals=%d context_tokens=%d/%d "
             "omissions=%d oversized_single_fact=%s duration_ms=%.1f",
             result["trace_id"],
             diagnostics["recall_level"],
             diagnostics["graph"],
             ",".join(diagnostics["executed_arms"]),
             "partial" if diagnostics["partial"] else "ok",
+            bool(self.config.models.embedding and self.config.models.embedding.query_prefix),
             budget["include_chunks"],
             budget["learned_count"],
             budget["original_count"],
@@ -221,11 +223,13 @@ class RecallService:
             )
 
         # One SQL task overlaps one embedding request; each owns separate results.
+        binding = self.config.models.embedding
+        embedding_query = (binding.query_prefix if binding is not None else "") + request.query
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="oam-recall-text") as executor:
             text_future = executor.submit(text_arms)
             embedding = stage(
                 "embedding",
-                lambda: self.models.embed((request.query,), timeout_seconds=_remaining(deadline)),
+                lambda: self.models.embed((embedding_query,), timeout_seconds=_remaining(deadline)),
             )
             lexical, anchors = text_future.result(timeout=_remaining(deadline))
         sql_phase_ready = True
