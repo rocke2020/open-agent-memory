@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -122,12 +123,76 @@ def repair_state(support_ids):
     }
 
 
+@pytest.mark.parametrize("overflow", [False, True])
+def test_repair_hydrates_existing_event_annotations_and_budgets_complete_support(overflow):
+    annotation = {
+        "role": "event",
+        "start": "2026-07-03T00:00:00Z",
+        "end": "2026-07-04T00:00:00Z",
+        "quote": "on July 3",
+    }
+    if overflow:
+        annotation["quote"] = "Long recorded event wording. " * 5000
+    store = RepairStore(
+        repair_state(["fact-a", "fact-b"]),
+        [
+            (
+                "unit-a",
+                "fact-a",
+                "Deployment occurred on July 3.",
+                "source",
+                1,
+                datetime(2026, 10, 22, tzinfo=UTC),
+                "tool",
+                [annotation],
+            ),
+            ("unit-b", "fact-b", "The rollout succeeded.", "source", 1, None, None, None),
+        ],
+    )
+    requests = []
+
+    class Models:
+        def generate(self, role, **kwargs):
+            requests.append(json.loads(kwargs["user"]))
+            return ModelResult(
+                content=json.dumps(
+                    {"outcome": "no_insight", "text": None, "subtype": None, "support_ids": []}
+                ),
+                usage=Usage(),
+            )
+
+    if overflow:
+        with pytest.raises(ValueError, match="complete eligible support set"):
+            repair_insights(store, Models())
+        assert requests == []
+        assert not store.connection.state.get("repair_outcomes")
+    else:
+        repair_insights(store, Models())
+        assert requests == [
+            {
+                "facts": [
+                    {
+                        "id": "fact-a",
+                        "text": "Deployment occurred on July 3.",
+                        "mentioned_at": "2026-10-22T00:00:00Z",
+                        "message_role": "tool",
+                        "temporal_annotations": [annotation],
+                    },
+                    {"id": "fact-b", "text": "The rollout succeeded."},
+                ]
+            }
+        ]
+        assert store.connection.state["repair_outcomes"] == {"insight": "deleted"}
+        private = next(iter(store.cache))[1]
+        assert "source:1" in private and "2026-07-03" in private
+
+
 def test_repair_publishes_next_revision_under_same_insight_id():
     store = RepairStore(
         repair_state(["fact-a", "fact-b"]),
         [
-            ("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None),
-            ("unit-b", "fact-b", "Another supported fact.", "source-b", 1, None, None),
+            ("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None, None),
+            ("unit-b", "fact-b", "Another supported fact.", "source-b", 1, None, None, None),
         ],
     )
 
@@ -160,13 +225,14 @@ def test_repair_embeds_current_purpose_but_publishes_full_supported_text(retriev
     store = RepairStore(
         repair_state(["fact-a", "fact-b"]),
         [
-            ("unit-a", "fact-a", "The user is restoring a violin.", "source", 1, None, None),
+            ("unit-a", "fact-a", "The user is restoring a violin.", "source", 1, None, None, None),
             (
                 "unit-b",
                 "fact-b",
                 "The user requested a bridge inspection.",
                 "source",
                 1,
+                None,
                 None,
                 None,
             ),
@@ -213,7 +279,7 @@ def test_repair_embeds_current_purpose_but_publishes_full_supported_text(retriev
 def test_insufficient_support_deletes_without_model_call():
     store = RepairStore(
         repair_state(["fact-a"]),
-        [("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None)],
+        [("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None, None)],
     )
 
     class NoCalls:
@@ -232,8 +298,8 @@ def test_direct_insight_removal_wins_over_pending_repair():
     store = RepairStore(
         repair_state(["fact-a", "fact-b"]),
         [
-            ("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None),
-            ("unit-b", "fact-b", "Another supported fact.", "source-b", 1, None, None),
+            ("unit-a", "fact-a", "A supported fact.", "source-a", 1, None, None, None),
+            ("unit-b", "fact-b", "Another supported fact.", "source-b", 1, None, None, None),
         ],
         direct_removed={"insight"},
     )
@@ -254,9 +320,9 @@ def test_repair_refuses_partial_support_after_input_packing(monkeypatch):
     store = RepairStore(
         repair_state(["fact-a", "fact-b", "fact-c"]),
         [
-            ("unit-a", "fact-a", "A.", "source", 1, None, None),
-            ("unit-b", "fact-b", "B.", "source", 1, None, None),
-            ("unit-c", "fact-c", "C.", "source", 1, None, None),
+            ("unit-a", "fact-a", "A.", "source", 1, None, None, None),
+            ("unit-b", "fact-b", "B.", "source", 1, None, None, None),
+            ("unit-c", "fact-c", "C.", "source", 1, None, None, None),
         ],
     )
     monkeypatch.setattr("oam.governance.repair.pack_insight_facts", lambda facts, config: facts[:2])
@@ -290,8 +356,8 @@ def test_superseded_repair_continues_with_other_insights(monkeypatch, outcome):
     store = RepairStore(
         state,
         [
-            ("unit-a", "fact-a", "A.", "source", 1, None, None),
-            ("unit-b", "fact-b", "B.", "source", 1, None, None),
+            ("unit-a", "fact-a", "A.", "source", 1, None, None, None),
+            ("unit-b", "fact-b", "B.", "source", 1, None, None, None),
         ],
     )
     store.connection.history_revision = 3

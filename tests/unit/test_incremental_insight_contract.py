@@ -1,6 +1,7 @@
 """Incremental synthesis validates dispositions, targets and complete input bounds."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,6 @@ def update(**changes):
     return {
         "action": "UPDATE",
         "target_id": "policy",
-        "expected_revision": 1,
         "text": "Approval is required; the approval rule changed.",
         "retrieval_text": "Deployment approval",
         "subtype": "projects",
@@ -77,6 +77,7 @@ def test_incremental_update_accepts_one_new_fact_and_uses_dedicated_completion_b
     result = synthesize(model, config)
     assert result.actions[0].target_id == "policy"
     assert result.actions[0].support_ids == ("new",)
+    assert result.actions[0].expected_revision == 1
     role, request = model.requests[0]
     assert role == "insights"
     assert request["max_output_tokens"] == completion_bound
@@ -94,7 +95,7 @@ def test_incremental_update_accepts_one_new_fact_and_uses_dedicated_completion_b
         [update(target_id="unseen")],
         [update(expected_revision=2)],
         [update(support_ids=["unseen"])],
-        [update(action="CREATE", target_id=None, expected_revision=None)],
+        [update(action="CREATE", target_id=None)],
         [update(action="NO_CHANGE", text=None, retrieval_text=None, subtype=None, support_ids=[])],
     ],
 )
@@ -103,11 +104,18 @@ def test_incremental_rejects_lost_duplicate_stale_or_unsupported_actions(actions
         synthesize(Reply(actions))
 
 
-def test_no_change_requires_existing_coverage_and_no_insight_has_no_claim():
+def test_keep_text_with_retained_support_normalizes_to_no_change():
     facts, target = inputs()
     target["supports"].append({"id": "new", "revision": 1})
     model = Reply(
-        [update(action="NO_CHANGE", text=None, retrieval_text=None, subtype=None, support_ids=[])]
+        [
+            {
+                "action": "KEEP_TEXT",
+                "target_id": "policy",
+                "support_ids": ["new"],
+                "seed_ids": ["new"],
+            }
+        ]
     )
     result = extraction.consolidate_insights(
         model,
@@ -118,13 +126,16 @@ def test_no_change_requires_existing_coverage_and_no_insight_has_no_claim():
         timeout_seconds=10,
     )
     assert result.actions[0].action == "NO_CHANGE"
+    assert result.actions[0].expected_revision == 1
+
+
+def test_no_insight_accepts_absent_inapplicable_fields():
     result = synthesize(
         Reply(
             [
                 update(
                     action="NO_INSIGHT",
                     target_id=None,
-                    expected_revision=None,
                     text=None,
                     retrieval_text=None,
                     subtype=None,
@@ -175,10 +186,24 @@ def test_producing_l2_bounds_bind_enabled_generation_and_not_disabled_generation
     assert index_generation(disabled, {}) == index_generation(disabled_tuned, {})
 
 
+def test_model_boundary_recipe_does_not_require_collection_rebuild(monkeypatch):
+    from oam.indexing import identity
+
+    config = CONFIG.model_copy(update={"models": ModelsConfig()})
+    disabled = config.model_copy(
+        update={"index": config.index.model_copy(update={"insights_enabled": False})}
+    )
+    enabled_before = identity.index_generation(config, {})
+    disabled_before = identity.index_generation(disabled, {})
+    monkeypatch.setattr(identity, "INSIGHT_MODEL_RECIPE", "different-model-boundary")
+    assert identity.index_generation(config, {}) == enabled_before
+    assert identity.index_generation(disabled, {}) == disabled_before
+
+
 @pytest.mark.parametrize(
     "actions",
     [
-        [update(action="NO_INSIGHT", target_id=None, expected_revision=None)],
+        [update(action="NO_INSIGHT", target_id=None)],
         [update(support_ids=["new", "new"])],
         [update(seed_ids=["new", "new"])],
         [update(action="UPDATE", text=" ")],
@@ -196,13 +221,10 @@ def test_create_and_no_insight_can_account_for_different_seeds_in_one_group():
     )
     model = Reply(
         [
-            update(
-                action="CREATE", target_id=None, expected_revision=None, support_ids=["new", "old"]
-            ),
+            update(action="CREATE", target_id=None, support_ids=["new", "old"]),
             update(
                 action="NO_INSIGHT",
                 target_id=None,
-                expected_revision=None,
                 text=None,
                 retrieval_text=None,
                 subtype=None,
@@ -220,3 +242,195 @@ def test_create_and_no_insight_can_account_for_different_seeds_in_one_group():
         timeout_seconds=10,
     )
     assert [action.action for action in result.actions] == ["CREATE", "NO_INSIGHT"]
+
+
+def test_model_projection_excludes_private_state_and_omits_absent_values():
+    facts, target = inputs()
+    target["vector"] = [0.25, 0.75]
+    annotated = facts[0].model_copy(
+        update={
+            "mentioned_at": datetime(2026, 10, 22, tzinfo=UTC),
+            "message_role": extraction.MessageRole.TOOL,
+            "temporal_annotations": (
+                extraction.TemporalAnnotation(
+                    role="event",
+                    start="2026-07-03T00:00:00Z",
+                    end="2026-07-04T00:00:00Z",
+                    quote="on July 3",
+                ),
+            ),
+        }
+    )
+    model = Reply([update()])
+    extraction.consolidate_insights(
+        model,
+        facts=(annotated, facts[1]),
+        seeds=("new",),
+        targets=(target,),
+        config=CONFIG,
+        timeout_seconds=10,
+    )
+    body = json.loads(model.requests[0][1]["user"])
+    assert body == {
+        "facts": [
+            {
+                "id": "new",
+                "text": "The approval rule changed.",
+                "message_role": "tool",
+                "mentioned_at": "2026-10-22T00:00:00Z",
+                "temporal_annotations": [
+                    {
+                        "role": "event",
+                        "start": "2026-07-03T00:00:00Z",
+                        "end": "2026-07-04T00:00:00Z",
+                        "quote": "on July 3",
+                    }
+                ],
+            },
+            {"id": "old", "text": "Approval is required."},
+        ],
+        "seed_ids": ["new"],
+        "targets": [
+            {
+                "id": "policy",
+                "text": "Approval is required.",
+                "retrieval_text": "Deployment approval",
+            }
+        ],
+    }
+    assert annotated.model_dump(mode="json")["source_refs"] == ["source:1"]
+
+
+@pytest.mark.parametrize("label", [None, "", "Approval is required.", "Deployment approval"])
+def test_target_labels_survive_without_redundancy_classification(label):
+    facts, target = inputs()
+    target["retrieval_text"] = label
+    model = Reply([update()])
+    extraction.consolidate_insights(
+        model, facts=facts, seeds=("new",), targets=(target,), config=CONFIG, timeout_seconds=10
+    )
+    supplied = json.loads(model.requests[0][1]["user"])["targets"][0]
+    assert supplied == {
+        "id": "policy",
+        "text": "Approval is required.",
+        **({"retrieval_text": label} if label else {}),
+    }
+
+
+def test_keep_text_adds_support_and_binds_exact_captured_claim_and_revision():
+    facts, target = inputs()
+    target.update(revision=7, text="  Exact stored claim.  ")
+    result = extraction.consolidate_insights(
+        Reply(
+            [
+                {
+                    "action": "KEEP_TEXT",
+                    "target_id": "policy",
+                    "support_ids": ["new"],
+                    "seed_ids": ["new"],
+                }
+            ]
+        ),
+        facts=facts,
+        seeds=("new",),
+        targets=(target,),
+        config=CONFIG,
+        timeout_seconds=10,
+    )
+    action = result.actions[0]
+    assert (action.action, action.expected_revision) == ("UPDATE", 7)
+    assert (action.text, action.retrieval_text, action.subtype) == (
+        "  Exact stored claim.  ",
+        "Deployment approval",
+        "projects",
+    )
+    assert action.support_ids == ("new",)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"target_id": "unknown"},
+        {"support_ids": []},
+        {"support_ids": ["old"]},
+        {"support_ids": ["unknown"]},
+        {"text": "Replacement"},
+        {"expected_revision": 1},
+    ],
+)
+def test_keep_text_rejects_unknown_or_unsupported_decisions(changes):
+    decision = {
+        "action": "KEEP_TEXT",
+        "target_id": "policy",
+        "support_ids": ["new"],
+        "seed_ids": ["new"],
+        **changes,
+    }
+    with pytest.raises(extraction.ExtractionError):
+        synthesize(Reply([decision]))
+
+
+def test_two_distinct_seed_decisions_cannot_address_one_target():
+    facts, target = inputs()
+    model = Reply(
+        [
+            {
+                "action": "KEEP_TEXT",
+                "target_id": "policy",
+                "support_ids": [seed],
+                "seed_ids": [seed],
+            }
+            for seed in ("new", "old")
+        ]
+    )
+    with pytest.raises(extraction.ExtractionError, match="duplicate.*target"):
+        extraction.consolidate_insights(
+            model,
+            facts=facts,
+            seeds=("new", "old"),
+            targets=(target,),
+            config=CONFIG,
+            timeout_seconds=10,
+        )
+
+
+def test_label_budget_matches_dispatch_and_ignores_private_source_metadata():
+    from oam.indexing.consolidation import _pack_facts
+
+    facts, target = inputs()
+    facts = tuple(
+        fact.model_copy(update={"source_refs": ("private provenance " * 10000,)}) for fact in facts
+    )
+    expected = {
+        "facts": [
+            {"id": "new", "text": "The approval rule changed."},
+            {"id": "old", "text": "Approval is required."},
+        ],
+        "seed_ids": ["new"],
+        "targets": [
+            {
+                "id": "policy",
+                "text": "Approval is required.",
+                "retrieval_text": "Deployment approval",
+            }
+        ],
+    }
+    bound = extraction.model_input_tokens(extraction.INCREMENTAL_INSIGHT_SYSTEM, expected)
+    config = CONFIG.model_copy(
+        update={"extraction": CONFIG.extraction.model_copy(update={"max_input_tokens": bound})}
+    )
+    assert _pack_facts(facts, ("new",), (target,), config) == facts
+    model = Reply([update()])
+
+    def synthesize_facts():
+        return extraction.consolidate_insights(
+            model, facts=facts, seeds=("new",), targets=(target,), config=config, timeout_seconds=10
+        )
+
+    synthesize_facts()
+    assert json.loads(model.requests[0][1]["user"]) == expected
+    target["retrieval_text"] = "Label-only context " * 5000
+    assert _pack_facts(facts, ("new",), (target,), config) is None
+    with pytest.raises(extraction.ExtractionInputTooLongError):
+        synthesize_facts()
+    assert len(model.requests) == 1

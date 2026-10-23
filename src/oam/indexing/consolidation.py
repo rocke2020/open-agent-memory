@@ -15,8 +15,10 @@ from oam.indexing.extraction import (
     InsightInput,
     consolidate_insights,
     consolidation_envelope,
+    insight_annotations,
     model_input_tokens,
 )
+from oam.indexing.identity import INSIGHT_MODEL_RECIPE
 from oam.indexing.store import MEMORY_REVISION, StaleConsolidationInputs, input_digest, stable_id
 from oam.retrieval.repository import RecallRepository
 
@@ -142,20 +144,13 @@ def _fact_context(store, connection, seeds, targets):
 
 
 def _fact_input(row):
-    from oam.contracts.evidence import TemporalAnnotation
-
     return InsightInput(
         id=row["memory_id"],
         text=row["content_text"],
         source_refs=(f"{row['source_id']}:{row['source_version']}",),
         mentioned_at=row["mentioned_at"],
         message_role=row["locator"].get("role"),
-        temporal_annotations=tuple(
-            TemporalAnnotation.model_validate(
-                {key: value[key] for key in TemporalAnnotation.model_fields if key in value}
-            )
-            for value in row["annotations"] or ()
-        ),
+        temporal_annotations=insight_annotations(row["annotations"]),
     )
 
 
@@ -349,8 +344,11 @@ def consolidate_source(store, models, new_fact_ids):
                 return
             facts, seeds, targets, private_targets = _freeze_group(store, connection, group)
         inputs = {
+            "recipe": INSIGHT_MODEL_RECIPE,
             "system": INCREMENTAL_INSIGHT_SYSTEM,
             "envelope": consolidation_envelope(facts, seeds, targets),
+            "private_facts": [fact.model_dump(mode="json") for fact in facts],
+            "private_targets": private_targets,
             "generation_id": store.generation_id,
             "config": {
                 "index": store.config.index.model_dump(mode="json"),
@@ -414,6 +412,7 @@ def consolidate_source(store, models, new_fact_ids):
                     ],
                     "seed_count": len(seeds),
                     "actions": [action.action for action in result.actions],
+                    "model_actions": list(result.model_actions),
                     "usage": result.usage.model_dump(mode="json"),
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
                 }

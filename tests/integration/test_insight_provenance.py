@@ -19,7 +19,7 @@ pytestmark = pytest.mark.integration
 
 
 async def test_l2_worker_preserves_accepted_roles_and_message_dates(core_database, tmp_path):
-    dsn, _, headers = core_database
+    dsn, tenant, headers = core_database
     raw = yaml.safe_load((ROOT / "configs/oam.yaml").read_text())
     raw["index"]["insight_consolidation_delay_hours"] = 1 / 3600
     path = tmp_path / "config.yaml"
@@ -41,7 +41,6 @@ async def test_l2_worker_preserves_accepted_roles_and_message_dates(core_databas
                             {
                                 "action": "NO_INSIGHT",
                                 "target_id": None,
-                                "expected_revision": None,
                                 "text": None,
                                 "retrieval_text": None,
                                 "subtype": None,
@@ -104,6 +103,13 @@ async def test_l2_worker_preserves_accepted_roles_and_message_dates(core_databas
         "The delivery service reported one successful execution.": "tool",
     }
     assert {fact["mentioned_at"] for fact in supplied.values()} == {"2026-05-03T18:00:00Z"}
-    assert {tuple(fact["source_refs"]) for fact in supplied.values()} == {
-        (f"{receipt.json()['source_id']}:1",)
-    }
+    assert all("source_refs" not in fact for fact in supplied.values())
+    # The lean model view must not discard stored provenance.
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT DISTINCT source_id,source_version FROM search_units "
+            "WHERE tenant_id=%s AND kind='fact'",
+            (tenant,),
+        ).fetchall() == [(receipt.json()["source_id"], 1)]

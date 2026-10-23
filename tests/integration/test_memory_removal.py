@@ -445,6 +445,12 @@ def _run_repair(database, models):
 
 async def test_l1_cleanup_then_repairs_same_id_and_deletes_insufficient_support(removal_database):
     database = removal_database
+    annotation = {
+        "role": "event",
+        "start": "2026-07-03T00:00:00Z",
+        "end": "2026-07-04T00:00:00Z",
+        "quote": "on July 3",
+    }
     with _content(database.dsn, database.tenant) as connection:
         connection.execute(
             "INSERT INTO insight_support VALUES (%s,%s,%s,2,%s,1)",
@@ -453,6 +459,12 @@ async def test_l1_cleanup_then_repairs_same_id_and_deletes_insufficient_support(
         connection.execute(
             "UPDATE search_units SET locator=%s WHERE memory_id=%s",
             (Jsonb({"role": "assistant"}), SURVIVING_MEMORY),
+        )
+        connection.execute(
+            "INSERT INTO unit_times(tenant_id,user_id,annotation_id,unit_id,role,time_span,detail) "
+            "VALUES (%s,%s,'surviving-event',%s,'event',"
+            "tstzrange('2026-07-03T00:00:00Z','2026-07-04T00:00:00Z','[)'),%s)",
+            (database.tenant, USER, SURVIVING_MEMORY, Jsonb(annotation)),
         )
     async with _client(database.headers) as client:
         response = await client.delete(f"/v1/users/{USER}/memories/{REMOVED_MEMORY}")
@@ -470,10 +482,14 @@ async def test_l1_cleanup_then_repairs_same_id_and_deletes_insufficient_support(
         models = RepairModels()
         assert _run_repair(database, models)
         assert models.calls == ["insights", "embedding"]
-        assert {fact["id"]: fact["message_role"] for fact in models.insight_inputs[0]} == {
+        assert {fact["id"]: fact.get("message_role") for fact in models.insight_inputs[0]} == {
             SURVIVING_MEMORY: "assistant",
             OTHER_MEMORIES[1]: None,
         }
+        supplied = {fact["id"]: fact for fact in models.insight_inputs[0]}
+        assert supplied[SURVIVING_MEMORY]["temporal_annotations"] == [annotation]
+        assert "temporal_annotations" not in supplied[OTHER_MEMORIES[1]]
+        assert all("source_refs" not in fact for fact in supplied.values())
         with _content(database.dsn, database.tenant) as connection:
             assert connection.execute(
                 "SELECT revision,synthesis_text FROM insights WHERE insight_id=%s",

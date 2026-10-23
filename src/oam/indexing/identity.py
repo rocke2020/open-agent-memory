@@ -12,6 +12,7 @@ from oam.tokens import ESTIMATOR
 INDEX_RECIPE = "oam-source-fact-insight-v34"
 RESOURCE_VISION_RECIPE = "oam-vision-downscale-v1"
 INSIGHT_RETRIEVAL_RECIPE = "oam-incremental-insight-v3"
+INSIGHT_MODEL_RECIPE = "oam-insight-model-v1"
 
 
 def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
