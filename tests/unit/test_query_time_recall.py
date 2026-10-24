@@ -16,6 +16,18 @@ from oam.retrieval.service import RecallService, RecallUnavailable
 from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 CONFIG = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+# These repository fakes isolate time/source mechanics from relevance selection.
+CONFIG = CONFIG.model_copy(
+    update={
+        "search": CONFIG.search.model_copy(
+            update={
+                "fast": CONFIG.search.fast.model_copy(
+                    update={"partial_match_gate": "off", "adjacent_user_context": False}
+                )
+            }
+        )
+    }
+)
 
 
 class DatedRepository:
@@ -50,7 +62,15 @@ class DatedRepository:
 
     def dense(self, vector, limit):
         return [
-            {"unit_id": name, "kind": "passage", "score": 0.8} for name in tuple(self.rows)[:limit]
+            {
+                "unit_id": name,
+                "kind": "passage",
+                "score": 0.8,
+                "source_id": name,
+                "source_version": 1,
+                "passage_id": name,
+            }
+            for name in tuple(self.rows)[:limit]
         ]
 
     def related_user_fact(self, unit_ids):
@@ -62,7 +82,9 @@ class DatedRepository:
     def temporal_candidates(self, vector, limit):
         return ()
 
-    def ordinary(self, seeds, vector, *, include_semantic=True):
+    def ordinary(
+        self, seeds, vector, *, include_semantic=True, include_entities=True, include_causal=True
+    ):
         return (), {}
 
     def valid_paths(self, paths, vector):
@@ -295,6 +317,29 @@ class EmbeddingOnly:
         return SimpleNamespace(vectors=((0.1,),), usage=Usage(coverage="complete"))
 
 
+def test_fast_never_calls_a_configured_reranker():
+    values = CONFIG.model_dump(mode="json")
+    values["models"]["reranker"] = {
+        "protocol": "openai_compatible",
+        "model": "unused-scorer",
+        "endpoint_env": "UNUSED_SCORER_ENDPOINT",
+        "capabilities": ["rerank"],
+    }
+    values["search"]["fast"]["rerank_candidates"] = 48
+    config = type(CONFIG).model_validate(values)
+
+    class NoScoring(EmbeddingOnly):
+        def rerank(self, *args, **kwargs):
+            pytest.fail("fast retrieval must not invoke a scoring model")
+
+    result = DatedService(config, None, NoScoring(), generation_id="generation").search(
+        object(), SearchRequest(query="Apple harvest", recall_level="fast")
+    )
+    assert {item["unit_id"] for item in result["items"]} == {"old", "new"}
+    assert "rerank" not in result["diagnostics"]["executed_stages"]
+    assert "rerank" in result["diagnostics"]["omitted_stages"]
+
+
 @pytest.mark.parametrize(
     "query",
     [
@@ -517,7 +562,15 @@ def test_fast_temporal_deadline_cannot_report_complete_recall(monkeypatch):
 @pytest.mark.parametrize("allow_partial", [False, True])
 def test_normal_graph_failure_obeys_partial_policy(allow_partial):
     class FailedGraphRepository(DatedRepository):
-        def ordinary(self, seeds, vector, *, include_semantic=True):
+        def ordinary(
+            self,
+            seeds,
+            vector,
+            *,
+            include_semantic=True,
+            include_entities=True,
+            include_causal=True,
+        ):
             raise RuntimeError("expansion failed")
 
     class FailedGraphService(RecallService):
@@ -585,7 +638,9 @@ class DirectEvidenceRepository(SupportedFactsRepository):
     def dense(self, vector, limit):
         return [{"unit_id": "z_direct", "kind": "fact", "score": 0.9}]
 
-    def ordinary(self, seeds, vector, *, include_semantic=True):
+    def ordinary(
+        self, seeds, vector, *, include_semantic=True, include_entities=True, include_causal=True
+    ):
         return ("a_graph",), {}
 
 
@@ -624,7 +679,9 @@ class OverlappingGraphRepository(DirectEvidenceRepository):
             {"unit_id": "z_unrelated", "kind": "fact", "score": 0.2},
         ]
 
-    def ordinary(self, seeds, vector, *, include_semantic=True):
+    def ordinary(
+        self, seeds, vector, *, include_semantic=True, include_entities=True, include_causal=True
+    ):
         assert seeds == ("z_seed",)
         return ("z_unrelated",), {}
 
@@ -678,7 +735,9 @@ class ConversationRepository(DatedRepository):
             {"unit_id": "b_noise", "kind": "fact", "score": 0.8},
         ]
 
-    def ordinary(self, seeds, vector, *, include_semantic=True):
+    def ordinary(
+        self, seeds, vector, *, include_semantic=True, include_entities=True, include_causal=True
+    ):
         return ("a_noise",), {}
 
     def hydrate(self, unit_ids):

@@ -28,7 +28,7 @@ class PhaseRepository(DatedRepository):
             raise psycopg.ProgrammingError("injected SQL failure")
         return [dict(row, kind="fact") for row in super().dense(vector, limit)]
 
-    def fast_graph(self, seeds, vector):
+    def fast_graph(self, seeds, vector, *, include_entities=True, include_causal=False):
         self.service.reads.append(("graph", self.token))
         return (), {}
 

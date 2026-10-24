@@ -83,6 +83,10 @@ class ExtractionConfig(FrozenModel):
 class SearchTier(FrozenModel):
     context_max_tokens: PositiveInt
     graph: Literal["off", "light", "full"]
+    causal_graph: bool
+    lexical_ranking: Literal["per_term", "whole_query"]
+    partial_match_gate: Literal["off", "user_fact_exchange"]
+    adjacent_user_context: bool
     channel_candidates: PositiveInt
     fused_candidates: PositiveInt
     source_seed_results: PositiveInt

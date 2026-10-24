@@ -34,10 +34,12 @@ class CausalRepository(SupportedFactsRepository):
     def ordinary(self, *args):
         raise AssertionError("fast must not execute entity/semantic ordinary SQL")
 
-    def fast_graph(self, seeds, vector):
+    def fast_graph(self, seeds, vector, *, include_entities=True, include_causal=False):
         self.calls.append(("fast_graph", tuple(seeds)))
         if self.failure:
             raise RuntimeError("causal lookup failed")
+        if not include_causal:
+            return (), {}
         return ("cause", "origin"), {
             "cause": [
                 {
@@ -94,9 +96,7 @@ def test_fast_graph_uses_yaml_default_unless_request_overrides(
             **options,
         ),
     )
-    assert {item["unit_id"] for item in result["items"]} == (
-        {"effect", "cause", "origin"} if expected else {"effect"}
-    )
+    assert {item["unit_id"] for item in result["items"]} == {"effect"}
     assert ("graph" in result["diagnostics"]["executed_arms"]) is expected
 
 
@@ -117,7 +117,10 @@ def test_batch_and_planner_inherit_mode_graph_config(
     from oam.models.runtime import ModelResult, Usage
 
     path = tmp_path / "oam.yaml"
-    path.write_text(f'search:\n  {mode}:\n    graph: "{graph}"\n')
+    path.write_text(
+        f'search:\n  {mode}:\n    graph: "{graph}"\n'
+        f"    causal_graph: {str(graph != 'off').lower()}\n"
+    )
     config = load_config(path).config
     service = GraphService(config=config)
 
@@ -193,9 +196,13 @@ class GraphRepository(CausalRepository):
         super().__init__(*args)
         self.rows["semantic"] = {"text": "A related moving announcement."}
 
-    def ordinary(self, seeds, vector, *, include_semantic=True):
+    def ordinary(
+        self, seeds, vector, *, include_semantic=True, include_entities=True, include_causal=True
+    ):
         self.calls.append(("ordinary", include_semantic))
-        ranks, paths = super().fast_graph(seeds, vector)
+        ranks, paths = super().fast_graph(
+            seeds, vector, include_entities=include_entities, include_causal=include_causal
+        )
         if include_semantic:
             ranks = (*ranks, "semantic")
             paths["semantic"] = [
@@ -222,7 +229,10 @@ class GraphService(CausalService):
 def test_mode_graph_config_controls_final_context(tmp_path: Path, caplog, mode, graph, expected):
     caplog.set_level("INFO", logger="oam.retrieval.service")
     path = tmp_path / "oam.yaml"
-    path.write_text(f'search:\n  {mode}:\n    graph: "{graph}"\n')
+    path.write_text(
+        f'search:\n  {mode}:\n    graph: "{graph}"\n'
+        f"    causal_graph: {str(graph != 'off').lower()}\n"
+    )
     service = GraphService(config=load_config(path).config)
     result = service.search(
         AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
@@ -252,22 +262,20 @@ def test_canonical_graph_defaults_reach_final_context(mode):
             include=SearchIncludeOptions(chunks=False), query="why move", recall_level=mode
         ),
     )
-    assert {item["unit_id"] for item in result["items"]} == (
-        {"effect"} if mode == "fast" else {"effect", "cause", "origin"}
-    )
+    assert {item["unit_id"] for item in result["items"]} == {"effect"}
 
 
 @pytest.mark.parametrize(
     ("override", "expected"),
     [
         (None, {"effect", "cause", "origin", "semantic"}),
-        (False, {"effect"}),
+        (False, {"effect", "cause", "origin"}),
         (True, {"effect", "cause", "origin"}),
     ],
 )
 def test_fast_request_boolean_overrides_configured_full_graph(tmp_path: Path, override, expected):
     path = tmp_path / "oam.yaml"
-    path.write_text("search:\n  fast:\n    graph: full\n")
+    path.write_text("search:\n  fast:\n    graph: full\n    causal_graph: true\n")
     service = GraphService(config=load_config(path).config)
     result = service.search(
         AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
@@ -299,7 +307,9 @@ def test_disabled_fast_keeps_direct_context_and_original_dense_cap(options):
 
 
 def test_enabled_fast_delivers_two_supported_causes_in_final_context():
-    service = CausalService()
+    tier = CONFIG.search.fast.model_copy(update={"causal_graph": True})
+    config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={"fast": tier})})
+    service = CausalService(config=config)
     result = service.search(
         object(),
         SearchRequest(
@@ -417,8 +427,8 @@ def test_graph_work_cannot_reset_fast_deadline(monkeypatch, partial):
     elapsed = [0.0]
     original = CausalRepository.fast_graph
 
-    def expire(repository, seeds, vector):
-        result = original(repository, seeds, vector)
+    def expire(repository, seeds, vector, **selection):
+        result = original(repository, seeds, vector, **selection)
         elapsed[0] = CONFIG.recall.fast_deadline_seconds + 1
         return result
 
@@ -485,8 +495,8 @@ def test_fast_graph_checks_scoped_raw_destinations_before_expansion(has_nonseed)
         assert parameters == {"tenant": "tenant", "user": "user", "seeds": ["seed"]}
         return [{"unit_id": "destination"}] if has_nonseed else []
 
-    def ordinary(seeds, vector, *, include_semantic):
-        assert has_nonseed and not include_semantic
+    def ordinary(seeds, vector, *, include_semantic, include_entities, include_causal):
+        assert has_nonseed and not include_semantic and include_entities and not include_causal
         calls.append((seeds, vector))
         return ("destination",), {"destination": []}
 

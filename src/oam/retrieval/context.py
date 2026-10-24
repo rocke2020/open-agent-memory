@@ -378,6 +378,7 @@ def assemble_context(
     include_chunks: bool,
     max_results: int,
     evidence_groups: list[list[dict]] | None = None,
+    optional_context: dict[str, list[dict]] | None = None,
 ) -> tuple[list[dict], list[str], list[list[dict]], bool]:
     """Admit complete representations in root relevance order under one rendered cap."""
     groups = {group[0]["unit_id"]: group for group in evidence_groups or []}
@@ -392,6 +393,16 @@ def assemble_context(
     }
     oversized_single_fact = False
     renderer = _ContextRenderer()
+
+    def selection(group):
+        tentative = bundle_items([*admitted, group])
+        originals = sum(row["kind"] in ORIGINAL_KINDS for row in tentative)
+        pools_fit = originals <= max_results and len(tentative) - originals <= max_results
+        tokens_fit = pools_fit and (
+            estimated_tokens(renderer.render(tentative)[1]) <= context_max_tokens
+        )
+        return tentative, pools_fit, tokens_fit
+
     for item in [*candidates, *source_passages]:
         identity = item["unit_id"]
         if identity in considered:
@@ -409,12 +420,11 @@ def assemble_context(
         representation = [
             row for row in group if include_chunks or row["kind"] not in ORIGINAL_KINDS
         ]
-        tentative = bundle_items([*admitted, representation])
-        originals = sum(row["kind"] in ORIGINAL_KINDS for row in tentative)
-        if originals > max_results or len(tentative) - originals > max_results:
+        tentative, pools_fit, tokens_fit = selection(representation)
+        if not pools_fit:
             omissions.append(identity)
             continue
-        if estimated_tokens(renderer.render(tentative)[1]) > context_max_tokens:
+        if not tokens_fit:
             if (
                 context_max_tokens > 0
                 and not admitted
@@ -429,4 +439,14 @@ def assemble_context(
         selected = tentative
         if oversized_single_fact:
             break
+        if item["kind"] == "fact" and include_chunks:
+            selected_ids = {row["unit_id"] for row in selected}
+            for neighbor in (optional_context or {}).get(identity, []):
+                if neighbor["unit_id"] in selected_ids:
+                    continue
+                tentative, pools_fit, tokens_fit = selection([neighbor])
+                if pools_fit and tokens_fit:
+                    admitted.append([neighbor])
+                    selected = tentative
+                    selected_ids.add(neighbor["unit_id"])
     return selected, omissions, admitted, oversized_single_fact

@@ -82,7 +82,9 @@ class SourceRepository(DatedRepository):
     def dense(self, vector, limit):
         return []
 
-    def ordinary(self, seeds, vector, *, include_semantic=True):
+    def ordinary(
+        self, seeds, vector, *, include_semantic=True, include_entities=True, include_causal=True
+    ):
         return tuple(self.graph_paths), self.graph_paths
 
     def hydrate(self, unit_ids):
@@ -246,6 +248,50 @@ def test_relevance_preserves_user_article_beside_supported_fact(evidence_rows, m
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("chunks", [False, True])
+def test_fact_seed_discovers_unextracted_original_beyond_its_adjacent_window(
+    evidence_rows, mode, chunks
+):
+    supplemental = deepcopy(evidence_rows[3])
+    supplemental.update(unit_id="later_original", text="I also missed the July workshop.")
+    supplemental["citations"][0].update(message_id="6", message_index=6)
+    calls = []
+
+    class FactRepository(SourceRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": "fact"}]
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            calls.append(source_keys)
+            assert source_keys == (("conversation", 1),)
+            assert limit == getattr(CONFIG.search, mode).source_seed_results
+            assert {"original", "second_event"} <= set(excluded_ids)
+            assert "later_original" not in excluded_ids
+            return [{"unit_id": "later_original"}]
+
+    class FactService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield FactRepository(request, self.rows, self.graph_paths)
+
+    result = FactService([*evidence_rows, supplemental]).search(
+        object(),
+        SearchRequest(query="missed workshops", recall_level=mode, include={"chunks": chunks}),
+    )
+    if chunks:
+        assert calls == [(("conversation", 1),)]
+        assert {"fact", "original", "later_original"} <= {
+            item["unit_id"] for item in result["items"]
+        }
+        assert supplemental["text"] in result["context"]
+    else:
+        assert calls == []
+        assert all(item["kind"] == "fact" for item in result["items"])
+        assert supplemental["text"] not in result["context"]
+    assert result["diagnostics"]["generative_calls"] == 0
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_passage_seed_recovers_query_relevant_user_original_without_a_fact(evidence_rows, mode):
     seed = deepcopy(evidence_rows[0])
     seed.update(
@@ -314,7 +360,7 @@ def test_supplemental_original_does_not_displace_ranked_evidence(evidence_rows, 
             return [{"unit_id": uid} for uid in ("fact", "guide", "other", "ranked_fact")]
 
         def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
-            assert source_keys == (("guide", 1),)
+            assert source_keys == (("conversation", 1), ("guide", 1))
             return [{"unit_id": "recovered"}]
 
     class RankedService(SourceService):

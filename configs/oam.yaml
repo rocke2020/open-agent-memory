@@ -113,14 +113,28 @@ search:
   # Upper bound on tuples visited by iterative ANN scans.
   ann_scan_max_tuples: 20000
   # Per mode: channel_candidates caps each arm; fused_candidates caps rank fusion.
-  # rerank_candidates caps optional reranker input; source_seed_results caps seed items.
+  # rerank_candidates caps optional normal-mode reranking; fast never calls a reranker.
+  # source_seed_results caps fact/original seeds and recovered user originals.
   # max_results caps each learned-text and original-text pool independently.
   # The combined response can contain up to twice this many items.
-  # graph: off skips expansion; light uses stored entity/alias and causal links;
-  # full adds semantic neighbors. Quote "off" so YAML does not parse it as false.
+  # graph: off skips entity/alias expansion, light uses identities, full adds
+  # semantic neighbors. causal_graph independently enables outgoing causal
+  # links, including within temporal retrieval. Quote "off" in YAML.
+  # user_fact_exchange keeps direct dense and strict lexical hits; other memory
+  # matches need a dense user fact in their user/immediate-assistant exchange.
+  # Partial assistant replies use only the first source_seed_results dense hits
+  # for both a user fact and its exact cited original; user roots and optional
+  # user context keep their existing scope. whole_query uses one OR FTS ranking;
+  # per_term retains term-list fusion. Neither ranking uses a scoring model.
+  # adjacent_user_context tries already-discovered neighboring user originals
+  # after a fact's required support, without rejecting the fact if they do not fit.
   fast:
     context_max_tokens: 18000
     graph: "off"
+    causal_graph: false
+    lexical_ranking: whole_query
+    partial_match_gate: user_fact_exchange
+    adjacent_user_context: true
     channel_candidates: 64
     fused_candidates: 128
     source_seed_results: 36
@@ -128,6 +142,10 @@ search:
   normal:
     context_max_tokens: 32768
     graph: light
+    causal_graph: false
+    lexical_ranking: per_term
+    partial_match_gate: "off"
+    adjacent_user_context: false
     channel_candidates: 64
     fused_candidates: 154
     rerank_candidates: 48

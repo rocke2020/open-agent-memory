@@ -35,6 +35,7 @@ from oam.retrieval.context import (
     source_diverse_seed_order,
     source_window_ids,
 )
+from oam.retrieval.local_context import local_evidence_ids
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.repository import RecallRepository
 from oam.tokens import estimate_units, estimated_tokens
@@ -90,18 +91,31 @@ class RecallService:
             raise TimeoutError("recall SQL deadline exceeded") from error
         diagnostics = result["diagnostics"]
         budget = diagnostics["context_budget"]
+        local = diagnostics["local_context"]
         logging.getLogger(__name__).info(
-            "oam.recall trace_id=%s mode=%s graph=%s arms=%s outcome=%s "
-            "admission=relevance_order query_prefix=%s include_chunks=%s "
+            "oam.recall trace_id=%s mode=%s graph=%s causal_graph=%s arms=%s outcome=%s "
+            "admission=%s query_prefix=%s include_chunks=%s "
+            "lexical_ranking=%s partial_match_gate=%s gate_status=%s filtered_roots=%d "
+            "reply_seed_limit=%d "
+            "adjacent_user_context=%s window_originals=%d "
             "facts=%d originals=%d context_tokens=%d/%d "
             "omissions=%d oversized_single_fact=%s duration_ms=%.1f",
             result["trace_id"],
             diagnostics["recall_level"],
             diagnostics["graph"],
+            diagnostics["causal_graph"],
             ",".join(diagnostics["executed_arms"]),
             "partial" if diagnostics["partial"] else "ok",
+            "rerank" if "rerank" in diagnostics["executed_stages"] else "relevance_order",
             bool(self.config.models.embedding and self.config.models.embedding.query_prefix),
             budget["include_chunks"],
+            diagnostics["lexical_ranking"],
+            local["partial_match_gate"],
+            local["gate_status"],
+            local["filtered_roots"],
+            local["reply_seed_limit"],
+            local["adjacent_user_context"],
+            local["window_originals"],
             budget["learned_count"],
             budget["original_count"],
             result["context_tokens"],
@@ -121,6 +135,7 @@ class RecallService:
         mode = request.recall_level.value
         tier = getattr(self.config.search, mode)
         graph = tier.graph
+        causal_graph = tier.causal_graph
         if mode == "fast" and request.fast_graph is not None:
             graph = "light" if request.fast_graph else "off"
         deadline = started + getattr(self.config.recall, f"{mode}_deadline_seconds")
@@ -238,13 +253,16 @@ class RecallService:
                 (*[row["unit_id"] for row in anchors], *[row["unit_id"] for row in lexical])
             )
         )[: tier.channel_candidates]
+        strict_lexical_ids = {row["unit_id"] for row in anchors} | {
+            row["unit_id"] for row in lexical if row.get("strict_match")
+        }
         vector = embedding.vectors[0] if embedding is not None else None
         dense_pool = []
         if embedding is not None:
             usage["embedding"] = embedding.usage.model_dump(mode="json")
             pool_limit = (
                 tier.channel_candidates
-                if graph == "off"
+                if graph == "off" and not causal_graph
                 else max(tier.channel_candidates, self.config.search.graph_seed_max)
             )
             dense_pool = stage("dense", lambda: read("dense", vector, pool_limit)) or []
@@ -256,13 +274,26 @@ class RecallService:
                 if row["kind"] == "fact"
                 and row["score"] >= self.config.search.graph_seed_min_similarity
             )[: self.config.search.graph_seed_max]
-            if graph != "off" and (seeds or mode == "normal"):
+            if (graph != "off" or causal_graph) and (seeds or mode == "normal"):
                 expansion = stage(
                     "graph",
                     lambda: (
-                        read("fast_graph", seeds, vector)
-                        if mode == "fast" and graph == "light"
-                        else read("ordinary", seeds, vector, include_semantic=graph == "full")
+                        read(
+                            "fast_graph",
+                            seeds,
+                            vector,
+                            include_entities=graph != "off",
+                            include_causal=causal_graph,
+                        )
+                        if mode == "fast" and graph != "full"
+                        else read(
+                            "ordinary",
+                            seeds,
+                            vector,
+                            include_semantic=graph == "full",
+                            include_entities=graph != "off",
+                            include_causal=causal_graph,
+                        )
                     ),
                 )
                 if expansion is not None:
@@ -454,7 +485,20 @@ class RecallService:
             raise RecallUnavailable("user generation changed during recall")
         if index_state["parse_partial"] and not request.allow_partial:
             raise RecallUnavailable("PDF parse became incomplete during recall")
-        hydrated = read("hydrate", final_ids)
+        gate_active = tier.partial_match_gate == "user_fact_exchange" and "dense" in executed
+        dense_fact_ids = (
+            {
+                row["unit_id"]
+                for row in dense_pool[: tier.channel_candidates]
+                if row["kind"] == "fact"
+            }
+            if gate_active
+            else set()
+        )
+        hydration_ids = tuple(dict.fromkeys((*final_ids, *sorted(dense_fact_ids))))
+        hydrated_rows = {row["unit_id"]: row for row in read("hydrate", hydration_ids)}
+        dense_facts = [row for node, row in hydrated_rows.items() if node in dense_fact_ids]
+        hydrated = [hydrated_rows[node] for node in final_ids if node in hydrated_rows]
         hydrated_passages = {row["unit_id"]: row for row in hydrated if row["kind"] == "passage"}
         context_limit = request.context_limit(self.config)
         chunks = request.include.chunks
@@ -753,24 +797,24 @@ class RecallService:
                         item["paths"] = paths.get(item["unit_id"], [])
                         companions[item["unit_id"]] = item
                     candidates.extend(companions.values())
-        if vector is not None:
-            passage_source_keys = tuple(
+        if vector is not None and chunks:
+            discovery_source_keys = tuple(
                 dict.fromkeys(
                     (citation["source_id"], citation["source_version"])
                     for item in discovery_seed_items
-                    if item["kind"] == "passage" and item["origin"] == "memory"
+                    if item["kind"] in {"fact", "passage"} and item["origin"] == "memory"
                     for citation in item["citations"]
                     if isinstance(citation.get("source_id"), str)
                     and type(citation.get("source_version")) is int
                 )
             )
-            if passage_source_keys:
+            if discovery_source_keys:
                 originals = (
                     stage(
                         "source_user_originals",
                         lambda: read(
                             "source_user_passage_ids",
-                            passage_source_keys,
+                            discovery_source_keys,
                             vector,
                             seed_limit,
                             tuple(hydrated_passages),
@@ -948,6 +992,68 @@ class RecallService:
         packing_candidates = [
             item for item in candidates if item["unit_id"] not in unavailable_roots
         ]
+        selection_started = time.monotonic()
+        available_originals = {
+            item["unit_id"]: item
+            for item in (*packing_candidates, *source_passages)
+            if item["kind"] in ORIGINAL_KINDS
+        }
+        gate_omissions = []
+        if gate_active:
+            independent_ids = (
+                set(arms.get("dense", ())) | set(arms.get("graph", ())) | strict_lexical_ids
+            )
+            allowed_ids = local_evidence_ids(
+                [*packing_candidates, *source_passages],
+                dense_facts,
+                independent_ids,
+                reply_fact_ids={
+                    row["unit_id"]
+                    for row in dense_pool[: min(seed_limit, tier.channel_candidates)]
+                    if row["kind"] == "fact"
+                },
+                reply_parent_keys={
+                    (row["source_id"], row["source_version"], row["passage_id"])
+                    for row in dense_pool[: min(seed_limit, tier.channel_candidates)]
+                    if row["kind"] == "passage"
+                },
+            )
+            gate_omissions = list(
+                dict.fromkeys(
+                    item["unit_id"]
+                    for item in (*packing_candidates, *source_passages)
+                    if item["unit_id"] not in allowed_ids
+                )
+            )
+            packing_candidates = [
+                item for item in packing_candidates if item["unit_id"] in allowed_ids
+            ]
+            source_passages = [item for item in source_passages if item["unit_id"] in allowed_ids]
+            evidence_groups = [
+                group for group in evidence_groups if group[0]["unit_id"] in allowed_ids
+            ]
+        optional_context = {}
+        if tier.adjacent_user_context and chunks and source_ids:
+            required_originals = {
+                group[0]["unit_id"]: {
+                    row["unit_id"] for row in group if row["kind"] in ORIGINAL_KINDS
+                }
+                for group in evidence_groups
+            }
+            for item in packing_candidates:
+                if item["kind"] != "fact" or (
+                    item["unit_id"] in l2_fact_items and item["unit_id"] not in final_ids
+                ):
+                    continue
+                optional_context[item["unit_id"]] = [
+                    available_originals[node]
+                    for node in source_window_ids([item], locators)
+                    if node in available_originals
+                    and node not in required_originals.get(item["unit_id"], set())
+                ]
+        if tier.partial_match_gate != "off" or tier.adjacent_user_context:
+            timing["local_context_selection"] = (time.monotonic() - selection_started) * 1000
+            executed.append("local_context_selection")
         packing_started = time.monotonic()
         items, budget_omissions, admitted_roots, oversized_single_fact = assemble_context(
             packing_candidates,
@@ -956,6 +1062,7 @@ class RecallService:
             include_chunks=chunks,
             max_results=tier.max_results,
             evidence_groups=evidence_groups,
+            optional_context=optional_context,
         )
         timing["context_packing"] = (time.monotonic() - packing_started) * 1000
         selected_insights = [
@@ -1014,6 +1121,7 @@ class RecallService:
             context = render_context(items)
         context_tokens = context_token_count(context)
         selected_ids = {item["unit_id"] for item in items}
+        omitted_by_gate = [node for node in gate_omissions if node not in selected_ids]
         for diagnostic in l2_diagnostics:
             if diagnostic["status"] == "included" and diagnostic["unit_id"] not in selected_ids:
                 diagnostic.update(
@@ -1033,6 +1141,7 @@ class RecallService:
                         *budget_omissions,
                         *source_omissions,
                         *sorted(support_limit_omissions),
+                        *omitted_by_gate,
                     ]
                 )
             ),
@@ -1040,6 +1149,7 @@ class RecallService:
                 **dict.fromkeys(budget_omissions, "context_or_result_limit"),
                 **dict.fromkeys(source_omissions, "missing_or_invalid_source_support"),
                 **dict.fromkeys(sorted(support_limit_omissions), "support_expansion_limit"),
+                **dict.fromkeys(omitted_by_gate, "partial_match_without_local_witness"),
                 **{
                     entry["unit_id"]: entry["reason"] for entry in l2_diagnostics if entry["reason"]
                 },
@@ -1055,6 +1165,27 @@ class RecallService:
             "diagnostics": {
                 "recall_level": mode,
                 "graph": graph,
+                "causal_graph": causal_graph,
+                "lexical_ranking": tier.lexical_ranking,
+                "local_context": {
+                    "partial_match_gate": tier.partial_match_gate,
+                    "gate_status": (
+                        "applied"
+                        if gate_active
+                        else "off"
+                        if tier.partial_match_gate == "off"
+                        else "dense_unavailable"
+                    ),
+                    "filtered_roots": len(gate_omissions),
+                    "reply_seed_limit": min(seed_limit, tier.channel_candidates)
+                    if gate_active
+                    else 0,
+                    "adjacent_user_context": tier.adjacent_user_context,
+                    "window_originals": len(
+                        {item["unit_id"] for group in optional_context.values() for item in group}
+                        & selected_ids
+                    ),
+                },
                 "generation_id": self.generation_id,
                 "executed_arms": list(arms),
                 "executed_stages": [
@@ -1070,6 +1201,7 @@ class RecallService:
                         "rerank",
                         "source_user_originals",
                         "l2_source_expansion",
+                        "local_context_selection",
                     )
                     if name in executed
                 ],
