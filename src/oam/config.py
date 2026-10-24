@@ -248,6 +248,7 @@ class UserConfig(FrozenModel):
 
 
 class IndexConfig(FrozenModel):
+    enable_causal_graph: bool
     insights_enabled: bool = True
     insight_consolidation_delay_hours: PositiveFloat
     insight_seed_max: PositiveInt = Field(le=64)

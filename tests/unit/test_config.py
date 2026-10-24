@@ -11,6 +11,28 @@ from oam.config import ConfigurationError, load_config
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def test_index_causal_extraction_switch_is_owned_by_canonical_yaml():
+    from oam.config import IndexConfig
+
+    values = yaml.safe_load((REPOSITORY_ROOT / "configs/oam.yaml").read_text())["index"]
+    disabled = IndexConfig.model_validate(values)
+    enabled = IndexConfig.model_validate({**values, "enable_causal_graph": True})
+    assert disabled.enable_causal_graph is False
+    assert enabled.enable_causal_graph is True
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_recall_causal_switch_is_independent_of_entity_graph_mode(mode):
+    from oam.config import SearchTier
+
+    values = yaml.safe_load((REPOSITORY_ROOT / "configs/oam.yaml").read_text())["search"][mode]
+    disabled = SearchTier.model_validate(values)
+    enabled = SearchTier.model_validate({**values, "causal_graph": True, "graph": "off"})
+    assert disabled.causal_graph is False
+    assert enabled.causal_graph is True
+    assert enabled.graph == "off"
+
+
 def test_fts_rank_weights_reject_values_outside_postgres_range() -> None:
     from pydantic import ValidationError
 

@@ -9,6 +9,7 @@ from oam.retrieval.repository import RecallRepository
 def test_repeated_alias_paths_do_not_outvote_two_distinct_shared_entity_ids():
     repository = object.__new__(RecallRepository)
     repository.config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    repository.request = None
     repository._has_insights = False
     repository._eligible = lambda **kwargs: "WITH filtered AS (SELECT 1) "
     graph_rows = []

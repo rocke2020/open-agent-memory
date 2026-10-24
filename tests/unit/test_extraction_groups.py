@@ -114,6 +114,9 @@ def test_cross_passage_relations_skip_rejected_targets_without_renumbering():
         ],
     }
     with extraction_models(reply) as (models, config):
+        config = config.model_copy(
+            update={"index": config.index.model_copy(update={"enable_causal_graph": True})}
+        )
         result = extract_group(
             models,
             passages=(passage("a", "Tea.", 0), passage("b", "Coffee.", 1)),
@@ -166,6 +169,9 @@ def test_group_recovers_invalid_owner_only_from_unique_exact_source_quote(owner)
     }
     requests = []
     with extraction_models(reply, requests) as (models, config):
+        config = config.model_copy(
+            update={"index": config.index.model_copy(update={"enable_causal_graph": True})}
+        )
         result = extract_group(
             models,
             passages=(

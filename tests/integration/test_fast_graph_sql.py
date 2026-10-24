@@ -16,6 +16,19 @@ from oam.retrieval.service import RecallService
 pytestmark = pytest.mark.integration
 
 
+def causal_config(config):
+    return config.model_copy(
+        update={
+            "search": config.search.model_copy(
+                update={
+                    mode: getattr(config.search, mode).model_copy(update={"causal_graph": True})
+                    for mode in ("fast", "normal")
+                }
+            )
+        }
+    )
+
+
 def history(connection, authority):
     for node, text in (
         ("effect", "Anchorword: I moved because my rent increased."),
@@ -49,7 +62,7 @@ def history(connection, authority):
             (authority.tenant_id, authority.user_id, source, target, kind),
         )
     add_insight(connection, authority, "plan", ("effect", "sibling"))
-    return load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    return causal_config(load_config(Path(__file__).parents[2] / "configs/oam.yaml").config)
 
 
 def test_fast_graph_sql_discovers_two_hops_without_semantic_or_insight_probes(
@@ -69,7 +82,7 @@ def test_fast_graph_sql_discovers_two_hops_without_semantic_or_insight_probes(
         return execute(sql, params)
 
     repository._execute = capture
-    ranks, paths = repository.fast_graph(("effect",), (1.0,) + (0.0,) * 1023)
+    ranks, paths = repository.fast_graph(("effect",), (1.0,) + (0.0,) * 1023, include_causal=True)
     assert set(ranks) == {"rent", "job"}
     assert paths["job"][0]["nodes"] == ["effect", "rent", "job"]
     assert repository.valid_paths(paths, (1.0,) + (0.0,) * 1023) == paths
@@ -81,7 +94,10 @@ def test_fast_graph_sql_discovers_two_hops_without_semantic_or_insight_probes(
         "UPDATE evidence SET learning_eligible=false WHERE evidence_id='rent' AND tenant_id=%s",
         (authority.tenant_id,),
     )
-    assert repository.fast_graph(("effect",), (1.0,) + (0.0,) * 1023) == ((), {})
+    assert repository.fast_graph(("effect",), (1.0,) + (0.0,) * 1023, include_causal=True) == (
+        (),
+        {},
+    )
     assert repository.valid_paths(paths, (1.0,) + (0.0,) * 1023) == {"rent": [], "job": []}
 
 
@@ -95,13 +111,20 @@ def test_fast_opt_in_recovers_graph_only_cause_with_cited_final_context(recall_d
             )
         }
     )
-    service = RecallService(
-        config,
-        TransactionPool(connection),
-        FixedModels(config.index.embedding_dimensions),
-        generation_id="generation",
-    )
     for enabled in (False, True):
+        selected = config.model_copy(
+            update={
+                "search": config.search.model_copy(
+                    update={"fast": config.search.fast.model_copy(update={"causal_graph": enabled})}
+                )
+            }
+        )
+        service = RecallService(
+            selected,
+            TransactionPool(connection),
+            FixedModels(config.index.embedding_dimensions),
+            generation_id="generation",
+        )
         result = service.search(
             authority,
             SearchRequest(
@@ -136,7 +159,10 @@ def test_configured_graph_selection_reaches_real_sql_context(
     connection, authority = recall_database
     history(connection, authority)
     path = tmp_path / "oam.yaml"
-    path.write_text(f'search:\n  {mode}:\n    graph: "{graph}"\n    channel_candidates: 1\n')
+    path.write_text(
+        f'search:\n  {mode}:\n    graph: "{graph}"\n'
+        f"    causal_graph: {str(graph != 'off').lower()}\n    channel_candidates: 1\n"
+    )
     config = load_config(path).config
     service = RecallService(
         config,
@@ -162,6 +188,7 @@ def test_graph_cannot_add_candidates_when_every_fact_is_a_seed(recall_database):
 
     connection, authority = recall_database
     repository, vector, _ = alias_history(connection, authority)
+    repository.config = causal_config(repository.config)
     connection.execute(
         "INSERT INTO unit_links VALUES (%s,%s,'seed','continuation','caused_by',1)",
         (authority.tenant_id, authority.user_id),
@@ -277,6 +304,18 @@ async def test_public_http_fast_graph_option_reaches_real_sql_context(core_datab
                     (generation, tenant),
                 )
         for enabled in (False, True):
+            selected = app.state.runtime.config
+            app.state.runtime.config = selected.model_copy(
+                update={
+                    "search": selected.search.model_copy(
+                        update={
+                            "fast": selected.search.fast.model_copy(
+                                update={"causal_graph": enabled}
+                            )
+                        }
+                    )
+                }
+            )
             response = await client.post(
                 "/v1/recall",
                 json={
@@ -365,11 +404,12 @@ def test_revoked_alias_keeps_independently_supported_fast_causal_path(recall_dat
 
     connection, authority = recall_database
     repository, vector, _ = alias_history(connection, authority)
+    repository.config = causal_config(repository.config)
     connection.execute(
         "INSERT INTO unit_links VALUES (%s,%s,'seed','continuation','caused_by',1)",
         (authority.tenant_id, authority.user_id),
     )
-    _, paths = repository.fast_graph(("seed",), vector)
+    _, paths = repository.fast_graph(("seed",), vector, include_causal=True)
     selected = {"continuation": paths["continuation"]}
     assert {path["relation"] for path in selected["continuation"]} == {"entity", "caused_by"}
     connection.execute(
@@ -380,7 +420,7 @@ def test_revoked_alias_keeps_independently_supported_fast_causal_path(recall_dat
     retained = repository.valid_paths(selected, vector)
     assert [path["relation"] for path in retained["continuation"]] == ["caused_by"]
     assert repository._has_insights is None
-    assert "continuation" in repository.fast_graph(("seed",), vector)[0]
+    assert "continuation" in repository.fast_graph(("seed",), vector, include_causal=True)[0]
 
 
 def test_fast_graph_does_not_read_identity_support_when_every_eligible_fact_is_a_seed(
@@ -546,6 +586,7 @@ def test_graph_validates_only_stored_path_candidates_without_capping_raw_neighbo
 
     connection, authority = recall_database
     repository, vector, _ = alias_history(connection, authority)
+    repository.config = causal_config(repository.config)
     repository.config = repository.config.model_copy(
         update={"search": repository.config.search.model_copy(update={"links_per_seed": 1})}
     )
@@ -610,7 +651,12 @@ def test_fast_graph_keeps_full_history_gate_when_nonseed_fact_has_no_stored_path
         return {
             row["unit_id"]
             for row in repository._execute(
-                _graph_fact_eligibility(include_semantic=False) + "SELECT unit_id FROM seeds",
+                _graph_fact_eligibility(
+                    include_semantic=False,
+                    include_entities=True,
+                    include_causal=repository.causal_graph_enabled,
+                )
+                + "SELECT unit_id FROM seeds",
                 {"seeds": list(seeds)},
             )
         }
@@ -687,6 +733,7 @@ def test_raw_graph_guard_preserves_seed_causal_paths_when_nonseed_exists(recall_
 
     connection, authority = recall_database
     repository, vector, _ = alias_history(connection, authority)
+    repository.config = causal_config(repository.config)
     seeds = ("definition", "seed", "continuation")
     connection.execute(
         "INSERT INTO unit_links VALUES (%s,%s,'seed','continuation','caused_by',1)",

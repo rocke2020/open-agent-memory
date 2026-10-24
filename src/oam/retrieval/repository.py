@@ -1111,7 +1111,9 @@ class RecallRepository:
                     "AND witness.role=%(time_role)s AND witness.time_span && "
                     "tstzrange(%(time_start)s,%(time_end)s,'[)'))"
                 )
-            witnesses = "(edge.relation='caused_by' OR (" + " AND ".join(conditions) + "))"
+            witnesses = "(" + " AND ".join(conditions) + ")"
+            if self.causal_graph_enabled:
+                witnesses = "(edge.relation='caused_by' OR " + witnesses + ")"
 
         def eligible_edges(edges):
             return (

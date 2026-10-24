@@ -55,14 +55,22 @@ WITH raw_units(unit_id,embedding,active,mentioned_at) AS (
 
 @pytest.mark.parametrize("basis", ["mentioned", "event"])
 @pytest.mark.parametrize("sources", [("seed",), ("seed", "seed")])
+@pytest.mark.parametrize("causal", [False, True])
 def test_temporal_topk_filters_before_caps_and_orders_ties_across_directions(
-    monkeypatch, basis, sources
+    monkeypatch, basis, sources, causal
 ):
     """Raw limits would waste slots on withdrawn, out-of-window, weak or invalid-witness edges."""
     dsn = os.environ.get("OAM_TEST_POSTGRES_DSN")
     if not dsn or os.environ.get("OAM_TEST_POSTGRES_ISOLATED") != "1":
         pytest.skip("requires an explicitly isolated PostgreSQL database")
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={
+            "search": config.search.model_copy(
+                update={"normal": config.search.normal.model_copy(update={"causal_graph": causal})}
+            )
+        }
+    )
     authority = AuthorizedUser("key", "tenant", "reader", "scope", frozenset({"memory:read"}))
     request = SearchRequest(
         query="What happened during January?",
@@ -89,10 +97,15 @@ def test_temporal_topk_filters_before_caps_and_orders_ties_across_directions(
             per_source=True,
             edge_ids=(json.dumps(["caused_by", "seed", "n14"]),),
         )
-    assert [row["unit_id"] for row in constrained] == ["n14"]
+    assert [row["unit_id"] for row in constrained] == (["n14"] if causal else [])
     assert len(rows) == 12
-    assert [row["unit_id"] for row in rows] == [f"n{i:02d}" for i in range(1, 5) for _ in range(3)]
-    assert [row["relation"] for row in rows] == ["caused_by", "temporal", "temporal"] * 4
+    repeats, groups = (3, 4) if causal else (2, 6)
+    assert [row["unit_id"] for row in rows] == [
+        f"n{i:02d}" for i in range(1, groups + 1) for _ in range(repeats)
+    ]
+    assert [row["relation"] for row in rows] == (
+        ["caused_by", "temporal", "temporal"] * 4 if causal else ["temporal"] * 12
+    )
     assert [row["neighbor_rank"] for row in rows] == list(range(1, 13))
     assert all(row["weight"] == 0.8 and row["cosine"] == 1.0 for row in rows)
     assert all("missing" not in row["edge_id"] for row in rows)

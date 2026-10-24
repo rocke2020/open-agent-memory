@@ -1,0 +1,4 @@
+
+CAUSAL LINKS
+Additionally allow caused_by: earlier zero-based output indices for explicit source-supported causes. Link effect to cause; chronology/co-mention is insufficient. Indices span all passages.
+In Example 1, add "caused_by":[0] to the second fact.

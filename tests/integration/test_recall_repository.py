@@ -715,7 +715,7 @@ def test_fast_service_returns_cited_context_with_mode_total(recall_database):
         "embedding",
         "dense",
         "related_user_fact",
-        "source_user_originals",
+        "local_context_selection",
     ]
     assert result["diagnostics"]["generative_calls"] == 0
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
@@ -1108,7 +1108,9 @@ def test_normal_follows_causal_direction_without_expanding_l2_siblings(recall_da
         )
     add_insight(connection, authority, "plan", ("move", "cheap"))
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    tier = getattr(config.search, mode).model_copy(update={"channel_candidates": 1})
+    tier = getattr(config.search, mode).model_copy(
+        update={"channel_candidates": 1, "causal_graph": True}
+    )
     config = config.model_copy(update={"search": config.search.model_copy(update={mode: tier})})
     service = RecallService(
         config,
@@ -1162,7 +1164,10 @@ def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_databa
                 (authority.tenant_id, authority.user_id, previous, node, previous, node),
             )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    tier = getattr(config.search, mode).model_copy(update={"channel_candidates": 1})
+    # Isolate temporal traversal from the separately tested exchange-selection gate.
+    tier = getattr(config.search, mode).model_copy(
+        update={"channel_candidates": 1, "partial_match_gate": "off"}
+    )
     config = config.model_copy(
         update={
             "search": config.search.model_copy(
