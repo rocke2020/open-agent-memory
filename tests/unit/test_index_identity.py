@@ -2,6 +2,24 @@ from oam.config import ModelsConfig, load_config
 from oam.paths import default_config_path
 
 
+def test_concise_extraction_invalidates_prior_prompt_checkpoints():
+    from oam.indexing.identity import index_generation
+
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
+    assert index_generation(config, {}) != (
+        "gen_e2621ff78fdee6a06d170b921025404478e75e00bf24f0a2d594ba0d78841207"
+    )
+
+
+def test_event_time_grounding_invalidates_prior_extraction_checkpoints():
+    from oam.indexing.identity import index_generation
+
+    config = load_config(default_config_path()).config.model_copy(update={"models": ModelsConfig()})
+    assert index_generation(config, {}) != (
+        "gen_f82942ddf971c342c92bf8d7247eee5fe3cb8dbc8125cfbfdf3ae2093e9fdbfb"
+    )
+
+
 def test_overflow_recipe_invalidates_legacy_generation_and_references_change_it():
     from oam.indexing.identity import index_generation
 

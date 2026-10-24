@@ -54,6 +54,18 @@ REFERENCE_CONTEXT_INSTRUCTIONS = (
     files("oam.indexing").joinpath("extraction-reference-suffix.txt").read_text(encoding="utf-8")
 )
 REFERENCE_EXTRACTION_SYSTEM = EXTRACTION_SYSTEM + REFERENCE_CONTEXT_INSTRUCTIONS
+CAUSAL_EXTRACTION_INSTRUCTIONS = (
+    files("oam.indexing").joinpath("extraction-causal-suffix.txt").read_text(encoding="utf-8")
+)
+
+
+def extraction_system(config: OAMConfig, *, with_references: bool = False) -> str:
+    system = EXTRACTION_SYSTEM
+    if config.index.enable_causal_graph:
+        system += CAUSAL_EXTRACTION_INSTRUCTIONS
+    if with_references:
+        system += REFERENCE_CONTEXT_INSTRUCTIONS
+    return system
 
 
 class ExtractionError(ValueError):
@@ -432,8 +444,10 @@ def pack_reference_facts(
     envelope: dict,
     config: OAMConfig,
     *,
-    system: str = REFERENCE_EXTRACTION_SYSTEM,
+    system: str | None = None,
 ):
+    if system is None:
+        system = extraction_system(config, with_references=True)
     selected = references[: config.extraction.reference_max_facts]
     metadata = [{**reference, "text": ""} for reference in selected]
     metadata_units = estimate_units(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
@@ -512,16 +526,18 @@ def extract_facts(
         mentioned_at=mentioned_at,
         reference_timezone=reference_timezone,
     )
-    system = EXTRACTION_SYSTEM
+    system = extraction_system(config)
     if config.extraction.reference_max_facts:
-        system = REFERENCE_EXTRACTION_SYSTEM
-        envelope["reference_facts"] = pack_reference_facts(references, envelope, config)
+        system = extraction_system(config, with_references=True)
+        envelope["reference_facts"] = pack_reference_facts(
+            references, envelope, config, system=system
+        )
         if (
             not envelope["reference_facts"]
             and model_input_tokens(system, envelope) > config.extraction.max_input_tokens
         ):
             envelope.pop("reference_facts")
-            system = EXTRACTION_SYSTEM
+            system = extraction_system(config)
     offered_ids = {reference["id"] for reference in envelope.get("reference_facts", [])}
     try:
         body, usage = _generate_json(
@@ -705,6 +721,14 @@ def validate_fact_output(
             annotations = raw.pop("annotations", [])
             aliases = raw.pop("entity_aliases", [])
             entity_references = raw.pop("entity_references", [])
+            if not config.index.enable_causal_graph:
+                discarded = raw.pop("caused_by", ())
+                if discarded not in ((), []):
+                    diagnostics.append(
+                        ExtractionDiagnostic(
+                            output_index=index, field="caused_by", code="causal_graph_disabled"
+                        )
+                    )
             if not all(
                 isinstance(value, list) for value in (annotations, aliases, entity_references)
             ):

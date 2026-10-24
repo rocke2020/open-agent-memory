@@ -83,6 +83,7 @@ class ExtractionConfig(FrozenModel):
 class SearchTier(FrozenModel):
     context_max_tokens: PositiveInt
     graph: Literal["off", "light", "full"]
+    causal_graph: bool
     channel_candidates: PositiveInt
     fused_candidates: PositiveInt
     source_seed_results: PositiveInt
@@ -244,6 +245,7 @@ class UserConfig(FrozenModel):
 
 
 class IndexConfig(FrozenModel):
+    enable_causal_graph: bool
     insights_enabled: bool = True
     insight_consolidation_delay_hours: PositiveFloat
     insight_seed_max: PositiveInt = Field(le=64)

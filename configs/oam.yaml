@@ -113,21 +113,26 @@ search:
   # Upper bound on tuples visited by iterative ANN scans.
   ann_scan_max_tuples: 20000
   # Per mode: channel_candidates caps each arm; fused_candidates caps rank fusion.
-  # rerank_candidates caps optional reranker input; source_seed_results caps seed items.
+  # rerank_candidates caps optional normal-mode reranker input; fast skips reranking.
+  # source_seed_results caps ordinary discovery seeds.
   # max_results caps each learned-text and original-text pool independently.
   # The combined response can contain up to twice this many items.
-  # graph: off skips expansion; light uses stored entity/alias and causal links;
-  # full adds semantic neighbors. Quote "off" so YAML does not parse it as false.
+  # graph: off skips entity/alias expansion, light uses identities, full adds
+  # semantic neighbors. causal_graph independently enables outgoing causal
+  # links, including within temporal retrieval. Quote "off" in YAML.
   fast:
     context_max_tokens: 18000
     graph: "off"
+    causal_graph: false
     channel_candidates: 64
     fused_candidates: 128
+    rerank_candidates: null
     source_seed_results: 36
     max_results: 96
   normal:
     context_max_tokens: 32768
     graph: light
+    causal_graph: false
     channel_candidates: 64
     fused_candidates: 154
     rerank_candidates: 48
@@ -135,6 +140,8 @@ search:
     max_results: 154
 
 index:
+  # Extract and store explicit causal links; recall opts in independently per mode.
+  enable_causal_graph: false
   # Maximum UTF-8 bytes for both the original entity name and its normalized lookup key.
   entity_name_max_bytes: 1024
   # Maximum existing entities proposed by name matching for extraction references.
@@ -319,7 +326,7 @@ models:
   # none disables thinking; low/high/max enable it. null disables the role.
   reasoning_effort:
     # Reasoning setting for source-backed fact extraction.
-    extraction: none
+    extraction: low
     # Reasoning setting for L2 Insight synthesis.
     insights: low
     # Reasoning setting for Resource abstract generation.

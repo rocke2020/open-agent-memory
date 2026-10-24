@@ -69,7 +69,9 @@ def _fact_only_eligible() -> str:
     )
 
 
-def _graph_fact_eligibility(*, include_semantic: bool) -> str:
+def _graph_fact_eligibility(
+    *, include_semantic: bool, include_entities: bool, include_causal: bool
+) -> str:
     eligible = _fact_only_eligible()
     seed_gate = (
         ""
@@ -80,23 +82,31 @@ def _graph_fact_eligibility(*, include_semantic: bool) -> str:
             + "SELECT 1 FROM filtered other WHERE other.unit_id<>ALL(%(seeds)s))"
         )
     )
-    candidates = [
-        "SELECT unit_id FROM seeds",
-        "SELECT ue.unit_id FROM unit_entities ue JOIN raw_seed_entities r "
-        "USING(tenant_id,user_id,entity_id)",
-        "SELECT u.unit_id FROM raw_seed_entities r JOIN entity_names n "
-        "USING(tenant_id,user_id,entity_id) JOIN entity_name_support ns "
-        "USING(tenant_id,user_id,name_id) JOIN search_units u "
-        "USING(tenant_id,user_id,memory_id)",
-        "SELECT l.target_id FROM seeds s JOIN unit_links l ON "
-        "(l.tenant_id,l.user_id,l.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
-        "WHERE l.kind='caused_by'",
-        "SELECT second.target_id FROM seeds s JOIN unit_links first ON "
-        "(first.tenant_id,first.user_id,first.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
-        "JOIN unit_links second ON (second.tenant_id,second.user_id,second.source_id)="
-        "(first.tenant_id,first.user_id,first.target_id) "
-        "WHERE first.kind='caused_by' AND second.kind='caused_by'",
-    ]
+    candidates = ["SELECT unit_id FROM seeds"]
+    if include_entities:
+        candidates.extend(
+            [
+                "SELECT ue.unit_id FROM unit_entities ue JOIN raw_seed_entities r "
+                "USING(tenant_id,user_id,entity_id)",
+                "SELECT u.unit_id FROM raw_seed_entities r JOIN entity_names n "
+                "USING(tenant_id,user_id,entity_id) JOIN entity_name_support ns "
+                "USING(tenant_id,user_id,name_id) JOIN search_units u "
+                "USING(tenant_id,user_id,memory_id)",
+            ]
+        )
+    if include_causal:
+        candidates.extend(
+            [
+                "SELECT l.target_id FROM seeds s JOIN unit_links l ON "
+                "(l.tenant_id,l.user_id,l.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
+                "WHERE l.kind='caused_by'",
+                "SELECT second.target_id FROM seeds s JOIN unit_links first ON "
+                "(first.tenant_id,first.user_id,first.source_id)=(s.tenant_id,s.user_id,s.unit_id) "
+                "JOIN unit_links second ON (second.tenant_id,second.user_id,second.source_id)="
+                "(first.tenant_id,first.user_id,first.target_id) "
+                "WHERE first.kind='caused_by' AND second.kind='caused_by'",
+            ]
+        )
     if include_semantic:
         for source, target in (("source_id", "target_id"), ("target_id", "source_id")):
             candidates.append(
@@ -121,10 +131,16 @@ def _graph_fact_eligibility(*, include_semantic: bool) -> str:
         + eligible
         + "SELECT * FROM filtered WHERE unit_id=ANY(%(seeds)s)"
         + seed_gate
-        + "), raw_seed_entities AS MATERIALIZED ("
-        "SELECT DISTINCT s.tenant_id,s.user_id,ue.entity_id FROM seeds s "
-        "JOIN unit_entities ue USING(tenant_id,user_id,unit_id,generation_id) "
-        "WHERE ue.entity_id IS NOT NULL), graph_candidate_ids AS MATERIALIZED ("
+        + ")"
+        + (
+            ", raw_seed_entities AS MATERIALIZED ("
+            "SELECT DISTINCT s.tenant_id,s.user_id,ue.entity_id FROM seeds s "
+            "JOIN unit_entities ue USING(tenant_id,user_id,unit_id,generation_id) "
+            "WHERE ue.entity_id IS NOT NULL)"
+            if include_entities
+            else ""
+        )
+        + ", graph_candidate_ids AS MATERIALIZED ("
         + " UNION ".join(candidates)
         + "), filtered AS MATERIALIZED (SELECT * FROM seeds UNION ALL "
         "SELECT * FROM (" + candidate_eligible + "SELECT * FROM filtered) candidate_facts) "
@@ -252,6 +268,11 @@ class RecallRepository:
                 (authority.tenant_id, authority.user_id),
             )
         self._has_insights: bool | None = None
+
+    @property
+    def causal_graph_enabled(self) -> bool:
+        mode = self.request.recall_level.value if self.request is not None else "normal"
+        return getattr(self.config.search, mode).causal_graph
 
     @property
     def has_insights(self) -> bool:
@@ -785,9 +806,17 @@ class RecallRepository:
         return self.ordinary(seed_ids, vector, include_semantic=False)
 
     def ordinary(
-        self, seed_ids: Sequence[str], vector: Sequence[float], *, include_semantic: bool = True
+        self,
+        seed_ids: Sequence[str],
+        vector: Sequence[float],
+        *,
+        include_semantic: bool = True,
+        include_entities: bool = True,
     ):
         config = self.config.search
+        include_causal = self.causal_graph_enabled
+        if not (include_semantic or include_entities or include_causal):
+            return (), {}
         parameters = {
             "seeds": list(seed_ids),
             "vector": json.dumps(tuple(vector)),
@@ -795,10 +824,11 @@ class RecallRepository:
             "per_entity": config.entity_candidates_per_entity,
             "links": config.links_per_seed,
         }
-        prefix = (
-            _graph_fact_eligibility(include_semantic=include_semantic)
-            + ENTITY_PROJECTIONS_FROM_SEED_ENTITIES
-        )
+        prefix = _graph_fact_eligibility(
+            include_semantic=include_semantic,
+            include_entities=include_entities,
+            include_causal=include_causal,
+        ) + (ENTITY_PROJECTIONS_FROM_SEED_ENTITIES if include_entities else "")
         directions = []
         for source, target in (("source_id", "target_id"), ("target_id", "source_id")):
             directions.append(
@@ -809,56 +839,72 @@ class RecallRepository:
                 f"AND u.unit_id<>ALL(%(seeds)s::text[]) ORDER BY l.weight DESC,l.{target} "
                 "LIMIT %(links)s)"
             )
-        graph = self._execute(
-            prefix.rstrip() + ", " + _causal_ctes() + ", "
-            "seed_entities AS MATERIALIZED (SELECT s.unit_id AS seed_id,e.entity_id,e.name_id "
-            "FROM seeds s CROSS JOIN LATERAL (SELECT entity_id,name_id FROM memberships ue WHERE "
-            "(ue.tenant_id,ue.user_id,ue.unit_id)=(s.tenant_id,s.user_id,s.unit_id) "
-            "ORDER BY entity_id LIMIT %(entities)s) e), "
-            "entity_candidates AS MATERIALIZED ("
-            "SELECT e.entity_id,c.unit_id,c.name_id,c.distance "
-            "FROM (SELECT DISTINCT entity_id FROM seed_entities) e "
-            "CROSS JOIN LATERAL (SELECT u.unit_id,ue.name_id,u.embedding <=> %(vector)s::vector "
-            "AS distance FROM filtered u JOIN memberships ue "
-            "USING(tenant_id,user_id,unit_id) WHERE u.kind='fact' "
-            "AND ue.entity_id=e.entity_id AND u.unit_id<>ALL(%(seeds)s::text[]) "
-            "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id "
-            "LIMIT %(per_entity)s) c), "
-            "entity_rows AS (SELECT s.seed_id,s.entity_id,s.name_id AS seed_name_id,"
-            "c.name_id AS target_name_id,c.unit_id FROM seed_entities s "
-            "CROSS JOIN LATERAL (SELECT unit_id,name_id FROM entity_candidates c "
-            "WHERE c.entity_id=s.entity_id AND c.unit_id<>s.seed_id "
-            "ORDER BY c.distance,c.unit_id LIMIT %(per_entity)s) c) "
-            + (
-                ", semantic_rows AS (SELECT e.* FROM seeds s CROSS JOIN LATERAL ("
+        ctes = [_causal_ctes()] if include_causal else []
+        outputs = []
+        if include_entities:
+            ctes.append(
+                "seed_entities AS MATERIALIZED (SELECT s.unit_id AS seed_id,e.entity_id,e.name_id "
+                "FROM seeds s CROSS JOIN LATERAL (SELECT entity_id,name_id "
+                "FROM memberships ue WHERE "
+                "(ue.tenant_id,ue.user_id,ue.unit_id)=(s.tenant_id,s.user_id,s.unit_id) "
+                "ORDER BY entity_id LIMIT %(entities)s) e), "
+                "entity_candidates AS MATERIALIZED ("
+                "SELECT e.entity_id,c.unit_id,c.name_id,c.distance "
+                "FROM (SELECT DISTINCT entity_id FROM seed_entities) e "
+                "CROSS JOIN LATERAL (SELECT u.unit_id,ue.name_id,"
+                "u.embedding <=> %(vector)s::vector "
+                "AS distance FROM filtered u JOIN memberships ue "
+                "USING(tenant_id,user_id,unit_id) WHERE u.kind='fact' "
+                "AND ue.entity_id=e.entity_id AND u.unit_id<>ALL(%(seeds)s::text[]) "
+                "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id "
+                "LIMIT %(per_entity)s) c), "
+                "entity_rows AS (SELECT s.seed_id,s.entity_id,s.name_id AS seed_name_id,"
+                "c.name_id AS target_name_id,c.unit_id FROM seed_entities s "
+                "CROSS JOIN LATERAL (SELECT unit_id,name_id FROM entity_candidates c "
+                "WHERE c.entity_id=s.entity_id AND c.unit_id<>s.seed_id "
+                "ORDER BY c.distance,c.unit_id LIMIT %(per_entity)s) c)"
+            )
+            outputs.append(
+                "SELECT 'entity' AS source,seed_id,entity_id AS entity_key,unit_id,"
+                "NULL::text AS source_id,NULL::text AS target_id,NULL::double precision AS weight,"
+                "NULL::text[] AS nodes,NULL::double precision AS path_score,"
+                "jsonb_build_object('name_ids',"
+                "ARRAY[seed_name_id,target_name_id],'alias_witnesses',COALESCE(w.witnesses,'[]')) "
+                "AS entity_evidence FROM entity_rows e LEFT JOIN LATERAL ("
+                "SELECT jsonb_agg(jsonb_build_object('support_id',support_id,'name_id',name_id,"
+                "'entity_id',entity_id,'quote',quote,'citation',jsonb_build_object("
+                "'source_id',source_id,'source_version',source_version,"
+                "'span',locator||jsonb_build_object('quote',quote))) "
+                "ORDER BY name_id) AS witnesses "
+                "FROM (SELECT DISTINCT ON(name_id) * FROM name_support ns "
+                "WHERE ns.entity_id=e.entity_id AND ns.name_id=ANY("
+                "ARRAY[e.seed_name_id,e.target_name_id]) AND ns.support_kind='alias' "
+                "ORDER BY name_id,support_id) ns) w ON true"
+            )
+        if include_semantic:
+            ctes.append(
+                "semantic_rows AS (SELECT e.* FROM seeds s CROSS JOIN LATERAL ("
                 + " UNION ALL ".join(directions)
-                + ") e) "
-                if include_semantic
-                else ""
+                + ") e)"
             )
-            + "SELECT 'entity' AS source,seed_id,entity_id AS entity_key,unit_id,"
-            "NULL::text AS source_id,NULL::text AS target_id,NULL::double precision AS weight,"
-            "NULL::text[] AS nodes,NULL::double precision AS path_score,"
-            "jsonb_build_object('name_ids',"
-            "ARRAY[seed_name_id,target_name_id],'alias_witnesses',COALESCE(w.witnesses,'[]')) "
-            "AS entity_evidence FROM entity_rows e LEFT JOIN LATERAL ("
-            "SELECT jsonb_agg(jsonb_build_object('support_id',support_id,'name_id',name_id,"
-            "'entity_id',entity_id,'quote',quote,'citation',jsonb_build_object("
-            "'source_id',source_id,'source_version',source_version,"
-            "'span',locator||jsonb_build_object('quote',quote))) ORDER BY name_id) AS witnesses "
-            "FROM (SELECT DISTINCT ON(name_id) * FROM name_support ns "
-            "WHERE ns.entity_id=e.entity_id AND ns.name_id=ANY("
-            "ARRAY[e.seed_name_id,e.target_name_id]) AND ns.support_kind='alias' "
-            "ORDER BY name_id,support_id) ns) w ON true "
-            + (
-                "UNION ALL SELECT 'semantic',NULL::text,NULL::text,NULL::text,"
-                "source_id,target_id,weight,NULL::text[],weight,NULL::jsonb FROM semantic_rows "
-                if include_semantic
-                else ""
+            outputs.append(
+                "SELECT 'semantic' AS source,NULL::text AS seed_id,NULL::text AS entity_key,"
+                "NULL::text AS unit_id,source_id,target_id,weight,NULL::text[] AS nodes,"
+                "weight AS path_score,NULL::jsonb AS entity_evidence FROM semantic_rows"
             )
-            + "UNION ALL SELECT 'causal',NULL::text,NULL::text,NULL::text,"
-            "source_id,target_id,weight,nodes,path_score,NULL::jsonb FROM causal_rows "
-            "ORDER BY source,source_id,target_id,seed_id,unit_id",
+        if include_causal:
+            outputs.append(
+                "SELECT 'causal' AS source,NULL::text AS seed_id,NULL::text AS entity_key,"
+                "NULL::text AS unit_id,source_id,target_id,weight,nodes,path_score,"
+                "NULL::jsonb AS entity_evidence FROM causal_rows"
+            )
+        graph = self._execute(
+            prefix.rstrip()
+            + ", "
+            + ", ".join(ctes)
+            + " "
+            + " UNION ALL ".join(outputs)
+            + " ORDER BY source,source_id,target_id,seed_id,unit_id",
             parameters,
         )
         entities = [row for row in graph if row["source"] == "entity"]
@@ -1001,12 +1047,13 @@ class RecallRepository:
                 f"FROM temporal_links t WHERE t.{source}{source_match} "
                 "AND t.time_basis=%(basis)s"
             )
-        adjacent.append(
-            "SELECT l.tenant_id,l.user_id,l.source_id,l.target_id,l.weight,'caused_by',"
-            "NULL::text,NULL::text,NULL::text,NULL::text,"
-            "jsonb_build_array('caused_by',l.source_id,l.target_id)::text FROM unit_links l "
-            f"WHERE l.kind='caused_by' AND l.source_id{source_match}"
-        )
+        if self.causal_graph_enabled:
+            adjacent.append(
+                "SELECT l.tenant_id,l.user_id,l.source_id,l.target_id,l.weight,'caused_by',"
+                "NULL::text,NULL::text,NULL::text,NULL::text,"
+                "jsonb_build_array('caused_by',l.source_id,l.target_id)::text FROM unit_links l "
+                f"WHERE l.kind='caused_by' AND l.source_id{source_match}"
+            )
         witnesses = "true"
         if self.request.time_basis in {"event", "referenced"}:
             conditions = []
@@ -1018,7 +1065,9 @@ class RecallRepository:
                     "AND witness.role=%(time_role)s AND witness.time_span && "
                     "tstzrange(%(time_start)s,%(time_end)s,'[)'))"
                 )
-            witnesses = "(edge.relation='caused_by' OR (" + " AND ".join(conditions) + "))"
+            witnesses = "(" + " AND ".join(conditions) + ")"
+            if self.causal_graph_enabled:
+                witnesses = "(edge.relation='caused_by' OR " + witnesses + ")"
 
         def eligible_edges(edges):
             return (
@@ -1153,6 +1202,7 @@ class RecallRepository:
                 entity_paths[id(path)] if path.get("relation") == "entity" else path
                 for path in group
                 if set(path["nodes"]) <= eligible
+                and (path.get("relation") != "caused_by" or self.causal_graph_enabled)
                 and (path["arm"] != "temporal" or set(path["nodes"]) <= temporal_eligible)
                 and set(path.get("edge_ids", ())) <= valid_edges
                 and (path.get("relation") != "entity" or id(path) in entity_paths)

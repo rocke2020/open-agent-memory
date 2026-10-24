@@ -91,13 +91,14 @@ class RecallService:
         diagnostics = result["diagnostics"]
         budget = diagnostics["context_budget"]
         logging.getLogger(__name__).info(
-            "oam.recall trace_id=%s mode=%s graph=%s arms=%s outcome=%s "
+            "oam.recall trace_id=%s mode=%s graph=%s causal_graph=%s arms=%s outcome=%s "
             "admission=relevance_order query_prefix=%s include_chunks=%s "
             "facts=%d originals=%d context_tokens=%d/%d "
             "omissions=%d oversized_single_fact=%s duration_ms=%.1f",
             result["trace_id"],
             diagnostics["recall_level"],
             diagnostics["graph"],
+            diagnostics["causal_graph"],
             ",".join(diagnostics["executed_arms"]),
             "partial" if diagnostics["partial"] else "ok",
             bool(self.config.models.embedding and self.config.models.embedding.query_prefix),
@@ -123,6 +124,8 @@ class RecallService:
         graph = tier.graph
         if mode == "fast" and request.fast_graph is not None:
             graph = "light" if request.fast_graph else "off"
+        causal_graph = tier.causal_graph
+        graph_enabled = graph != "off" or causal_graph
         deadline = started + getattr(self.config.recall, f"{mode}_deadline_seconds")
         if deadline_at is not None:
             if deadline_at.utcoffset() is None:
@@ -244,7 +247,7 @@ class RecallService:
             usage["embedding"] = embedding.usage.model_dump(mode="json")
             pool_limit = (
                 tier.channel_candidates
-                if graph == "off"
+                if not graph_enabled
                 else max(tier.channel_candidates, self.config.search.graph_seed_max)
             )
             dense_pool = stage("dense", lambda: read("dense", vector, pool_limit)) or []
@@ -256,12 +259,20 @@ class RecallService:
                 if row["kind"] == "fact"
                 and row["score"] >= self.config.search.graph_seed_min_similarity
             )[: self.config.search.graph_seed_max]
-            if graph != "off" and (seeds or mode == "normal"):
+            if graph_enabled and (seeds or mode == "normal"):
                 expansion = stage(
                     "graph",
                     lambda: (
                         read("fast_graph", seeds, vector)
                         if mode == "fast" and graph == "light"
+                        else read(
+                            "ordinary",
+                            seeds,
+                            vector,
+                            include_semantic=False,
+                            include_entities=False,
+                        )
+                        if graph == "off"
                         else read("ordinary", seeds, vector, include_semantic=graph == "full")
                     ),
                 )
@@ -1055,6 +1066,7 @@ class RecallService:
             "diagnostics": {
                 "recall_level": mode,
                 "graph": graph,
+                "causal_graph": causal_graph,
                 "generation_id": self.generation_id,
                 "executed_arms": list(arms),
                 "executed_stages": [

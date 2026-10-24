@@ -221,6 +221,9 @@ def test_split_result_relations_and_diagnostics_keep_their_own_output_indices():
         )
 
     with extraction_models(respond) as (models, config):
+        config = config.model_copy(
+            update={"index": config.index.model_copy(update={"enable_causal_graph": True})}
+        )
         result = extract_group(
             models,
             passages=(passage("a", "Tea. Cake.", 0), passage("b", "Coffee. Water.", 1)),

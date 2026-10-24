@@ -12,11 +12,10 @@ from typing import cast
 from oam.config import OAMConfig
 from oam.indexing.chunker import TextChunk, split_chunk_for_output_retry
 from oam.indexing.extraction import (
-    EXTRACTION_SYSTEM,
-    REFERENCE_CONTEXT_INSTRUCTIONS,
     ExtractionInputTooLongError,
     _generate_json,
     extraction_envelope,
+    extraction_system,
     model_input_tokens,
     pack_reference_facts,
     retry_split_extractions,
@@ -28,9 +27,8 @@ from oam.models.runtime import ModelOutputTooLongError
 # The output repeats source claims as text and quote and adds ownership/qualification fields.
 GROUP_OUTPUT_TEXT_MULTIPLIER = 3
 GROUP_OUTPUT_PASSAGE_TOKENS = 128
-GROUP_EXTRACTION_SYSTEM = (
+GROUP_CONTEXT_INSTRUCTIONS = (
     files("oam.indexing").joinpath("extraction-group-prefix.txt").read_text(encoding="utf-8")
-    + EXTRACTION_SYSTEM
 )
 
 
@@ -44,8 +42,8 @@ class ExtractionPassage:
 
 
 def group_system(config: OAMConfig) -> str:
-    return GROUP_EXTRACTION_SYSTEM + (
-        REFERENCE_CONTEXT_INSTRUCTIONS if config.extraction.reference_max_facts else ""
+    return GROUP_CONTEXT_INSTRUCTIONS + extraction_system(
+        config, with_references=bool(config.extraction.reference_max_facts)
     )
 
 
