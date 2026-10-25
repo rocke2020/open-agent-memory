@@ -115,6 +115,7 @@ class SearchConfig(FrozenModel):
     query_concurrency: PositiveInt
     rrf_k: PositiveInt
     fts_rank_weights: tuple[float, float, float, float]
+    query_entity_boost: float = Field(ge=0, le=1)
     normal_arm_weights: NormalArmWeights
     graph_seed_min_similarity: float = Field(ge=0, le=1)
     graph_seed_max: PositiveInt

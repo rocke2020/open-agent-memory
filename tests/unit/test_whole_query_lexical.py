@@ -9,6 +9,7 @@ def test_configured_whole_query_returns_database_relevance_order():
     base = load_config("configs/oam.yaml").config
     values = base.model_dump(mode="json")
     values["search"]["fast"]["lexical_ranking"] = "whole_query"
+    values["search"]["query_entity_boost"] = 0
     config = type(base).model_validate(values)
     rows = [
         {"unit_id": "specific", "score": 0.8, "strict_match": True},

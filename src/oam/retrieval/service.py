@@ -95,7 +95,8 @@ class RecallService:
         logging.getLogger(__name__).info(
             "oam.recall trace_id=%s mode=%s graph=%s causal_graph=%s arms=%s outcome=%s "
             "admission=%s query_prefix=%s include_chunks=%s "
-            "lexical_ranking=%s partial_match_gate=%s gate_status=%s filtered_roots=%d "
+            "lexical_ranking=%s entity_boost=%s entity_matches=%d "
+            "partial_match_gate=%s gate_status=%s filtered_roots=%d "
             "reply_seed_limit=%d "
             "adjacent_user_context=%s window_originals=%d "
             "facts=%d originals=%d context_tokens=%d/%d "
@@ -110,6 +111,8 @@ class RecallService:
             bool(self.config.models.embedding and self.config.models.embedding.query_prefix),
             budget["include_chunks"],
             diagnostics["lexical_ranking"],
+            local["query_entity_boost"],
+            local["query_entity_matches"],
             local["partial_match_gate"],
             local["gate_status"],
             local["filtered_roots"],
@@ -256,6 +259,7 @@ class RecallService:
         strict_lexical_ids = {row["unit_id"] for row in anchors} | {
             row["unit_id"] for row in lexical if row.get("strict_match")
         }
+        query_entity_ids = {row["unit_id"] for row in lexical if row.get("entity_match")}
         vector = embedding.vectors[0] if embedding is not None else None
         dense_pool = []
         if embedding is not None:
@@ -1001,7 +1005,10 @@ class RecallService:
         gate_omissions = []
         if gate_active:
             independent_ids = (
-                set(arms.get("dense", ())) | set(arms.get("graph", ())) | strict_lexical_ids
+                set(arms.get("dense", ()))
+                | set(arms.get("graph", ()))
+                | strict_lexical_ids
+                | query_entity_ids
             )
             allowed_ids = local_evidence_ids(
                 [*packing_candidates, *source_passages],
@@ -1168,6 +1175,8 @@ class RecallService:
                 "causal_graph": causal_graph,
                 "lexical_ranking": tier.lexical_ranking,
                 "local_context": {
+                    "query_entity_boost": self.config.search.query_entity_boost,
+                    "query_entity_matches": len(query_entity_ids),
                     "partial_match_gate": tier.partial_match_gate,
                     "gate_status": (
                         "applied"

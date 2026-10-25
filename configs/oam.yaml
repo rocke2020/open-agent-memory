@@ -76,6 +76,9 @@ search:
   # D applies to all indexed units; current HTML passages may also supply C/B/A.
   # Higher weights favor those structural fields when present.
   fts_rank_weights: [0.1, 0.2, 0.4, 1.0]
+  # Supported query entities increase lexical relevance by at most this fraction.
+  # Zero skips the stored-name lookup; names alone never outrank positive relevance.
+  query_entity_boost: 0.5
   # Only normal uses these arm weights; fast uses equal fusion weights.
   normal_arm_weights:
     lexical: 1.0
