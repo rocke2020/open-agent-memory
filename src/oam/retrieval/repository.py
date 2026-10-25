@@ -29,6 +29,7 @@ from oam.db.entity_eligibility import (
     ELIGIBLE_ENTITY_NAME_SUPPORT,
     ENTITY_PROJECTIONS_FROM_SEED_ENTITIES,
 )
+from oam.indexing.entity_names import normalize_entity_text
 from oam.retrieval.algorithms import (
     GraphEdge,
     TemporalEdge,
@@ -429,75 +430,162 @@ class RecallRepository:
             raise PermissionError("active user is unavailable")
         return rows[0]
 
+    def _query_entity_names(self, query: str) -> list[dict]:
+        terms = query_terms(query, max_terms=None)
+        normalized = normalize_entity_text(query)
+        if not normalized:
+            return []
+        parameters = {
+            "entity_query": normalized,
+            "query_name_keys": list(
+                dict.fromkeys(
+                    [normalized, *normalized.split(), *re.findall(r"\w+(?:[.-]\w+)*", normalized)]
+                )
+            ),
+        }
+        candidate = _tsquery((*terms.candidates, *terms.modifiers), "||", parameters, "name_term")
+        return self._execute(
+            "WITH matched_query_names AS MATERIALIZED ("
+            "SELECT n.* FROM entity_names n WHERE "
+            "n.tenant_id=current_setting('oam.tenant_id',true) "
+            "AND n.user_id=current_setting('oam.user_id',true) "
+            f"AND (n.lexical @@ {candidate} OR n.name_key=ANY(%(query_name_keys)s) "
+            "OR (n.lexical=''::tsvector "
+            "AND split_part(n.name_key,' ',1)=ANY(%(query_name_keys)s))) "
+            "AND %(entity_query)s ~ ("
+            r"CASE WHEN left(n.name_key,1) ~ '[[:alnum:]_]' "
+            r"AND left(n.name_key,1) !~ '[㐀-鿿]' THEN '\m' ELSE '' END || "
+            r"regexp_replace(n.name_key,'([\\.^$|?*+(){}\[\]])','\\\1','g') || "
+            r"CASE WHEN right(n.name_key,1) ~ '[[:alnum:]_]' "
+            r"AND right(n.name_key,1) !~ '[㐀-鿿]' THEN '\M' ELSE '' END)) "
+            "SELECT DISTINCT n.entity_id,n.name_text FROM matched_query_names n "
+            "WHERE EXISTS (SELECT 1 FROM ("
+            + ELIGIBLE_ENTITY_NAME_SUPPORT
+            + ") binding WHERE (binding.tenant_id,binding.user_id,binding.entity_id,"
+            "binding.name_id)=(n.tenant_id,n.user_id,n.entity_id,n.name_id)) "
+            "ORDER BY n.entity_id,n.name_text",
+            parameters,
+        )
+
     def lexical(self, query: str, limit: int) -> list[dict]:
         # Protected literals are ranked by anchors, including their query remainder.
         if _ANCHOR.search(query):
             return []
-        terms = query_terms(query)
+        entity_names = (
+            self._query_entity_names(query) if self.config.search.query_entity_boost else []
+        )
+        terms = query_terms(query, prioritized_names=[row["name_text"] for row in entity_names])
         candidates = _informative_terms(terms.candidates)
         parameters = {
             "limit": limit,
             "weights": list(self.config.search.fts_rank_weights),
             "normalization": LEXICAL_DOCUMENT_LENGTH_NORMALIZATION,
+            "entity_boost": self.config.search.query_entity_boost,
         }
-        if not candidates:
-            if not terms.candidates:
+        fallback = not candidates
+        if fallback:
+            if not terms.candidates and not entity_names:
                 return []
-            return self._execute(
-                self._eligible(candidate_facts=True)
-                + "SELECT u.unit_id,ts_rank_cd(u.lexical,plainto_tsquery('simple',%(query)s)) "
-                "AS score,true AS strict_match FROM filtered u WHERE "
-                "u.lexical @@ plainto_tsquery('simple',%(query)s) "
-                "ORDER BY score DESC,u.mentioned_at DESC NULLS LAST,u.unit_id "
-                "LIMIT %(limit)s",
-                {"query": query, "limit": limit},
-            )
+            if not entity_names:
+                return self._execute(
+                    self._eligible(candidate_facts=True)
+                    + "SELECT u.unit_id,ts_rank_cd(u.lexical,plainto_tsquery('simple',%(query)s)) "
+                    "AS score,true AS strict_match FROM filtered u WHERE "
+                    "u.lexical @@ plainto_tsquery('simple',%(query)s) "
+                    "ORDER BY score DESC,u.mentioned_at DESC NULLS LAST,u.unit_id "
+                    "LIMIT %(limit)s",
+                    {"query": query, "limit": limit},
+                )
+            candidates = (("simple", query),)
+            terms = QueryTerms(candidates, candidates, ())
         request = self.request or SearchRequest(query=query)
-        whole_query = (
+        whole_query = fallback or (
             getattr(self.config.search, request.recall_level.value).lexical_ranking == "whole_query"
         )
         if whole_query:
             parameters["normalization"] = LEXICAL_WHOLE_QUERY_NORMALIZATION
         candidate, primary, full, term_queries = _rank_queries(terms, parameters)
+        if fallback:
+            candidate = primary = full = _tsquery(candidates, "&&", parameters, "fallback")
+        lexical_vector = "u.lexical" if fallback else "u.lexical_bilingual"
+        entity_prefix = ""
+        entity_match = "false"
+        hits_source = "search_units u"
+        hits_predicate = f"{lexical_vector} @@ q.candidate"
+        if entity_names:
+            parameters["query_entities"] = sorted({row["entity_id"] for row in entity_names})
+            memberships = ELIGIBLE_ENTITY_MEMBERSHIPS.replace(
+                "FROM unit_entities membership", "FROM query_entity_memberships membership"
+            )
+            entity_prefix = (
+                ", query_entity_memberships AS MATERIALIZED ("
+                "SELECT * FROM unit_entities WHERE "
+                "tenant_id=current_setting('oam.tenant_id',true) "
+                "AND user_id=current_setting('oam.user_id',true) "
+                "AND entity_id=ANY(%(query_entities)s)), "
+                "query_entity_units AS MATERIALIZED (SELECT DISTINCT unit_id FROM ("
+                + memberships
+                + ") eligible_memberships)"
+            )
+            entity_match = "u.unit_id IN (SELECT unit_id FROM query_entity_units)"
+            entity_prefix += (
+                ", lexical_candidate_ids AS MATERIALIZED ("
+                "SELECT u.unit_id FROM search_units u,queries q WHERE "
+                "u.tenant_id=current_setting('oam.tenant_id',true) "
+                "AND u.user_id=current_setting('oam.user_id',true) "
+                f"AND {lexical_vector} @@ q.candidate "
+                "UNION SELECT unit_id FROM query_entity_units)"
+            )
+            hits_source = "lexical_candidate_ids ids JOIN search_units u ON u.unit_id=ids.unit_id"
+            hits_predicate = "true"
+        score = "u.partial_score*(1+%(entity_boost)s*u.entity_match::int)"
         # Order matches before checking support so a common term does not
         # validate the entire history. Eligibility still precedes every cap.
         eligible_ordered = self.candidate_units_sql.replace("FROM search_units u", "FROM ordered u")
         hits_sql = (
             "WITH queries AS (SELECT "
-            f"{candidate} AS candidate,{primary} AS primary,{full} AS full), "
+            f"{candidate} AS candidate,{primary} AS primary,{full} AS full)" + entity_prefix + ", "
             "hits AS MATERIALIZED (SELECT u.tenant_id,u.user_id,u.unit_id,u.kind,u.origin,"
             "u.source_id,u.source_version,u.evidence_id,u.passage_id,u.memory_id,"
-            "u.insight_id,u.insight_revision,u.generation_id,u.lexical_bilingual,u.mentioned_at,"
-            "ts_rank_cd(%(weights)s::float4[],u.lexical_bilingual,q.candidate,"
+            "u.insight_id,u.insight_revision,u.generation_id,"
+            f"{lexical_vector} AS lexical_bilingual,u.mentioned_at,"
+            f"ts_rank_cd(%(weights)s::float4[],{lexical_vector},q.candidate,"
             "%(normalization)s) AS partial_score,"
-            "u.lexical_bilingual @@ q.full AS full_match,"
-            "u.lexical_bilingual @@ q.primary AS primary_match "
-            "FROM search_units u,queries q WHERE "
+            f"{lexical_vector} @@ q.full AS full_match,"
+            f"{lexical_vector} @@ q.primary AS primary_match,"
+            f"({entity_match}) AS entity_match "
+            f"FROM {hits_source},queries q WHERE "
             "u.tenant_id=current_setting('oam.tenant_id',true) "
             "AND u.user_id=current_setting('oam.user_id',true) "
-            "AND u.lexical_bilingual @@ q.candidate)"
+            f"AND {hits_predicate})"
         )
         if whole_query:
             return self._execute(
-                hits_sql + ", ordered AS (SELECT u.*,u.partial_score AS score FROM hits u "
+                hits_sql + f", ordered AS (SELECT u.*,{score} AS score FROM hits u "
                 "ORDER BY u.full_match DESC,u.primary_match DESC,score DESC,"
                 "u.mentioned_at DESC NULLS LAST,u.unit_id OFFSET 0) "
-                "SELECT u.unit_id,u.score,(u.full_match OR u.primary_match) AS strict_match FROM ("
+                "SELECT u.unit_id,u.score,u.entity_match,"
+                "(u.full_match OR u.primary_match) AS strict_match FROM ("
                 + eligible_ordered
                 + ") u ORDER BY u.full_match DESC,u.primary_match DESC,u.score DESC,"
                 "u.mentioned_at DESC NULLS LAST,u.unit_id LIMIT %(limit)s",
                 parameters,
             )
+        entity_tail = ",NULL::tsquery" if entity_names else ""
         rows = self._execute(
             hits_sql + " "
-            "SELECT t.term_order,hit.unit_id,hit.mentioned_at,hit.full_match,hit.primary_match "
-            f"FROM unnest(ARRAY[{term_queries}]) WITH ORDINALITY AS t(term,term_order) "
+            "SELECT t.term_order,hit.unit_id,hit.mentioned_at,hit.full_match,hit.primary_match,"
+            "hit.entity_match "
+            f"FROM unnest(ARRAY[{term_queries}{entity_tail}]) "
+            "WITH ORDINALITY AS t(term,term_order) "
             "CROSS JOIN LATERAL (WITH ordered AS (SELECT u.*,"
-            "u.partial_score AS score "
+            f"{score} AS score "
             "FROM hits u WHERE u.lexical_bilingual @@ t.term "
+            "OR (t.term IS NULL AND u.entity_match AND u.partial_score=0) "
             "ORDER BY u.full_match DESC,u.primary_match DESC,score DESC,"
             "u.mentioned_at DESC NULLS LAST,u.unit_id OFFSET 0) "
-            "SELECT u.unit_id,u.mentioned_at,u.full_match,u.primary_match,u.score FROM ("
+            "SELECT u.unit_id,u.mentioned_at,u.full_match,u.primary_match,u.score,"
+            "u.entity_match FROM ("
             + eligible_ordered
             + ") u ORDER BY u.full_match DESC,u.primary_match DESC,u.score DESC,"
             "u.mentioned_at DESC NULLS LAST,u.unit_id LIMIT %(limit)s) hit "
@@ -507,16 +595,32 @@ class RecallRepository:
         )
         arms = [[] for _ in candidates]
         evidence = {}
+        tail = []
         for row in rows:
+            if row["term_order"] > len(arms):
+                tail.append(
+                    {
+                        "unit_id": row["unit_id"],
+                        "score": 0.0,
+                        "strict_match": False,
+                        "entity_match": True,
+                    }
+                )
+                continue
             arms[row["term_order"] - 1].append(row["unit_id"])
             evidence[row["unit_id"]] = row
         ranked = reciprocal_rank_fusion(arms, rrf_k=self.config.search.rrf_k)
+        boosted_scores = {
+            item.node_id: item.score
+            * (1 + self.config.search.query_entity_boost * evidence[item.node_id]["entity_match"])
+            for item in ranked
+        }
         ranked = sorted(
             ranked,
             key=lambda item: (
                 -evidence[item.node_id]["full_match"],
                 -evidence[item.node_id]["primary_match"],
-                -item.score,
+                -boosted_scores[item.node_id],
                 -(
                     evidence[item.node_id]["mentioned_at"].timestamp()
                     if evidence[item.node_id]["mentioned_at"]
@@ -525,16 +629,18 @@ class RecallRepository:
                 item.node_id,
             ),
         )
-        return [
+        selected = [
             {
                 "unit_id": item.node_id,
-                "score": item.score,
+                "score": boosted_scores[item.node_id],
+                "entity_match": evidence[item.node_id]["entity_match"],
                 "strict_match": bool(
                     evidence[item.node_id]["full_match"] or evidence[item.node_id]["primary_match"]
                 ),
             }
             for item in ranked[:limit]
         ]
+        return [*selected, *tail[: max(0, limit - len(selected))]]
 
     def anchors(self, query: str, limit: int) -> list[dict]:
         matches = _ANCHOR.findall(query)

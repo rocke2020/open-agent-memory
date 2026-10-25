@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_core_http import core_database as core_database
 from test_recall_repository import add_fact
 from test_recall_repository import recall_database as _recall_database
 
@@ -200,8 +201,8 @@ def test_partial_revalidation_keeps_other_graph_paths_and_independent_direct_hit
                 {"unit_id": node, "kind": "fact", "score": 1.0} for node in ("seed", "other_seed")
             ]
 
-        def ordinary(self, seeds, query_vector, *, include_semantic=True):
-            result = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
+        def ordinary(self, seeds, query_vector, **graph_options):
+            result = super().ordinary(seeds, query_vector, **graph_options)
             connection.execute(
                 "UPDATE evidence SET learning_eligible=false WHERE tenant_id=%s AND user_id=%s "
                 "AND evidence_id='definition'",
@@ -271,8 +272,8 @@ def test_replacement_witness_preserves_same_graph_path_under_strict_recall(recal
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector, *, include_semantic=True):
-            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
+        def ordinary(self, seeds, query_vector, **graph_options):
+            _, paths = super().ordinary(seeds, query_vector, **graph_options)
             selected = paths["continuation"]
             chosen = selected[0]["alias_witnesses"][0]
             replaced.append(chosen["support_id"])
@@ -319,8 +320,8 @@ def test_alias_metadata_preserves_graph_vote_under_fact_text_budget(recall_datab
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector, *, include_semantic=True):
-            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
+        def ordinary(self, seeds, query_vector, **graph_options):
+            _, paths = super().ordinary(seeds, query_vector, **graph_options)
             return ("continuation",), {"continuation": paths["continuation"]}
 
         def related_user_fact(self, unit_ids):
@@ -376,8 +377,8 @@ def test_entity_and_semantic_paths_survive_text_only_budget(recall_database, tmp
         def dense(self, query_vector, limit):
             return [{"unit_id": "seed", "kind": "fact", "score": 1.0}]
 
-        def ordinary(self, seeds, query_vector, *, include_semantic=True):
-            _, paths = super().ordinary(seeds, query_vector, include_semantic=include_semantic)
+        def ordinary(self, seeds, query_vector, **graph_options):
+            _, paths = super().ordinary(seeds, query_vector, **graph_options)
             return ("continuation", "healthy"), {
                 name: paths[name] for name in ("continuation", "healthy")
             }

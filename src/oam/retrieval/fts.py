@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,7 +68,9 @@ def index_streams(text: str) -> IndexStreams:
     return IndexStreams(" ".join(english), " ".join(simple))
 
 
-def query_terms(text: str) -> QueryTerms:
+def query_terms(
+    text: str, *, prioritized_names: Sequence[str] = (), max_terms: int | None = _MAX_QUERY_TERMS
+) -> QueryTerms:
     """Keep search expansions in OR candidates and primary terms in full-match ranking."""
     candidates: list[tuple[str, str]] = []
     primary: list[tuple[str, str]] = []
@@ -90,8 +93,13 @@ def query_terms(text: str) -> QueryTerms:
         else:
             candidates.append(("english", part))
             primary.append(("english", part))
-    return QueryTerms(
-        tuple(dict.fromkeys(candidates))[:_MAX_QUERY_TERMS],
-        tuple(dict.fromkeys(primary))[:_MAX_QUERY_TERMS],
-        tuple(dict.fromkeys(modifiers))[:_MAX_QUERY_TERMS],
-    )
+    preferred = {
+        term for name in prioritized_names for term in query_terms(name, max_terms=None).candidates
+    }
+
+    def bounded(terms: list[tuple[str, str]]) -> tuple[tuple[str, str], ...]:
+        distinct = dict.fromkeys(terms)
+        ordered = sorted(distinct, key=lambda term: term not in preferred)
+        return tuple(ordered)[:max_terms]
+
+    return QueryTerms(bounded(candidates), bounded(primary), bounded(modifiers))
