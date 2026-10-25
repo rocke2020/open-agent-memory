@@ -3,9 +3,11 @@
 from contextlib import contextmanager
 from copy import deepcopy
 
+import pytest
 from test_source_context import CONFIG, SourceRepository, SourceService
 
 from oam.contracts.search import SearchRequest
+from oam.retrieval import context
 from oam.retrieval.context import assemble_context, context_token_count, render_context
 from oam.retrieval.local_context import local_evidence_ids
 
@@ -23,6 +25,7 @@ def original(identity, index, role="user", *, version=1, origin="memory"):
                 "source_version": version,
                 "message_index": index,
                 "role": role,
+                "passage_index": 0,
             }
         ],
     }
@@ -44,6 +47,323 @@ def fact(identity, passage):
             }
         ],
     }
+
+
+@pytest.mark.parametrize(
+    ("before_text", "after_text", "cap", "expected_before", "expected_after"),
+    [
+        (
+            "Discard this longer sentence. Tail.",
+            "Head. Another longer sentence.",
+            8,
+            "Tail.",
+            "Head.",
+        ),
+        ("很长的前面内容。尾句。", "首句。后面内容很长。", 4, "尾句。", "首句。"),
+        ("discard discard. 🙂🙂。", "🙂🙂。 discard discard.", 3, "🙂🙂。", "🙂🙂。"),
+    ],
+    ids=["ascii", "cjk", "emoji"],
+)
+def test_adjacent_excerpts_keep_the_boundary_facing_text_within_the_cap(
+    before_text, after_text, cap, expected_before, expected_after
+):
+    support = original("support", 4)
+    root = fact("root", support)
+    before, after = original("before", 2), original("after", 6)
+    before["text"], after["text"] = before_text, after_text
+    originals = {row["unit_id"]: row for row in (before, support, after)}
+    locators = [
+        {
+            "unit_id": row["unit_id"],
+            "passage_id": row["unit_id"],
+            "source_id": "conversation",
+            "source_version": 1,
+            "locator": row["citations"][0],
+        }
+        for row in originals.values()
+    ]
+    excerpts = context.source_window_excerpts(root, locators, originals, max_chars=cap)
+    assert [row["unit_id"] for row in excerpts] == ["before", "after"]
+    assert [row["text"] for row in excerpts] == [expected_before, expected_after]
+    for row in excerpts:
+        full = originals[row["unit_id"]]
+        span = row["excerpt"]
+        assert row["text"] == full["text"][span["start"] : span["end"]]
+        assert span["original_length"] == len(full["text"])
+        assert row["citations"] == full["citations"]
+        assert len(row["text"]) <= cap
+        assert "excerpt" not in full
+
+
+@pytest.mark.parametrize(
+    ("text", "cap", "previous", "starts_message", "expected"),
+    [
+        ("First. More, details continue without ending", 16, False, True, "First."),
+        ("Long opening, more words. Last.", 15, True, True, "Last."),
+        ("Alpha, beta gamma without a terminator", 8, False, True, "Alpha,"),
+        ("An oversized opening, Tail; unfinished", 8, True, True, "Tail;"),
+        ("第一句。第二部分，后面尚未结束", 9, False, True, "第一句。"),
+        ("Keep; More, trailing without an ending", 16, False, True, "Keep;"),
+        ("第一部分，后面的内容很长且没有结束", 6, False, True, "第一部分，"),
+        ("مرحبا؟ this continues without ending", 12, False, True, "مرحبا؟"),
+        ("नमस्ते। this continues without ending", 12, False, True, "नमस्ते।"),
+        ("“你好！” 后面的内容尚未结束", 5, False, True, "“你好！”"),
+        ('Really?!" this continues without ending', 9, False, True, 'Really?!"'),
+        ("fragment. Complete. unfinished", 100, True, False, "Complete."),
+        ("fragment. Complete. unfinished", 100, False, False, "Complete."),
+        ("fragment. unfinished", 100, True, False, None),
+        ("No punctuation anywhere", 100, False, True, None),
+        ("Dr. Lee left. trailing unfinished", 5, False, True, None),
+        ("The U.S. team left. trailing unfinished", 10, False, True, None),
+        ("A. Lee left. trailing unfinished", 3, False, True, None),
+        ("Cost 3.14 units. trailing unfinished", 9, False, True, None),
+        ("价格３．１４元。 其他内容尚未结束", 4, False, True, None),
+        ("时间１２：３０，其他内容尚未结束", 5, False, True, None),
+        ("Ｄｒ． Lee left. trailing unfinished", 4, False, True, None),
+        ("See https://example.com for details", 10, False, True, None),
+        ("Cost 1,000 units without an ending", 10, False, True, None),
+    ],
+)
+def test_excerpt_span_uses_sentence_priority_then_clauses_without_raw_cuts(
+    text, cap, previous, starts_message, expected
+):
+    span = context.excerpt_span(
+        text, max_chars=cap, previous=previous, starts_message=starts_message
+    )
+    assert (text[span[0] : span[1]] if span else None) == expected
+    if span:
+        assert span[1] - span[0] <= cap
+
+
+@pytest.mark.parametrize("mark", list(".!?。！？؟।॥"))
+def test_unicode_sentence_terminators_are_kept(mark):
+    text = f"Keep{mark} trailing text without an ending"
+    span = context.excerpt_span(text, max_chars=6, previous=False, starts_message=True)
+    assert text[span[0] : span[1]] == f"Keep{mark}"
+
+
+@pytest.mark.parametrize("mark", list(",，;；:：、،؛"))
+def test_unicode_clause_punctuation_is_used_when_no_sentence_fits(mark):
+    text = f"Lead{mark} trailing text without an ending"
+    span = context.excerpt_span(text, max_chars=6, previous=False, starts_message=True)
+    assert text[span[0] : span[1]] == f"Lead{mark}"
+
+
+def test_exact_thousand_character_sentence_is_not_cut():
+    text = "a" * 999 + "." + " trailing unfinished"
+    assert context.excerpt_span(text, max_chars=1000, previous=False, starts_message=True) == (
+        0,
+        1000,
+    )
+
+
+def test_short_neighbor_remains_complete_and_is_not_labelled_as_an_excerpt():
+    support, neighbor = original("support", 4), original("neighbor", 2)
+    rows = [support, neighbor]
+    locators = [
+        {
+            "unit_id": row["unit_id"],
+            "passage_id": row["unit_id"],
+            "source_id": "conversation",
+            "source_version": 1,
+            "locator": row["citations"][0],
+        }
+        for row in rows
+    ]
+    assert context.source_window_excerpts(
+        fact("root", support), locators, {row["unit_id"]: row for row in rows}, max_chars=1000
+    ) == [neighbor]
+
+
+def test_source_window_cannot_bypass_omission_when_no_boundary_fits():
+    support = original("support", 4)
+    root = fact("root", support)
+    neighbor = original("neighbor", 2)
+    neighbor["text"] = "unfinished words without punctuation " * 100
+
+    class RankedRepository(SourceRepository):
+        def lexical(self, query, count):
+            return [{"unit_id": "root"}]
+
+    class RankedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RankedRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    values["search"]["fast"].update(
+        adjacent_user_context=True, adjacent_user_context_max_chars=1000
+    )
+    result = RankedService(
+        [root, support, neighbor], config=type(CONFIG).model_validate(values)
+    ).search(object(), SearchRequest(query="history", recall_level="fast"))
+    assert {row["unit_id"] for row in result["items"]} == {"root", "support"}
+
+
+def test_omitted_fact_does_not_make_a_rejected_neighbor_an_independent_original():
+    support, neighbor = original("support", 4), original("neighbor", 2)
+    neighbor["text"] = "unfinished words without punctuation " * 100
+    root, oversized = fact("root", support), fact("oversized", neighbor)
+    oversized["text"] = "A large learned record. " * 1000
+
+    class RankedRepository(SourceRepository):
+        def lexical(self, query, count):
+            return [{"unit_id": "root"}, {"unit_id": "oversized"}]
+
+    class RankedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RankedRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    values["search"]["fast"].update(
+        adjacent_user_context=True, adjacent_user_context_max_chars=1000, context_max_tokens=1500
+    )
+    result = RankedService(
+        [root, oversized, support, neighbor], config=type(CONFIG).model_validate(values)
+    ).search(object(), SearchRequest(query="history", recall_level="fast"))
+    assert {row["unit_id"] for row in result["items"]} == {"root", "support"}
+
+
+def test_source_window_does_not_treat_a_cited_passage_as_optional_when_ids_differ():
+    support = original("support-unit", 4)
+    root = fact("root", support)
+    root["citations"][0]["passage_id"] = "source-passage"
+    locators = [
+        {
+            "unit_id": "support-unit",
+            "passage_id": "source-passage",
+            "source_id": "conversation",
+            "source_version": 1,
+            "locator": support["citations"][0],
+        }
+    ]
+    assert (
+        context.source_window_excerpts(root, locators, {"support-unit": support}, max_chars=1) == []
+    )
+
+
+@pytest.mark.parametrize("required_support", [False, True])
+def test_later_admitted_original_promotes_optional_excerpt_to_complete_text(required_support):
+    support, neighbor = original("support", 4), original("neighbor", 2)
+    neighbor["text"] = "Complete neighboring source. " * 50
+    root, later = fact("root", support), fact("later", neighbor)
+    excerpt = {
+        **neighbor,
+        "text": neighbor["text"][-32:],
+        "excerpt": {
+            "start": len(neighbor["text"]) - 32,
+            "end": len(neighbor["text"]),
+            "original_length": len(neighbor["text"]),
+        },
+    }
+    items, _, admitted, _ = assemble_context(
+        [root, later if required_support else neighbor],
+        [],
+        context_max_tokens=10000,
+        include_chunks=True,
+        max_results=10,
+        evidence_groups=[[root, support], [later, neighbor]],
+        optional_context={"root": [excerpt]},
+    )
+    selected = {row["unit_id"]: row for row in items}
+    assert selected["neighbor"]["text"] == neighbor["text"]
+    assert "excerpt" not in selected["neighbor"]
+    assert context.bundle_items([*admitted, [excerpt]]) == items
+
+
+def test_optional_excerpt_cannot_stand_in_for_required_support_that_does_not_fit():
+    support, neighbor = original("support", 4), original("neighbor", 2)
+    neighbor["text"] = "Large source. " * 10000
+    root, later = fact("root", support), fact("later", neighbor)
+    excerpt = {
+        **neighbor,
+        "text": "Large source.",
+        "excerpt": {"start": 0, "end": 13, "original_length": len(neighbor["text"])},
+    }
+    items, omissions, _, _ = assemble_context(
+        [root, later],
+        [],
+        context_max_tokens=1000,
+        include_chunks=True,
+        max_results=10,
+        evidence_groups=[[root, support], [later, neighbor]],
+        optional_context={"root": [excerpt]},
+    )
+    assert {row["unit_id"] for row in items} == {"root", "support", "neighbor"}
+    assert "later" in omissions
+    assert context_token_count(render_context(items)) <= 1000
+
+
+def test_excerpt_metadata_is_visible_in_both_renderings_and_recorded_replay(monkeypatch):
+    import json
+
+    from oam.debug.traces import TraceRepository
+
+    row = {
+        **original("neighbor", 2),
+        "text": "Boundary text.",
+        "excerpt": {"start": 40, "end": 54, "original_length": 100},
+    }
+    assert "excerpt=40:54/100" in context.render_item(row)
+    assert "excerpt=40:54/100" in context._render_compact_item(row, {"neighbor": "1"}, {}, None)
+    assert "native_truncated" not in render_context([row])
+    result = {
+        "items": [row],
+        "context": render_context([row]),
+        "context_tokens": context_token_count(render_context([row])),
+        "tokenizer": context.CONTEXT_TOKENIZER,
+    }
+    recorded = json.loads(json.dumps({"status": "recorded", "result": result}))
+    monkeypatch.setattr(TraceRepository, "get", lambda *args: recorded)
+    assert TraceRepository().replay(None, None, "trace", "reassemble_recorded")["status"] == "exact"
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize(
+    ("limit", "before_text", "after_text"),
+    [
+        (10, "Previous.", "Next."),
+        (20, "Previous. Previous.", "Next. Next. Next."),
+    ],
+)
+def test_configured_neighbor_cap_reaches_the_actual_recall_context(
+    mode, limit, before_text, after_text
+):
+    support = original("support", 4)
+    support["text"] = "Required source stays complete. " * 100
+    root = fact("root", support)
+    before, after = original("before", 2), original("after", 6)
+    before["text"], after["text"] = "Previous. " * 200, "Next. " * 200
+
+    class RankedRepository(SourceRepository):
+        def lexical(self, query, count):
+            return [{"unit_id": "root"}]
+
+    class RankedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RankedRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    values["search"][mode].update(
+        partial_match_gate="off",
+        adjacent_user_context=True,
+        adjacent_user_context_max_chars=limit,
+    )
+    config = type(CONFIG).model_validate(values)
+    result = RankedService([root, support, before, after], config=config).search(
+        object(), SearchRequest(query="history", recall_level=mode)
+    )
+    selected = {row["unit_id"]: row for row in result["items"]}
+    assert selected["support"]["text"] == support["text"]
+    assert "excerpt" not in selected["support"]
+    assert selected["before"]["text"] == before_text
+    assert selected["after"]["text"] == after_text
+    for identity in ("before", "after"):
+        assert len(selected[identity]["text"]) <= limit
+        assert "excerpt" in selected[identity]
+    assert result["diagnostics"]["local_context"]["adjacent_user_context_max_chars"] == limit
 
 
 def test_partial_matches_require_the_actual_user_fact_exchange():

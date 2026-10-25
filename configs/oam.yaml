@@ -34,7 +34,7 @@ chunk:
   # Split each message/document into passages before indexing, in either extraction mode.
   # These are per-passage limits using the local token estimate, not batch group sizes.
   ingestion:
-    # Preferred passage size measured with the local token estimate.
+    # Soft packing target; complete paragraphs/sentences may exceed it within max.
     target_estimated_tokens: 2048
     # Maximum passage size measured with the local token estimate.
     max_estimated_tokens: 4096
@@ -126,8 +126,8 @@ search:
   # for both a user fact and its exact cited original; user roots and optional
   # user context keep their existing scope. whole_query uses one OR FTS ranking;
   # per_term retains term-list fusion. Neither ranking uses a scoring model.
-  # adjacent_user_context tries already-discovered neighboring user originals
-  # after a fact's required support, without rejecting the fact if they do not fit.
+  # Optional neighbors keep sentence spans first, then clauses, up to max_chars.
+  # Use the previous user's tail / next user's head; cited originals stay complete.
   fast:
     context_max_tokens: 18000
     graph: "off"
@@ -135,6 +135,7 @@ search:
     lexical_ranking: whole_query
     partial_match_gate: user_fact_exchange
     adjacent_user_context: true
+    adjacent_user_context_max_chars: 1000
     channel_candidates: 64
     fused_candidates: 128
     rerank_candidates: null
@@ -147,6 +148,7 @@ search:
     lexical_ranking: per_term
     partial_match_gate: "off"
     adjacent_user_context: false
+    adjacent_user_context_max_chars: 1000
     channel_candidates: 64
     fused_candidates: 154
     rerank_candidates: 48

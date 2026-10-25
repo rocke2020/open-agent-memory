@@ -4,7 +4,12 @@ import json
 from datetime import datetime
 
 from oam.quotes import unique_quote
-from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
+from oam.text_boundaries import punctuation_ends
+from oam.tokens import (
+    ESTIMATOR,
+    estimate_units,
+    estimated_tokens,
+)
 
 CONTEXT_TOKENIZER = ESTIMATOR
 ORIGINAL_KINDS = frozenset({"passage", "resource_passage"})
@@ -89,9 +94,7 @@ class _ContextRenderer:
 
 
 def _render_compact_item(item, references, sources, passage):
-    header = f"[{references[item['unit_id']]}] {item['kind']} {item['origin']}"
-    if item.get("truncated"):
-        header += " native_truncated=true"
+    header = f"[{references[item['unit_id']]}] {item['kind']} {item['origin']}" + _text_marker(item)
     inherited_time = bool(
         passage and item["time_evidence"] and item["time_evidence"] == passage["time_evidence"]
     )
@@ -111,13 +114,20 @@ def render_item(item: dict, source_id: str | None = None) -> str:
     reference = (
         f"Source: [{source_id}]" if source_id is not None else _render_citations(item["citations"])
     )
-    marker = " native_truncated=true" if item.get("truncated") else ""
+    marker = _text_marker(item)
     rendered = (
         f"[{item['unit_id']}] {item['kind']} {item['origin']}{marker}\n{item['text']}\n{reference}"
     )
     if item["time_evidence"]:
         rendered += "\n" + _render_time(item["time_evidence"])
     return rendered + _render_aliases(item)
+
+
+def _text_marker(item: dict) -> str:
+    marker = " native_truncated=true" if item.get("truncated") else ""
+    if excerpt := item.get("excerpt"):
+        marker += f" excerpt={excerpt['start']}:{excerpt['end']}/{excerpt['original_length']}"
+    return marker
 
 
 def _render_aliases(item: dict, sources: dict | None = None) -> str:
@@ -228,7 +238,7 @@ def _supported_passage_id(item: dict, passages: dict[str, dict]) -> str | None:
     if len(passage_ids) != 1:
         return None
     passage = passages.get(next(iter(passage_ids)))
-    if passage is None or len(passage["citations"]) != 1:
+    if passage is None or passage.get("excerpt") or len(passage["citations"]) != 1:
         return None
     locator = passage["citations"][0]
     identity = (
@@ -365,9 +375,80 @@ def source_window_ids(
     ]
 
 
+def excerpt_span(
+    text: str, *, max_chars: int, previous: bool, starts_message: bool
+) -> tuple[int, int] | None:
+    """Prefer bounded sentence spans, then clauses, without inventing passage-edge boundaries."""
+    sentences, clauses = punctuation_ends(text)
+
+    for endings in (sentences, clauses):
+        edges = [0, *endings] if starts_message else endings
+        if len(edges) < 2:
+            continue
+        pairs = (
+            ((start, edges[-1]) for start in edges[:-1])
+            if previous
+            else ((edges[0], end) for end in reversed(edges[1:]))
+        )
+        for start, end in pairs:
+            while start < end and text[start].isspace():
+                start += 1
+            while end > start and text[end - 1].isspace():
+                end -= 1
+            if 0 < end - start <= max_chars:
+                return start, end
+    return None
+
+
+def source_window_excerpts(
+    fact: dict, passage_locators: list[dict], originals: dict[str, dict], *, max_chars: int
+) -> list[dict]:
+    """Keep boundary-facing optional user text, with passage-relative character offsets."""
+    required = {
+        (citation.get("source_id"), citation.get("source_version"), citation.get("passage_id"))
+        for citation in fact["citations"]
+    }
+    selected = {}
+    by_id = {row["unit_id"]: row for row in passage_locators}
+    for citation in fact["citations"]:
+        anchor = citation.get("span", {}).get("message_index")
+        for identity in source_window_ids([{**fact, "citations": [citation]}], passage_locators):
+            row = by_id[identity]
+            if (
+                (row["source_id"], row["source_version"], row["passage_id"]) in required
+                or identity in selected
+                or identity not in originals
+            ):
+                continue
+            item = originals[identity]
+            text = item["text"]
+            span = excerpt_span(
+                text,
+                max_chars=max_chars,
+                previous=row["locator"]["message_index"] < anchor,
+                starts_message=row["locator"].get("passage_index") == 0,
+            )
+            if span is None:
+                continue
+            start, end = span
+            if span != (0, len(text)):
+                item = {
+                    **item,
+                    "text": text[start:end],
+                    "excerpt": {"start": start, "end": end, "original_length": len(text)},
+                }
+            selected[identity] = item
+    return list(selected.values())
+
+
 def bundle_items(bundles: list[list[dict]]) -> list[dict]:
     """Return the unique items required by actually admitted roots, in admission order."""
-    return list({item["unit_id"]: item for bundle in bundles for item in bundle}.values())
+    selected = {}
+    for bundle in bundles:
+        for item in bundle:
+            if item["unit_id"] not in selected or not item.get("excerpt"):
+                selected[item["unit_id"]] = item
+    return list(selected.values())
 
 
 def assemble_context(
@@ -386,6 +467,8 @@ def assemble_context(
     selected: list[dict] = []
     omissions: list[str] = []
     considered: set[str] = set()
+    candidate_ids = {item["unit_id"] for item in candidates}
+    optional_ids: set[str] = set()
     eligible_facts = {
         item["unit_id"]
         for item in candidates
@@ -405,7 +488,7 @@ def assemble_context(
 
     for item in [*candidates, *source_passages]:
         identity = item["unit_id"]
-        if identity in considered:
+        if identity in considered or (identity in optional_ids and identity not in candidate_ids):
             continue
         considered.add(identity)
         if item["kind"] in ORIGINAL_KINDS:
@@ -449,4 +532,5 @@ def assemble_context(
                     admitted.append([neighbor])
                     selected = tentative
                     selected_ids.add(neighbor["unit_id"])
+                    optional_ids.add(neighbor["unit_id"])
     return selected, omissions, admitted, oversized_single_fact

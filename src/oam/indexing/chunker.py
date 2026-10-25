@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left, bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from oam.config import IngestionChunkConfig
+from oam.text_boundaries import punctuation_ends
 from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimated_tokens
 
 # Portions Copyright (c) 2025 Vectorize AI, Inc.
 # MIT license: third_party_licenses/extraction-split-MIT.txt.
 MIN_OUTPUT_SPLIT_CHARS = 500
+_PARAGRAPH_END = re.compile(r"\n[ \t\r]*\n(?:[ \t\r]*\n)*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,10 +33,10 @@ class TextChunk:
 def chunk_text(
     text: str, config: IngestionChunkConfig, *, previous_context: str = ""
 ) -> tuple[TextChunk, ...]:
-    """Chunk eligible text at original offsets, omitting whitespace-only source spans."""
+    """Pack lossless structural units at original offsets under a hard token bound."""
     if config.extractable_overlap_estimated_tokens:
         raise ValueError("owned source overlap must remain zero")
-    if not text.strip():
+    if not text:
         return ()
     weights = cumulative_units(text)
     if any(
@@ -41,38 +44,65 @@ def chunk_text(
         for index in range(len(text))
     ):
         raise ValueError("single source character exceeds chunk hard maximum")
-    boundaries = [match.end() for match in re.finditer(r"\n", text)]
-    if not boundaries or boundaries[-1] != len(text):
-        boundaries.append(len(text))
-    chunks = []
-    start = 0
-    context = _tail(previous_context, config.previous_context_estimated_tokens)
-    while start < len(text):
-        target = max(start + 1, _bounded_end(weights, start, config.target_estimated_tokens))
-        maximum = _bounded_end(weights, start, config.max_estimated_tokens)
-        boundary_index = bisect_right(boundaries, target) - 1
-        if boundary_index >= 0 and boundaries[boundary_index] > start:
-            end = boundaries[boundary_index]
+    paragraphs = [match.end() for match in _PARAGRAPH_END.finditer(text)]
+    if not paragraphs or paragraphs[-1] != len(text):
+        paragraphs.append(len(text))
+    sentences, clauses = punctuation_ends(text)
+    levels = (sentences, clauses, [match.end() for match in re.finditer(r"\s+", text)])
+    hard_units = config.max_estimated_tokens * UNITS_PER_TOKEN
+
+    def bounded_units(start: int, end: int, level: int) -> Iterator[tuple[int, int]]:
+        if start == end:
+            return
+        if weights[end] - weights[start] <= hard_units:
+            yield start, end
+        elif level < len(levels):
+            boundaries = levels[level]
+            for stop in boundaries[bisect_right(boundaries, start) : bisect_left(boundaries, end)]:
+                yield from bounded_units(start, stop, level + 1)
+                start = stop
+            yield from bounded_units(start, end, level + 1)
         else:
-            next_boundary = boundaries[bisect_right(boundaries, start)]
-            if next_boundary <= maximum:
-                end = next_boundary
-            else:
-                spaces = tuple(re.finditer(r"\s+", text[start:target]))
-                end = start + spaces[-1].end() if spaces else target
+            while weights[end] - weights[start] > hard_units:
+                stop = max(start + 1, _bounded_end(weights, start, config.target_estimated_tokens))
+                yield start, stop
+                start = stop
+            if start < end:
+                yield start, end
+
+    chunks = []
+    context = _tail(previous_context, config.previous_context_estimated_tokens)
+
+    def emit(start: int, end: int) -> None:
+        nonlocal context
         content = text[start:end]
-        if content.strip():
-            chunks.append(
-                TextChunk(
-                    text=content,
-                    start=start,
-                    end=end,
-                    previous_context=context,
-                    estimated_tokens=estimated_tokens(weights[end] - weights[start]),
-                )
+        chunks.append(
+            TextChunk(
+                text=content,
+                start=start,
+                end=end,
+                previous_context=context,
+                estimated_tokens=estimated_tokens(weights[end] - weights[start]),
             )
+        )
         context = _tail(context + content, config.previous_context_estimated_tokens)
-        start = end
+
+    paragraph_start = chunk_start = chunk_end = 0
+    for paragraph_end in paragraphs:
+        for start, end in bounded_units(paragraph_start, paragraph_end, 0):
+            if chunk_end > chunk_start and weights[end] - weights[chunk_start] > hard_units:
+                emit(chunk_start, chunk_end)
+                chunk_start = start
+            chunk_end = end
+            if (
+                weights[chunk_end] - weights[chunk_start]
+                >= config.target_estimated_tokens * UNITS_PER_TOKEN
+            ):
+                emit(chunk_start, chunk_end)
+                chunk_start = chunk_end
+        paragraph_start = paragraph_end
+    if chunk_end > chunk_start:
+        emit(chunk_start, chunk_end)
     return tuple(chunks)
 
 
@@ -91,11 +121,25 @@ def split_chunk_for_output_retry(
     search_range = int(len(text) * 0.2)
     search_start = max(0, mid_point - search_range)
     search_end = min(len(text), mid_point + search_range)
+    sentences, clauses = punctuation_ends(text)
+    levels = (
+        [match.end() for match in _PARAGRAPH_END.finditer(text)],
+        sentences,
+        clauses,
+        [match.end() for match in re.finditer(r"\s+", text)],
+    )
+    first_nonblank = len(text) - len(text.lstrip())
+    last_nonblank = len(text.rstrip())
     best_split = mid_point
-    for ending in [". ", "! ", "? ", "\n\n"]:
-        pos = text.rfind(ending, search_start, search_end)
-        if pos != -1:
-            best_split = pos + len(ending)
+    for boundaries in levels:
+        candidates = []
+        for point in boundaries:
+            while point < len(text) and text[point].isspace():
+                point += 1
+            if search_start <= point <= search_end and first_nonblank < point < last_nonblank:
+                candidates.append(point)
+        if candidates:
+            best_split = min(candidates, key=lambda point: (abs(point - mid_point), point))
             break
     first_half, second_half = text[:best_split], text[best_split:]
     if not first_half.strip() or not second_half.strip():

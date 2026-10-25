@@ -501,6 +501,9 @@
         if (current(generation) && state.view === view && requestId === state.detailRequest) showResource(detail);
       } else if (state.view === "retrieve" && !["fact", "insight"].includes(item.kind)) {
         byId("detail").replaceChildren(element("h3", msg("Retrieved passage")), element("p", item.text, "source-text"));
+        if (item.excerpt) byId("detail").append(element("p", msg("Excerpt: characters {start}–{end} of {total}", {
+          start: item.excerpt.start + 1, end: item.excerpt.end, total: item.excerpt.original_length,
+        }), "form-note"));
         for (const citation of item.citations || []) {
           byId("detail").append(labelValue(msg("Source"), citation.source_id), labelValue(msg("Passage"), citation.passage_id));
         }

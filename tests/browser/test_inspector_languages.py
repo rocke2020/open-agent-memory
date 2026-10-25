@@ -139,6 +139,54 @@ def test_all_languages_preserve_live_content_and_selection(inspector_browser):
         context.close()
 
 
+def test_retrieved_excerpt_details_disclose_the_partial_range(inspector_browser):
+    browser, url = inspector_browser
+    excerpt = {
+        "unit_id": "neighbor",
+        "kind": "passage",
+        "origin": "memory",
+        "text": "Boundary text.",
+        "citations": [],
+        "excerpt": {"start": 10, "end": 24, "original_length": 100},
+    }
+
+    def respond(route):
+        data = {"items": []}
+        if route.request.url.endswith("/recall"):
+            data = {
+                "items": [excerpt],
+                "context": "Boundary text.",
+                "context_tokens": 4,
+                "diagnostics": {"generative_calls": 0},
+            }
+        route.fulfill(content_type="application/json", body=json.dumps(data))
+
+    context = browser.new_context(locale="en-US")
+    try:
+        page = context.new_page()
+        page.set_default_timeout(3000)
+        page.route("**/v1/**", respond)
+        page.goto(url)
+        page.locator("#user").fill("alice")
+        page.locator("#credential").fill("synthetic-local-only")
+        page.locator("#connect-form button").click()
+        page.locator('[data-view="retrieve"]').click()
+        page.locator("#query").fill("boundary context")
+        page.locator("#search-form button").click()
+        page.locator("#item-list .list-item").first.click()
+        page.locator("#detail").get_by_text(
+            "Excerpt: characters 11–24 of 100", exact=True
+        ).wait_for()
+        assert page.locator("#detail").get_by_text("Boundary text.", exact=True).is_visible()
+        page.locator("#language").select_option("zh-CN")
+        page.locator("#item-list .list-item").first.click()
+        page.locator("#detail").get_by_text(
+            "节选：第 11–24 个字符，共 100 个字符", exact=True
+        ).wait_for()
+    finally:
+        context.close()
+
+
 @pytest.mark.parametrize(
     ("preferences", "saved", "expected"),
     [

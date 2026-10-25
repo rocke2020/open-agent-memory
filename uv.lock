@@ -509,6 +509,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "pyyaml" },
+    { name = "regex" },
     { name = "tiktoken" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -539,6 +540,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "regex", specifier = ">=2026.9.10" },
     { name = "tiktoken", specifier = ">=0.11" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.37" },
 ]

@@ -159,6 +159,41 @@ def test_single_passage_overflow_preserves_exact_source_quotes_and_whitespace():
     assert result.usage.total_tokens == 60
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+def test_multilingual_overflow_uses_complete_sentences_in_both_extraction_paths(grouped):
+    text = "甲" * 200 + "。" + "乙" * 400 + "。"
+    requests = []
+
+    def respond(request):
+        envelope = json.loads(json.loads(request.content)["messages"][1]["content"])
+        center = envelope["passages"][0] if grouped else envelope
+        quote = center["center"]["text"]
+        if len(quote) > 500:
+            return response("{", "length")
+        fact = {"text": quote, "quote": quote}
+        if grouped:
+            fact["passage_id"] = center["passage_id"]
+        return response(json.dumps({"outcome": "facts", "facts": [fact]}))
+
+    with extraction_models(respond, requests) as (models, config):
+        if grouped:
+            result = extract_group(
+                models, passages=(passage("canonical", text, 0),), config=config, timeout_seconds=1
+            )
+        else:
+            result = extract_facts(
+                models,
+                chunk=TextChunk(text, 0, len(text), "", 903),
+                config=config,
+                message_role="user",
+                timeout_seconds=1,
+            )
+    assert [f.quote for f in result.facts] == ["甲" * 200 + "。", "乙" * 400 + "。"]
+    assert "".join(f.quote for f in result.facts) == text
+    assert all(f.passage_id == ("canonical" if grouped else None) for f in result.facts)
+    assert len(requests) == 3
+
+
 def test_unsplittable_overflow_remains_a_failure_and_does_not_loop():
     requests = []
     with (

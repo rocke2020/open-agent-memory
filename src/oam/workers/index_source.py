@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -33,7 +34,7 @@ from oam.indexing.grouping import (
     group_envelope,
     plan_extraction_groups,
 )
-from oam.indexing.identity import index_generation
+from oam.indexing.identity import INDEX_RECIPE, index_generation
 from oam.indexing.references import eligible_reference_ids, freeze_extraction_references
 from oam.indexing.store import IndexStore, stable_id
 from oam.workers.claims import claim_one
@@ -403,6 +404,8 @@ def _index_interaction(config, store, models, request):
             )
 
     prepared = []
+    chunking_started = time.monotonic()
+    total_chunks = 0
     previous = ""
     for message_index, message in enumerate(request.messages):
         if not message.learning_eligible:
@@ -416,10 +419,24 @@ def _index_interaction(config, store, models, request):
             message.message_id,
         )
         chunks = chunk_text(message.content, config.chunk.ingestion, previous_context=previous)
-        for passage_index, chunk in enumerate(chunks):
+        total_chunks += len(chunks)
+        for passage_index, chunk in enumerate(chunk for chunk in chunks if chunk.text.strip()):
             passage_id = stable_id("passage", evidence_id, passage_index)
             prepared.append((passage_id, chunk, message, evidence_id, message_index, passage_index))
         previous = message.content
+    logging.getLogger(__name__).info(
+        "oam.index.chunking source_id=%s generation=%s recipe=%s messages=%d "
+        "chunks=%d blank_chunks_skipped=%d target_tokens=%d max_tokens=%d duration_ms=%.1f",
+        store.source["source_id"],
+        store.generation_id,
+        INDEX_RECIPE,
+        len(request.messages),
+        len(prepared),
+        total_chunks - len(prepared),
+        config.chunk.ingestion.target_estimated_tokens,
+        config.chunk.ingestion.max_estimated_tokens,
+        (time.monotonic() - chunking_started) * 1000,
+    )
     by_passage = {
         item[0]: ExtractionPassage(
             item[0], item[1], item[2].role.value, item[2].event_time, item[4]
@@ -581,7 +598,11 @@ def _resource(store, models):
     if original.media_type is ResourceMediaType.TEXT:
         enforce_byte_limit(original, store.config.resource)
         source_text = content.decode("utf-8")
-        chunks = chunk_text(source_text, store.config.chunk.ingestion)
+        chunks = tuple(
+            chunk
+            for chunk in chunk_text(source_text, store.config.chunk.ingestion)
+            if chunk.text.strip()
+        )
         if not chunks:
             raise ResourceParseError("text Resource contains no extractable text")
         blocks = tuple(
@@ -607,7 +628,11 @@ def _resource(store, models):
                         "parse_revision": LEGACY_RESOURCE_PARSE_REVISION,
                     }
                 else:
-                    chunks = chunk_text(page.text, store.config.chunk.ingestion)
+                    chunks = tuple(
+                        chunk
+                        for chunk in chunk_text(page.text, store.config.chunk.ingestion)
+                        if chunk.text.strip()
+                    )
                     for chunk in chunks:
                         locator = (
                             page.locator

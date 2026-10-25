@@ -174,9 +174,11 @@ def test_document_abstract_admission_counts_system_and_user_before_model_call():
     assert models.generated_roles == []
 
 
-def test_plain_text_resource_preserves_exact_chunks_and_document_revision():
+@pytest.mark.parametrize("blank_prefix", ("", "\n" * 4096))
+def test_plain_text_resource_preserves_exact_chunks_and_document_revision(blank_prefix):
     text = "  Dose <10 mg.\n\n" + "Read literally <tag> & keep spaces.\n" * 200
-    store = MemoryStore(content=text.encode())
+    original = blank_prefix + text
+    store = MemoryStore(content=original.encode())
     store.config = store.config.model_copy(
         update={
             "chunk": store.config.chunk.model_copy(
@@ -195,6 +197,7 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision():
     assert len(store.units) > 1
     assert "".join(unit["text"] for unit in store.units) == text
     assert models.embedded == [unit["text"] for unit in store.units]
+    assert all(value.strip() for value in models.embedded)
     assert models.generated_roles == ["abstract"]
     for index, unit in enumerate(store.units):
         assert unit["kind"] == "resource_passage"
@@ -209,7 +212,8 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision():
         for query, parameters in store.statements
         if query.startswith("INSERT INTO evidence")
     ]
-    assert all(parameters[-1] == text for parameters in evidence_values)
+    assert evidence_values
+    assert all(parameters[-1] == original for parameters in evidence_values)
     assert store.stages["abstract_state"] == "current"
 
 

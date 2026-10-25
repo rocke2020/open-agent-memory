@@ -33,6 +33,7 @@ from oam.retrieval.context import (
     context_token_count,
     render_context,
     source_diverse_seed_order,
+    source_window_excerpts,
     source_window_ids,
 )
 from oam.retrieval.local_context import local_evidence_ids
@@ -97,7 +98,7 @@ class RecallService:
             "admission=%s query_prefix=%s include_chunks=%s "
             "lexical_ranking=%s partial_match_gate=%s gate_status=%s filtered_roots=%d "
             "reply_seed_limit=%d "
-            "adjacent_user_context=%s window_originals=%d "
+            "adjacent_user_context=%s adjacent_user_context_max_chars=%d window_originals=%d "
             "facts=%d originals=%d context_tokens=%d/%d "
             "omissions=%d oversized_single_fact=%s duration_ms=%.1f",
             result["trace_id"],
@@ -115,6 +116,7 @@ class RecallService:
             local["filtered_roots"],
             local["reply_seed_limit"],
             local["adjacent_user_context"],
+            local["adjacent_user_context_max_chars"],
             local["window_originals"],
             budget["learned_count"],
             budget["original_count"],
@@ -1040,17 +1042,27 @@ class RecallService:
                 }
                 for group in evidence_groups
             }
+            window_neighbor_ids = set()
             for item in packing_candidates:
                 if item["kind"] != "fact" or (
                     item["unit_id"] in l2_fact_items and item["unit_id"] not in final_ids
                 ):
                     continue
-                optional_context[item["unit_id"]] = [
-                    available_originals[node]
-                    for node in source_window_ids([item], locators)
-                    if node in available_originals
-                    and node not in required_originals.get(item["unit_id"], set())
-                ]
+                window_neighbor_ids.update(
+                    set(source_window_ids([item], locators))
+                    - required_originals.get(item["unit_id"], set())
+                )
+                optional_context[item["unit_id"]] = source_window_excerpts(
+                    item,
+                    locators,
+                    available_originals,
+                    max_chars=tier.adjacent_user_context_max_chars,
+                )
+            # Window discovery cannot return a rejected neighbor as a full body.
+            # Independently selected originals still compete in packing_candidates.
+            source_passages = [
+                item for item in source_passages if item["unit_id"] not in window_neighbor_ids
+            ]
         if tier.partial_match_gate != "off" or tier.adjacent_user_context:
             timing["local_context_selection"] = (time.monotonic() - selection_started) * 1000
             executed.append("local_context_selection")
@@ -1181,6 +1193,7 @@ class RecallService:
                     if gate_active
                     else 0,
                     "adjacent_user_context": tier.adjacent_user_context,
+                    "adjacent_user_context_max_chars": tier.adjacent_user_context_max_chars,
                     "window_originals": len(
                         {item["unit_id"] for group in optional_context.values() for item in group}
                         & selected_ids

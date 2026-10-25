@@ -11,6 +11,17 @@ from oam.config import ConfigurationError, load_config
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5])
+def test_adjacent_context_character_cap_rejects_invalid_values(tmp_path, mode, invalid):
+    path = tmp_path / "override.yaml"
+    path.write_text(
+        yaml.safe_dump({"search": {mode: {"adjacent_user_context_max_chars": invalid}}})
+    )
+    with pytest.raises(ConfigurationError):
+        load_config(path)
+
+
 def test_index_causal_extraction_switch_is_owned_by_canonical_yaml():
     from oam.config import IndexConfig
 
