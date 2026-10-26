@@ -523,14 +523,15 @@ def assemble_context(
         if oversized_single_fact:
             break
         if item["kind"] == "fact" and include_chunks:
-            selected_ids = {row["unit_id"] for row in selected}
+            selected_by_id = {row["unit_id"]: row for row in selected}
             for neighbor in (optional_context or {}).get(identity, []):
-                if neighbor["unit_id"] in selected_ids:
+                current = selected_by_id.get(neighbor["unit_id"])
+                if current is not None and ("excerpt" not in current or "excerpt" in neighbor):
                     continue
                 tentative, pools_fit, tokens_fit = selection([neighbor])
                 if pools_fit and tokens_fit:
                     admitted.append([neighbor])
                     selected = tentative
-                    selected_ids.add(neighbor["unit_id"])
+                    selected_by_id[neighbor["unit_id"]] = neighbor
                     optional_ids.add(neighbor["unit_id"])
     return selected, omissions, admitted, oversized_single_fact

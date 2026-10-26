@@ -98,7 +98,8 @@ class RecallService:
             "admission=%s query_prefix=%s include_chunks=%s "
             "lexical_ranking=%s entity_boost=%s entity_matches=%d "
             "partial_match_gate=%s gate_status=%s filtered_roots=%d "
-            "reply_seed_limit=%d "
+            "reply_seed_limit=%d recovery_sources=%d recovered_user_originals=%d "
+            "selected_recovered_user_originals=%d "
             "adjacent_user_context=%s adjacent_user_context_max_chars=%d window_originals=%d "
             "facts=%d originals=%d context_tokens=%d/%d "
             "omissions=%d oversized_single_fact=%s duration_ms=%.1f",
@@ -118,6 +119,9 @@ class RecallService:
             local["gate_status"],
             local["filtered_roots"],
             local["reply_seed_limit"],
+            local["recovery_sources"],
+            local["recovered_user_originals"],
+            local["selected_recovered_user_originals"],
             local["adjacent_user_context"],
             local["adjacent_user_context_max_chars"],
             local["window_originals"],
@@ -492,6 +496,12 @@ class RecallService:
         if index_state["parse_partial"] and not request.allow_partial:
             raise RecallUnavailable("PDF parse became incomplete during recall")
         gate_active = tier.partial_match_gate == "user_fact_exchange" and "dense" in executed
+        independent_ids = (
+            set(arms.get("dense", ()))
+            | set(arms.get("graph", ()))
+            | strict_lexical_ids
+            | query_entity_ids
+        )
         dense_fact_ids = (
             {
                 row["unit_id"]
@@ -803,6 +813,23 @@ class RecallService:
                         item["paths"] = paths.get(item["unit_id"], [])
                         companions[item["unit_id"]] = item
                     candidates.extend(companions.values())
+        recovery_anchors = {}
+        recovered_user_context = {}
+        recovered_user_ids = set()
+        recovery_source_count = 0
+        if gate_active:
+            for item in candidates:
+                if (
+                    item["kind"] != "fact"
+                    or item["origin"] != "memory"
+                    or item["unit_id"] not in independent_ids
+                ):
+                    continue
+                for citation in item["citations"]:
+                    if citation.get("span", {}).get("role") == "user":
+                        recovery_anchors.setdefault(
+                            (citation["source_id"], citation["source_version"]), item["unit_id"]
+                        )
         if vector is not None and chunks:
             discovery_source_keys = tuple(
                 dict.fromkeys(
@@ -814,6 +841,11 @@ class RecallService:
                     and type(citation.get("source_version")) is int
                 )
             )
+            if gate_active:
+                discovery_source_keys = tuple(
+                    key for key in discovery_source_keys if key in recovery_anchors
+                )
+                recovery_source_count = len(discovery_source_keys)
             if discovery_source_keys:
                 originals = (
                     stage(
@@ -835,6 +867,14 @@ class RecallService:
                         item = {key: value for key, value in row.items() if key != "locator"}
                         item["paths"] = paths.get(item["unit_id"], [])
                         recovered.append(item)
+                        if gate_active and item["kind"] == "passage" and item["origin"] == "memory":
+                            for citation in item["citations"]:
+                                key = (citation.get("source_id"), citation.get("source_version"))
+                                if citation.get("role") == "user" and key in discovery_source_keys:
+                                    owner = recovery_anchors[key]
+                                    recovered_user_context.setdefault(owner, []).append(item)
+                                    recovered_user_ids.add(item["unit_id"])
+                                    break
                     candidates = [*candidates, *recovered]
         original_detail_set = set(original_detail_ids)
         evidence_groups = []
@@ -1006,12 +1046,6 @@ class RecallService:
         }
         gate_omissions = []
         if gate_active:
-            independent_ids = (
-                set(arms.get("dense", ()))
-                | set(arms.get("graph", ()))
-                | strict_lexical_ids
-                | query_entity_ids
-            )
             allowed_ids = local_evidence_ids(
                 [*packing_candidates, *source_passages],
                 dense_facts,
@@ -1027,6 +1061,8 @@ class RecallService:
                     if row["kind"] == "passage"
                 },
             )
+            # Source-local recovery admits user originals without creating witnesses.
+            allowed_ids.update(recovered_user_ids)
             gate_omissions = list(
                 dict.fromkeys(
                     item["unit_id"]
@@ -1070,6 +1106,11 @@ class RecallService:
             source_passages = [
                 item for item in source_passages if item["unit_id"] not in window_neighbor_ids
             ]
+        window_original_ids = {
+            item["unit_id"] for originals in optional_context.values() for item in originals
+        }
+        for owner, originals in recovered_user_context.items():
+            optional_context.setdefault(owner, []).extend(originals)
         if tier.partial_match_gate != "off" or tier.adjacent_user_context:
             timing["local_context_selection"] = (time.monotonic() - selection_started) * 1000
             executed.append("local_context_selection")
@@ -1201,12 +1242,22 @@ class RecallService:
                     "reply_seed_limit": min(seed_limit, tier.channel_candidates)
                     if gate_active
                     else 0,
+                    "recovery_sources": recovery_source_count,
+                    "recovered_user_originals": len(recovered_user_ids),
+                    "selected_recovered_user_originals": sum(
+                        item["unit_id"] in recovered_user_ids and "excerpt" not in item
+                        for item in items
+                    ),
+                    "source_user_context": [
+                        {
+                            "anchor_unit_id": owner,
+                            "original_ids": [item["unit_id"] for item in originals],
+                        }
+                        for owner, originals in recovered_user_context.items()
+                    ],
                     "adjacent_user_context": tier.adjacent_user_context,
                     "adjacent_user_context_max_chars": tier.adjacent_user_context_max_chars,
-                    "window_originals": len(
-                        {item["unit_id"] for group in optional_context.values() for item in group}
-                        & selected_ids
-                    ),
+                    "window_originals": len(window_original_ids & selected_ids),
                 },
                 "generation_id": self.generation_id,
                 "executed_arms": list(arms),

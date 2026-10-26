@@ -1023,6 +1023,70 @@ def test_recall_measures_tentative_complete_renderings_during_assembly(evidence_
     assert result["context_tokens"] <= CONFIG.search.normal.context_max_tokens
 
 
+@pytest.mark.parametrize("full_fits", [True, False], ids=["promote-full", "keep-excerpt"])
+def test_later_optional_owner_upgrades_an_existing_excerpt_only_when_full_text_fits(
+    evidence_rows, full_fits
+):
+    from oam.retrieval.context import assemble_context, render_context
+
+    earlier = deepcopy(evidence_rows[0])
+    earlier["unit_id"] = "earlier_fact"
+    owner = deepcopy(evidence_rows[0])
+    owner["unit_id"] = "owner_fact"
+    owner["text"] = "The user missed another workshop on June 10."
+    owner["citations"][0]["passage_id"] = "second_event"
+    owner["citations"][0]["span"].update(
+        message_id="2", message_index=2, quote=evidence_rows[3]["text"]
+    )
+    support, owner_support = deepcopy(evidence_rows[2:])
+    full = deepcopy(owner_support)
+    full.update(
+        unit_id="recovered",
+        text="I also attended the June workshop. " + "I asked about its next session. " * 40,
+    )
+    full["citations"][0].update(message_id="4", message_index=4)
+    excerpt = {
+        **full,
+        "text": "I also attended the June workshop.",
+        "excerpt": {
+            "start": 0,
+            "end": len("I also attended the June workshop."),
+            "original_length": len(full["text"]),
+        },
+    }
+    expected = [earlier, support, full if full_fits else excerpt, owner, owner_support]
+    cap = context_token_count(render_context(expected))
+    assert context_token_count(render_context([earlier, support, full, owner, owner_support])) > (
+        context_token_count(render_context([earlier, support, excerpt, owner, owner_support]))
+    )
+
+    items, _, _, oversized = assemble_context(
+        [earlier, owner],
+        [],
+        context_max_tokens=cap,
+        include_chunks=True,
+        max_results=3,
+        evidence_groups=[[earlier, support], [owner, owner_support]],
+        optional_context={"earlier_fact": [excerpt], "owner_fact": [full]},
+    )
+
+    recovered = next(item for item in items if item["unit_id"] == "recovered")
+    assert recovered["text"] == (full["text"] if full_fits else excerpt["text"])
+    assert bool(recovered.get("excerpt")) is not full_fits
+    assert {item["unit_id"] for item in items} == {
+        "earlier_fact",
+        "original",
+        "owner_fact",
+        "second_event",
+        "recovered",
+    }
+    assert len(items) == 5
+    assert support["text"] in render_context(items)
+    assert owner_support["text"] in render_context(items)
+    assert context_token_count(render_context(items)) <= cap
+    assert oversized is False
+
+
 @pytest.mark.parametrize("method", ["oam-unicode-quarter-v1", "o200k_base"])
 def test_recorded_replay_reassembles_the_same_grouped_context(evidence_rows, method):
     from oam.debug.traces import TraceRepository

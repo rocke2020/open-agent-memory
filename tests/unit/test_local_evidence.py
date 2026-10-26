@@ -602,3 +602,107 @@ def test_unavailable_dense_retrieval_preserves_degraded_lexical_recall():
     assert [row["unit_id"] for row in result["items"]] == ["partial"]
     assert result["diagnostics"]["degraded"] == ["embedding"]
     assert result["diagnostics"]["local_context"]["gate_status"] == "dense_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("mode", "query", "earlier_text"),
+    [
+        ("fast", "Which workshops interest me?", "I want a workshop on wood carving."),
+        ("normal", "Suggest activities for my trip.", "I would like a guided kayak trip."),
+    ],
+)
+def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating(
+    mode, query, earlier_text
+):
+    support = original("support", 8)
+    root = fact("root", support)
+    earlier = original("earlier", 0)
+    earlier["text"] = earlier_text
+    bridge = original("bridge", 6)
+    bulky = original("bulky", 2, "assistant")
+    bulky["citations"][0]["source_id"] = "separate_source"
+    bulky["text"] = "An independently retrieved long assistant discussion. " * 100
+    reply = original("recovered_reply", 1, "assistant")
+    weak_user = original("weak_user", 0)
+    weak_user["citations"][0]["source_id"] = "weak_source"
+    weak = fact("weak", weak_user)
+    assistant = original("assistant", 1, "assistant")
+    assistant["citations"][0]["source_id"] = "assistant_source"
+    assistant_fact = fact("assistant_fact", assistant)
+    stale_user = original("stale_user", 0, version=2)
+    stale = fact("stale", stale_user)
+
+    class RecoveryRepository(SourceRepository):
+        def dense(self, vector, limit):
+            return [
+                {"unit_id": "root", "kind": "fact", "score": 0.8},
+                {
+                    "unit_id": "bulky",
+                    "kind": "passage",
+                    "score": 0.7,
+                    "source_id": "separate_source",
+                    "source_version": 1,
+                    "passage_id": "bulky",
+                },
+            ]
+
+        def lexical(self, query, limit):
+            return [
+                {"unit_id": node, "strict_match": False}
+                for node in ("weak", "assistant_fact", "stale", "recovered_reply")
+            ]
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            assert source_keys == (("conversation", 1),)
+            assert limit == getattr(CONFIG.search, mode).source_seed_results
+            assert "earlier" not in excluded_ids
+            return [{"unit_id": "earlier"}]
+
+    class RecoveryService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RecoveryRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    values["search"][mode].update(
+        partial_match_gate="user_fact_exchange",
+        adjacent_user_context=False,
+        context_max_tokens=context_token_count(render_context([root, support, bulky])),
+    )
+    result = RecoveryService(
+        [
+            root,
+            support,
+            earlier,
+            bridge,
+            bulky,
+            reply,
+            weak,
+            weak_user,
+            assistant_fact,
+            assistant,
+            stale,
+            stale_user,
+        ],
+        config=type(CONFIG).model_validate(values),
+    ).search(object(), SearchRequest(query=query, recall_level=mode))
+    selected = {row["unit_id"] for row in result["items"]}
+    assert {"root", "support", "earlier"} <= selected
+    assert earlier_text in result["context"]
+    assert "bulky" not in selected
+    assert (
+        not {
+            "recovered_reply",
+            "weak",
+            "weak_user",
+            "assistant_fact",
+            "assistant",
+            "stale",
+            "stale_user",
+        }
+        & selected
+    )
+    assert result["diagnostics"]["generative_calls"] == 0
+    assert result["context_tokens"] <= getattr(CONFIG.search, mode).context_max_tokens
+    assert result["diagnostics"]["local_context"]["window_originals"] == 0
+    assert result["diagnostics"]["local_context"]["selected_recovered_user_originals"] == 1
