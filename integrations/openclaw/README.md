@@ -40,7 +40,7 @@ Failed/skipped executions, reported execution errors, host-suppressed output and
 
 Each request has a stable content-derived idempotency key and validates its OAM acceptance receipt. Runtime-only metadata does not change report content or identity. Reconciliation stops when its host snapshot is cancelled. There is no local queue or automatic retry. `cron definition` and `cron report` logs correlate the job, OAM operation/source and request duration; `cron skipped` reports the filtering reason, while warnings report capture failures without credentials or content. An accepted receipt means OAM owns processing; verify source readiness, extracted claims and cited recall separately. Enabling capture does not grant cron sessions access to personal recall or removal tools. Filtering itself leaves stored history unchanged; explicitly authorized cleanup uses OAM's normal source/removal APIs.
 
-The plugin sends `maxContextTokens` as the learned-text `max_tokens` request budget and separately checks the complete returned `context_tokens` against the same host limit. Citations, metadata and required originals can take a valid server result above that limit; automatic recall then omits the result and explicit search reports an error instead of injecting oversized context.
+Set `maxContextTokens` to the service’s largest recall context limit when the agent can accommodate it; the default is 1024 and the maximum is 32768. The plugin checks the complete returned `context_tokens` against its `maxContextTokens` host limit. Citations, metadata and required originals can take a valid server result above that limit; automatic recall then omits the result and explicit search reports an error instead of injecting oversized context.
 
 ## Memory removal
 

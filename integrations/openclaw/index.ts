@@ -6,6 +6,7 @@ const TOOL_RECALL_TIMEOUT_MS = 12_000;
 const REMOVE_TIMEOUT_MS = 12_000;
 const CAPTURE_TIMEOUT_MS = 12_000;
 const DEFAULT_CONTEXT_TOKENS = 1_024;
+const MAX_RESPONSE_CHARS = 1_048_576;
 const MAX_PENDING_LOCAL_TURNS = 128;
 const DEFAULT_TARGET_AGENT_ID = 'main';
 const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
@@ -52,8 +53,8 @@ function configured(raw, registrationMode) {
     }
   }
   const maxContextTokens = raw.maxContextTokens ?? DEFAULT_CONTEXT_TOKENS;
-  if (!Number.isInteger(maxContextTokens) || maxContextTokens < 1 || maxContextTokens > 8_192) {
-    throw new Error('maxContextTokens must be between 1 and 8192');
+  if (!Number.isInteger(maxContextTokens) || maxContextTokens < 1 || maxContextTokens > 32_768) {
+    throw new Error('maxContextTokens must be between 1 and 32768');
   }
   return { ...raw, baseUrl: baseUrl.origin, targetAgentId: targetAgentId.trim().toLowerCase(), maxContextTokens };
 }
@@ -131,14 +132,14 @@ async function request(config, path, body, timeoutMs, idempotencyKey, requestSig
   }
   if (!response.headers.get('content-type')?.startsWith('application/json')) throw new Error('invalid content type');
   const text = await response.text();
-  if (text.length > 256_000) throw new Error('oversized response');
+  if (text.length > MAX_RESPONSE_CHARS) throw new Error('oversized response');
   return JSON.parse(text);
 }
 
 function recallBody(config, query, recallLevel) {
   return {
     user_id: config.userId, query, recall_level: recallLevel,
-    max_tokens: config.maxContextTokens, allow_partial: false,
+    allow_partial: false,
   };
 }
 

@@ -629,7 +629,7 @@ test('authorized direct turn recalls cited context and captures exact keyed huma
   assert.deepEqual(requests.map((request) => request.path), ['/v1/recall', '/v1/retain']);
   assert.equal(requests[0].body.user_id, 'u1');
   assert.equal(requests[0].body.recall_level, 'fast');
-  assert.equal(requests[0].body.max_tokens, 1024);
+  assert.equal('max_tokens' in requests[0].body, false);
   assert.equal('max_context_tokens' in requests[0].body, false);
   assert.equal(requests[0].body.query, 'What does Lin prefer?');
   assert.deepEqual(requests[1].body.messages.map(({ role, content }) => ({ role, content })), [
@@ -831,10 +831,29 @@ test('explicit search uses the fixed user and defaults to normal recall', async 
   assert.deepEqual(requests.map(({ path }) => path), ['/v1/recall']);
   assert.equal(requests[0].body.user_id, 'u1');
   assert.equal(requests[0].body.recall_level, 'normal');
-  assert.equal(requests[0].body.max_tokens, 1024);
+  assert.equal('max_tokens' in requests[0].body, false);
   assert.equal('max_context_tokens' in requests[0].body, false);
   assert.equal(requests[0].body.query, 'Lin preference');
   assert.equal('include_profile' in requests[0].body, false);
+});
+
+test('plugin accepts the service normal recall context ceiling', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../openclaw.plugin.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.configSchema.properties.maxContextTokens.maximum, 32768);
+  const { tool } = await installedPlugin({ maxContextTokens: 32768 });
+  assert.ok(tool);
+});
+
+test('accepts a complete response within the configured context ceiling', async () => {
+  const { tool } = await installedPlugin({ maxContextTokens: 32768 });
+  const context = 'memory evidence '.repeat(8000);
+  recallResponse = { context, context_tokens: Math.ceil(context.length / 4), items: [{ text: context }] };
+  try {
+    const search = tool.create({ agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7', conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {} });
+    const result = await search.execute('large', { query: 'memory' });
+    assert.equal(result.isError, undefined);
+    assert.ok(result.content[0].text.includes(context.trim()));
+  } finally { recallResponse = undefined; }
 });
 
 test('host context ceiling rejects valid server results above its injection budget', async () => {
