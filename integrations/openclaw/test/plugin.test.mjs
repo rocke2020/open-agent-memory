@@ -135,6 +135,26 @@ const cronJob = {
   state: { lastRunAtMs: 1780000002000, lastRunStatus: 'ok', lastDurationMs: 123 },
 };
 
+test('cron records execution status without generated report content', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({ captureCronJobs: true });
+  await hooks.cron_changed({action:'finished',jobId:cronJob.id,job:cronJob,runAtMs:1780000002000,status:'error',summary:'PRIVATE GENERATED REPORT',error:'PRIVATE ERROR'}, {});
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].body.messages[0].content, /job-news/);
+  assert.match(requests[0].body.messages[0].content, /error/);
+  assert.doesNotMatch(requests[0].body.messages[0].content, /PRIVATE/);
+});
+
+test('cron run retries reuse identity after a job is renamed', async () => {
+  requests.length = 0;
+  const { hooks } = await installedPlugin({captureCronJobs:true});
+  const event = {action:'finished',jobId:cronJob.id,job:cronJob,runAtMs:1780000002000,status:'ok'};
+  await hooks.cron_changed(event, {});
+  await hooks.cron_changed({...event,job:{...cronJob,name:'Renamed job'}}, {});
+  assert.deepEqual(requests[0].body,requests[1].body);
+  assert.equal(requests[0].headers['idempotency-key'],requests[1].headers['idempotency-key']);
+});
+
 test('cron reconciliation learns enabled user tasks and skips inactive or maintenance jobs', async () => {
   requests.length = 0;
   const { hooks } = await installedPlugin({ captureCronJobs: true });
@@ -149,7 +169,7 @@ test('cron reconciliation learns enabled user tasks and skips inactive or mainte
         { ...cronJob, id: 'foreign-job', agentId: 'research' }, { ...cronJob, id: 'unknown-job', agentId: undefined }];
     } }),
   });
-  assert.equal(requests.length, 1);
+  assert.equal(requests.length, 2);
   assert.match(requests[0].body.messages[0].content, /Read the daily news/);
   assert.equal(requests[0].body.messages[0].learning_eligible, true);
   assert.ok(requests.every((r) => !JSON.stringify(r.body).includes('model-secret')));
@@ -178,7 +198,8 @@ test('cron definitions keep purpose and schedule without internal metadata or wo
   assert.match(content, /Daily news/);
   assert.match(content, /Read the daily news/);
   assert.match(content, /1800000/);
-  assert.doesNotMatch(content, /job-news|agentId|session:news|wakeMode|anchorMs|staggerMs|model-secret|science news/);
+  assert.match(content, /job-news/);
+  assert.doesNotMatch(content, /agentId|session:news|wakeMode|anchorMs|staggerMs|model-secret|science news/);
 });
 
 test('cron tasks without descriptions preserve their name and timing without learning payload prompts', async () => {
@@ -208,97 +229,18 @@ test('cron command and script tasks never learn executable payloads', async () =
   }
 });
 
-test('cron execution and delivery diagnostics are never archived as memory', async () => {
+test('cron status captures only recurring jobs and never report or diagnostic text', async () => {
   requests.length = 0;
   const { hooks } = await installedPlugin({ captureCronJobs: true });
-  for (const outcome of [{ status: 'error' }, { status: 'ok', deliveryError: 'Recipient unavailable' }]) {
-    await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: { ...cronJob, enabled: false },
-      runAtMs: 1780000002000, summary: 'NO_REPLY', ...outcome }, {});
+  for (const status of ['ok', 'error', 'skipped']) {
+    await hooks.cron_changed({action:'finished',jobId:cronJob.id,job:cronJob,runAtMs:1780000002000,status,summary:'PRIVATE OUTPUT',error:'PRIVATE DIAGNOSTIC'}, {});
   }
-  assert.equal(requests.length, 0);
-});
-
-test('cron successful report content enters learning as assistant-authored text', async () => {
-  requests.length = 0;
-  const { hooks } = await installedPlugin({ captureCronJobs: true });
-  const event = { action: 'finished', jobId: cronJob.id, job: cronJob, agentId: 'main',
-    runAtMs: 1780000002000, durationMs: 123, status: 'ok', completionStatus: 'succeeded',
-    deliveryStatus: 'delivered', sessionId: 'news-session', runId: 'news-run',
-    summary: 'Research result: use <tag> literally.\nSource https://example.com/report' };
-  await hooks.cron_changed(event, {});
-  assert.equal(requests.length, 1);
-  const [report] = requests;
-  assert.equal(report.body.input_type, 'interaction');
-  assert.equal(report.path, '/v1/retain');
-  assert.equal(report.body.user_id, 'u1');
-  assert.equal(report.body.messages.length, 1);
-  const message = report.body.messages[0];
-  assert.equal(message.role, 'assistant');
-  assert.equal(message.learning_eligible, true);
-  assert.equal(message.content, event.summary);
-  assert.doesNotMatch(message.content, /news-run|news-session|jobId|durationMs|deliveryStatus|completionStatus/);
-  assert.equal(message.event_time, '2026-05-28T20:26:42.000Z');
-  await hooks.cron_changed(event, {});
-  assert.deepEqual(requests[1].body, report.body);
-  assert.equal(requests[1].headers['idempotency-key'], report.headers['idempotency-key']);
-});
-
-test('cron transient task definitions are skipped while their successful reports can be learned', async () => {
-  requests.length = 0;
-  const { hooks } = await installedPlugin({ captureCronJobs: true });
-  for (const schedule of [{ kind: 'at', at: '2026-05-28T20:30:00Z' },
-    { kind: 'on-exit', command: 'wait-for-build' }, { kind: 'stream', command: ['watch-build'] }]) {
-    const job = { ...cronJob, schedule };
-    for (const action of ['added', 'updated', 'removed']) {
-      await hooks.cron_changed({ action, jobId: job.id, job }, {});
-    }
-    assert.equal(requests.length, 0);
+  await hooks.cron_changed({action:'finished',jobId:cronJob.id,job:{...cronJob,schedule:{kind:'at',at:'2026-05-28T20:30:00Z'}},runAtMs:1780000002000,status:'ok'}, {});
+  assert.equal(requests.length, 3);
+  for (const request of requests) {
+    assert.equal(request.body.messages[0].role, 'user');
+    assert.doesNotMatch(request.body.messages[0].content, /PRIVATE/);
   }
-  await hooks.cron_changed({ action: 'finished', jobId: cronJob.id,
-    job: { ...cronJob, schedule: { kind: 'at', at: '2026-05-28T20:30:00Z' } },
-    runAtMs: 1780000002000, status: 'ok', summary: 'The completed analysis is available at https://example.com/result.' }, {});
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].body.messages[0].role, 'assistant');
-});
-
-test('cron unsuccessful or host-suppressed output is skipped despite nonblank summary', async () => {
-  requests.length = 0;
-  const { hooks } = await installedPlugin({ captureCronJobs: true });
-  for (const outcome of [{ status: 'error', error: 'Provider unavailable' }, { status: 'skipped' },
-    { status: 'ok', error: 'Incomplete execution' },
-    ...['empty', 'silent', 'heartbeat', 'channel_transform'].map((deliverySuppressionReason) => ({ status: 'ok', deliverySuppressionReason }))]) {
-    await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: cronJob,
-      runAtMs: 1780000002000, summary: 'A nonblank status message.', ...outcome }, {});
-  }
-  assert.equal(requests.length, 0);
-});
-
-test('cron execution-success report is learned even when delivery or overall completion failed', async () => {
-  requests.length = 0;
-  const { hooks } = await installedPlugin({ captureCronJobs: true });
-  await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: { ...cronJob, enabled: false },
-    runAtMs: 1780000002000, status: 'ok', completionStatus: 'failed', deliveryStatus: 'not-delivered',
-    deliveryError: 'Recipient unavailable', summary: 'A complete report with source https://example.com/source.' }, {});
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].body.messages[0].learning_eligible, true);
-  assert.ok(requests[0].body.messages[0].content.endsWith('https://example.com/source.'));
-  assert.doesNotMatch(requests[0].body.messages[0].content, /Recipient unavailable/);
-});
-
-test('cron routine outcomes and standalone host control replies make no OAM request', async () => {
-  requests.length = 0;
-  const { hooks } = await installedPlugin({ captureCronJobs: true });
-  for (const summary of [undefined, '', '  ', 'HEARTBEAT_OK', 'NO_REPLY', ' NO_REPLY\nNO_REPLY ']) {
-    for (const status of ['ok', 'skipped']) {
-      await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: cronJob,
-        runAtMs: 1780000002000, status, summary, delivered: true, durationMs: 123 }, {});
-    }
-  }
-  assert.equal(requests.length, 0);
-  await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: cronJob,
-    runAtMs: 1780000002000, status: 'ok', summary: 'The report explains how NO_REPLY works.' }, {});
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].body.input_type, 'interaction');
 });
 
 test('cron definitions ignore runtime state and distinguish removed jobs', async () => {
@@ -317,20 +259,17 @@ test('cron definitions ignore runtime state and distinguish removed jobs', async
   assert.match(requests[3].body.messages[0].content, /disabled/);
 });
 
-test('cron reconciliation never backfills transient execution failures', async () => {
+test('cron reconciliation retains the last observable failure without diagnostics', async () => {
   requests.length = 0;
   const { hooks } = await installedPlugin({ captureCronJobs: true });
-  await hooks.cron_changed({ action: 'finished', jobId: cronJob.id, job: cronJob,
-    runAtMs: cronJob.state.lastRunAtMs, durationMs: 123, status: 'error', error: 'Provider unavailable',
-    completionStatus: 'failed', sessionId: 'news-session', sessionKey: 'agent:main:news', runId: 'live-run' }, {});
-  assert.equal(requests.length, 0);
-  await hooks.cron_reconciled({ reason: 'reload', enabled: true }, {
-    getCron: () => ({ async list() { return [{ ...cronJob,
-      state: { ...cronJob.state, lastRunStatus: 'error', lastError: 'Provider unavailable' } }]; } }),
+  const event = {action:'finished',jobId:cronJob.id,job:cronJob,runAtMs:cronJob.state.lastRunAtMs,status:'error',error:'PRIVATE ERROR'};
+  await hooks.cron_changed(event, {});
+  await hooks.cron_reconciled({reason:'reload',enabled:true}, {
+    getCron: () => ({async list(){return [{...cronJob,state:{...cronJob.state,lastRunStatus:'error',lastError:'PRIVATE ERROR'}}];}}),
   });
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].body.messages[0].role, 'user');
-  assert.doesNotMatch(requests[0].body.messages[0].content, /Provider unavailable/);
+  assert.equal(requests.length, 3);
+  assert.equal(requests[0].headers['idempotency-key'], requests[2].headers['idempotency-key']);
+  assert.doesNotMatch(JSON.stringify(requests), /PRIVATE ERROR/);
 });
 
 test('cron capture is opt-in and rejects foreign, malformed and cancelled events', async () => {
@@ -354,7 +293,7 @@ test('cron capture is opt-in and rejects foreign, malformed and cancelled events
   assert.equal(requests.length, 0);
 });
 
-test('cron report learning rejects failed or invalid acceptance receipts', async () => {
+test('cron status capture rejects failed or invalid acceptance receipts', async () => {
   const event = { action: 'finished', jobId: cronJob.id, job: cronJob,
     runAtMs: 1780000002000, status: 'ok', summary: 'A completed result' };
   try {
@@ -368,7 +307,7 @@ test('cron report learning rejects failed or invalid acceptance receipts', async
       await hooks.cron_changed(event, {});
       assert.deepEqual(requests.map((r) => r.body.input_type), ['interaction']);
       assert.equal(logs.length, 1);
-      assert.match(logs[0], /cron report job=job-news/);
+      assert.match(logs[0], /cron run job=job-news/);
       assert.equal(logs.filter((line) => line.includes('operation=')).length, 0);
       assert.ok(logs.every((line) => !line.includes('private-key')));
     }
@@ -376,7 +315,7 @@ test('cron report learning rejects failed or invalid acceptance receipts', async
     retainResponses = {};
     const { hooks } = await installedPlugin({ captureCronJobs: true });
     await hooks.cron_changed({ ...event, summary: undefined }, {});
-    assert.equal(requests.length, 0);
+    assert.equal(requests.length, 1);
   } finally {
     retainResponses = {};
   }

@@ -21,8 +21,6 @@ function ownedJob(config, job) {
 
 const USER_TASK_PAYLOADS = new Set(['agentTurn', 'systemEvent', 'command', 'script']);
 const RECURRING_SCHEDULES = new Set(['cron', 'every']);
-const SUPPRESSED_RESULTS = new Set(['empty', 'silent', 'heartbeat', 'channel_transform']);
-const CONTROL_RESULT = /^(?:HEARTBEAT_OK|NO_REPLY)(?:\s+(?:HEARTBEAT_OK|NO_REPLY))*$/i;
 
 function text(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -66,6 +64,7 @@ export function registerCronCapture(api, config, retain, safeError) {
       return;
     }
     const content = `OpenClaw cron job definition (historical snapshot):\n${JSON.stringify({
+      id: job.id,
       state: state === 'removed' ? 'removed' : job.enabled === true ? 'enabled' : 'disabled',
       name: text(job.name) || undefined, purpose: text(job.description) || undefined,
       schedule: selected(job.schedule, ['kind', 'expr', 'tz', 'at', 'everyMs']),
@@ -77,29 +76,17 @@ export function registerCronCapture(api, config, retain, safeError) {
   }
 
   async function finished(job, event, signal) {
+    if (!RECURRING_SCHEDULES.has(job.schedule?.kind)) return;
     const eventTime = timestamp(event.runAtMs);
     if (!eventTime || !['ok', 'error', 'skipped'].includes(event.status)) {
       api.logger.warn(`oam-openclaw: cron outcome job=${job.id} skipped invalid run metadata`);
       return;
     }
-    if (event.status !== 'ok' || text(event.error)) {
-      skipped(job, 'unsuccessful-run');
-      return;
-    }
-    if (SUPPRESSED_RESULTS.has(event.deliverySuppressionReason)) {
-      skipped(job, 'suppressed-result');
-      return;
-    }
-    const summary = text(event.summary);
-    if (summary && !CONTROL_RESULT.test(summary)) {
-      await capture(job, 'report', {
-        input_type: 'interaction', user_id: config.userId,
-        messages: [{ role: 'assistant', learning_eligible: true, event_time: eventTime,
-          content: event.summary }],
-      }, signal);
-    } else {
-      skipped(job, summary ? 'control-result' : 'routine-outcome');
-    }
+    const content = `OpenClaw scheduled job run: ${JSON.stringify({id:job.id, status:event.status})}`;
+    await capture(job, 'run', {
+      input_type: 'interaction', user_id: config.userId,
+      messages: [{ role:'user', learning_eligible:true, event_time:eventTime, content }],
+    }, signal);
   }
 
   api.on('cron_reconciled', async (_event, ctx) => {
