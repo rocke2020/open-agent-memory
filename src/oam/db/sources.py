@@ -111,7 +111,7 @@ WHERE tenant_id = %s
 """.strip()
 
 LOCK_USER_SQL = """
-SELECT accepted_seq
+SELECT accepted_seq, index_generation_id
 FROM users
 WHERE tenant_id = %s AND user_id = %s AND state = 'active'
 FOR UPDATE
@@ -401,11 +401,15 @@ class SourceRepository:
                 command = self._assign_revision(cursor, authority, command)
 
             accepted_seq = int(user_row[0]) + 1
+            command = replace(command, generation_id=user_row[1] or command.generation_id)
             cursor.execute(
-                "UPDATE users SET accepted_seq = %s, policy_epoch = policy_epoch + %s "
+                "UPDATE users SET accepted_seq = %s, "
+                "index_generation_id = COALESCE(index_generation_id, %s), "
+                "policy_epoch = policy_epoch + %s "
                 "WHERE tenant_id = %s AND user_id = %s",
                 (
                     accepted_seq,
+                    command.generation_id,
                     int(command.expected_active_version is not None),
                     authority.tenant_id,
                     authority.user_id,

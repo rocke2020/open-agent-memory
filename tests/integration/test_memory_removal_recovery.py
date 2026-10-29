@@ -275,7 +275,7 @@ async def test_recover_unknown_model_outcome_requires_reconciliation_without_mut
 
 
 @pytest.mark.parametrize("stale", ["source", "generation"])
-async def test_recover_does_not_retarget_stale_failed_repair(removal_database, stale):
+async def test_recover_checks_source_and_allows_old_generation(removal_database, stale):
     from test_memory_removal import RepairModels, _run_repair
 
     database = removal_database
@@ -306,15 +306,16 @@ async def test_recover_does_not_retarget_stale_failed_repair(removal_database, s
                 "ORDER BY work_unit_id"
             ).fetchall()
         response = await client.post(f"/v1/users/{USER}/operations/{operation_id}/recover")
-        assert response.status_code == 409, response.text
+        assert response.status_code == (409 if stale == "source" else 200), response.text
         with _content(database.dsn, database.tenant) as connection:
-            assert (
-                connection.execute(
-                    "SELECT work_unit_id,status,attempts_remaining,fence FROM work_units "
-                    "ORDER BY work_unit_id"
-                ).fetchall()
-                == before
-            )
+            after = connection.execute(
+                "SELECT work_unit_id,status,attempts_remaining,fence FROM work_units "
+                "ORDER BY work_unit_id"
+            ).fetchall()
+            if stale == "source":
+                assert after == before
+            else:
+                assert any(row[1] == "queued" for row in after)
 
 
 async def test_recovery_queue_cap_rolls_back_new_roots_and_allows_shared_root(removal_database):
@@ -343,7 +344,6 @@ async def test_recovery_queue_cap_rolls_back_new_roots_and_allows_shared_root(re
             principal = connection.execute(
                 "SELECT principal_id FROM operations WHERE operation_id=%s", (operation_id,)
             ).fetchone()[0]
-            generation = connection.execute("SELECT index_generation_id FROM users").fetchone()[0]
             connection.execute(
                 "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,kind,"
                 "schema_version,status,plan_sealed) "
@@ -367,7 +367,6 @@ async def test_recovery_queue_cap_rolls_back_new_roots_and_allows_shared_root(re
                     attempts_remaining=load_config(
                         ROOT / "configs/oam.yaml"
                     ).config.retry.max_attempts,
-                    generation_id=generation,
                     max_pending_per_user=1,
                 )
             assert (
@@ -389,7 +388,6 @@ async def test_recovery_queue_cap_rolls_back_new_roots_and_allows_shared_root(re
                 authority,
                 operation_id,
                 attempts_remaining=load_config(ROOT / "configs/oam.yaml").config.retry.max_attempts,
-                generation_id=generation,
                 max_pending_per_user=1,
             )
             assert recovered.operation_id == operation_id
@@ -411,8 +409,7 @@ async def test_profile_coverage_keeps_failed_repair_until_its_own_recovery_compl
             "INSERT INTO insight_support VALUES (%s,%s,%s,2,%s,1)",
             (database.tenant, USER, INSIGHT, OTHER_MEMORIES[1]),
         )
-        generation = connection.execute("SELECT index_generation_id FROM users").fetchone()[0]
-    parameters = (generation, generation, generation, database.tenant, USER, generation, generation)
+    parameters = (database.tenant, USER)
     async with _client(database.headers) as client:
         first = await client.delete(f"/v1/users/{USER}/memories/{REMOVED_MEMORY}")
         operation_id = first.json()["operation_id"]

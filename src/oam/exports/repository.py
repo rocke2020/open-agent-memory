@@ -284,7 +284,7 @@ class ExportRepository:
                 "JOIN source_versions v USING(tenant_id,user_id,source_id,source_version) "
                 "JOIN users owner ON (owner.tenant_id,owner.user_id)=(p.tenant_id,p.user_id) "
                 "WHERE p.tenant_id=%s AND p.user_id=%s AND p.visible_to IS NULL "
-                "AND p.generation_id=owner.index_generation_id AND e.status='active' "
+                "AND e.status='active' "
                 "AND s.status='active' AND v.status='active' "
                 "AND s.active_version=e.source_version ORDER BY p.passage_id",
                 key,

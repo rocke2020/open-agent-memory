@@ -170,7 +170,7 @@ async def test_corroborating_increment_reuses_embedding_and_retains_old_support(
         assert final["published_count"] == 0
 
 
-@pytest.mark.parametrize("race", ["revision", "support", "direct_removal", "generation"])
+@pytest.mark.parametrize("race", ["revision", "support", "direct_removal"])
 async def test_stale_publication_keeps_previous_revision_and_seeds_retryable(
     core_database, monkeypatch, race
 ):
@@ -241,12 +241,6 @@ async def test_stale_publication_keeps_previous_revision_and_seeds_retryable(
                         "UPDATE operations SET removal_target_kind='insight',removal_target_id=%s "
                         "WHERE tenant_id=%s AND operation_id=%s",
                         (original_id, tenant, first["operation_id"]),
-                    )
-                else:
-                    concurrent.execute(
-                        "UPDATE users SET index_generation_id='changed-generation' "
-                        "WHERE tenant_id=%s AND user_id='scope'",
-                        (tenant,),
                     )
             return publish(store, connection, **kwargs)
 

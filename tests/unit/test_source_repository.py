@@ -81,7 +81,7 @@ def _command(**changes: object) -> sources.AcceptSource:
 def test_accept_original_commits_bytes_evidence_receipt_and_work_in_one_transaction() -> None:
     connection = RecordingConnection(
         [
-            (4,),  # current accepted sequence under lock
+            (4, None),  # current accepted sequence and namespace under lock
             None,  # no prior idempotent operation
             ("source-1",),  # source activation succeeded
         ]
@@ -173,7 +173,7 @@ def test_resource_revision_rejects_stale_expected_version_before_admission() -> 
 
 
 def test_revision_advances_policy_epoch_with_source_activation() -> None:
-    connection = RecordingConnection([(4,), None, (1, "text/plain", b"first"), ("source-1",)])
+    connection = RecordingConnection([(4, None), None, (1, "text/plain", b"first"), ("source-1",)])
     command = _command(
         source_version=None,
         expected_active_version=1,
@@ -190,7 +190,7 @@ def test_revision_advances_policy_epoch_with_source_activation() -> None:
     ]
     assert len(updates) == 1
     assert "policy_epoch" in updates[0][0]
-    assert updates[0][1][1] == 1
+    assert updates[0][1][2] == 1
 
 
 def test_delete_source_returns_distinct_cleanup_receipt_for_all_versions() -> None:

@@ -263,7 +263,6 @@ class OperationRepository:
         operation_id: str,
         *,
         attempts_remaining: int,
-        generation_id: str,
         max_pending_per_user: int,
     ) -> OperationRecord:
         """Rearm failed removal maintenance without replaying removal or extraction."""
@@ -316,7 +315,7 @@ class OperationRepository:
                     raise RemovalRecoveryConflict("cancelled maintenance is not resumed")
                 return self._record(original)
             cleanup_ids = [row[0] for row in work if row[1] == operation_id]
-            for _unit_id, owner_id, stage, _, unit_generation, dependencies in failed:
+            for _unit_id, owner_id, stage, _, _unit_generation, dependencies in failed:
                 record = records[owner_id]
                 if record.cancellation_revision:
                     raise RemovalRecoveryConflict("cancelled maintenance is not resumed")
@@ -333,8 +332,6 @@ class OperationRepository:
                     or any(item.get("removal_operation_id") != operation_id for item in repairs)
                 ):
                     raise RemovalRecoveryConflict("linked repair identity does not match")
-                if unit_generation != generation_id or user[0] != generation_id:
-                    raise RemovalRecoveryConflict("repair generation is no longer current")
                 cursor.execute(
                     "SELECT 1 FROM sources s JOIN source_versions v "
                     "USING(tenant_id,user_id,source_id) WHERE s.tenant_id=%s AND s.user_id=%s "

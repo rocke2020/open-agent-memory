@@ -368,12 +368,14 @@ class RecallRepository:
         rows = self._execute(
             "INSERT INTO traces(tenant_id,user_id,trace_id,read_seq,generation_id,"
             "policy_epoch,decisions,content,expires_at) "
-            "SELECT tenant_id,user_id,%s,published_seq,index_generation_id,policy_epoch,"
+            "SELECT tenant_id,user_id,%s,published_seq,"
+            "COALESCE(index_generation_id,%s),policy_epoch,"
             "%s,%s,clock_timestamp()+(%s*interval '1 day') FROM users "
             "WHERE tenant_id=%s AND user_id=%s AND state='active' AND policy_epoch=%s "
             "FOR SHARE RETURNING trace_id",
             (
                 trace_id,
+                decisions.get("generation_id"),
                 Jsonb(decisions),
                 Jsonb(result),
                 self.config.trace.metadata_retention_days,
@@ -398,8 +400,7 @@ class RecallRepository:
             "SELECT DISTINCT o.tenant_id,o.user_id,o.operation_id,o.source_id,"
             "o.source_version,o.status,o.stage_state,o.created_at "
             "FROM active_user sc JOIN work_units w ON "
-            "(w.tenant_id,w.user_id,w.generation_id)="
-            "(sc.tenant_id,sc.user_id,sc.index_generation_id) "
+            "(w.tenant_id,w.user_id)=(sc.tenant_id,sc.user_id) "
             "JOIN operations o ON (o.tenant_id,o.user_id,o.operation_id)="
             "(w.tenant_id,w.user_id,w.operation_id) WHERE o.kind<>'consolidate'), "
             "latest_operations AS MATERIALIZED ("
@@ -854,7 +855,8 @@ class RecallRepository:
         return self._execute(
             "WITH filtered AS NOT MATERIALIZED ("
             + ELIGIBLE_PASSAGE_UNITS
-            + ") SELECT u.unit_id,u.passage_id,u.source_id,u.source_version,u.locator "
+            + ") SELECT u.unit_id,u.passage_id,u.source_id,u.source_version,"
+            "u.generation_id,u.locator "
             "FROM filtered u WHERE u.kind='passage' "
             "AND u.source_id=ANY(%(source_ids)s) "
             "ORDER BY u.source_id,u.source_version,u.ordinal,u.unit_id",

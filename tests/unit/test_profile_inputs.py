@@ -15,7 +15,7 @@ from oam.profiles.inputs import PENDING_PROFILE_INPUTS_SQL
     [
         (1, "gen", "true", []),
         (2, "gen", "true", [("chat", 1, "failed")]),
-        (1, "old", "true", [("chat", 1, "failed")]),
+        (1, "old", "true", []),
         (1, "gen", "false", [("chat", 1, "failed")]),
     ],
 )
@@ -42,7 +42,7 @@ def test_profile_coverage_recognizes_only_current_source_insight_retry(
             "INSERT INTO work_units VALUES('tenant','alice','failed','gen','failed_terminal');"
         )
         query = PENDING_PROFILE_INPUTS_SQL.replace("%s", "?")
-        parameters = ("gen", "gen", "gen", "tenant", "alice", "gen", "gen")
+        parameters = ("tenant", "alice")
         assert connection.execute(query, parameters).fetchall() == [("chat", 1, "failed")]
         # PostgreSQL's ->> yields text; use its literal text value in this SQL boundary fixture.
         connection.execute(
@@ -73,7 +73,7 @@ def test_profile_coverage_recognizes_only_current_source_insight_retry(
         ),
         ({"operation_status": "succeeded", "work_status": "succeeded"}, []),
         ({"created_at": 0}, [("chat", 1, "pending")]),
-        ({"generation": "old"}, []),
+        ({"generation": "old"}, [("chat", 1, "pending")]),
         ({"version": 2}, []),
         ({"tenant": "other"}, []),
         ({"user": "other"}, []),
@@ -137,7 +137,7 @@ def test_profile_coverage_preserves_each_unresolved_repair(repair, expected) -> 
                 "INSERT INTO work_units VALUES('tenant','alice','repair-b','gen','succeeded')"
             )
         query = PENDING_PROFILE_INPUTS_SQL.replace("%s", "?")
-        parameters = ("gen", "gen", "gen", "tenant", "alice", "gen", "gen")
+        parameters = ("tenant", "alice")
         assert connection.execute(query, parameters).fetchall() == expected
         if repair.get("independent_success"):
             connection.execute(
@@ -544,10 +544,6 @@ def test_profile_read_uses_stored_collection_generation_and_keeps_support_checks
         assert result["content"] == snapshot["content"]
         assert result["references"] == snapshot["references"]
         assert result["freshness"] == "current"
-    with pytest.raises(ValueError, match="index generation changed"):
-        service.ProfileService(config, pool).refresh(
-            authority(frozenset({"memory:read", "memory:append"}))
-        )
 
 
 @pytest.mark.parametrize("profile_resources", [False, True])

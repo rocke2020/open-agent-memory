@@ -65,14 +65,15 @@ def _validate_entity_records(records: list[dict], generation: str | None) -> Non
         if record["kind"] == "support"
     }
     for record in selected:
-        if record["generation_id"] != generation:
-            raise ExportValidationError("entity generation differs from manifest")
+        if not isinstance(record["generation_id"], str) or not record["generation_id"].strip():
+            raise ExportValidationError("entity generation is missing")
     for entity in entities.values():
         if not isinstance(entity["canonical_name"], str) or not entity["canonical_name"].strip():
             raise ExportValidationError("entity canonical name is invalid")
     for name_record in names.values():
         if (
             name_record["entity_id"] not in entities
+            or name_record["generation_id"] != entities[name_record["entity_id"]]["generation_id"]
             or name_record["name_kind"] not in {"canonical", "alias"}
             or any(
                 not isinstance(name_record[key], str) or not name_record[key].strip()
@@ -93,9 +94,10 @@ def _validate_entity_records(records: list[dict], generation: str | None) -> Non
         if (
             name is None
             or name["entity_id"] != support["entity_id"]
+            or name["generation_id"] != support["generation_id"]
             or name["name_kind"] != support["support_kind"]
             or memory is None
-            or memory.get("generation_id") != generation
+            or memory.get("generation_id") != support["generation_id"]
             or (support["memory_id"], support["passage_id"]) not in fact_support
             or passage is None
             or not isinstance(passage.get("text"), str)
@@ -135,8 +137,9 @@ def _validate_entity_records(records: list[dict], generation: str | None) -> Non
             or not member["unit_id"].strip()
             or name is None
             or name["entity_id"] != member["entity_id"]
+            or name["generation_id"] != member["generation_id"]
             or memory is None
-            or memory.get("generation_id") != generation
+            or memory.get("generation_id") != member["generation_id"]
             or not isinstance(member["observed_mention"], str)
             or not member["observed_mention"].strip()
             or not isinstance(quote, str)

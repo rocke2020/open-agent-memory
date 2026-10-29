@@ -376,7 +376,7 @@ def test_proposal_read_allows_same_user_publication_without_epoch_change(direct_
 
 
 @pytest.mark.parametrize(
-    "change", ["lease", "fence", "cancel", "generation", "withdraw", "supersede", "endpoint"]
+    "change", ["lease", "fence", "cancel", "withdraw", "supersede", "endpoint"]
 )
 def test_publication_rejects_changes_after_proposal_read(direct_store, monkeypatch, change):
     from oam.workers import semantic_links
@@ -394,7 +394,6 @@ def test_publication_rejects_changes_after_proposal_read(direct_store, monkeypat
             "UPDATE operations SET cancellation_revision=1,status='cancelled' "
             "WHERE operation_id='source-op'"
         ),
-        "generation": "UPDATE users SET index_generation_id='changed'",
         "withdraw": "UPDATE sources SET status='deleted' WHERE source_id='seed'",
         "supersede": "UPDATE source_versions SET status='superseded' WHERE source_id='seed'",
         "endpoint": "UPDATE memories SET visible_to=2 WHERE memory_id='a'",

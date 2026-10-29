@@ -121,7 +121,7 @@ def test_portable_export_preserves_current_entity_alias_witnesses(recall_databas
     }
 
 
-def test_export_excludes_revoked_support_and_old_generation_registry(recall_database):
+def test_export_excludes_revoked_support_and_keeps_old_generation_registry(recall_database):
     connection, authority = recall_database
     config = seed_alias(connection, authority)
     connection.execute(
@@ -139,7 +139,9 @@ def test_export_excludes_revoked_support_and_old_generation_registry(recall_data
         (authority.tenant_id, authority.user_id),
     )
     records = snapshot(connection, authority, config, "new-generation")
-    assert not any(r["kind"].startswith("entity") for r in records)
+    assert {r["memory_id"] for r in records if r["kind"] == "entity_name_support"} == {
+        "independent"
+    }
 
 
 def test_exact_memory_cleanup_purges_only_its_entity_support_quotes(recall_database):

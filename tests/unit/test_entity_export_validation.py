@@ -103,6 +103,15 @@ def test_validator_accepts_witnessed_entity_aliases(tmp_path):
     assert counts["entity_membership"] == 1
 
 
+def test_validator_accepts_witnessed_entities_from_an_older_generation(tmp_path):
+    records = entity_records()
+    for record in records:
+        if "generation_id" in record:
+            record["generation_id"] = "old"
+    write_export(tmp_path, records)
+    assert validate_directory(tmp_path)["entity"] == 1
+
+
 @pytest.mark.parametrize(
     ("kind", "field", "bad"),
     [

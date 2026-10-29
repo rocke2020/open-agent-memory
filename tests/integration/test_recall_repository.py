@@ -789,27 +789,24 @@ def test_recall_reports_pending_partial_and_ready_from_current_index_operation(r
     assert ready["diagnostics"]["partial"] is False
 
 
-def test_generation_drift_fails_before_embedding_dispatch(recall_database):
-    from oam.retrieval.service import RecallService, RecallUnavailable
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_existing_memory_remains_recallable_after_recipe_change(recall_database, mode):
+    from oam.retrieval.service import RecallService
 
     connection, authority = recall_database
-    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-
-    class MustNotDispatch:
-        def embed(self, *args, **kwargs):
-            pytest.fail("generation mismatch dispatched an embedding request")
-
-    service = RecallService(
-        config, TransactionPool(connection), MustNotDispatch(), generation_id="new"
+    add_fact(
+        connection, authority, "apple", "I plant apple trees in my orchard.", with_original=True
     )
-    with pytest.raises(RecallUnavailable, match="generation"):
-        service.search(
-            authority,
-            SearchRequest(
-                query="apple",
-                include={"chunks": False},
-            ),
-        )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    models = FixedModels(config.index.embedding_dimensions)
+    connection.execute("SET LOCAL ROLE oam_api")
+    service = RecallService(config, TransactionPool(connection), models, generation_id="new-recipe")
+
+    result = service.search(
+        authority, SearchRequest(query="apple", recall_level=mode, include={"chunks": False})
+    )
+    assert any(item["unit_id"] == "apple" for item in result["items"])
+    assert "apple trees" in result["context"]
 
 
 def test_readiness_selects_current_operations_without_rescanning_each_history(recall_database):
@@ -837,7 +834,7 @@ def test_readiness_selects_current_operations_without_rescanning_each_history(re
             "VALUES (%s,%s,%s,%s,'index',%s,'generation','succeeded',1)",
             (authority.tenant_id, authority.user_id, source_id, source_id, b"x" * 32),
         )
-    # Newer operations must not hide the current generation's base indexing result.
+    # The latest base operation counts across generations; consolidation does not.
     for operation_id, kind, generation in (
         ("wrong-generation", "retain", "other"),
         ("consolidation", "consolidate", "generation"),
@@ -884,9 +881,15 @@ def test_readiness_selects_current_operations_without_rescanning_each_history(re
     assert repository.user_state() == {
         "index_generation_id": "generation",
         "policy_epoch": 0,
-        "parse_partial": False,
-        "readiness": "ready",
+        "parse_partial": True,
+        "readiness": "partial",
     }
+    connection.execute(
+        "UPDATE operations SET status='succeeded',stage_state='{}'::jsonb "
+        "WHERE tenant_id=%s AND user_id=%s AND operation_id='wrong-generation'",
+        (authority.tenant_id, authority.user_id),
+    )
+    assert repository.user_state()["readiness"] == "ready"
 
     def work_reads(node):
         own = (
@@ -1769,3 +1772,23 @@ class FixedModels:
             vectors=((1.0,) + (0.0,) * (self.dimensions - 1),),
             usage=Usage(input_tokens=1, output_tokens=0, total_tokens=1, coverage="complete"),
         )
+
+
+def test_empty_user_recall_returns_empty_result(recall_database):
+    from oam.retrieval.service import RecallService
+
+    connection, authority = recall_database
+    connection.execute(
+        "UPDATE users SET index_generation_id=NULL WHERE tenant_id=%s AND user_id=%s",
+        (authority.tenant_id, authority.user_id),
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection.execute("SET LOCAL ROLE oam_api")
+    result = RecallService(
+        config,
+        TransactionPool(connection),
+        FixedModels(config.index.embedding_dimensions),
+        generation_id="current",
+    ).search(authority, SearchRequest(query="apple", recall_level="fast"))
+    assert result["items"] == []
+    assert result["context"] == ""

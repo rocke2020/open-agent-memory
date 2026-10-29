@@ -485,6 +485,8 @@ async def test_public_pdf_and_image_retain_to_cited_recall(
 async def test_structured_native_pdf_late_detail_reaches_fast_and_normal_context(
     core_database, tmp_path
 ):
+    import yaml
+
     from oam.config import load_config
     from oam.contracts.resources import ResourceMediaType
     from oam.resources.originals import OriginalDescriptor
@@ -493,7 +495,12 @@ async def test_structured_native_pdf_late_detail_reaches_fast_and_normal_context
     from oam.workers.index_source import process_one
 
     dsn, tenant, headers = core_database
-    config = load_config(ROOT / "configs/oam.yaml").config
+    values = yaml.safe_load((ROOT / "configs/oam.yaml").read_text())
+    values["chunk"]["ingestion"]["target_estimated_tokens"] = 512
+    values["chunk"]["ingestion"]["max_estimated_tokens"] = 1024
+    config_path = tmp_path / "pdf-chunks.yaml"
+    config_path.write_text(yaml.safe_dump(values))
+    config = load_config(config_path).config
     writer = PdfWriter()
     target = "If the seal is broken, retain the sealed backup and do not restart."
     lines = [
@@ -526,7 +533,7 @@ async def test_structured_native_pdf_late_detail_reaches_fast_and_normal_context
     original = output.getvalue()
     (tmp_path / "structured-native.pdf").write_bytes(original)
     models = SyntheticIndexModels()
-    app = create_app(ROOT / "configs/oam.yaml")
+    app = create_app(config_path)
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -2647,3 +2654,70 @@ async def test_new_profile_instruction_cancels_running_generation(core_database)
             "/v1/users/scope/profile/refresh", json={"instruction": "First JSON format"}
         )
         assert returned.status_code == 202, returned.text
+
+
+async def test_new_source_keeps_existing_user_namespace_after_recipe_change(core_database):
+    dsn, tenant, headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "namespace-user")
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE users SET index_generation_id=%s WHERE tenant_id=%s AND user_id=%s",
+                ("old-namespace", tenant, "namespace-user"),
+            )
+        response = await client.post(
+            "/v1/retain",
+            headers={"Idempotency-Key": "new-source"},
+            json={
+                "user_id": "namespace-user",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I prefer tea.",
+                        "event_time": "2026-09-01T09:00:00Z",
+                        "learning_eligible": True,
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 202, response.text
+        with psycopg.connect(dsn) as connection:
+            generation = connection.execute(
+                "SELECT generation_id FROM work_units WHERE tenant_id=%s "
+                "AND user_id=%s AND operation_id=%s",
+                (tenant, "namespace-user", response.json()["operation_id"]),
+            ).fetchone()[0]
+        assert generation == "old-namespace"
+
+
+async def test_profile_refresh_uses_existing_user_namespace_after_recipe_change(core_database):
+    dsn, tenant, headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "profile-namespace")
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE users SET index_generation_id=%s WHERE tenant_id=%s AND user_id=%s",
+                ("old-namespace", tenant, "profile-namespace"),
+            )
+        response = await client.post("/v1/users/profile-namespace/profile/refresh", json={})
+        assert response.status_code == 202, response.text
+        with psycopg.connect(dsn) as connection:
+            generation = connection.execute(
+                "SELECT generation_id FROM work_units WHERE tenant_id=%s "
+                "AND user_id=%s AND operation_id=%s",
+                (tenant, "profile-namespace", response.json()["operation_id"]),
+            ).fetchone()[0]
+        assert generation == "old-namespace"

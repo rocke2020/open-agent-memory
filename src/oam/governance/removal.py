@@ -101,6 +101,14 @@ class RemovalRepository:
             work_unit_id = "work_remove_" + secrets.token_hex(12)
             affected = self._affected_insights(cursor, key, target_kind, target_id)
             repair_inputs = self._repair_inputs(cursor, key, affected) if affected else {}
+            removed_passages = []
+            if target_kind == "memory":
+                cursor.execute(
+                    "SELECT DISTINCT passage_id FROM support WHERE tenant_id=%s AND user_id=%s "
+                    "AND memory_id=%s ORDER BY passage_id",
+                    (*key, target_id),
+                )
+                removed_passages = [row[0] for row in cursor.fetchall()]
             state = {
                 "policy_epoch": policy_epoch,
                 "target_kind": target_kind,
@@ -110,6 +118,7 @@ class RemovalRepository:
                 "repair_inputs": repair_inputs,
                 "repair_status": "pending" if target_kind == "memory" and affected else "none",
                 "model_calls": 0,
+                "removed_passage_ids": removed_passages,
             }
             cursor.execute(
                 "UPDATE users SET accepted_seq=%s,policy_epoch=%s,projection_epoch="

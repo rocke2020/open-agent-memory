@@ -58,6 +58,12 @@ class MemoryStore:
     def guard(self, connection):
         pass
 
+    def resume_source(self):
+        return {}, {}, []
+
+    def resource_passages(self):
+        return {}
+
     def check_retry_claim(self):
         raise AssertionError("document fixture does not expect overflow retries")
 
@@ -217,6 +223,37 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision(blank_
     assert store.stages["abstract_state"] == "current"
 
 
+def test_partial_text_resource_preserves_published_chunks_after_limit_change():
+    from oam.config import IngestionChunkConfig
+
+    content = "甲乙丙丁戊己庚辛壬癸子丑"
+    store = MemoryStore(content=content.encode())
+    limits = IngestionChunkConfig(
+        target_estimated_tokens=4,
+        max_estimated_tokens=6,
+        extractable_overlap_estimated_tokens=0,
+        previous_context_estimated_tokens=2,
+    )
+    store.config = store.config.model_copy(
+        update={"chunk": store.config.chunk.model_copy(update={"ingestion": limits})}
+    )
+    store.resource_passages = lambda: {"text:0": "甲乙", "text:1": "丙丁戊己"}
+    index_source._resource(store, LocalModels())
+    assert [item["text"] for item in store.units[:2]] == ["甲乙", "丙丁戊己"]
+    assert "".join(item["text"] for item in store.units) == content
+
+
+def test_resource_retry_rejects_conflicting_published_block_without_writing():
+    from oam.resources.types import ResourceParseError
+
+    store = MemoryStore(content=b"<p>New parsed text.</p>", media_type="text/html")
+    store.resource_passages = lambda: {"removed-block": "previous text"}
+    with pytest.raises(ResourceParseError, match="published Resource passages"):
+        index_source._resource(store, LocalModels())
+    assert store.statements == []
+    assert store.units == []
+
+
 def test_html_resource_also_publishes_document_identity_and_revision():
     store = MemoryStore(content=b"<p>Dose 10 mg.</p>", media_type="text/html")
 
@@ -288,6 +325,34 @@ def test_native_pdf_splits_large_pages_into_exact_bounded_page_spans(monkeypatch
     ]
     assert all(parameters[4] == 2 for parameters in passage_rows)
     assert models.generated_roles == ["abstract"]
+
+
+def test_partial_native_pdf_preserves_published_spans_after_limit_change(monkeypatch):
+    from oam.config import IngestionChunkConfig
+    from oam.resources import pdf_isolated
+    from oam.resources.pdf_isolated import InspectedPdfPage
+
+    text = "甲乙丙丁戊己庚辛壬癸子丑"
+    original = (MEDICAL_FIXTURES / "bilingual/en-native.pdf").read_bytes()
+    store = MemoryStore(content=original, media_type="application/pdf")
+    limits = IngestionChunkConfig(
+        target_estimated_tokens=4,
+        max_estimated_tokens=6,
+        extractable_overlap_estimated_tokens=0,
+        previous_context_estimated_tokens=2,
+    )
+    store.config = store.config.model_copy(
+        update={"chunk": store.config.chunk.model_copy(update={"ingestion": limits})}
+    )
+    store.resource_passages = lambda: {"pdf:page:0001:span:0:2": "甲乙"}
+    monkeypatch.setattr(
+        pdf_isolated,
+        "inspect_pdf",
+        lambda *_: (InspectedPdfPage("pdf:page:0001", 1, text, False),),
+    )
+    index_source._resource(store, LocalModels())
+    assert store.units[0]["locator"]["block"] == "pdf:page:0001:span:0:2"
+    assert "".join(item["text"] for item in store.units) == text
 
 
 def test_caller_annotated_pdf_keeps_legacy_page_text_locator_and_annotation(monkeypatch):
@@ -713,6 +778,124 @@ def test_interaction_locator_keeps_original_message_order_and_internal_id(monkey
     assert len(store.units) == 1
     assert store.units[0]["locator"]["message_index"] == 1
     assert store.units[0]["locator"]["message_id"] == "retained"
+
+
+def test_partial_interaction_reuses_published_passage_boundaries():
+    from oam.config import IngestionChunkConfig
+    from oam.contracts.evidence import EvidenceAppendRequest
+
+    request = EvidenceAppendRequest.model_validate(
+        {
+            "source_id": "document",
+            "messages": [
+                {
+                    "message_id": "first",
+                    "role": "user",
+                    "content": "甲乙丙丁戊己庚辛壬癸子丑",
+                    "event_time": "2026-09-23T00:00:01Z",
+                    "learning_eligible": True,
+                }
+            ],
+        }
+    )
+    store = MemoryStore(content=b"", input_role="interaction")
+    limits = IngestionChunkConfig(
+        target_estimated_tokens=4,
+        max_estimated_tokens=6,
+        extractable_overlap_estimated_tokens=0,
+        previous_context_estimated_tokens=2,
+    )
+    store.config = store.config.model_copy(
+        update={
+            "chunk": store.config.chunk.model_copy(update={"ingestion": limits}),
+            "extraction": store.config.extraction.model_copy(update={"reference_max_facts": 0}),
+        }
+    )
+    evidence_id = index_source.stable_id("evidence", "generation", "document", 3, "first")
+    store.resume_source = lambda: (
+        {
+            0: [
+                (0, "甲乙", index_source.stable_id("passage", evidence_id, 0)),
+                (1, "丙丁戊己", index_source.stable_id("passage", evidence_id, 1)),
+            ]
+        },
+        {},
+        [],
+    )
+    index_source._index_interaction(store.config, store, LocalModels(), request)
+    assert [unit["text"] for unit in store.units[:2]] == ["甲乙", "丙丁戊己"]
+    assert "".join(unit["text"] for unit in store.units) == request.messages[0].content
+
+
+def test_partial_interaction_does_not_extract_a_published_fact_again():
+    from oam.contracts.evidence import EvidenceAppendRequest
+
+    request = EvidenceAppendRequest.model_validate(
+        {
+            "source_id": "document",
+            "messages": [
+                {
+                    "message_id": "first",
+                    "role": "user",
+                    "content": "A stored fact.",
+                    "event_time": "2026-09-23T00:00:01Z",
+                    "learning_eligible": True,
+                }
+            ],
+        }
+    )
+    store = MemoryStore(content=b"", input_role="interaction")
+    store.config = store.config.model_copy(
+        update={"extraction": store.config.extraction.model_copy(update={"reference_max_facts": 0})}
+    )
+    evidence_id = index_source.stable_id("evidence", "generation", "document", 3, "first")
+    passage_id = index_source.stable_id("passage", evidence_id, 0)
+    diagnostic = {"passage_id": passage_id, "field": "quote", "code": "invalid_quote"}
+    store.resume_source = lambda: (
+        {0: [(0, "A stored fact.", passage_id)]},
+        {passage_id: {"fact"}},
+        [diagnostic],
+    )
+    models = LocalModels()
+    fact_ids, diagnostics = index_source._index_interaction(store.config, store, models, request)
+    assert fact_ids == ["fact"]
+    assert models.generated_roles == []
+    assert models.embedded == []
+    assert diagnostics == [diagnostic]
+    assert store.stages["extraction_diagnostics"] == [diagnostic]
+
+
+def test_fact_publication_persists_its_diagnostics_with_the_fact(monkeypatch):
+    from oam.indexing.chunker import TextChunk
+    from oam.indexing.extraction import Fact, FactExtraction
+
+    store = MemoryStore(content=b"", input_role="interaction")
+    message = SimpleNamespace(content="A stored fact.", event_time=None, temporal_annotations=[])
+    chunk = TextChunk("A stored fact.", 0, 14, "", 4)
+    result = FactExtraction(
+        outcome="facts",
+        facts=(
+            Fact(
+                output_index=0,
+                text="A stored fact.",
+                quote="A stored fact.",
+                related_existing_ids=("unavailable",),
+            ),
+        ),
+        usage=Usage(),
+    )
+    monkeypatch.setattr(index_source, "eligible_reference_ids", lambda *args: set())
+    diagnostics = []
+    index_source._publish_facts(
+        store,
+        {"passage": (message, "evidence", {}, chunk)},
+        result,
+        ((1.0, 0.0),),
+        metadata=SimpleNamespace(source_created_at=None, source_updated_at=None),
+        diagnostics=diagnostics,
+    )
+    assert diagnostics[0]["code"] == "ineligible_reference"
+    assert store.stages["extraction_diagnostics"] == diagnostics
 
 
 def test_extraction_sliding_window_embeds_ready_facts_before_slow_sibling_finishes(monkeypatch):

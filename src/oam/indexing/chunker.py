@@ -106,6 +106,47 @@ def chunk_text(
     return tuple(chunks)
 
 
+def resume_chunks(
+    text: str,
+    published: list[str],
+    config: IngestionChunkConfig,
+    *,
+    previous_context: str = "",
+) -> tuple[TextChunk, ...]:
+    """Keep published passage boundaries and chunk only the unprocessed suffix."""
+    chunks = []
+    offset = 0
+    for content in published:
+        start = text.find(content, offset)
+        if not content or start < 0 or text[offset:start].strip():
+            raise ValueError("published passage does not match the source prefix")
+        end = start + len(content)
+        chunks.append(
+            TextChunk(
+                text=content,
+                start=start,
+                end=end,
+                previous_context=_tail(
+                    previous_context + text[:start], config.previous_context_estimated_tokens
+                ),
+                estimated_tokens=estimated_tokens(cumulative_units(content)[-1]),
+            )
+        )
+        offset = end
+    remaining = chunk_text(text[offset:], config, previous_context=previous_context + text[:offset])
+    chunks.extend(
+        TextChunk(
+            text=chunk.text,
+            start=offset + chunk.start,
+            end=offset + chunk.end,
+            previous_context=chunk.previous_context,
+            estimated_tokens=chunk.estimated_tokens,
+        )
+        for chunk in remaining
+    )
+    return tuple(chunks)
+
+
 def _bounded_end(weights: list[int], start: int, tokens: int) -> int:
     return bisect_right(weights, weights[start] + tokens * UNITS_PER_TOKEN) - 1
 

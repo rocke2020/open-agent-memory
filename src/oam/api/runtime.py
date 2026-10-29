@@ -959,7 +959,6 @@ class DatabaseRuntime:
                 authority,
                 operation_id,
                 attempts_remaining=self.config.retry.max_attempts,
-                generation_id=index_generation(self.config, os.environ),
                 max_pending_per_user=self.config.queue.max_pending_per_user,
             )
 

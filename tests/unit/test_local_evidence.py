@@ -49,6 +49,54 @@ def fact(identity, passage):
     }
 
 
+def test_adjacent_source_window_uses_the_cited_passage_generation():
+    support = original("support", 4)
+    root = fact("root", support)
+    locators = []
+    for identity, index, generation in (
+        ("old-before", 2, "old"),
+        ("new-before", 2, "new"),
+        ("support", 4, "new"),
+        ("old-after", 6, "old"),
+        ("new-after", 6, "new"),
+    ):
+        locators.append(
+            {
+                "unit_id": identity,
+                "passage_id": identity,
+                "source_id": "conversation",
+                "source_version": 1,
+                "generation_id": generation,
+                "locator": original(identity, index)["citations"][0],
+            }
+        )
+    assert set(context.source_window_ids([root], locators)) == {
+        "new-before",
+        "support",
+        "new-after",
+    }
+
+
+@pytest.mark.parametrize("same_support", [True, False])
+def test_identical_historical_facts_are_deduplicated_only_with_identical_support(same_support):
+    first, second = original("first-passage", 4), original("second-passage", 4)
+    first["text"] = "The same supported source."
+    second["text"] = first["text"] if same_support else "A different supported source."
+    first_fact, second_fact = fact("first-fact", first), fact("second-fact", second)
+    first_fact["text"] = second_fact["text"] = "The same claim."
+    selected, _, _, _ = assemble_context(
+        [first_fact, second_fact],
+        [],
+        context_max_tokens=10000,
+        include_chunks=False,
+        max_results=10,
+        evidence_groups=[[first_fact, first], [second_fact, second]],
+    )
+    assert [item["unit_id"] for item in selected] == (
+        ["first-fact"] if same_support else ["first-fact", "second-fact"]
+    )
+
+
 @pytest.mark.parametrize(
     ("before_text", "after_text", "cap", "expected_before", "expected_after"),
     [

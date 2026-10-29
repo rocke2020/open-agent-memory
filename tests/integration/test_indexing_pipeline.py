@@ -110,3 +110,56 @@ async def test_failed_pipeline_preserves_unknown_model_outcome(pipeline_store):
     ):
         store.checkpoint("extract:first", {"group": 1}, unknown)
     assert disposition(dsn, store) == "unknown_external_outcome"
+
+
+def test_completed_checkpoint_is_reused_after_recipe_change(pipeline_store):
+    dsn, store = pipeline_store
+    assert store.checkpoint("example", {"input": "same"}, lambda: {"value": "old"}) == {
+        "value": "old"
+    }
+    changed = store.config.model_copy(
+        update={
+            "extraction": store.config.extraction.model_copy(
+                update={"max_facts_per_group": store.config.extraction.max_facts_per_group - 1}
+            )
+        }
+    )
+    updated = IndexStore(
+        make_conninfo(dsn, options="-c role=oam_content"),
+        changed,
+        store.claim,
+        "pipeline",
+        index_generation(changed, os.environ),
+    )
+    assert updated.checkpoint("example", {"input": "same"}, lambda: {"value": "new"}) == {
+        "value": "old"
+    }
+
+
+def test_recipe_qualified_checkpoint_keeps_plain_input_digest_for_removal(pipeline_store):
+    from oam.indexing.store import input_digest
+
+    dsn, store = pipeline_store
+    changed = store.config.model_copy(
+        update={
+            "extraction": store.config.extraction.model_copy(
+                update={"max_facts_per_group": store.config.extraction.max_facts_per_group - 1}
+            )
+        }
+    )
+    updated = IndexStore(
+        make_conninfo(dsn, options="-c role=oam_content"),
+        changed,
+        store.claim,
+        "pipeline",
+        index_generation(changed, os.environ),
+    )
+    updated.checkpoint("insight", {"value": "test"}, lambda: {"value": "complete"})
+    with psycopg.connect(dsn) as connection:
+        stored = connection.execute(
+            "SELECT stage_key,input_digest FROM index_stage_results "
+            "WHERE tenant_id=%s AND user_id=%s AND starts_with(stage_key,'insight')",
+            store.key,
+        ).fetchone()
+    assert bytes(stored[1]) == input_digest({"value": "test"})
+    assert stored[0].startswith("insight")

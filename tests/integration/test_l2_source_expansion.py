@@ -147,7 +147,7 @@ def test_l2_only_direct_candidate_restores_full_code_in_actual_context(l2_databa
     assert decisions["l2_source_expansion"][0]["status"] == "included"
 
 
-@pytest.mark.parametrize("invalid", ["source", "revision", "generation"])
+@pytest.mark.parametrize("invalid", ["source", "revision"])
 def test_support_lookup_enforces_whole_insight_eligibility(l2_database, invalid):
     connection, authority = l2_database
     if invalid == "source":
@@ -161,10 +161,6 @@ def test_support_lookup_enforces_whole_insight_eligibility(l2_database, invalid)
             "UPDATE insight_support SET support_revision=2 "
             "WHERE tenant_id=%s AND memory_id='review'",
             (authority.tenant_id,),
-        )
-    else:
-        connection.execute(
-            "UPDATE users SET index_generation_id='new' WHERE tenant_id=%s", (authority.tenant_id,)
         )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)

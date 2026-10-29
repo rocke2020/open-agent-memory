@@ -357,7 +357,12 @@ def source_window_ids(
             direct = by_id.get(citation.get("passage_id"))
             selected = [direct] if direct is not None and direct in passages else []
             if not direct_only:
-                user_rows = [row for row in passages if row["locator"].get("role") == "user"]
+                user_rows = [
+                    row
+                    for row in passages
+                    if row["locator"].get("role") == "user"
+                    and (direct is None or row.get("generation_id") == direct.get("generation_id"))
+                ]
                 before = [row for row in user_rows if row["locator"]["message_index"] < index]
                 after = [row for row in user_rows if row["locator"]["message_index"] > index]
                 selected.extend(before[-1:] + after[:1])
@@ -451,6 +456,50 @@ def bundle_items(bundles: list[list[dict]]) -> list[dict]:
     return list(selected.values())
 
 
+def _fact_support_key(item: dict, group: list[dict]) -> str | None:
+    """Identify only facts with identical complete, source-qualified support."""
+    if item["kind"] != "fact" or item.get("paths") or item.get("truncated"):
+        return None
+    citations = item.get("citations", [])
+    passage_ids = {citation.get("passage_id") for citation in citations}
+    passages = {
+        row["unit_id"]: row
+        for row in group
+        if row["kind"] == "passage" and not row.get("excerpt") and not row.get("truncated")
+    }
+    if not citations or None in passage_ids or passage_ids != set(passages):
+        return None
+
+    def normalized(value):
+        if isinstance(value, dict):
+            return {
+                key: normalized(part)
+                for key, part in value.items()
+                if key not in {"passage_id", "evidence_id"}
+            }
+        if isinstance(value, list):
+            return [normalized(part) for part in value]
+        return value
+
+    support = sorted(
+        json.dumps(
+            {
+                "citation": normalized(citation),
+                "text": passages[citation["passage_id"]]["text"],
+                "time_evidence": passages[citation["passage_id"]].get("time_evidence", []),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        for citation in citations
+    )
+    return json.dumps(
+        [item["text"], item["origin"], item.get("time_evidence", []), support],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
 def assemble_context(
     candidates: list[dict],
     source_passages: list[dict],
@@ -469,6 +518,7 @@ def assemble_context(
     considered: set[str] = set()
     candidate_ids = {item["unit_id"] for item in candidates}
     optional_ids: set[str] = set()
+    fact_support_keys: set[str] = set()
     eligible_facts = {
         item["unit_id"]
         for item in candidates
@@ -500,6 +550,9 @@ def assemble_context(
             if group is None:
                 omissions.append(identity)
                 continue
+        support_key = _fact_support_key(item, group)
+        if support_key is not None and support_key in fact_support_keys:
+            continue
         representation = [
             row for row in group if include_chunks or row["kind"] not in ORIGINAL_KINDS
         ]
@@ -519,6 +572,8 @@ def assemble_context(
                 omissions.append(identity)
                 continue
         admitted.append(representation)
+        if support_key is not None:
+            fact_support_keys.add(support_key)
         selected = tentative
         if oversized_single_fact:
             break

@@ -3,7 +3,7 @@ from itertools import pairwise
 import pytest
 
 from oam.config import IngestionChunkConfig
-from oam.indexing.chunker import chunk_text, split_chunk_for_output_retry
+from oam.indexing.chunker import chunk_text, resume_chunks, split_chunk_for_output_retry
 
 
 def limits():
@@ -13,6 +13,22 @@ def limits():
         extractable_overlap_estimated_tokens=0,
         previous_context_estimated_tokens=2,
     )
+
+
+def test_resume_preserves_published_chunks_when_limits_change():
+    text = "甲乙丙丁戊己庚辛壬癸子丑"
+    chunks = resume_chunks(text, ["甲乙", "丙丁戊己"], limits())
+    assert [(item.text, item.start, item.end) for item in chunks[:2]] == [
+        ("甲乙", 0, 2),
+        ("丙丁戊己", 2, 6),
+    ]
+    assert "".join(item.text for item in chunks) == text
+    assert all(left.end == right.start for left, right in pairwise(chunks))
+
+
+def test_resume_rejects_published_text_that_is_not_the_source_prefix():
+    with pytest.raises(ValueError, match="published passage"):
+        resume_chunks("甲乙丙丁", ["不存在"], limits())
 
 
 def test_chunks_keep_exact_nonoverlapping_offsets_and_separate_previous_context():

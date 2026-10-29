@@ -1093,8 +1093,9 @@ async def test_stale_owner_cannot_record_usage_or_requeue_work(accepted_source):
         ).fetchone() == ("claimed", None)
 
 
+@pytest.mark.parametrize("change_recipe", [False, True])
 async def test_retry_reuses_completed_fact_vectors_when_ready_group_batching_changes(
-    accepted_source, monkeypatch
+    accepted_source, monkeypatch, change_recipe
 ):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1148,7 +1149,13 @@ async def test_retry_reuses_completed_fact_vectors_when_ready_group_batching_cha
             return future
 
     monkeypatch.setattr(index_source, "ThreadPoolExecutor", ReadyTogetherExecutor)
-    assert run_source(dsn, config, models) is True
+    retry_config = config
+    if change_recipe:
+        retry_config = config.model_copy(
+            update={"extraction": config.extraction.model_copy(update={"group_max_passages": 64})}
+        )
+        assert index_generation(retry_config, os.environ) != index_generation(config, os.environ)
+    assert run_source(dsn, retry_config, models) is True
     indexed = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert indexed["status"] == "succeeded"
     assert indexed["readiness"]["memory_ready"] is True
@@ -1178,3 +1185,167 @@ async def test_retry_reuses_completed_fact_vectors_when_ready_group_batching_cha
     assert {item["text"] for item in facts} == {first, second}
     assert all(item["citations"] for item in facts)
     assert indexed_batches == [(first, second), (first,), (second,)]
+
+
+def test_accepted_source_runs_after_recipe_change(accepted_source):
+    _, dsn, tenant, config, operation_id = accepted_source
+    changed = config.model_copy(
+        update={
+            "extraction": config.extraction.model_copy(
+                update={"max_facts_per_group": config.extraction.max_facts_per_group - 1}
+            )
+        }
+    )
+    assert index_generation(changed, os.environ) != index_generation(config, os.environ)
+    assert run_source(dsn, changed, SyntheticIndexModels())
+    with psycopg.connect(dsn) as connection:
+        row = connection.execute(
+            "SELECT status FROM operations WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation_id),
+        ).fetchone()
+    assert row[0] == "succeeded"
+
+
+@pytest.mark.parametrize("legacy_receipt", [False, True])
+async def test_retry_does_not_recreate_removed_fact_from_completed_passage(
+    core_database, tmp_path, legacy_receipt
+):
+    dsn, tenant, headers = core_database
+    values = yaml.safe_load((ROOT / "configs/oam.yaml").read_text())
+    values["extraction"]["group_max_passages"] = 2
+    values["index"]["insights_enabled"] = False
+    path = tmp_path / "grouped.yaml"
+    path.write_text(yaml.safe_dump(values))
+    config = load_config(path).config
+    app = create_app(path)
+    first = "Lin prefers concise updates."
+    removed_text = "Lin prefers morning updates."
+    third = "Lin prefers written updates."
+    published = Event()
+
+    class Models(SyntheticIndexModels):
+        def __init__(self):
+            super().__init__()
+            self.group_calls = []
+            self.fail = True
+
+        def generate(self, role, **kwargs):
+            if role == "extraction":
+                envelope = json.loads(kwargs["user"])
+                if "passages" in envelope:
+                    self.group_calls.append([p["center"]["text"] for p in envelope["passages"]])
+                elif envelope["center"]["text"] == third and self.fail:
+                    self.fail = False
+                    assert published.wait(5)
+                    raise httpx.ConnectTimeout("later passage failed")
+            return super().generate(role, **kwargs)
+
+        def embed(self, texts, **kwargs):
+            result = super().embed(texts, **kwargs)
+            if texts == (first, removed_text):
+                published.set()
+            return result
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "lin")
+        response = await client.post(
+            "/v1/retain",
+            headers={"Idempotency-Key": "removal-retry"},
+            json={
+                "user_id": "lin",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": text,
+                        "event_time": "2026-09-24T09:00:00Z",
+                        "learning_eligible": True,
+                    }
+                    for text in (first, removed_text, third)
+                ],
+            },
+        )
+        assert response.status_code == 202, response.text
+        operation_id = response.json()["operation_id"]
+        models = Models()
+        with pytest.raises(httpx.ConnectTimeout, match="later passage failed"):
+            run_source(dsn, config, models)
+        with psycopg.connect(dsn) as connection:
+            removed_id = connection.execute(
+                "SELECT memory_id FROM memories WHERE tenant_id=%s AND canonical_claim=%s",
+                (tenant, removed_text),
+            ).fetchone()[0]
+        response = await client.delete(f"/v1/users/lin/memories/{removed_id}")
+        assert response.status_code == 202, response.text
+        removal_operation = response.json()["operation_id"]
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp()+interval '1 hour' "
+                "WHERE tenant_id=%s AND operation_id=%s AND stage='index_source'",
+                (tenant, operation_id),
+            )
+            if legacy_receipt:
+                connection.execute(
+                    "UPDATE operations SET stage_state=stage_state-'removed_passage_ids' "
+                    "WHERE tenant_id=%s AND operation_id=%s",
+                    (tenant, removal_operation),
+                )
+        assert run_source(dsn, config, models)
+        removal_state = (await client.get(f"/v1/users/lin/operations/{removal_operation}")).json()
+        assert removal_state["stage_state"]["cleanup_status"] == "complete"
+        assert removal_state["stage_state"]["removed_passage_ids"]
+        with psycopg.connect(dsn) as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM support WHERE tenant_id=%s AND memory_id=%s",
+                    (tenant, removed_id),
+                ).fetchone()[0]
+                == 0
+            )
+            connection.execute(
+                "UPDATE work_units SET available_at=clock_timestamp() "
+                "WHERE tenant_id=%s AND operation_id=%s AND stage='index_source'",
+                (tenant, operation_id),
+            )
+        assert run_source(dsn, config, models)
+        with psycopg.connect(dsn) as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM memories WHERE tenant_id=%s AND canonical_claim=%s "
+                    "AND lifecycle_state='active' AND visible_to IS NULL",
+                    (tenant, removed_text),
+                ).fetchone()[0]
+                == 0
+            )
+        assert models.group_calls == [[first, removed_text]]
+        assert (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()[
+            "status"
+        ] == "succeeded"
+
+
+async def test_explicit_retry_reuses_partial_source_under_same_new_recipe(accepted_source):
+    client, dsn, _tenant, config, operation_id = accepted_source
+    changed = config.model_copy(
+        update={
+            "extraction": config.extraction.model_copy(
+                update={"max_facts_per_group": config.extraction.max_facts_per_group - 1}
+            )
+        }
+    )
+    models = IntermittentModels(3)
+    for _ in range(3):
+        with pytest.raises(ExtractionError):
+            run_source(dsn, changed, models)
+    retried = await client.post(
+        f"/v1/users/lin/operations/{operation_id}/retry",
+        headers={"Idempotency-Key": "new-recipe-retry"},
+    )
+    assert retried.status_code == 201, retried.text
+    assert run_source(dsn, changed, IntermittentModels(0))
+    result = (await client.get(f"/v1/users/lin/operations/{retried.json()['operation_id']}")).json()
+    assert result["status"] == "succeeded"

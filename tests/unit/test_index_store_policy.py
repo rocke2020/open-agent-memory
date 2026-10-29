@@ -59,6 +59,14 @@ def test_independent_source_indexing_survives_other_source_policy_change():
     guarded_store("index_source").guard(GuardConnection())
 
 
+def test_existing_source_work_remains_valid_after_namespace_changes():
+    connection = GuardConnection()
+    rows = list(connection.rows)
+    rows[0] = ("active", 2, "new-namespace")
+    connection.rows = iter(rows)
+    guarded_store("index_source").guard(connection)
+
+
 def test_consolidation_rejects_changed_related_source_policy():
     with pytest.raises(StaleIndexWork):
         guarded_store("consolidate").guard(GuardConnection())
@@ -120,6 +128,121 @@ def test_index_store_pool_checkout_is_bounded_by_pool_timeout():
     with pytest.raises(RuntimeError, match="stop after checkout"), store.transaction():
         pass
     assert checkout_timeouts == [5]
+
+
+def test_completed_checkpoint_is_reused_when_recipe_changes():
+    from contextlib import contextmanager
+    from threading import Lock
+
+    class Connection:
+        def execute(self, sql, parameters=()):
+            if sql.startswith("SELECT output FROM index_stage_results"):
+                value = ({"value": "stored"},) if parameters[5] == "extract:passage" else None
+                return SimpleNamespace(fetchone=lambda: value)
+            return SimpleNamespace(fetchone=lambda: None)
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    store = guarded_store("index_source")
+    store._model_stage_lock = Lock()
+    store._unsettled_model_stages = set()
+    store.config = SimpleNamespace(lease=SimpleNamespace(seconds=30))
+    store._record_model_stage_state = lambda *args, **kwargs: None
+    store.transaction = transaction
+    store.guard = lambda connection: None
+    assert store.checkpoint(
+        "extract:passage", {"text": "original"}, lambda: pytest.fail("repeated model work")
+    ) == {"value": "stored"}
+
+
+def test_legacy_recipe_qualified_checkpoint_remains_reusable():
+    import sqlite3
+    from contextlib import contextmanager
+    from threading import Lock
+
+    from oam.indexing.store import input_digest
+
+    with sqlite3.connect(":memory:") as db:
+        db.create_function("starts_with", 2, lambda value, prefix: value.startswith(prefix))
+        db.execute(
+            "CREATE TABLE index_stage_results(tenant_id,user_id,source_id,source_version,"
+            "generation_id,stage_key,input_digest,output)"
+        )
+        db.execute(
+            "INSERT INTO index_stage_results VALUES(?,?,?,?,?,?,?,?)",
+            (
+                "tenant",
+                "user",
+                "source",
+                1,
+                "generation",
+                "extract:passage:recipe=old",
+                input_digest({"text": "original"}),
+                "stored",
+            ),
+        )
+
+        class Connection:
+            def execute(self, sql, parameters=()):
+                return db.execute(sql.replace("%s", "?"), parameters)
+
+        @contextmanager
+        def transaction():
+            yield Connection()
+
+        store = guarded_store("index_source")
+        store._model_stage_lock = Lock()
+        store._unsettled_model_stages = set()
+        store.transaction = transaction
+        store.guard = lambda connection: None
+        assert (
+            store.checkpoint(
+                "extract:passage", {"text": "original"}, lambda: pytest.fail("repeated model work")
+            )
+            == "stored"
+        )
+
+
+def test_resume_skips_every_passage_in_a_completed_extraction_group():
+    from contextlib import contextmanager
+
+    from oam.indexing.store import stable_id
+
+    memory_id = stable_id("memory", "passage-a", 0, "First fact.")
+
+    class Connection:
+        def execute(self, query, parameters=()):
+            if "FROM passages p" in query:
+                rows = [
+                    ("passage-a", {"message_index": 0, "passage_index": 0}, "A", memory_id),
+                    ("passage-b", {"message_index": 1, "passage_index": 0}, "B", None),
+                ]
+                return SimpleNamespace(fetchall=lambda: rows)
+            if "FROM index_stage_results" in query:
+                output = {
+                    "facts": [
+                        {"passage_id": "passage-a", "output_index": 0, "text": "First fact."}
+                    ],
+                    "diagnostics": [],
+                    "_passage_ids": ["passage-a", "passage-b"],
+                }
+                return SimpleNamespace(fetchall=lambda: [("extract:group", output)])
+            if "jsonb_array_elements_text" in query:
+                return SimpleNamespace(fetchall=lambda: [])
+            return SimpleNamespace(fetchone=lambda: ([],))
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    store = guarded_store("index_source")
+    store.transaction = transaction
+    store.guard = lambda connection: None
+    _, saved, _ = store.resume_source()
+    assert saved["passage-a"] == {memory_id}
+    assert saved["passage-b"] == set()
 
 
 def test_completed_model_response_is_saved_before_policy_retry():

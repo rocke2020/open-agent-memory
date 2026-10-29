@@ -111,8 +111,9 @@ class IndexStore:
                     (*self.key, self.claim.work_unit_id),
                 )
                 self.source = cursor.fetchone()
-            if self.source is None or self.source["generation_id"] != self.generation_id:
-                raise StaleIndexWork("index generation changed")
+            if self.source is None:
+                raise StaleIndexWork("index work is unavailable")
+            self.generation_id = self.source["generation_id"]
             connection.execute(
                 "UPDATE users SET index_generation_id=%s WHERE tenant_id=%s AND user_id=%s "
                 "AND index_generation_id IS NULL",
@@ -124,6 +125,123 @@ class IndexStore:
                 "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
                 (*self.key, self.claim.operation_id),
             )
+
+    def resume_source(self):
+        """Read previously published interaction passages and their active facts."""
+        with self.transaction() as connection:
+            self.guard(connection)
+            rows = connection.execute(
+                "SELECT p.passage_id,p.locator,p.normalized_text,m.memory_id "
+                "FROM passages p JOIN evidence e USING(tenant_id,user_id,evidence_id) "
+                "LEFT JOIN support sp USING(tenant_id,user_id,passage_id) "
+                "LEFT JOIN memories m ON (m.tenant_id,m.user_id,m.memory_id)="
+                "(sp.tenant_id,sp.user_id,sp.memory_id) "
+                "AND m.generation_id=p.generation_id "
+                "AND m.lifecycle_state='active' AND m.visible_to IS NULL "
+                "WHERE p.tenant_id=%s AND p.user_id=%s AND e.source_id=%s "
+                "AND e.source_version=%s AND p.generation_id=%s AND p.visible_to IS NULL "
+                "ORDER BY p.passage_id,m.memory_id",
+                (
+                    *self.key,
+                    self.source["source_id"],
+                    self.source["source_version"],
+                    self.generation_id,
+                ),
+            ).fetchall()
+            diagnostic_rows = connection.execute(
+                "SELECT stage_key,output FROM index_stage_results "
+                "WHERE tenant_id=%s AND user_id=%s AND source_id=%s AND source_version=%s "
+                "AND generation_id=%s AND starts_with(stage_key,'extract:') "
+                "ORDER BY stage_key",
+                (
+                    *self.key,
+                    self.source["source_id"],
+                    self.source["source_version"],
+                    self.generation_id,
+                ),
+            ).fetchall()
+            removed_rows = connection.execute(
+                "SELECT DISTINCT passage_id FROM operations o "
+                "CROSS JOIN LATERAL jsonb_array_elements_text("
+                "COALESCE(o.stage_state->'removed_passage_ids','[]'::jsonb)) AS passage_id "
+                "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='remove_memory' "
+                "UNION SELECT sp.passage_id FROM operations o JOIN support sp ON "
+                "(sp.tenant_id,sp.user_id,sp.memory_id)="
+                "(o.tenant_id,o.user_id,o.removal_target_id) "
+                "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='remove_memory'",
+                (*self.key, *self.key),
+            ).fetchall()
+            state_row = connection.execute(
+                "SELECT COALESCE(o.stage_state->'extraction_diagnostics', "
+                "parent.stage_state->'extraction_diagnostics', '[]'::jsonb) "
+                "FROM operations o LEFT JOIN operations parent ON "
+                "(parent.tenant_id,parent.user_id,parent.operation_id)="
+                "(o.tenant_id,o.user_id,o.retry_of_operation_id) "
+                "WHERE o.tenant_id=%s AND o.user_id=%s AND o.operation_id=%s",
+                (*self.key, self.claim.operation_id),
+            ).fetchone()
+        passages = {}
+        facts = {}
+        for passage_id, locator, content, memory_id in rows:
+            message_index = locator.get("message_index")
+            passage_index = locator.get("passage_index")
+            if type(message_index) is not int or type(passage_index) is not int:
+                raise StaleIndexWork("published passage has no source position")
+            passages.setdefault(message_index, {})[passage_index] = (content, passage_id)
+            if memory_id:
+                facts.setdefault(passage_id, set()).add(memory_id)
+        saved_ids = {memory_id for values in facts.values() for memory_id in values}
+        saved_passages = {passage_id for passage_id, _, _, _ in rows}
+        for (passage_id,) in removed_rows:
+            if passage_id in saved_passages:
+                facts.setdefault(passage_id, set())
+        diagnostics = list(state_row[0]) if state_row else []
+        for stage, output in diagnostic_rows:
+            group_id = stage.removeprefix("extract:").split(":recipe=", 1)[0]
+            output_ids = {
+                stable_id(
+                    "memory", fact.get("passage_id") or group_id, fact["output_index"], fact["text"]
+                )
+                for fact in output.get("facts", [])
+            }
+            members = output.get("_passage_ids", [])
+            completed = bool(members) and set(members) <= saved_passages and output_ids <= saved_ids
+            if completed:
+                for passage_id in members:
+                    facts.setdefault(passage_id, set())
+            if completed or output_ids & saved_ids:
+                for item in output.get("diagnostics", []):
+                    diagnostic = {"passage_id": group_id, **item}
+                    if diagnostic not in diagnostics:
+                        diagnostics.append(diagnostic)
+        return (
+            {
+                message: [(index, *entries[index]) for index in sorted(entries)]
+                for message, entries in passages.items()
+            },
+            facts,
+            diagnostics,
+        )
+
+    def resource_passages(self):
+        """Read published Resource blocks before continuing a partial source."""
+        with self.transaction() as connection:
+            self.guard(connection)
+            rows = connection.execute(
+                "SELECT p.locator->>'block',p.normalized_text FROM passages p "
+                "JOIN evidence e USING(tenant_id,user_id,evidence_id) "
+                "WHERE p.tenant_id=%s AND p.user_id=%s AND e.source_id=%s "
+                "AND e.source_version=%s AND p.generation_id=%s AND p.visible_to IS NULL",
+                (
+                    *self.key,
+                    self.source["source_id"],
+                    self.source["source_version"],
+                    self.generation_id,
+                ),
+            ).fetchall()
+        if any(not locator for locator, _ in rows):
+            raise StaleIndexWork("published Resource passage has no locator")
+        return dict(rows)
 
     @contextmanager
     def transaction(self):
@@ -220,7 +338,6 @@ class IndexStore:
         if (
             user is None
             or user[0] != "active"
-            or user[2] != self.generation_id
             or row is None
             or row[:5] != (self.worker_id, self.claim.fence, "running", True, 0)
             or row[5] not in {"accepted", "running"}
@@ -293,8 +410,9 @@ class IndexStore:
                 existing = connection.execute(
                     "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
                     "AND source_id=%s AND source_version=%s AND generation_id=%s "
-                    "AND stage_key=%s AND input_digest=%s",
-                    identity,
+                    "AND (stage_key=%s OR starts_with(stage_key,%s||':recipe=')) "
+                    "AND input_digest=%s ORDER BY (stage_key=%s) DESC,stage_key LIMIT 1",
+                    (*identity[:6], identity[5], identity[6], identity[5]),
                 ).fetchone()
                 if existing:
                     return existing[0]
@@ -366,8 +484,9 @@ class IndexStore:
                     existing = connection.execute(
                         "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
                         "AND source_id=%s AND source_version=%s AND generation_id=%s "
-                        "AND stage_key=%s AND input_digest=%s",
-                        identity,
+                        "AND (stage_key=%s OR starts_with(stage_key,%s||':recipe=')) "
+                        "AND input_digest=%s ORDER BY (stage_key=%s) DESC,stage_key LIMIT 1",
+                        (*identity[:6], identity[5], identity[6], identity[5]),
                     ).fetchone()
                     if existing:
                         outputs[index] = existing[0]
@@ -895,7 +1014,9 @@ class IndexStore:
             if disposition == "failed" and stage is not None and usage is not None
         )
         for stage, usage in rows:
-            if stage.startswith(("extract:", "vision:")) or stage in {"insight", "abstract"}:
+            if stage.startswith(
+                ("extract:", "vision:", "insight:recipe=", "abstract:recipe=")
+            ) or stage in {"insight", "abstract"}:
                 generation.append(usage)
             elif stage.startswith(("passage:", "facts_embed:", "insight_embed")):
                 embedding.append(usage)

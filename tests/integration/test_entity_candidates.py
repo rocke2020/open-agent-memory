@@ -320,7 +320,10 @@ def test_unfinished_freeze_removes_revoked_alias_metadata_without_reselecting(re
     assert {name["name"] for name in retried[0]["entities"]} == {"Nova Research"}
 
 
-def test_completed_extraction_reuses_exact_frozen_context_after_support_changes(recall_database):
+@pytest.mark.parametrize("stage_key", ["extract:new-source", "extract:new-source:recipe=old"])
+def test_completed_extraction_reuses_exact_frozen_context_after_support_changes(
+    recall_database, stage_key
+):
     from psycopg.types.json import Jsonb
 
     from oam.indexing.references import freeze_extraction_references
@@ -336,9 +339,10 @@ def test_completed_extraction_reuses_exact_frozen_context_after_support_changes(
     connection.execute(
         "INSERT INTO index_stage_results(tenant_id,user_id,source_id,source_version,"
         "generation_id,stage_key,input_digest,output,work_unit_id,attempt_id) "
-        "VALUES (%s,%s,'new-source',1,'generation','extract:new-source',%s,%s,'work','attempt')",
+        "VALUES (%s,%s,'new-source',1,'generation',%s,%s,%s,'work','attempt')",
         (
             *store.key,
+            stage_key,
             input_digest({**inputs, "reference_facts": references}),
             Jsonb({"outcome": "facts"}),
         ),

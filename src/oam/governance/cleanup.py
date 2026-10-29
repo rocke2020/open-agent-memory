@@ -317,6 +317,15 @@ def cleanup_removal_claim(
             affected = [str(value) for value in state.get("affected_insight_ids", [])]
             memory_target = target_id if target_kind == "memory" else ""
             insight_target = target_id if target_kind == "insight" else ""
+            if memory_target and "removed_passage_ids" not in state:
+                state["removed_passage_ids"] = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT DISTINCT passage_id FROM support WHERE tenant_id=%s AND user_id=%s "
+                        "AND memory_id=%s ORDER BY passage_id",
+                        (*key, memory_target),
+                    ).fetchall()
+                ]
             revision_limits = (
                 {
                     identifier: int(state["repair_inputs"]["next_revision"][identifier])
@@ -483,7 +492,8 @@ def _remove_projection_checkpoints(
     digests.extend(input_digest(row[3]) for row in old_insights)
     connection.execute(
         "DELETE FROM index_stage_results WHERE tenant_id=%s AND user_id=%s AND ("
-        "((stage_key='insight' OR starts_with(stage_key,'insight_embed')) "
+        "((stage_key='insight' OR starts_with(stage_key,'insight:recipe=') "
+        "OR starts_with(stage_key,'insight_embed')) "
         "AND input_digest=ANY(%s)) OR "
         "(%s<>'' AND starts_with(stage_key,'repair:'||%s||':')) OR EXISTS ("
         "SELECT 1 FROM jsonb_each_text(%s::jsonb) bound WHERE "

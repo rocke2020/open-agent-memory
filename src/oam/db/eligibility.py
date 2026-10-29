@@ -98,7 +98,7 @@ SELECT u.* FROM search_units u
 JOIN users owner ON (owner.tenant_id,owner.user_id)=(u.tenant_id,u.user_id)
 WHERE u.tenant_id=current_setting('oam.tenant_id',true)
   AND u.user_id=current_setting('oam.user_id',true)
-  AND owner.state='active' AND owner.index_generation_id=u.generation_id
+  AND owner.state='active'
   AND (
     (u.kind IN ('passage','resource_passage') AND EXISTS (
         SELECT 1 FROM passages p

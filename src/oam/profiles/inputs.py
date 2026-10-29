@@ -30,7 +30,7 @@ FROM eligible u
 LEFT JOIN insights i ON
   (i.tenant_id,i.user_id,i.insight_id,i.revision)=
   (u.tenant_id,u.user_id,u.insight_id,u.insight_revision)
-WHERE u.generation_id=%s AND u.origin='memory' AND u.kind IN ('fact','insight')
+WHERE u.origin='memory' AND u.kind IN ('fact','insight')
 ORDER BY u.kind,u.unit_id
 """.strip()
 
@@ -67,7 +67,7 @@ SELECT DISTINCT s.source_id,s.active_version AS source_version,
             (s.tenant_id,s.user_id,s.source_id,s.active_version)
         AND o.kind IN ('index_interaction','consolidate')
         AND o.status IN ('accepted','running')
-        AND w.generation_id=%s AND w.status IN ('queued','running','retry_wait')
+        AND w.status IN ('queued','running','retry_wait')
     ) THEN 'pending'
     WHEN EXISTS (
       SELECT 1 FROM operations o JOIN work_units w
@@ -75,7 +75,7 @@ SELECT DISTINCT s.source_id,s.active_version AS source_version,
       WHERE (o.tenant_id,o.user_id,o.source_id,o.source_version)=
             (s.tenant_id,s.user_id,s.source_id,s.active_version)
         AND o.kind='consolidate'
-        AND w.generation_id=%s AND w.status IN ('failed_terminal','cancelled')
+        AND w.status IN ('failed_terminal','cancelled')
     ) THEN 'failed'
     WHEN EXISTS (
       SELECT 1 FROM operations o JOIN work_units w
@@ -83,7 +83,7 @@ SELECT DISTINCT s.source_id,s.active_version AS source_version,
       WHERE (o.tenant_id,o.user_id,o.source_id,o.source_version)=
             (s.tenant_id,s.user_id,s.source_id,s.active_version)
         AND o.kind='index_interaction'
-        AND w.generation_id=%s AND w.status IN ('failed_terminal','cancelled')
+        AND w.status IN ('failed_terminal','cancelled')
     ) THEN 'blocked'
     ELSE 'pending'
   END AS coverage_state
@@ -102,7 +102,7 @@ WHERE s.tenant_id=%s AND s.user_id=%s
       USING(tenant_id,user_id,operation_id)
     WHERE (o.tenant_id,o.user_id,o.source_id,o.source_version)=
           (s.tenant_id,s.user_id,s.source_id,s.active_version)
-      AND o.kind='index_interaction' AND w.generation_id=%s
+      AND o.kind='index_interaction'
       AND w.status IN ('queued','running','retry_wait','failed_terminal','cancelled')
   ))
   AND NOT EXISTS (
@@ -112,14 +112,13 @@ WHERE s.tenant_id=%s AND s.user_id=%s
     WHERE (o.tenant_id,o.user_id,o.source_id,o.source_version)=
           (s.tenant_id,s.user_id,s.source_id,s.active_version)
       AND o.kind IN ('index_interaction','consolidate') AND o.status='succeeded'
-      AND o.stage_state->>'insights_ready'='true' AND w.generation_id=%s
+      AND o.stage_state->>'insights_ready'='true'
       AND NOT EXISTS (
         SELECT 1 FROM operations repair JOIN work_units repair_work
           USING(tenant_id,user_id,operation_id)
         WHERE (repair.tenant_id,repair.user_id,repair.source_id,repair.source_version)=
               (o.tenant_id,o.user_id,o.source_id,o.source_version)
           AND repair.kind='consolidate' AND repair.stage_state->>'insight_repairs' IS NOT NULL
-          AND repair_work.generation_id=w.generation_id
           AND ((repair.status IN ('accepted','running')
                 AND repair_work.status IN ('queued','running','retry_wait'))
                OR repair_work.status IN ('failed_terminal','cancelled'))
@@ -144,7 +143,7 @@ SELECT sp.memory_id,sp.passage_id,sp.source_id,sp.source_version,sp.event_time,
 FROM eligible sp
 JOIN passages p ON
   (p.tenant_id,p.user_id,p.passage_id)=(sp.tenant_id,sp.user_id,sp.passage_id)
-WHERE sp.generation_id=%s AND sp.memory_id=ANY(%s)
+WHERE sp.memory_id=ANY(%s)
 ORDER BY sp.memory_id,sp.passage_id
 """.strip()
 
@@ -211,7 +210,7 @@ def _exact_fields(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
     return tuple(exact)
 
 
-def _prompt_inputs(cursor, authority: AuthorizedUser, units: list[dict], generation_id: str):
+def _prompt_inputs(cursor, authority: AuthorizedUser, units: list[dict]):
     selected = units[:MAX_PROMPT_UNITS]
     insight_keys = {
         (row["insight_id"], row["insight_revision"]) for row in selected if row["kind"] == "insight"
@@ -231,7 +230,7 @@ def _prompt_inputs(cursor, authority: AuthorizedUser, units: list[dict], generat
         memory_ids.update(identifiers)
     passages: dict[str, list[dict[str, Any]]] = defaultdict(list)
     if memory_ids:
-        cursor.execute(PASSAGE_SUPPORT_SQL, (generation_id, sorted(memory_ids)))
+        cursor.execute(PASSAGE_SUPPORT_SQL, (sorted(memory_ids),))
         for row in cursor.fetchall():
             citations = passages[row["memory_id"]]
             if len(citations) < MAX_PASSAGES_PER_MEMORY:
@@ -300,7 +299,7 @@ def load_profile_inputs(
             raise PermissionError("user is not active")
         if state["index_generation_id"] not in {None, generation_id}:
             raise ValueError("index generation changed")
-        cursor.execute(ELIGIBLE_PROFILE_UNITS_SQL, (generation_id,))
+        cursor.execute(ELIGIBLE_PROFILE_UNITS_SQL)
         units = cursor.fetchall()
         cursor.execute(ACTIVE_PROFILE_RESOURCES_SQL, (authority.tenant_id, authority.user_id))
         resources = cursor.fetchall()
@@ -309,25 +308,16 @@ def load_profile_inputs(
         source_scope = cursor.fetchall()
         cursor.execute(
             PENDING_PROFILE_INPUTS_SQL,
-            (
-                generation_id,
-                generation_id,
-                generation_id,
-                authority.tenant_id,
-                authority.user_id,
-                generation_id,
-                generation_id,
-            ),
+            (authority.tenant_id, authority.user_id),
         )
         pending = cursor.fetchall()
         profile_units = [row for row in units if row["kind"] == "insight"]
-        prompt_inputs = _prompt_inputs(cursor, authority, profile_units, generation_id)
+        prompt_inputs = _prompt_inputs(cursor, authority, profile_units)
         stored_support_inputs = (
             _prompt_inputs(
                 cursor,
                 authority,
                 [row for row in units if row["unit_id"] in stored_support_ids],
-                generation_id,
             )
             if stored_support_ids
             else []

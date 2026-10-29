@@ -60,8 +60,9 @@ def freeze_extraction_references(
         frozen = connection.execute(
             "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
             "AND source_id=%s AND source_version=%s AND generation_id=%s "
-            "AND stage_key=%s AND input_digest=%s",
-            (*identity, stage, digest),
+            "AND (stage_key=%s OR starts_with(stage_key,%s||':recipe=')) "
+            "AND input_digest=%s ORDER BY (stage_key=%s) DESC,stage_key LIMIT 1",
+            (*identity, stage, stage, digest, stage),
         ).fetchone()
         if frozen:
             references = frozen[0]["references"]
@@ -69,11 +70,14 @@ def freeze_extraction_references(
             completed = connection.execute(
                 "SELECT 1 FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
                 "AND source_id=%s AND source_version=%s AND generation_id=%s "
-                "AND stage_key=%s AND input_digest=%s",
+                "AND (stage_key=%s OR starts_with(stage_key,%s||':recipe=')) "
+                "AND input_digest=%s ORDER BY (stage_key=%s) DESC,stage_key LIMIT 1",
                 (
                     *identity,
                     "extract:" + passage_id,
+                    "extract:" + passage_id,
                     input_digest({**inputs, "reference_facts": references}),
+                    "extract:" + passage_id,
                 ),
             ).fetchone()
             if completed:

@@ -186,14 +186,16 @@ class ProfileService:
             raise PermissionError("Profile refresh is denied")
         if instruction is not None and reset_instruction:
             raise ValueError("instruction and reset_instruction cannot be combined")
-        generation = index_generation(self.config, os.environ)
         with self.pool.connection() as connection, connection.transaction():
             with connection.cursor() as cursor:
                 bind_user(cursor, authority)
                 cursor.execute(
-                    "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s FOR UPDATE",
+                    "SELECT index_generation_id FROM users "
+                    "WHERE tenant_id=%s AND user_id=%s FOR UPDATE",
                     (authority.tenant_id, authority.user_id),
                 )
+                row = cursor.fetchone()
+                generation = (row[0] if row else None) or index_generation(self.config, os.environ)
             inputs = load_profile_inputs(connection, authority, generation)
             snapshot = _current_snapshot(connection, authority)
             if reset_instruction:
@@ -280,14 +282,13 @@ class ProfileService:
                     "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='consolidate' "
                     "AND o.source_id=ANY(%s) AND o.source_version=s.active_version "
                     "AND s.status='active' AND o.status IN ('accepted','running') "
-                    "AND w.stage='consolidate' AND w.generation_id=%s "
+                    "AND w.stage='consolidate' "
                     "AND w.status IN ('queued','running','retry_wait') "
                     "ORDER BY o.source_id,w.work_unit_id",
                     (
                         authority.tenant_id,
                         authority.user_id,
                         list(inputs.waiting_source_ids),
-                        generation,
                     ),
                 ).fetchall()
                 if {row[0] for row in rows} != set(inputs.waiting_source_ids):

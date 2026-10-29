@@ -21,7 +21,7 @@ from psycopg_pool import ConnectionPool
 from oam.config import OAMConfig
 from oam.contracts.evidence import EvidenceAppendRequest
 from oam.governance.cleanup import cleanup_claim, cleanup_removal_claim
-from oam.indexing.chunker import chunk_text
+from oam.indexing.chunker import resume_chunks
 from oam.indexing.extraction import (
     FactExtraction,
     extract_facts,
@@ -259,8 +259,12 @@ def _read_inline_semantic_state(store):
 
 
 def _index_interaction(config, store, models, request):
-    fact_ids = []
-    extraction_diagnostics = []
+    saved_passages, saved_facts, extraction_diagnostics = store.resume_source()
+    if extraction_diagnostics:
+        with store.transaction() as connection:
+            store.guard(connection)
+            store.readiness(connection, extraction_diagnostics=extraction_diagnostics)
+    fact_ids = sorted({fact for values in saved_facts.values() for fact in values})
     pending_extractions = []
     extraction_failures = []
     capacity = config.provider.llm_concurrency
@@ -334,8 +338,14 @@ def _index_interaction(config, store, models, request):
                     check_retry_claim=store.check_retry_claim,
                 )
 
+        def produce_with_passages(produce=produce, passages=passages):
+            return {
+                **produce().model_dump(mode="json"),
+                "_passage_ids": [passage.passage_id for passage in passages],
+            }
+
         future = extraction_executor.submit(
-            store.checkpoint, "extract:" + group_id, extraction_input, produce
+            store.checkpoint, "extract:" + group_id, extraction_input, produce_with_passages
         )
         pending_extractions.append((members, group_id, future))
         if len(pending_extractions) >= window:
@@ -373,7 +383,9 @@ def _index_interaction(config, store, models, request):
             if isinstance(output, BaseException):
                 failures.append((group_id, output))
                 continue
-            result = FactExtraction.model_validate(output)
+            result = FactExtraction.model_validate(
+                {key: value for key, value in output.items() if key != "_passage_ids"}
+            )
             extraction_diagnostics.extend(
                 {"passage_id": group_id, **diagnostic.model_dump(mode="json")}
                 for diagnostic in result.diagnostics
@@ -418,10 +430,20 @@ def _index_interaction(config, store, models, request):
             store.source["source_version"],
             message.message_id,
         )
-        chunks = chunk_text(message.content, config.chunk.ingestion, previous_context=previous)
+        saved = saved_passages.get(message_index, [])
+        if [item[0] for item in saved] != list(range(len(saved))):
+            raise ValueError("published passage order is incomplete")
+        chunks = resume_chunks(
+            message.content,
+            [item[1] for item in saved],
+            config.chunk.ingestion,
+            previous_context=previous,
+        )
         total_chunks += len(chunks)
         for passage_index, chunk in enumerate(chunk for chunk in chunks if chunk.text.strip()):
             passage_id = stable_id("passage", evidence_id, passage_index)
+            if passage_index < len(saved) and saved[passage_index][2] != passage_id:
+                raise ValueError("published passage identity does not match source")
             prepared.append((passage_id, chunk, message, evidence_id, message_index, passage_index))
         previous = message.content
     logging.getLogger(__name__).info(
@@ -443,13 +465,19 @@ def _index_interaction(config, store, models, request):
         )
         for item in prepared
     }
-    groups = plan_extraction_groups(tuple(by_passage.values()), config, request.reference_timezone)
+    groups = plan_extraction_groups(
+        tuple(passage for identity, passage in by_passage.items() if identity not in saved_facts),
+        config,
+        request.reference_timezone,
+    )
     ending_groups = {group[-1].passage_id: tuple(p.passage_id for p in group) for group in groups}
     published = {}
     extraction_executor = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix="oam-extract")
     try:
         for offset in range(0, len(prepared), PASSAGE_EMBED_BATCH_SIZE):
             batch = prepared[offset : offset + PASSAGE_EMBED_BATCH_SIZE]
+            if all(item[0] in saved_facts for item in batch):
+                continue
             texts = tuple(chunk.text for _, chunk, _, _, _, _ in batch)
             batch_id = stable_id("passage_batch", [item[0] for item in batch])
             embedded = checkpoint(
@@ -467,6 +495,8 @@ def _index_interaction(config, store, models, request):
                 message_index,
                 passage_index,
             ), vector in zip(batch, embedded["vectors"], strict=True):
+                if passage_id in saved_facts:
+                    continue
                 locator = {
                     "source_id": store.source["source_id"],
                     "source_version": store.source["source_version"],
@@ -591,6 +621,7 @@ def _resource(store, models):
     content = bytes(store.source["original_bytes"])
     original = OriginalDescriptor.from_bytes(media_type=store.source["media_type"], content=content)
     metadata = store.resource_metadata()
+    saved_passages = store.resource_passages()
     annotated_locators = {annotation.locator for annotation in metadata.temporal_annotations}
     spans = {}
     processing_error = None
@@ -598,9 +629,12 @@ def _resource(store, models):
     if original.media_type is ResourceMediaType.TEXT:
         enforce_byte_limit(original, store.config.resource)
         source_text = content.decode("utf-8")
+        published = [saved_passages.get(f"text:{index}") for index in range(len(saved_passages))]
+        if any(chunk is None for chunk in published):
+            raise ResourceParseError("published text Resource passage order is incomplete")
         chunks = tuple(
             chunk
-            for chunk in chunk_text(source_text, store.config.chunk.ingestion)
+            for chunk in resume_chunks(source_text, published, store.config.chunk.ingestion)
             if chunk.text.strip()
         )
         if not chunks:
@@ -628,9 +662,24 @@ def _resource(store, models):
                         "parse_revision": LEGACY_RESOURCE_PARSE_REVISION,
                     }
                 else:
+                    saved_spans = []
+                    for locator, text in saved_passages.items():
+                        if locator == page.locator:
+                            saved_spans.append((0, text))
+                        else:
+                            match = re.fullmatch(
+                                re.escape(page.locator) + r":span:(\d+):(\d+)", locator
+                            )
+                            if match:
+                                saved_spans.append((int(match.group(1)), text))
+                    saved_spans.sort()
                     chunks = tuple(
                         chunk
-                        for chunk in chunk_text(page.text, store.config.chunk.ingestion)
+                        for chunk in resume_chunks(
+                            page.text,
+                            [text for _, text in saved_spans],
+                            store.config.chunk.ingestion,
+                        )
                         if chunk.text.strip()
                     )
                     for chunk in chunks:
@@ -729,6 +778,9 @@ def _resource(store, models):
                 store.mark_deferred_failure_stage(processing_error_stage)
             raise processing_error
         raise ResourceParseError("Resource contains no extractable detail")
+    current_blocks = {block.locator: block.text for block in blocks}
+    if any(current_blocks.get(locator) != text for locator, text in saved_passages.items()):
+        raise ResourceParseError("published Resource passages differ from the current parse")
     metadata.validate_source_quotes({block.locator: block.text for block in blocks})
     evidence_id = stable_id(
         "resource_evidence",
@@ -1140,6 +1192,8 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                             identifiers[target],
                         ),
                     )
+        if diagnostics:
+            store.readiness(connection, extraction_diagnostics=diagnostics)
     return list(identifiers.values())
 
 

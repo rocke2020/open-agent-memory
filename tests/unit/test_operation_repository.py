@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
@@ -216,3 +217,51 @@ def test_reconcile_attempt_updates_only_exact_owner_and_fence() -> None:
         "tenant-1",
         "scope-1",
     )
+
+
+@pytest.mark.parametrize("current_namespace", ["stored-namespace", "new-namespace"])
+def test_removal_recovery_uses_stored_namespace_after_recipe_change(current_namespace) -> None:
+    original = list(_operation_row(status="partial_failed", operation_id="remove"))
+    original[1] = "remove_memory"
+    original[11] = {"consolidation_operation_ids": ["repair"]}
+    repair = list(_operation_row(status="partial_failed", operation_id="repair"))
+    repair[1] = "consolidate"
+    repair[11] = {"insight_repairs": [{"removal_operation_id": "remove"}]}
+    work = [
+        ("cleanup", "remove", "cleanup_memory", "succeeded", "cleanup", []),
+        (
+            "repair-work",
+            "repair",
+            "consolidate",
+            "failed_terminal",
+            "stored-namespace",
+            ["cleanup"],
+        ),
+    ]
+
+    class RecoveryCursor:
+        def __init__(self):
+            self.one = iter(
+                [(current_namespace,), tuple(original), (1,), None, (0,), (0,), tuple(original)]
+            )
+            self.many = iter([[tuple(original), tuple(repair)], work])
+
+        def execute(self, query, parameters=()):
+            pass
+
+        def fetchone(self):
+            return next(self.one)
+
+        def fetchall(self):
+            return next(self.many)
+
+    connection = Connection([])
+    connection.cursor_value = cast(Cursor, RecoveryCursor())
+    result = repository.OperationRepository().recover_removal(
+        connection,
+        _authority("source:delete"),
+        "remove",
+        attempts_remaining=3,
+        max_pending_per_user=2,
+    )
+    assert result.operation_id == "remove"

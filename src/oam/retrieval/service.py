@@ -234,8 +234,7 @@ class RecallService:
                 )
 
         initial_index_state = read("user_state")
-        if initial_index_state["index_generation_id"] != self.generation_id:
-            raise RecallUnavailable("query generation differs from active user generation")
+        generation_id = initial_index_state["index_generation_id"] or self.generation_id
         if initial_index_state["parse_partial"] and not request.allow_partial:
             raise RecallUnavailable("PDF parse is incomplete; set allow_partial to read it")
 
@@ -491,7 +490,7 @@ class RecallService:
             related_tail_id = related["unit_id"]
             final_ids = (*final_ids, related_tail_id)
         index_state = read("user_state")
-        if index_state["index_generation_id"] != self.generation_id:
+        if index_state["index_generation_id"] != initial_index_state["index_generation_id"]:
             raise RecallUnavailable("user generation changed during recall")
         if index_state["parse_partial"] and not request.allow_partial:
             raise RecallUnavailable("PDF parse became incomplete during recall")
@@ -1259,7 +1258,7 @@ class RecallService:
                     "adjacent_user_context_max_chars": tier.adjacent_user_context_max_chars,
                     "window_originals": len(window_original_ids & selected_ids),
                 },
-                "generation_id": self.generation_id,
+                "generation_id": generation_id,
                 "executed_arms": list(arms),
                 "executed_stages": [
                     name
@@ -1335,7 +1334,7 @@ class RecallService:
         decisions = {
             "query_hash": hashlib.sha256(request.query.encode()).hexdigest(),
             "options": request.model_dump(mode="json", exclude={"query"}),
-            "generation_id": self.generation_id,
+            "generation_id": generation_id,
             "arms": {name: list(ids) for name, ids in arms.items()},
             "fusion": fusion,
             "rerank_scores": rerank_scores,
