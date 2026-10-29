@@ -49,7 +49,7 @@ extraction:
   # Group planning estimates output as 3 * source tokens + 128 * passage count.
   # Multi-passage groups must fit this estimate and max_input_tokens; size is not fixed.
   group_max_estimated_output_tokens: 4096
-  # Generation completion cap, leaving room for reasoning and visible JSON.
+  # Chat/Messages completion budget, leaving room for reasoning and visible JSON; Responses omits it.
   # This is separate from the group-planning estimate above.
   max_output_tokens: 64000
   # Maximum extracted facts in one model response, shared by all passages in the group.
@@ -330,19 +330,23 @@ backup:
   retention_days: 30
 
 models:
-  # Every generative role uses this one VLM and OpenAI Chat protocol.
+  # Every generative role uses this shared VLM binding.
   vlm:
-    # Generative wire protocol; only OpenAI Chat completions is supported.
+    # Generative protocol: openai_chat, openai_responses or anthropic_messages.
     protocol: openai_chat
+    # legacy_chat preserves existing requests; effort sends protocol-native effort; provider_default omits controls.
+    reasoning_mode: legacy_chat
+    # Chat-only extension: null omits it; true and false are sent exactly.
+    reasoning_split: null
     # Environment variable holding the shared generative model identifier.
     model_env: VLM_MODEL
-    # Environment variable holding the API base URL; /chat/completions is appended.
+    # Environment variable holding the protocol base URL; see docs/operations.md for path rules.
     endpoint_env: VLM_BASE_URL
-    # Environment variable holding the required Bearer API credential.
+    # Environment variable holding the API credential.
     api_key_env: VLM_API_KEY
     # Declared model capabilities validated against enabled generative roles.
     capabilities: [text, vision]
-  # none disables thinking; low/high/max enable it. null disables the role.
+  # Role effort; null disables the role. Its wire meaning depends on reasoning_mode.
   reasoning_effort:
     # Reasoning setting for source-backed fact extraction.
     extraction: low

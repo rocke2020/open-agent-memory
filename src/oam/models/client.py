@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from importlib.resources import files
 from io import BytesIO
 from typing import Any
@@ -15,6 +16,10 @@ from oam.models.preflight import (
     RerankProbeOutput,
     VisionProbeOutput,
 )
+from oam.models.protocols import generation_request, normalize_generation
+from oam.models.runtime import _usage
+
+logger = logging.getLogger(__name__)
 
 _VISION_PROBE_SIZE = 512
 _CHAT_PROBE_PROMPT = (
@@ -61,18 +66,10 @@ class OpenAICompatibleProbeClient:
     def probe_chat(
         self, binding: ResolvedModelBinding, *, max_output_tokens: int
     ) -> ChatProbeOutput:
-        payload = {
-            "model": binding.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": _CHAT_PROBE_PROMPT,
-                }
-            ],
-            "max_tokens": max_output_tokens,
-            "response_format": {"type": "json_object"},
-        }
-        return self._chat_output(self._post(binding, "/chat/completions", payload))
+        path, headers, payload = generation_request(
+            binding, "", _CHAT_PROBE_PROMPT, max_output_tokens
+        )
+        return self._probe_generation(binding, path, headers, payload)
 
     def probe_embeddings(
         self, binding: ResolvedModelBinding, texts: tuple[str, ...]
@@ -99,31 +96,40 @@ class OpenAICompatibleProbeClient:
     def probe_vision(
         self, binding: ResolvedModelBinding, *, max_output_tokens: int
     ) -> VisionProbeOutput:
-        payload = {
-            "model": binding.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": _VISION_PROBE_PROMPT,
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": _VISION_PROBE_PNG_DATA_URL},
-                        },
-                    ],
-                }
-            ],
-            "max_tokens": max_output_tokens,
-        }
-        output = self._chat_output(self._post(binding, "/chat/completions", payload))
+        path, headers, payload = generation_request(
+            binding, "", _VISION_PROBE_PROMPT, max_output_tokens, _VISION_PROBE_PNG_DATA_URL
+        )
+        output = self._probe_generation(binding, path, headers, payload)
         return VisionProbeOutput(
             content=output.content,
             finish_reason=output.finish_reason,
             reasoning_content=output.reasoning_content,
         )
+
+    def _probe_generation(
+        self,
+        binding: ResolvedModelBinding,
+        path: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> ChatProbeOutput:
+        body = normalize_generation(binding, self._post(binding, path, payload, headers=headers))
+        usage = _usage(body.get("usage"))
+        logger.info(
+            "model_preflight protocol=%s role=%s model=%s input_tokens=%s cached_input_tokens=%s "
+            "uncached_input_tokens=%s cache_creation_input_tokens=%s "
+            "output_tokens=%s reasoning_tokens=%s",
+            binding.protocol,
+            binding.role,
+            binding.model,
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.uncached_input_tokens,
+            usage.cache_creation_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_tokens,
+        )
+        return self._chat_output(body)
 
     def probe_rerank(
         self, binding: ResolvedModelBinding, documents: tuple[str, ...]
@@ -149,12 +155,13 @@ class OpenAICompatibleProbeClient:
         binding: ResolvedModelBinding,
         path: str,
         payload: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        headers = {"content-type": "application/json"}
-        if binding._api_key is not None:
-            headers["authorization"] = f"Bearer {binding._api_key}"
-        if path == "/chat/completions":
-            payload = {**payload, **binding.chat_parameters()}
+        if headers is None:
+            headers = {"content-type": "application/json"}
+            if binding._api_key is not None:
+                headers["authorization"] = f"Bearer {binding._api_key}"
         response = self._http.post(
             f"{binding.endpoint}{path}",
             headers=headers,
@@ -172,7 +179,10 @@ class OpenAICompatibleProbeClient:
     @staticmethod
     def _chat_output(body: dict[str, Any]) -> ChatProbeOutput:
         try:
-            choice = body["choices"][0]
+            choices = body["choices"]
+            if not isinstance(choices, list) or len(choices) != 1:
+                raise TypeError
+            choice = choices[0]
             message = choice["message"]
             if not isinstance(message, dict):
                 raise TypeError

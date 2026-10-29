@@ -22,6 +22,8 @@ class ResolvedModelBinding:
     capabilities: frozenset[ModelCapability]
     credential_configured: bool
     reasoning_effort: str | None = None
+    reasoning_split: bool | None = None
+    reasoning_mode: str = "legacy_chat"
     _api_key: str | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -40,6 +42,8 @@ class ResolvedModelBinding:
             "capabilities": sorted(capability.value for capability in self.capabilities),
             "credential_configured": self.credential_configured,
             "reasoning_effort": self.reasoning_effort,
+            "reasoning_split": self.reasoning_split,
+            "reasoning_mode": self.reasoning_mode,
             "thinking": self.thinking,
         }
 
@@ -48,12 +52,16 @@ class ResolvedModelBinding:
             raise ModelBindingResolutionError(
                 f"model role {self.role!r} requires explicit reasoning_effort"
             )
-        if self.reasoning_effort == "none":
-            return {"thinking": {"type": "disabled"}}
-        return {
-            "reasoning_effort": self.reasoning_effort,
-            "thinking": {"type": self.thinking},
-        }
+        params: dict[str, Any] = {}
+        if self.reasoning_mode == "legacy_chat":
+            params["thinking"] = {"type": self.thinking}
+            if self.reasoning_effort != "none":
+                params["reasoning_effort"] = self.reasoning_effort
+        elif self.reasoning_mode == "effort":
+            params["reasoning_effort"] = self.reasoning_effort
+        if self.reasoning_split is not None:
+            params["reasoning_split"] = self.reasoning_split
+        return params
 
 
 def resolve_model_binding(
@@ -108,6 +116,8 @@ def resolve_model_binding(
         role=role,
         alias=alias,
         protocol=binding.protocol,
+        reasoning_split=binding.reasoning_split,
+        reasoning_mode=binding.reasoning_mode,
         model=model,
         endpoint=endpoint,
         capabilities=binding.capabilities,

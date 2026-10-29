@@ -28,11 +28,15 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
     for role in roles_to_hash:
         binding = resolve_model_binding(config.models, role, environment)
         if binding is not None:
-            role_identity = {
+            role_identity: dict[str, object] = {
                 "protocol": binding.protocol,
                 "reasoning_effort": binding.reasoning_effort,
                 "thinking": binding.thinking,
             }
+            if binding.reasoning_mode != "legacy_chat":
+                role_identity["reasoning_mode"] = binding.reasoning_mode
+            if binding.reasoning_split is not None:
+                role_identity["reasoning_split"] = binding.reasoning_split
             # VLM_BASE_URL, VLM_API_KEY, and VLM_MODEL select the transport at
             # runtime. Route and provider naming are deliberately excluded from
             # content-generation identity so an equivalent binding can resume

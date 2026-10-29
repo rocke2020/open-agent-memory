@@ -16,6 +16,7 @@ from pydantic import (
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
+    StrictBool,
     ValidationError,
     field_serializer,
     field_validator,
@@ -298,7 +299,9 @@ class ModelCapability(StrEnum):
 
 
 class ModelBinding(FrozenModel):
-    protocol: Literal["openai_chat", "openai_compatible"]
+    protocol: Literal["openai_chat", "openai_responses", "anthropic_messages", "openai_compatible"]
+    reasoning_split: StrictBool | None = None
+    reasoning_mode: Literal["legacy_chat", "effort", "provider_default"] = "legacy_chat"
     model: str | None = Field(default=None, min_length=1)
     model_env: str | None = Field(default=None, min_length=1)
     endpoint_env: str = Field(min_length=1)
@@ -351,12 +354,32 @@ class ModelsConfig(FrozenModel):
 
     @model_validator(mode="after")
     def validate_roles(self) -> ModelsConfig:
+        if self.vlm is not None and self.vlm.protocol not in {
+            "openai_chat",
+            "openai_responses",
+            "anthropic_messages",
+        }:
+            raise ValueError("models.vlm.protocol must be a generative protocol")
         if self.vlm is not None and self.vlm.protocol != "openai_chat":
-            raise ValueError("models.vlm.protocol must be openai_chat")
+            if self.vlm.reasoning_split is not None:
+                raise ValueError("reasoning_split requires openai_chat")
+            if self.vlm.reasoning_mode == "legacy_chat":
+                raise ValueError("legacy_chat reasoning requires openai_chat")
+        if (
+            self.vlm is not None
+            and self.vlm.protocol == "anthropic_messages"
+            and self.vlm.reasoning_mode == "effort"
+            and any(value == "none" for value in self.reasoning_effort.model_dump().values())
+        ):
+            raise ValueError("anthropic_messages does not support effort none")
         for role in ("embedding", "reranker"):
             binding = getattr(self, role)
             if binding is not None and binding.protocol != "openai_compatible":
                 raise ValueError(f"models.{role}.protocol must be openai_compatible")
+            if binding is not None and (
+                binding.reasoning_split is not None or binding.reasoning_mode != "legacy_chat"
+            ):
+                raise ValueError(f"models.{role} does not support generation reasoning options")
         for role, capabilities in ROLE_CAPABILITIES.items():
             binding = self.binding_for(role)
             if binding is None:
