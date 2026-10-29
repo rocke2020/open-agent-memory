@@ -170,3 +170,75 @@ def test_embedding_client_rejects_invalid_response_indices(indices) -> None:
         OpenAICompatibleProbeClient(http=http).probe_embeddings(
             _binding(ModelCapability.EMBEDDINGS), ("first", "second")
         )
+
+
+@pytest.mark.parametrize("finish_reason", ["tool_calls", "error", None])
+def test_chat_preflight_rejects_non_stop_termination(finish_reason):
+    from oam.models.preflight import _validate_chat
+
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"finish_reason": finish_reason, "message": {"content": '{"ok":true}'}}
+                    ]
+                },
+            )
+        )
+    ) as http:
+        result = OpenAICompatibleProbeClient(http=http).probe_chat(
+            _binding(ModelCapability.TEXT), max_output_tokens=1024
+        )
+        with pytest.raises(ValueError):
+            _validate_chat(result)
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "anthropic_messages"])
+def test_preflight_uses_selected_generation_protocol(protocol):
+    models = ModelsConfig.model_validate(
+        {
+            "reasoning_effort": {"extraction": "low"},
+            "vlm": {
+                "protocol": protocol,
+                "reasoning_mode": "provider_default",
+                "model": "synthetic",
+                "endpoint_env": "MODEL_URL",
+                "api_key_env": "MODEL_KEY",
+                "capabilities": ["text", "vision"],
+            },
+        }
+    )
+    binding = resolve_model_binding(
+        models, "extraction", {"MODEL_URL": "https://model.example", "MODEL_KEY": "test"}
+    )
+    assert binding is not None
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        if protocol == "openai_responses":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": '{"ok":true}'}],
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"stop_reason": "end_turn", "content": [{"type": "text", "text": '{"ok":true}'}]},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        result = OpenAICompatibleProbeClient(http=http).probe_chat(binding, max_output_tokens=1024)
+    assert result.content == '{"ok":true}'
+    assert result.finish_reason == "stop"
+    assert seen == (["/responses"] if protocol == "openai_responses" else ["/v1/messages"])

@@ -905,8 +905,23 @@ class IndexStore:
                 name: sum(value[name] for value in values)
                 if all(value.get(name) is not None for value in values)
                 else None
-                for name in ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens")
+                for name in (
+                    "input_tokens",
+                    "output_tokens",
+                    "total_tokens",
+                    "reasoning_tokens",
+                    "cached_input_tokens",
+                    "uncached_input_tokens",
+                    "cache_creation_input_tokens",
+                )
             }
+            if uncertain:
+                for name in (
+                    "cached_input_tokens",
+                    "uncached_input_tokens",
+                    "cache_creation_input_tokens",
+                ):
+                    result[name] = None
             result["coverage"] = (
                 "complete"
                 if not uncertain and all(value.get("coverage") == "complete" for value in values)

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import logging
 import math
 import time
 from collections.abc import Mapping
 from contextlib import suppress
 from threading import BoundedSemaphore, Event
 from typing import Any, Literal
+from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -16,6 +18,9 @@ from pydantic import BaseModel, ConfigDict
 from oam.capacity import CapacityUnavailable, PostgresCapacity
 from oam.config import OAMConfig
 from oam.models.bindings import ResolvedModelBinding, resolve_model_binding
+from oam.models.protocols import generation_request, normalize_generation
+
+logger = logging.getLogger(__name__)
 
 MIN_GENERATION_OUTPUT_TOKENS = 1_024
 
@@ -48,6 +53,9 @@ class Usage(FrozenResult):
     """Reported token totals; reasoning is a subset of completion, never an addend."""
 
     input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
     reasoning_tokens: int | None = None
@@ -107,21 +115,10 @@ class RuntimeModels:
         if not system.strip() or not user.strip():
             raise ValueError("generation requires nonempty system and user content")
         binding = self._binding(role, "text")
-        body = self._post(
-            binding,
-            "/chat/completions",
-            {
-                "model": binding.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "max_tokens": max_output_tokens,
-                "response_format": {"type": "json_object"},
-            },
-            timeout_seconds,
-        )
-        return _generation_result(body)
+        path, headers, payload = generation_request(binding, system, user, max_output_tokens)
+        call_id = uuid4().hex
+        body = self._post(binding, path, payload, timeout_seconds, headers=headers, call_id=call_id)
+        return self._generation_result(binding, body, call_id)
 
     def generate_vision(
         self,
@@ -141,30 +138,75 @@ class RuntimeModels:
             raise ValueError("vision requires nonempty system and user content")
         binding = self._binding("extraction", "vision")
         encoded = base64.b64encode(image).decode("ascii")
-        body = self._post(
-            binding,
-            "/chat/completions",
-            {
-                "model": binding.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{media_type};base64,{encoded}"},
-                            },
-                        ],
-                    },
-                ],
-                "max_tokens": max_output_tokens,
-                "response_format": {"type": "json_object"},
-            },
-            timeout_seconds,
+        image_url = f"data:{media_type};base64,{encoded}"
+        path, headers, payload = generation_request(
+            binding, system, user, max_output_tokens, image_url
         )
-        return _generation_result(body)
+        call_id = uuid4().hex
+        body = self._post(binding, path, payload, timeout_seconds, headers=headers, call_id=call_id)
+        return self._generation_result(binding, body, call_id)
+
+    def _generation_result(
+        self, binding: ResolvedModelBinding, body: dict[str, Any], call_id: str
+    ) -> ModelResult:
+        normalized = normalize_generation(binding, body)
+        choices = normalized.get("choices")
+        choice = (
+            choices[0]
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict)
+            else {}
+        )
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        reasoning = message.get("reasoning_content")
+        reasoning_chars = (
+            len(reasoning)
+            if binding.protocol == "openai_chat" and isinstance(reasoning, str)
+            else None
+        )
+        try:
+            result = _generation_result(normalized)
+        except ModelOutputError as exc:
+            logger.info(
+                "model_result protocol=%s role=%s outcome=%s finish_reason=%s "
+                "completion_tokens=%s reasoning_chars=%s input_tokens=%s cached_input_tokens=%s "
+                "uncached_input_tokens=%s cache_creation_input_tokens=%s model=%s call_id=%s "
+                "reasoning_tokens=%s total_tokens=%s",
+                binding.protocol,
+                binding.role,
+                type(exc).__name__,
+                choice.get("finish_reason"),
+                exc.usage.output_tokens if exc.usage else None,
+                reasoning_chars,
+                exc.usage.input_tokens if exc.usage else None,
+                exc.usage.cached_input_tokens if exc.usage else None,
+                exc.usage.uncached_input_tokens if exc.usage else None,
+                exc.usage.cache_creation_input_tokens if exc.usage else None,
+                binding.model,
+                call_id,
+                exc.usage.reasoning_tokens if exc.usage else None,
+                exc.usage.total_tokens if exc.usage else None,
+            )
+            raise
+        logger.info(
+            "model_result protocol=%s role=%s outcome=success finish_reason=%s "
+            "completion_tokens=%s reasoning_chars=%s input_tokens=%s cached_input_tokens=%s "
+            "uncached_input_tokens=%s cache_creation_input_tokens=%s model=%s call_id=%s "
+            "reasoning_tokens=%s total_tokens=%s",
+            binding.protocol,
+            binding.role,
+            choice.get("finish_reason"),
+            result.usage.output_tokens,
+            reasoning_chars,
+            result.usage.input_tokens,
+            result.usage.cached_input_tokens,
+            result.usage.uncached_input_tokens,
+            result.usage.cache_creation_input_tokens,
+            binding.model,
+            call_id,
+            result.usage.reasoning_tokens,
+            result.usage.total_tokens,
+        )
+        return result
 
     def embed(self, texts: tuple[str, ...], *, timeout_seconds: float) -> EmbeddingResult:
         _require_texts(texts)
@@ -230,14 +272,16 @@ class RuntimeModels:
         path: str,
         payload: dict[str, Any],
         timeout_seconds: float,
+        *,
+        headers: dict[str, str] | None = None,
+        call_id: str | None = None,
     ) -> dict[str, Any]:
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("model timeout must be positive and finite")
-        headers = {"content-type": "application/json"}
-        if binding._api_key is not None:
-            headers["authorization"] = f"Bearer {binding._api_key}"
-        if path == "/chat/completions":
-            payload = {**payload, **binding.chat_parameters()}
+        if headers is None:
+            headers = {"content-type": "application/json"}
+            if binding._api_key is not None:
+                headers["authorization"] = f"Bearer {binding._api_key}"
         deadline = time.monotonic() + timeout_seconds
         kind = "embedding" if path == "/embeddings" else "llm"
         slots = (
@@ -268,20 +312,45 @@ class RuntimeModels:
                 permit.dispatched()
                 headers["X-Request-ID"] = str(permit.permit_id)
             remaining = remaining_time()
+            started = time.monotonic()
             try:
                 sent = True
                 response = self._http.post(
                     f"{binding.endpoint}{path}", headers=headers, json=payload, timeout=remaining
                 )
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+                logger.info(
+                    "model_dispatch protocol=%s role=%s outcome=%s duration_ms=%.0f call_id=%s",
+                    binding.protocol,
+                    binding.role,
+                    type(exc).__name__,
+                    (time.monotonic() - started) * 1000,
+                    call_id,
+                )
                 if permit is not None:
                     permit.complete()
                 raise
-            except BaseException:
+            except BaseException as exc:
+                logger.info(
+                    "model_dispatch protocol=%s role=%s outcome=%s duration_ms=%.0f call_id=%s",
+                    binding.protocol,
+                    binding.role,
+                    type(exc).__name__,
+                    (time.monotonic() - started) * 1000,
+                    call_id,
+                )
                 if permit is not None:
                     permit.uncertain()
                 raise
             else:
+                logger.info(
+                    "model_dispatch protocol=%s role=%s status=%s duration_ms=%.0f call_id=%s",
+                    binding.protocol,
+                    binding.role,
+                    response.status_code,
+                    (time.monotonic() - started) * 1000,
+                    call_id,
+                )
                 if permit is not None:
                     permit.complete()
         except CapacityUnavailable as exc:
@@ -377,10 +446,24 @@ def _usage(raw: object, *, generates: bool = True) -> Usage:
         return value
 
     input_tokens = count(raw.get("prompt_tokens", raw.get("input_tokens")))
+    input_details = raw.get("prompt_tokens_details", raw.get("input_tokens_details"))
+    if input_details is not None and not isinstance(input_details, dict):
+        raise ModelOutputError("input token details must be an object")
+    cached = count(raw.get("cached_input_tokens"))
+    uncached = count(raw.get("uncached_input_tokens"))
+    cache_creation = count(raw.get("cache_creation_input_tokens"))
+    if cached is None and isinstance(input_details, dict):
+        cached = count(input_details.get("cached_tokens"))
+        if cached is not None and input_tokens is not None:
+            if cached > input_tokens:
+                raise ModelOutputError("cached tokens exceed input tokens")
+            uncached = input_tokens - cached
+    if input_tokens is not None and cached is not None and cached > input_tokens:
+        raise ModelOutputError("cached tokens exceed input tokens")
     output_tokens = count(raw.get("completion_tokens", raw.get("output_tokens")))
     if not generates and output_tokens is None:
         output_tokens = 0
-    details = raw.get("completion_tokens_details")
+    details = raw.get("completion_tokens_details", raw.get("output_tokens_details"))
     if details is None:
         details = {}
     if not isinstance(details, dict):
@@ -402,6 +485,9 @@ def _usage(raw: object, *, generates: bool = True) -> Usage:
     coverage = "complete" if all(value is not None for value in available) else "partial"
     return Usage(
         input_tokens=input_tokens,
+        cached_input_tokens=cached,
+        uncached_input_tokens=uncached,
+        cache_creation_input_tokens=cache_creation,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         reasoning_tokens=reasoning_tokens,

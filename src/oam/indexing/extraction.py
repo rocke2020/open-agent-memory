@@ -636,6 +636,11 @@ def _sum_extraction_usage(usages: list[Usage | None]) -> Usage:
         values = [getattr(usage, field) for usage in usages if usage is not None]
         known = [value for value in values if value is not None]
         fields[field] = sum(known) if known else None
+    for field in ("cached_input_tokens", "uncached_input_tokens", "cache_creation_input_tokens"):
+        values = [getattr(usage, field) if usage is not None else None for usage in usages]
+        fields[field] = (
+            sum(values) if values and all(value is not None for value in values) else None
+        )
     fields["coverage"] = (
         "complete"
         if all(usage is not None and usage.coverage == "complete" for usage in usages)

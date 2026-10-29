@@ -285,6 +285,9 @@ def test_runtime_generation_preserves_visible_content_and_does_not_add_reasoning
         "output_tokens": 40,
         "total_tokens": 140,
         "reasoning_tokens": 30,
+        "cached_input_tokens": None,
+        "uncached_input_tokens": None,
+        "cache_creation_input_tokens": None,
         "coverage": "complete",
     }
     payload = json.loads(requests[0].content)
@@ -374,6 +377,9 @@ def test_generation_rejects_unusable_or_nonterminal_visible_output(finish_reason
             "output_tokens": 40,
             "total_tokens": 140,
             "reasoning_tokens": None,
+            "cached_input_tokens": None,
+            "uncached_input_tokens": None,
+            "cache_creation_input_tokens": None,
             "coverage": "complete",
         }
 
@@ -590,3 +596,300 @@ def test_generation_invalid_content_without_usage_keeps_metering_unavailable():
             )
         assert captured.value.usage.total_tokens is None
         assert captured.value.usage.coverage == "unavailable"
+
+
+@pytest.mark.parametrize("split", [None, False, True])
+def test_chat_reasoning_split_preserves_explicit_boolean_on_wire(split):
+    base = runtime_config()
+    values = base.models.model_dump(mode="json")
+    values["vlm"]["reasoning_split"] = split
+    configured = base.model_copy(update={"models": ModelsConfig.model_validate(values)})
+    seen = []
+
+    def respond(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]}
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        RuntimeModels(
+            configured, {"MODEL_URL": "https://model.example/v1", "MODEL_KEY": "test"}, http
+        ).generate(
+            "extraction",
+            system="Return JSON.",
+            user="Hello.",
+            max_output_tokens=1024,
+            timeout_seconds=2,
+        )
+    if split is None:
+        assert "reasoning_split" not in seen[0]
+    else:
+        assert seen[0]["reasoning_split"] is split
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "anthropic_messages"])
+@pytest.mark.parametrize("vision", [False, True])
+def test_generation_protocol_wire_contract_and_visible_result(protocol, vision):
+    base = runtime_config()
+    values = base.models.model_dump(mode="json")
+    values["vlm"]["protocol"] = protocol
+    values["vlm"]["reasoning_mode"] = "provider_default"
+    configured = base.model_copy(update={"models": ModelsConfig.model_validate(values)})
+    observed = []
+
+    def respond(request):
+        payload = json.loads(request.content)
+        observed.append(payload)
+        if protocol == "openai_responses":
+            assert request.url.path == "/v1/responses"
+            assert request.headers["authorization"] == "Bearer test"
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "{}"}],
+                        }
+                    ],
+                    "usage": {"input_tokens": 4, "output_tokens": 3, "total_tokens": 7},
+                },
+            )
+        assert request.url.path == "/v1/messages"
+        assert request.headers["x-api-key"] == "test"
+        assert request.headers["anthropic-version"]
+        return httpx.Response(
+            200,
+            json={
+                "type": "message",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "{}"}],
+                "usage": {"input_tokens": 4, "output_tokens": 3},
+            },
+        )
+
+    endpoint = (
+        "https://model.example/v1" if protocol == "openai_responses" else "https://model.example"
+    )
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        models = RuntimeModels(configured, {"MODEL_URL": endpoint, "MODEL_KEY": "test"}, http)
+        if vision:
+            result = models.generate_vision(
+                b"image",
+                media_type="image/png",
+                system="Return JSON.",
+                user="Describe image.",
+                max_output_tokens=1024,
+                timeout_seconds=2,
+            )
+        else:
+            result = models.generate(
+                "extraction",
+                system="Return JSON.",
+                user="Hello.",
+                max_output_tokens=1024,
+                timeout_seconds=2,
+            )
+    assert result.content == "{}"
+    assert result.usage.input_tokens == 4
+    assert result.usage.output_tokens == 3
+    serialized = json.dumps(observed[0])
+    assert ("aW1hZ2U=" in serialized) is vision
+
+
+@pytest.mark.parametrize(
+    "protocol,body",
+    [
+        ("openai_responses", {"status": "completed", "output": [{"type": "reasoning"}]}),
+        (
+            "openai_responses",
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [],
+            },
+        ),
+        (
+            "openai_responses",
+            {
+                "status": "completed",
+                "output": [{"type": "message", "content": [{"type": "refusal", "refusal": "no"}]}],
+            },
+        ),
+        (
+            "anthropic_messages",
+            {"stop_reason": "refusal", "content": [{"type": "text", "text": "no"}]},
+        ),
+        (
+            "anthropic_messages",
+            {"stop_reason": "max_tokens", "content": [{"type": "text", "text": "partial"}]},
+        ),
+        (
+            "anthropic_messages",
+            {
+                "stop_reason": "end_turn",
+                "content": [{"type": "thinking", "thinking": "not an answer"}],
+            },
+        ),
+    ],
+)
+def test_new_protocols_reject_incomplete_refused_or_reasoning_only_output(protocol, body):
+    base = runtime_config()
+    values = base.models.model_dump(mode="json")
+    values["vlm"].update(protocol=protocol, reasoning_mode="provider_default")
+    config = base.model_copy(update={"models": ModelsConfig.model_validate(values)})
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+        ) as http,
+        pytest.raises(ModelOutputError),
+    ):
+        RuntimeModels(
+            config, {"MODEL_URL": "https://model.example", "MODEL_KEY": "test"}, http
+        ).generate(
+            "extraction",
+            system="Return JSON",
+            user="Input",
+            max_output_tokens=1024,
+            timeout_seconds=2,
+        )
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_chat_reasoning_split_changes_index_identity(split):
+    from oam.indexing.identity import index_generation
+
+    base = runtime_config()
+    values = base.models.model_dump(mode="json")
+    values["vlm"]["reasoning_split"] = split
+    changed = base.model_copy(update={"models": ModelsConfig.model_validate(values)})
+    environment = {"MODEL_URL": "https://model.example/v1", "MODEL_KEY": "test"}
+    assert index_generation(base, environment) != index_generation(changed, environment)
+
+
+@pytest.mark.parametrize(
+    "protocol,body",
+    [
+        ("openai_responses", {"status": "completed", "output": [None]}),
+        (
+            "openai_responses",
+            {"status": "incomplete", "incomplete_details": "malformed", "output": []},
+        ),
+        ("anthropic_messages", {"stop_reason": "end_turn", "content": [None]}),
+    ],
+)
+def test_malformed_protocol_output_is_a_model_error(protocol, body):
+    base = runtime_config()
+    values = base.models.model_dump(mode="json")
+    values["vlm"].update(protocol=protocol, reasoning_mode="provider_default")
+    config = base.model_copy(update={"models": ModelsConfig.model_validate(values)})
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+        ) as http,
+        pytest.raises(ModelOutputError),
+    ):
+        RuntimeModels(
+            config, {"MODEL_URL": "https://model.example", "MODEL_KEY": "test"}, http
+        ).generate(
+            "extraction",
+            system="Return JSON",
+            user="Input",
+            max_output_tokens=1024,
+            timeout_seconds=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "output_text", "text": "{}"}],
+                }
+            ],
+        },
+        {
+            "status": "completed",
+            "output": [
+                {"type": "function_call", "name": "x"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "{}"}],
+                },
+            ],
+        },
+        {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "content": [{"type": "output_text", "text": "{}"}],
+                }
+            ],
+        },
+    ],
+)
+def test_responses_rejects_non_final_or_actionable_output(body):
+    base = runtime_config()
+    values = base.models.model_dump(mode="json")
+    values["vlm"].update(protocol="openai_responses", reasoning_mode="provider_default")
+    config = base.model_copy(update={"models": ModelsConfig.model_validate(values)})
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+        ) as http,
+        pytest.raises(ModelOutputError),
+    ):
+        RuntimeModels(
+            config, {"MODEL_URL": "https://model.example", "MODEL_KEY": "test"}, http
+        ).generate(
+            "extraction",
+            system="Return JSON",
+            user="Input",
+            max_output_tokens=1024,
+            timeout_seconds=2,
+        )
+
+
+def test_generation_logs_protocol_outcome_without_secret(caplog):
+    import logging
+
+    response = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 3},
+    }
+    with (
+        caplog.at_level(logging.INFO, logger="oam.models.runtime"),
+        httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=response))
+        ) as http,
+    ):
+        RuntimeModels(
+            runtime_config(),
+            {"MODEL_URL": "https://model.example", "MODEL_KEY": "secret-value"},
+            http,
+        ).generate(
+            "extraction",
+            system="Return JSON",
+            user="Input",
+            max_output_tokens=1024,
+            timeout_seconds=2,
+        )
+    assert "protocol=openai_chat role=extraction outcome=success" in caplog.text
+    assert "finish_reason=stop completion_tokens=3" in caplog.text
+    assert "secret-value" not in caplog.text
+    import re
+
+    call_ids = re.findall(r"call_id=([0-9a-f]{32})", caplog.text)
+    assert len(call_ids) == 2 and call_ids[0] == call_ids[1]

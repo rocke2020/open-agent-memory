@@ -181,3 +181,39 @@ def test_model_binding_rejects_an_independent_thinking_setting() -> None:
                 "thinking": "disabled",
             }
         )
+
+
+def test_anthropic_effort_none_fails_during_configuration():
+    from oam.config import ModelsConfig
+
+    with pytest.raises(ValueError, match="effort none"):
+        ModelsConfig.model_validate(
+            {
+                "reasoning_effort": {"extraction": "none"},
+                "vlm": {
+                    "protocol": "anthropic_messages",
+                    "reasoning_mode": "effort",
+                    "model": "test",
+                    "endpoint_env": "MODEL_URL",
+                    "capabilities": ["text", "vision"],
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("options", [{"reasoning_split": False}, {"reasoning_mode": "effort"}])
+def test_embedding_rejects_generation_options(options):
+    from oam.config import ModelsConfig
+
+    with pytest.raises(ValueError, match="does not support generation"):
+        ModelsConfig.model_validate(
+            {
+                "embedding": {
+                    "protocol": "openai_compatible",
+                    "model": "embedding",
+                    "endpoint_env": "URL",
+                    "capabilities": ["embeddings"],
+                    **options,
+                }
+            }
+        )

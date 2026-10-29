@@ -178,6 +178,8 @@ def _validate_chat(response: ChatProbeOutput) -> str:
         raise ValueError("chat probe failed: length termination")
     if response.finish_reason == "content_filter":
         raise ValueError("chat probe failed: content_filter termination")
+    if response.finish_reason != "stop":
+        raise ValueError("generation probe failed: unexpected termination")
     content = (response.content or "").strip()
     if not content:
         if (response.reasoning_content or "").strip():
@@ -214,6 +216,8 @@ def _validate_vision(response: VisionProbeOutput) -> str:
         raise ValueError("vision probe failed: length termination")
     if response.finish_reason == "content_filter":
         raise ValueError("vision probe failed: content_filter termination")
+    if response.finish_reason != "stop":
+        raise ValueError("generation probe failed: unexpected termination")
     content = (response.content or "").strip()
     if not content:
         if (response.reasoning_content or "").strip():
