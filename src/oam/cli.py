@@ -45,6 +45,12 @@ def _parser() -> argparse.ArgumentParser:
         "--once", action="store_true", help="process at most one queued source and exit"
     )
 
+    l2_hold = commands.add_parser("l2-hold", help="manage a user's L2 consolidation hold")
+    l2_hold.add_argument("--config", type=Path, default=selected_config_path)
+    l2_hold.add_argument("action", choices=("hold", "release", "status"))
+    l2_hold.add_argument("--tenant-id", required=True)
+    l2_hold.add_argument("--user-id", required=True)
+
     recovery = commands.add_parser(
         "recover-bootstrap", help="issue a replacement bootstrap administrator credential"
     )
@@ -165,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
         from oam.workers.runner import run_worker_from_environment
 
         return run_worker_from_environment(args.config, once=args.once)
+    if args.command == "l2-hold":
+        from oam.workers.l2_hold import l2_hold_from_environment
+
+        return l2_hold_from_environment(args.config, args.action, args.tenant_id, args.user_id)
     if args.command == "recover-bootstrap":
         from oam.auth.bootstrap import recover_bootstrap_from_environment
 
