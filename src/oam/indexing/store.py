@@ -359,6 +359,13 @@ class IndexStore:
         ):
             raise StaleConsolidationPolicy("consolidation policy changed")
 
+    @property
+    def model_lease_seconds(self):
+        return max(
+            self.config.lease.seconds,
+            self.config.model.attempt_timeout_seconds + self.config.lease.heartbeat_seconds,
+        )
+
     def check_retry_claim(self):
         """Recheck cancellation and renew the fenced lease before a split child call."""
         with self.transaction() as connection:
@@ -366,7 +373,7 @@ class IndexStore:
             connection.execute(
                 RENEW_LEASE_SQL,
                 (
-                    self.config.lease.seconds,
+                    self.model_lease_seconds,
                     *self.key,
                     self.claim.work_unit_id,
                     self.worker_id,
@@ -419,7 +426,7 @@ class IndexStore:
                 connection.execute(
                     RENEW_LEASE_SQL,
                     (
-                        self.config.lease.seconds,
+                        self.model_lease_seconds,
                         *self.key,
                         self.claim.work_unit_id,
                         self.worker_id,
@@ -496,7 +503,7 @@ class IndexStore:
                     connection.execute(
                         RENEW_LEASE_SQL,
                         (
-                            self.config.lease.seconds,
+                            self.model_lease_seconds,
                             *self.key,
                             self.claim.work_unit_id,
                             self.worker_id,
@@ -880,7 +887,12 @@ class IndexStore:
 
     def fail(self, error: Exception):
         from oam.indexing.extraction import ExtractionError, ExtractionInputTooLongError
-        from oam.models.runtime import ModelEmptyContentError, ModelOutputError
+        from oam.models.runtime import (
+            ModelEmptyContentError,
+            ModelOutputError,
+            Usage,
+            retryable_model_http_error,
+        )
 
         diagnostic = {"error": type(error).__name__}
         if isinstance(error, (ExtractionError, ModelOutputError)):
@@ -888,9 +900,20 @@ class IndexStore:
         known_usage = (
             error.usage if isinstance(error, (ExtractionError, ModelOutputError)) else None
         )
-        not_dispatched = isinstance(error, (httpx.ConnectTimeout, ExtractionInputTooLongError))
+        retryable_http = retryable_model_http_error(error)
+        not_dispatched = isinstance(
+            error,
+            (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.PoolTimeout,
+                ExtractionInputTooLongError,
+            ),
+        )
+        if retryable_http and not not_dispatched:
+            known_usage = Usage(coverage="partial")
         retryable = (
-            isinstance(error, httpx.ConnectTimeout)
+            retryable_http
             or known_usage is not None
             and (
                 isinstance(error, ModelEmptyContentError)
@@ -906,15 +929,18 @@ class IndexStore:
         # One error cannot settle several stages with unsaved outcomes.
         if len(self._unsettled_model_stages) > 1:
             not_dispatched = False
-            known_usage = None
-            retryable = False
+            if retryable_http:
+                known_usage = Usage(coverage="partial")
+            else:
+                known_usage = None
+                retryable = False
         semantic = (
             self.claim.stage == "index_semantic_links"
             or self._inline_semantic
             or self._semantic_handoff
         )
         if semantic:
-            retryable = isinstance(error, (psycopg.Error, OSError))
+            retryable = retryable or isinstance(error, (psycopg.Error, OSError))
         with self.transaction() as connection:
             owned = connection.execute(
                 "UPDATE work_units SET status=CASE WHEN %s AND attempts_remaining>0 "
@@ -931,7 +957,7 @@ class IndexStore:
                 ),
             ).fetchone()
             if owned:
-                if (not_dispatched and known_usage is None) or semantic or inputs_changed:
+                if ((not_dispatched or semantic) and known_usage is None) or inputs_changed:
                     connection.execute(
                         "UPDATE attempts SET disposition='failed',usage=NULL,response_ref=NULL,"
                         "finished_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
@@ -1005,7 +1031,14 @@ class IndexStore:
             "AND w.generation_id=%s" + (" AND w.work_unit_id=%s" if work_filter else ""),
             (*parameters, self.claim.work_unit_id) if work_filter else parameters,
         ).fetchall()
-        uncertain = any(disposition == "unknown_external_outcome" for disposition, _, _ in attempts)
+        # One failed attempt can include overlapping generation and embedding calls.
+        uncertain = any(
+            disposition == "unknown_external_outcome"
+            or disposition == "failed"
+            and usage is not None
+            and usage.get("coverage") == "partial"
+            for disposition, _, usage in attempts
+        )
         generation = []
         embedding = []
         rows.extend(

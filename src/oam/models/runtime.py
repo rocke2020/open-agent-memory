@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 MIN_GENERATION_OUTPUT_TOKENS = 1_024
 
 
+def retryable_model_http_error(error: BaseException) -> bool:
+    return isinstance(error, httpx.TransportError) or (
+        isinstance(error, httpx.HTTPStatusError)
+        and (error.response.status_code == 429 or 500 <= error.response.status_code < 600)
+    )
+
+
 class ModelOutputError(ValueError):
     """A model response cannot be consumed as a valid runtime result."""
 
@@ -318,9 +325,10 @@ class RuntimeModels:
                 response = self._http.post(
                     f"{binding.endpoint}{path}", headers=headers, json=payload, timeout=remaining
                 )
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            except httpx.TransportError as exc:
                 logger.info(
-                    "model_dispatch protocol=%s role=%s outcome=%s duration_ms=%.0f call_id=%s",
+                    "model_dispatch protocol=%s role=%s outcome=%s duration_ms=%.0f call_id=%s "
+                    "local_call_finished=true response_usage=unknown",
                     binding.protocol,
                     binding.role,
                     type(exc).__name__,

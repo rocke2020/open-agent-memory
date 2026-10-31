@@ -37,6 +37,7 @@ from oam.indexing.grouping import (
 from oam.indexing.identity import INDEX_RECIPE, index_generation
 from oam.indexing.references import eligible_reference_ids, freeze_extraction_references
 from oam.indexing.store import IndexStore, stable_id
+from oam.models.runtime import retryable_model_http_error
 from oam.workers.claims import claim_one
 
 ABSTRACT_SYSTEM = (
@@ -600,6 +601,8 @@ def _index_interaction(config, store, models, request):
         stage, failure = extraction_failures[0]
         store.mark_deferred_failure_stage(stage)
         if len(extraction_failures) > 1:
+            if all(retryable_model_http_error(error) for _, error in extraction_failures):
+                raise failure from None
             raise RuntimeError(
                 "multiple indexing stages failed; usage coverage is partial"
             ) from failure

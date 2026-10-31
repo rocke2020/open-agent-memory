@@ -265,7 +265,10 @@ def test_completed_model_response_is_saved_before_policy_retry():
         yield connection
 
     store = guarded_store("consolidate")
-    store.config = SimpleNamespace(lease=SimpleNamespace(seconds=30))
+    store.config = SimpleNamespace(
+        lease=SimpleNamespace(seconds=30, heartbeat_seconds=20),
+        model=SimpleNamespace(attempt_timeout_seconds=60),
+    )
     store.claim.attempt_id = "attempt"
     store._model_stage_lock = Lock()
     store._unsettled_model_stages = set()

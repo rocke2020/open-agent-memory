@@ -302,7 +302,7 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["features"]["portable_export"] is True
     assert payload["features"]["profiles"] is False
     assert payload["export_format_versions"] == [1]
-    assert payload["limits"]["model"]["attempt_timeout_seconds"] == 60
+    assert payload["limits"]["model"]["attempt_timeout_seconds"] == 600
     assert payload["limits"]["user"]["max_chats"] == 1000
     assert payload["features"]["python_sdk"] is False
     assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "normal"))

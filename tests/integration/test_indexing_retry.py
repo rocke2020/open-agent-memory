@@ -690,8 +690,15 @@ async def test_consumer_failure_preserves_unknown_overlapping_extraction(
                 raise httpx.ConnectTimeout("fact embedding failed before dispatch")
             return super().embed(texts, **kwargs)
 
-    with pytest.raises(RuntimeError, match="multiple indexing stages failed") as failure:
+    expected = RuntimeError if known_usage else httpx.ReadTimeout
+    with pytest.raises(expected) as failure:
         run_source(dsn, config, MixedFailureModels())
+    if not known_usage:
+        operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+        assert operation["status"] == "processing"
+        assert operation["usage"]["coverage"] == "partial"
+        assert run_source(dsn, config, SyntheticIndexModels()) is True
+        return
     assert isinstance(failure.value.__cause__, httpx.ReadTimeout)
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "partial"
@@ -938,24 +945,92 @@ async def test_pre_dispatch_connect_timeout_stops_at_claim_budget(accepted_sourc
 
 
 @pytest.mark.parametrize("timeout", [httpx.ReadTimeout, httpx.WriteTimeout])
-async def test_unknown_timeout_is_not_automatically_requeued(accepted_source, timeout):
+async def test_transport_timeout_retries_and_reuses_completed_stages(accepted_source, timeout):
     client, dsn, tenant, config, operation_id = accepted_source
+    models = IntermittentModels(1, timeout=timeout)
     with pytest.raises(timeout):
-        run_source(dsn, config, IntermittentModels(1, timeout=timeout))
-    assert run_source(dsn, config, IntermittentModels(0)) is False
+        run_source(dsn, config, models)
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
-    assert operation["status"] == "partial"
+    assert operation["status"] == "processing"
+    assert run_source(dsn, config, models) is True
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == "succeeded"
+    assert operation["stage_state"]["index_attempts"] == 2
     assert operation["usage"]["coverage"] == "partial"
+    assert operation["usage"]["total_tokens"] is None
+    assert models.first_calls == 1
     with psycopg.connect(dsn) as connection:
         assert (
             connection.execute(
-                "SELECT disposition FROM attempts WHERE tenant_id=%s", (tenant,)
+                "SELECT count(*) FROM attempts WHERE tenant_id=%s "
+                "AND disposition='unknown_external_outcome'",
+                (tenant,),
             ).fetchone()[0]
-            == "unknown_external_outcome"
+            == 0
         )
 
 
-async def test_mixed_extraction_and_embedding_failures_preserve_unknown_usage(accepted_source):
+async def test_transport_timeout_stops_at_existing_claim_budget(accepted_source):
+    client, dsn, tenant, config, operation_id = accepted_source
+    models = IntermittentModels(config.retry.max_attempts + 1, timeout=httpx.ReadTimeout)
+    for _ in range(config.retry.max_attempts):
+        with pytest.raises(httpx.ReadTimeout):
+            run_source(dsn, config, models)
+    assert run_source(dsn, config, models) is False
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == "partial"
+    assert operation["usage"]["coverage"] == "partial"
+    assert operation["stage_state"]["index_attempts"] == 3
+
+
+@pytest.mark.parametrize("status", [429, 503, 401])
+async def test_provider_failure_retries_only_transient_statuses(accepted_source, status):
+    client, dsn, tenant, config, operation_id = accepted_source
+
+    def fail_http(message):
+        request = httpx.Request("POST", "https://model.example/chat/completions")
+        return httpx.HTTPStatusError(
+            message, request=request, response=httpx.Response(status, request=request)
+        )
+
+    models = IntermittentModels(1, timeout=fail_http)
+    with pytest.raises(httpx.HTTPStatusError):
+        run_source(dsn, config, models)
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == ("partial" if status == 401 else "processing")
+    assert run_source(dsn, config, models) is (status != 401)
+
+
+async def test_model_timeout_can_settle_after_ordinary_claim_lease(accepted_source):
+    import time
+
+    client, dsn, tenant, config, operation_id = accepted_source
+    config = config.model_copy(
+        update={
+            "lease": config.lease.model_copy(update={"seconds": 1}),
+            "model": config.model.model_copy(update={"attempt_timeout_seconds": 3}),
+        }
+    )
+
+    class SlowTimeoutModels(IntermittentModels):
+        def generate(self, role, **kwargs):
+            if self.failures and "morning" in kwargs["user"]:
+                time.sleep(1.1)
+            return super().generate(role, **kwargs)
+
+    models = SlowTimeoutModels(1, timeout=httpx.ReadTimeout)
+    with pytest.raises(httpx.ReadTimeout):
+        run_source(dsn, config, models)
+    assert (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()["status"] == (
+        "processing"
+    )
+    assert run_source(dsn, config, models) is True
+
+
+@pytest.mark.parametrize("embedding_error", [httpx.ConnectTimeout, httpx.ReadTimeout])
+async def test_mixed_extraction_and_embedding_failures_preserve_unknown_usage(
+    accepted_source, embedding_error
+):
     client, dsn, tenant, config, operation_id = accepted_source
 
     class MixedTimeoutModels(SyntheticIndexModels):
@@ -968,7 +1043,7 @@ async def test_mixed_extraction_and_embedding_failures_preserve_unknown_usage(ac
             self.embedding_calls += 1
             if self.embedding_calls == 2:
                 self.fact_embedding_started.set()
-                raise httpx.ConnectTimeout("fact embedding was dispatched")
+                raise embedding_error("fact embedding failed")
             return super().embed(texts, **kwargs)
 
         def generate(self, role, **kwargs):
@@ -980,25 +1055,25 @@ async def test_mixed_extraction_and_embedding_failures_preserve_unknown_usage(ac
             return super().generate(role, **kwargs)
 
     models = MixedTimeoutModels()
-    with pytest.raises(RuntimeError, match="multiple indexing stages failed") as failure:
+    with pytest.raises(httpx.ReadTimeout):
         run_source(dsn, config, models)
-    assert isinstance(failure.value.__cause__, httpx.ReadTimeout)
     assert models.embedding_calls == 2
-    assert run_source(dsn, config, models) is False
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
-    assert operation["status"] == "partial"
+    assert operation["status"] == "processing"
     assert operation["usage"]["coverage"] == "partial"
+    if embedding_error is httpx.ReadTimeout:
+        assert operation["embedding_usage"]["coverage"] == "partial"
     with psycopg.connect(dsn) as connection:
         assert (
             connection.execute(
                 "SELECT status FROM work_units WHERE tenant_id=%s", (tenant,)
             ).fetchone()[0]
-            == "failed_terminal"
+            == "queued"
         )
         disposition, request_ref = connection.execute(
             "SELECT disposition,request_ref FROM attempts WHERE tenant_id=%s", (tenant,)
         ).fetchone()
-        assert disposition == "unknown_external_outcome"
+        assert disposition == "failed"
         assert request_ref.startswith("extract:")
         assert (
             connection.execute(
@@ -1008,6 +1083,10 @@ async def test_mixed_extraction_and_embedding_failures_preserve_unknown_usage(ac
             ).fetchone()[0]
             == 1
         )
+    assert run_source(dsn, config, SyntheticIndexModels()) is True
+    if embedding_error is httpx.ReadTimeout:
+        operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+        assert operation["embedding_usage"]["coverage"] == "partial"
 
 
 @pytest.mark.parametrize(

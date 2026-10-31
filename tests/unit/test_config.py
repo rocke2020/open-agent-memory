@@ -238,7 +238,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert (config.planner.max_calls, config.planner.max_context_tokens) == (1, 2048)
     assert config.request.batch_deadline_seconds == 10
     assert config.request.delegated_deadline_seconds == 10
-    assert config.model.attempt_timeout_seconds == 60
+    assert config.model.attempt_timeout_seconds == 600
     assert config.retry.max_attempts == 3
     assert (
         config.lease.seconds,

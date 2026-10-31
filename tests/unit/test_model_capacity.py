@@ -112,9 +112,16 @@ def test_model_admission_bounds_cleanup_if_pool_return_finishes_after_deadline()
 
 @pytest.mark.parametrize(
     ("failure", "expected"),
-    [(httpx.ConnectTimeout, "released"), (httpx.ReadTimeout, "unknown"), (None, "released")],
+    [
+        (httpx.ConnectTimeout, "released"),
+        (httpx.ReadTimeout, "released"),
+        (httpx.WriteTimeout, "released"),
+        (httpx.ReadError, "released"),
+        (KeyboardInterrupt, "unknown"),
+        (None, "released"),
+    ],
 )
-def test_model_permit_tracks_remote_completion_at_http_boundary(failure, expected):
+def test_finished_http_call_releases_local_model_capacity(failure, expected):
     events = []
 
     class Permit:
@@ -137,6 +144,8 @@ def test_model_permit_tracks_remote_completion_at_http_boundary(failure, expecte
 
     def respond(request):
         events.append("http")
+        if failure is KeyboardInterrupt:
+            raise KeyboardInterrupt("synthetic interrupted call")
         if failure:
             raise failure("synthetic transport failure", request=request)
         return httpx.Response(500, json={"error": "synthetic terminal response"})

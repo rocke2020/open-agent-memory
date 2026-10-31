@@ -227,7 +227,7 @@ request:
 
 model:
   # Default model-call timeout, including capacity wait; request deadlines may shorten it.
-  attempt_timeout_seconds: 60
+  attempt_timeout_seconds: 600
 
 retry:
   # Total durable work attempts, including the first attempt; not extra retries per model call.
