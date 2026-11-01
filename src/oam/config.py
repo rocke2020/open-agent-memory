@@ -34,6 +34,22 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class TokenizerConfig(FrozenModel):
+    type: Literal["oam-unicode-quarter-v1", "o200k_base", "cl100k_base", "tokenizer_json"]
+    file_env: str | None = Field(default=None, min_length=1)
+    add_special_tokens: StrictBool = False
+
+    @model_validator(mode="after")
+    def validate_asset(self) -> TokenizerConfig:
+        if (self.type == "tokenizer_json") != bool(self.file_env):
+            raise ValueError(
+                "tokenizer_json requires file_env; named counters do not accept file_env"
+            )
+        if self.add_special_tokens and self.type != "tokenizer_json":
+            raise ValueError("add_special_tokens applies only to tokenizer_json")
+        return self
+
+
 class ResourceConfig(FrozenModel):
     max_output_tokens: PositiveInt
     max_bytes: PositiveInt
@@ -321,6 +337,10 @@ class ModelBinding(FrozenModel):
 
 class EmbeddingModelBinding(ModelBinding):
     query_prefix: str = ""
+    tokenizer: TokenizerConfig | None = None
+    max_input_tokens: PositiveInt | None = None
+    max_request_tokens: PositiveInt | None = None
+    max_request_items: PositiveInt | None = None
 
 
 ReasoningEffort = Literal["none", "low", "high", "max"]
@@ -407,6 +427,7 @@ class ModelsConfig(FrozenModel):
 
 class OAMConfig(FrozenModel):
     contract_version: Literal["0.0.1"]
+    tokenizer: TokenizerConfig
     resource: ResourceConfig
     api: APIConfig
     chunk: ChunkConfig

@@ -37,7 +37,9 @@ from oam.indexing.grouping import (
 from oam.indexing.identity import INDEX_RECIPE, index_generation
 from oam.indexing.references import eligible_reference_ids, freeze_extraction_references
 from oam.indexing.store import IndexStore, stable_id
+from oam.models.embedding_inputs import configured_embedding_admission
 from oam.models.runtime import retryable_model_http_error
+from oam.tokens import resolve_counter
 from oam.workers.claims import claim_one
 
 ABSTRACT_SYSTEM = (
@@ -71,6 +73,23 @@ PDF_NATIVE_PARSE_REVISION = 2
 LEGACY_RESOURCE_PARSE_REVISION = 1
 PASSAGE_EMBED_BATCH_SIZE = 16
 EXTRACTION_WINDOW_BATCHES = 2
+
+
+def _ingestion_counter(config, models):
+    counter = getattr(models, "ingestion_counter", None)
+    return counter if counter is not None else resolve_counter(config.tokenizer)
+
+
+def _embedding_admission(config, models):
+    admission = getattr(models, "embedding_admission", None)
+    return admission if admission is not None else configured_embedding_admission(config)
+
+
+def _embedding_fits(config, models):
+    admission = _embedding_admission(config, models)
+    if admission.max_input_tokens is None and admission.max_request_tokens is None:
+        return None
+    return admission.fits
 
 
 def process_one(
@@ -439,6 +458,8 @@ def _index_interaction(config, store, models, request):
             [item[1] for item in saved],
             config.chunk.ingestion,
             previous_context=previous,
+            counter=_ingestion_counter(config, models),
+            embedding_fits=_embedding_fits(config, models),
         )
         total_chunks += len(chunks)
         for passage_index, chunk in enumerate(chunk for chunk in chunks if chunk.text.strip()):
@@ -637,7 +658,13 @@ def _resource(store, models):
             raise ResourceParseError("published text Resource passage order is incomplete")
         chunks = tuple(
             chunk
-            for chunk in resume_chunks(source_text, published, store.config.chunk.ingestion)
+            for chunk in resume_chunks(
+                source_text,
+                published,
+                store.config.chunk.ingestion,
+                counter=_ingestion_counter(store.config, models),
+                embedding_fits=_embedding_fits(store.config, models),
+            )
             if chunk.text.strip()
         )
         if not chunks:
@@ -682,6 +709,8 @@ def _resource(store, models):
                             page.text,
                             [text for _, text in saved_spans],
                             store.config.chunk.ingestion,
+                            counter=_ingestion_counter(store.config, models),
+                            embedding_fits=_embedding_fits(store.config, models),
                         )
                         if chunk.text.strip()
                     )
