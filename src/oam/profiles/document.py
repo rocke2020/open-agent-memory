@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 
-def _resource_support(field: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def profile_data_support(field: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     support = field["supports"][0]
     identifier = f"profile_resource:{support['resource_id']}:{support['resource_version']}"
     return identifier, {
@@ -38,8 +38,10 @@ def build_profile_document(
         raise ValueError("Profile content or support_ids are invalid")
     selected_ids = list(selected_ids)
     body = body.strip()
+    if generation is not None and append_exact_values and not body:
+        raise ValueError("Profile generation has empty content")
     available = {item["id"]: item for item in prompt_inputs}
-    resource_refs = dict(_resource_support(field) for field in exact_fields)
+    resource_refs = dict(profile_data_support(field) for field in exact_fields)
     if any(
         not isinstance(identifier, str)
         or identifier not in available
@@ -104,7 +106,7 @@ def build_profile_document(
         )
     exact_lines = []
     for field in exact_fields if append_exact_values else ():
-        identifier, reference = _resource_support(field)
+        identifier, reference = profile_data_support(field)
         if identifier not in selected_ids:
             selected_ids.append(identifier)
             references.append(reference)
@@ -161,7 +163,7 @@ def render_stored_profile_fields(
             field_ids = []
             for support in supports:
                 if support.get("kind") == "profile_resource":
-                    identifier, _ = _resource_support({"supports": [support]})
+                    identifier, _ = profile_data_support({"supports": [support]})
                     resource_references.append({"supports": [support]})
                 else:
                     identifier = support["id"]

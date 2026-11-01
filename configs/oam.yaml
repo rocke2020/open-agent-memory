@@ -204,6 +204,8 @@ recall:
 
 profile:
   enabled: true
+  # Complete input budget with local token estimate and a conservative UTF-8 byte ceiling.
+  max_input_tokens: 8192
   # Stored Profile content budget for read/unchanged responses, using the local token estimate.
   max_response_tokens: 18000
   # Maximum accepted UTF-8 Profile content: 16 KB; separate from the model's token cap.

@@ -14,7 +14,7 @@ from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_SUPPORT, ELIGIBLE_UNITS
 from oam.profiles.resources import map_profile_data
 
-PROFILE_INPUT_SCHEMA_VERSION = 5
+PROFILE_INPUT_SCHEMA_VERSION = 8
 MAX_PROMPT_UNITS = 64
 MAX_PASSAGES_PER_MEMORY = 4
 MAX_PASSAGES_PER_UNIT = 8
@@ -111,9 +111,9 @@ WHERE s.tenant_id=%s AND s.user_id=%s
       (w.tenant_id,w.user_id,w.operation_id)=(o.tenant_id,o.user_id,o.operation_id)
     WHERE (o.tenant_id,o.user_id,o.source_id,o.source_version)=
           (s.tenant_id,s.user_id,s.source_id,s.active_version)
-      AND o.kind IN ('index_interaction','consolidate') AND o.status='succeeded'
-      AND o.stage_state->>'insights_ready'='true'
-      AND NOT EXISTS (
+      AND o.status='succeeded'
+      AND ((%s AND o.kind IN ('index_interaction','consolidate')
+      AND o.stage_state->>'insights_ready'='true' AND NOT EXISTS (
         SELECT 1 FROM operations repair JOIN work_units repair_work
           USING(tenant_id,user_id,operation_id)
         WHERE (repair.tenant_id,repair.user_id,repair.source_id,repair.source_version)=
@@ -122,7 +122,8 @@ WHERE s.tenant_id=%s AND s.user_id=%s
           AND ((repair.status IN ('accepted','running')
                 AND repair_work.status IN ('queued','running','retry_wait'))
                OR repair_work.status IN ('failed_terminal','cancelled'))
-      )
+      )) OR (NOT %s AND o.kind='index_interaction'
+              AND o.stage_state->>'memory_ready'='true'))
   )
 ORDER BY s.source_id
 """.strip()
@@ -279,7 +280,9 @@ def load_profile_inputs(
     authority: AuthorizedUser,
     generation_id: str,
     *,
+    insights_enabled: bool,
     stored_support_ids: set[str] | None = None,
+    selected_unit_ids: list[str] | None = None,
 ) -> ProfileInputs:
     """Load current Profile inputs in one caller-owned PostgreSQL connection."""
     if not authority.allows("memory:read"):
@@ -308,11 +311,16 @@ def load_profile_inputs(
         source_scope = cursor.fetchall()
         cursor.execute(
             PENDING_PROFILE_INPUTS_SQL,
-            (authority.tenant_id, authority.user_id),
+            (authority.tenant_id, authority.user_id, insights_enabled, insights_enabled),
         )
         pending = cursor.fetchall()
-        profile_units = [row for row in units if row["kind"] == "insight"]
-        prompt_inputs = _prompt_inputs(cursor, authority, profile_units)
+        profile_units = units
+        if selected_unit_ids is None:
+            selected_units = profile_units
+        else:
+            by_id = {row["unit_id"]: row for row in profile_units}
+            selected_units = [by_id[unit_id] for unit_id in selected_unit_ids if unit_id in by_id]
+        prompt_inputs = _prompt_inputs(cursor, authority, selected_units)
         stored_support_inputs = (
             _prompt_inputs(
                 cursor,
@@ -358,7 +366,7 @@ def load_profile_inputs(
                     row["insight_subtype"],
                     row["content_text"],
                 ]
-                for row in profile_units
+                for row in units
             ],
             "profile_resources": [[row["source_id"], row["source_version"]] for row in resources],
             "pending": [

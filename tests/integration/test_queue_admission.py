@@ -248,7 +248,12 @@ def test_profile_refresh_reuses_work_and_obeys_queue_cap(queue_database):
             (
                 "## Main content\n\nNo supported details yet.\n\n"
                 "## References\n\nNo references yet.",
-                profile_identity(bytes.fromhex(current["input_identity"]), None),
+                profile_identity(
+                    bytes.fromhex(current["input_identity"]),
+                    None,
+                    config.profile.max_input_tokens,
+                    (config.models.embedding.query_prefix if config.models.embedding else ""),
+                ),
                 current["policy_epoch"],
                 index_generation(config, {}),
             ),

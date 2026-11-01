@@ -11,6 +11,38 @@ from oam.profiles.inputs import PENDING_PROFILE_INPUTS_SQL
 
 
 @pytest.mark.parametrize(
+    ("status", "memory_ready", "expected"),
+    [
+        ("succeeded", "true", []),
+        ("running", "false", [("chat", 1, "pending")]),
+        ("partial_failed", "false", [("chat", 1, "blocked")]),
+    ],
+)
+def test_profile_coverage_without_insights_tracks_indexing_only(status, memory_ready, expected):
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            "CREATE TABLE sources(tenant_id,user_id,source_id,active_version,input_role,status);"
+            "CREATE TABLE source_versions(tenant_id,user_id,source_id,source_version,status);"
+            "CREATE TABLE evidence(tenant_id,user_id,source_id,source_version,status,"
+            "learning_eligible,evidence_id);"
+            "CREATE TABLE operations(tenant_id,user_id,operation_id,source_id,source_version,"
+            "kind,status,stage_state);"
+            "CREATE TABLE work_units(tenant_id,user_id,operation_id,status);"
+            "INSERT INTO sources VALUES('t','u','chat',1,'interaction','active');"
+            "INSERT INTO source_versions VALUES('t','u','chat',1,'active');"
+            "INSERT INTO evidence VALUES('t','u','chat',1,'active',1,'e');"
+        )
+        connection.execute(
+            "INSERT INTO operations VALUES('t','u','index','chat',1,'index_interaction',?,?)",
+            (status, json.dumps({"memory_ready": memory_ready})),
+        )
+        work_status = "failed_terminal" if status == "partial_failed" else status
+        connection.execute("INSERT INTO work_units VALUES('t','u','index',?)", (work_status,))
+        query = PENDING_PROFILE_INPUTS_SQL.replace("%s", "?")
+        assert connection.execute(query, ("t", "u", False, False)).fetchall() == expected
+
+
+@pytest.mark.parametrize(
     ("retry_version", "retry_generation", "ready", "expected"),
     [
         (1, "gen", "true", []),
@@ -42,7 +74,7 @@ def test_profile_coverage_recognizes_only_current_source_insight_retry(
             "INSERT INTO work_units VALUES('tenant','alice','failed','gen','failed_terminal');"
         )
         query = PENDING_PROFILE_INPUTS_SQL.replace("%s", "?")
-        parameters = ("tenant", "alice")
+        parameters = ("tenant", "alice", True, True)
         assert connection.execute(query, parameters).fetchall() == [("chat", 1, "failed")]
         # PostgreSQL's ->> yields text; use its literal text value in this SQL boundary fixture.
         connection.execute(
@@ -137,7 +169,7 @@ def test_profile_coverage_preserves_each_unresolved_repair(repair, expected) -> 
                 "INSERT INTO work_units VALUES('tenant','alice','repair-b','gen','succeeded')"
             )
         query = PENDING_PROFILE_INPUTS_SQL.replace("%s", "?")
-        parameters = ("tenant", "alice")
+        parameters = ("tenant", "alice", True, True)
         assert connection.execute(query, parameters).fetchall() == expected
         if repair.get("independent_success"):
             connection.execute(
@@ -283,7 +315,7 @@ def authority(capabilities=frozenset({"memory:read"})):
 def load(connection, user=None):
     from oam.profiles.inputs import load_profile_inputs
 
-    return load_profile_inputs(connection, user or authority(), "gen_1")
+    return load_profile_inputs(connection, user or authority(), "gen_1", insights_enabled=True)
 
 
 def test_loader_returns_supported_memory_exact_fields_and_cited_prompt_inputs() -> None:
@@ -338,11 +370,10 @@ def test_loader_returns_supported_memory_exact_fields_and_cited_prompt_inputs() 
             "locator": {"message": 1},
         }
     ]
-    assert len(result.prompt_inputs) == 1
-    assert result.prompt_inputs[0]["kind"] == "insight"
-    assert result.prompt_inputs[0]["support_memory_ids"] == ["fact_1"]
-    assert result.prompt_inputs[0]["subtype"] == "projects"
-    assert result.prompt_inputs[0]["revision"] == 2
+    assert [item["kind"] for item in result.prompt_inputs] == ["fact", "insight"]
+    assert result.prompt_inputs[1]["support_memory_ids"] == ["fact_1"]
+    assert result.prompt_inputs[1]["subtype"] == "projects"
+    assert result.prompt_inputs[1]["revision"] == 2
     assert result.pending_inputs == 0
     assert result.policy_epoch == 4
     assert len(result.identity) == 32
@@ -391,7 +422,7 @@ def test_evidence_only_change_does_not_dirty_profile_identity_but_coverage_does(
     assert blocked.waiting_source_ids == ("chat_2",)
 
 
-def test_l1_facts_do_not_fill_profile_inputs_or_change_refresh_identity() -> None:
+def test_l1_facts_change_refresh_identity_even_when_not_selected() -> None:
     connection = ProfileConnection()
     first = load(connection)
     insight = connection.units[-1]
@@ -414,14 +445,56 @@ def test_l1_facts_do_not_fill_profile_inputs_or_change_refresh_identity() -> Non
 
     inputs = load(connection)
 
-    assert len(inputs.prompt_inputs) == 1
-    assert {item["kind"] for item in inputs.prompt_inputs} == {"insight"}
     assert len(inputs.supported) == 101
-    assert inputs.uncovered_inputs == 0
-    assert inputs.identity == first.identity
+    assert inputs.identity != first.identity
 
 
-def test_profile_input_limit_counts_only_insights() -> None:
+def test_new_l1_fact_changes_profile_refresh_identity() -> None:
+    connection = ProfileConnection()
+    before = load(connection)
+    connection.units.append(
+        {
+            **connection.units[0],
+            "unit_id": "fact_unit_new",
+            "memory_id": "fact_new",
+            "content_text": "The user prefers English replies.",
+        }
+    )
+    connection.passages.append(
+        {**connection.passages[0], "memory_id": "fact_new", "passage_id": "passage_new"}
+    )
+
+    assert load(connection).identity != before.identity
+
+
+def test_unpaired_l1_can_be_used_as_profile_input() -> None:
+    connection = ProfileConnection()
+    connection.units = connection.units[:1]
+
+    inputs = load(connection)
+
+    assert [(item["kind"], item["id"]) for item in inputs.prompt_inputs] == [
+        ("fact", "fact_unit_1")
+    ]
+    assert inputs.prompt_inputs[0]["source_passages"][0]["source_id"] == "chat_1"
+
+
+def test_ranked_candidates_are_hydrated_in_selection_order() -> None:
+    from oam.profiles.inputs import load_profile_inputs
+
+    connection = ProfileConnection()
+    result = load_profile_inputs(
+        connection,
+        authority(),
+        "gen_1",
+        insights_enabled=True,
+        selected_unit_ids=["insight_unit_1", "fact_unit_1"],
+    )
+
+    assert [item["id"] for item in result.prompt_inputs] == ["insight_unit_1", "fact_unit_1"]
+
+
+def test_profile_input_limit_counts_all_eligible_units() -> None:
     connection = ProfileConnection()
     insight = connection.units[-1]
     connection.units += [
@@ -440,8 +513,7 @@ def test_profile_input_limit_counts_only_insights() -> None:
     inputs = load(connection)
 
     assert len(inputs.prompt_inputs) == 64
-    assert all(item["kind"] == "insight" for item in inputs.prompt_inputs)
-    assert inputs.uncovered_inputs == 1
+    assert inputs.uncovered_inputs == 2
 
 
 def test_profile_data_remains_available_without_insights() -> None:
@@ -450,7 +522,7 @@ def test_profile_data_remains_available_without_insights() -> None:
 
     inputs = load(connection)
 
-    assert inputs.prompt_inputs == []
+    assert inputs.prompt_inputs[0]["kind"] == "fact"
     assert inputs.exact_fields[0]["value"] == "Python"
     assert inputs.uncovered_inputs == 0
 
@@ -513,7 +585,12 @@ def test_profile_read_uses_stored_collection_generation_and_keeps_support_checks
         "references": [{"source_id": "chat_1"}],
         "support_ids": ["fact_unit_1"],
         "instruction": None,
-        "input_identity": service.profile_identity(inputs.identity, None),
+        "input_identity": service.profile_identity(
+            inputs.identity,
+            None,
+            config.profile.max_input_tokens,
+            (config.models.embedding.query_prefix if config.models.embedding else ""),
+        ),
         "published_at": None,
     }
     if remove_support:
@@ -546,6 +623,34 @@ def test_profile_read_uses_stored_collection_generation_and_keeps_support_checks
         assert result["freshness"] == "current"
 
 
+def test_profile_read_reports_published_selection_coverage(monkeypatch) -> None:
+    from oam.config import load_config
+    from oam.profiles import service
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    connection = ProfileConnection()
+    inputs = load(connection)
+    snapshot = {
+        "profile_revision": 7,
+        "generation_id": "gen_1",
+        "content": "The user prefers Python [1].",
+        "references": [{"source_id": "chat_1"}],
+        "support_ids": ["fact_unit_1"],
+        "instruction": None,
+        "input_identity": service.profile_identity(
+            inputs.identity,
+            None,
+            config.profile.max_input_tokens,
+            (config.models.embedding.query_prefix if config.models.embedding else ""),
+        ),
+        "published_at": None,
+        "input_coverage": {"unexamined": 3, "budget_omitted": 2},
+    }
+    result = service._view(config, inputs, snapshot, 500)
+    assert result["uncovered_inputs"] == 5
+    assert result["freshness"] == "uncovered"
+
+
 @pytest.mark.parametrize("profile_resources", [False, True])
 def test_unindexed_stored_profile_keeps_its_generation_and_current_identity(
     monkeypatch, profile_resources
@@ -568,7 +673,12 @@ def test_unindexed_stored_profile_keeps_its_generation_and_current_identity(
         "references": [],
         "support_ids": support_ids,
         "instruction": None,
-        "input_identity": service.profile_identity(inputs.identity, None),
+        "input_identity": service.profile_identity(
+            inputs.identity,
+            None,
+            config.profile.max_input_tokens,
+            (config.models.embedding.query_prefix if config.models.embedding else ""),
+        ),
         "published_at": None,
     }
     pool = type("Pool", (), {"connection": lambda _self: nullcontext(connection)})()

@@ -76,6 +76,17 @@ def test_profile_rejects_support_the_model_did_not_receive() -> None:
         )
 
 
+def test_generated_empty_body_cannot_replace_a_profile() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        build_profile_document(
+            json.dumps({"content": " ", "support_ids": []}),
+            INPUTS,
+            [],
+            instruction=None,
+            max_content_bytes=4096,
+        )
+
+
 def test_custom_document_can_cite_an_exact_profile_resource() -> None:
     result = build_profile_document(
         json.dumps(

@@ -156,6 +156,7 @@ class ChunkConfig(FrozenModel):
 
 class ProfileConfig(FrozenModel):
     enabled: bool = True
+    max_input_tokens: PositiveInt
     max_response_tokens: PositiveInt
     max_content_bytes: PositiveInt
     max_output_tokens: PositiveInt
