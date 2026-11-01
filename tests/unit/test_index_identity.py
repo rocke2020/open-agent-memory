@@ -195,3 +195,47 @@ def test_extraction_prompt_revision_invalidates_index_generation(monkeypatch):
     current = identity.index_generation(config, {})
     monkeypatch.setattr(identity, "INDEX_RECIPE", "oam-source-fact-insight-v24")
     assert identity.index_generation(config, {}) != current
+
+
+def test_explicit_legacy_counter_preserves_compatible_prior_generation():
+    from oam.config import TokenizerConfig
+    from oam.indexing.identity import index_generation
+
+    config = load_config(default_config_path()).config.model_copy(
+        update={
+            "models": ModelsConfig(),
+            "tokenizer": TokenizerConfig(type="oam-unicode-quarter-v1"),
+        }
+    )
+    assert (
+        index_generation(config, {})
+        == "gen_bcbbe1a13f79116323228293c323d0ec162fe99987a3a54822029f0cb3563c8b"
+    )
+
+
+def test_request_scheduling_limit_does_not_change_source_recipe_above_item_limit():
+    from oam.config import EmbeddingModelBinding, ModelCapability, TokenizerConfig
+    from oam.indexing.identity import index_generation
+
+    binding = EmbeddingModelBinding(
+        protocol="openai_compatible",
+        model="synthetic",
+        endpoint_env="VECTOR_URL",
+        capabilities=frozenset({ModelCapability.EMBEDDINGS}),
+        tokenizer=TokenizerConfig(type="cl100k_base"),
+        max_input_tokens=8192,
+        max_request_tokens=300000,
+    )
+    config = load_config(default_config_path()).config.model_copy(
+        update={"models": ModelsConfig(embedding=binding)}
+    )
+    smaller = config.model_copy(
+        update={
+            "models": config.models.model_copy(
+                update={"embedding": binding.model_copy(update={"max_request_tokens": 200000})}
+            )
+        }
+    )
+    assert index_generation(
+        config, {"VECTOR_URL": "https://vector.example/v1"}
+    ) == index_generation(smaller, {"VECTOR_URL": "https://vector.example/v1"})

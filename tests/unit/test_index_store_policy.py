@@ -290,3 +290,120 @@ def test_completed_model_response_is_saved_before_policy_retry():
         store.checkpoint("repair:ins:3:1:synthesis", ["fact"], produce)
     assert any(q.startswith("INSERT INTO index_stage_results") for q in queries)
     assert store._unsettled_model_stages == set()
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+@pytest.mark.parametrize("siblings,pipeline", [(set(), False), ({"other"}, False), (set(), True)])
+def test_local_embedding_rejection_settles_only_its_stage(siblings, pipeline, parallel):
+    from contextlib import contextmanager
+    from threading import Lock
+
+    from oam.models.embedding_inputs import EmbeddingInputLimitError
+
+    states = []
+
+    class Connection:
+        def execute(self, query, params=()):
+            if query.startswith("UPDATE attempts SET disposition"):
+                states.append(params[0])
+            return SimpleNamespace(fetchone=lambda: None)
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    store = guarded_store("index_source")
+    store.config = SimpleNamespace(
+        lease=SimpleNamespace(seconds=30, heartbeat_seconds=20),
+        model=SimpleNamespace(attempt_timeout_seconds=60),
+    )
+    store.claim.attempt_id = "attempt"
+    store._model_stage_lock = Lock()
+    store._unsettled_model_stages = set(siblings)
+    store._pipeline_owns_attempt = pipeline
+    store.transaction = transaction
+    store.guard = lambda connection: None
+
+    def reject():
+        raise EmbeddingInputLimitError("embedding input limit")
+
+    if parallel:
+        outputs = store.checkpoints(
+            [
+                ("invalid", ["text"], reject),
+                ("valid", ["valid"], lambda: {"vectors": [[1, 2]], "usage": {}}),
+            ]
+        )
+        assert isinstance(outputs[0], EmbeddingInputLimitError)
+        assert outputs[1]["vectors"] == [[1, 2]]
+    else:
+        with pytest.raises(EmbeddingInputLimitError):
+            store.checkpoint("invalid", ["text"], reject)
+    assert store._unsettled_model_stages == siblings
+    assert states[-1] == ("unknown_external_outcome" if siblings or pipeline else "claimed")
+
+
+@pytest.mark.parametrize("unsettled", [set(), {"ambiguous-sibling"}])
+def test_pipeline_local_rejection_settles_after_drain_without_hiding_unknowns(unsettled):
+    from contextlib import contextmanager
+    from threading import Lock
+
+    from oam.models.embedding_inputs import EmbeddingInputLimitError
+
+    states = []
+
+    class Connection:
+        def execute(self, query, params=()):
+            if query.startswith("UPDATE attempts SET disposition"):
+                states.append(params[0])
+            return SimpleNamespace(fetchone=lambda: None)
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    store = guarded_store("index_source")
+    store.claim.attempt_id = "attempt"
+    store._model_stage_lock = Lock()
+    store._unsettled_model_stages = set(unsettled)
+    store.transaction = transaction
+    store.guard = lambda connection: None
+    with pytest.raises(EmbeddingInputLimitError), store.model_pipeline():
+        raise EmbeddingInputLimitError("embedding limit")
+    assert states[-1] == ("unknown_external_outcome" if unsettled else "claimed")
+    assert store._unsettled_model_stages == unsettled
+    assert store._pipeline_owns_attempt is False
+
+
+@pytest.mark.parametrize("unsettled", [set(), {"ambiguous-sibling"}])
+def test_local_terminal_failure_finishes_attempt_only_without_unknown_sibling(unsettled):
+    from contextlib import contextmanager
+
+    from oam.models.embedding_inputs import EmbeddingInputLimitError
+
+    statements = []
+
+    class Connection:
+        def execute(self, query, parameters=()):
+            statements.append(query)
+            return SimpleNamespace(fetchone=lambda: ("failed_terminal",))
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    store = guarded_store("index_source")
+    store.claim.attempt_id = "attempt"
+    store._unsettled_model_stages = set(unsettled)
+    store._inline_semantic = False
+    store._semantic_handoff = False
+    store.transaction = transaction
+    store.summarize_usage = lambda connection: None
+    store.fail(EmbeddingInputLimitError("embedding per-input token limit exceeded"))
+
+    attempt_updates = [query for query in statements if query.startswith("UPDATE attempts SET")]
+    assert bool(attempt_updates) is not bool(unsettled)
+    if attempt_updates:
+        assert "disposition='failed'" in attempt_updates[0]
+        assert "finished_at=clock_timestamp()" in attempt_updates[0]
+    assert any(query.startswith("UPDATE operations SET status=") for query in statements)

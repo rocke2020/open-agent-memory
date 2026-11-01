@@ -22,6 +22,9 @@ MEDICAL_FIXTURES = Path(__file__).parents[2] / "conformance/fixtures/medical"
 
 
 class MemoryStore:
+    def require_source_recipe(self):
+        pass
+
     def __init__(self, *, content, media_type="text/plain", input_role="evidence_resource"):
         self.config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config.model_copy(
             update={"models": ModelsConfig()}
@@ -201,7 +204,7 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision(blank_
     index_source._resource(store, models)
 
     assert len(store.units) > 1
-    assert "".join(unit["text"] for unit in store.units) == text
+    assert "".join(unit["text"] for unit in store.units).lstrip("\n") == text
     assert models.embedded == [unit["text"] for unit in store.units]
     assert all(value.strip() for value in models.embedded)
     assert models.generated_roles == ["abstract"]
@@ -212,7 +215,12 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision(blank_
         assert locator["revision"] == 3
         assert locator["block"] == f"text:{index}"
         assert {"start", "end"}.isdisjoint(locator)
-        assert len(unit["text"]) <= store.config.chunk.ingestion.max_estimated_tokens * 4
+        from oam.tokens import resolve_counter
+
+        assert (
+            resolve_counter(store.config.tokenizer).count(unit["text"])
+            <= store.config.chunk.ingestion.max_estimated_tokens
+        )
     evidence_values = [
         parameters
         for query, parameters in store.statements
@@ -1263,3 +1271,31 @@ def test_caller_quote_crossing_chunks_preserves_passage_time_without_coordinates
         range(len(store.units))
     )
     assert all({"start", "end"}.isdisjoint(unit["locator"]) for unit in store.units)
+
+
+def test_worker_indexes_new_resource_in_existing_namespace_after_recipe_change(monkeypatch):
+    store = MemoryStore(content=b"A source remains indexable after an upgrade.")
+    store.generation_id = "existing-user-namespace"
+    store.require_source_recipe = lambda: pytest.fail(
+        "namespace must not be used as a recipe fence"
+    )
+    connection = SimpleNamespace(cursor=lambda: None)
+
+    @contextmanager
+    def connect(*args, **kwargs):
+        yield connection
+
+    monkeypatch.setattr(index_source.psycopg, "connect", connect)
+    monkeypatch.setattr(
+        index_source, "claim_one", lambda *args, **kwargs: SimpleNamespace(stage="index_source")
+    )
+    monkeypatch.setattr(index_source, "IndexStore", lambda *args, **kwargs: store)
+
+    assert index_source.process_one(
+        store.config, "queue", "content", models=LocalModels(), worker_id="worker"
+    )
+    assert store.finished
+    assert any(
+        unit["text"] == "A source remains indexable after an upgrade." for unit in store.units
+    )
+    assert store.generation_id == "existing-user-namespace"

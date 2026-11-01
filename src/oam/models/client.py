@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Mapping
 from importlib.resources import files
 from io import BytesIO
 from typing import Any
@@ -9,7 +10,9 @@ from typing import Any
 import httpx
 from PIL import Image
 
+from oam.config import OAMConfig, TokenizerConfig
 from oam.models.bindings import ResolvedModelBinding
+from oam.models.embedding_inputs import configured_embedding_admission, embedding_admission
 from oam.models.preflight import (
     ChatProbeOutput,
     EmbeddingProbeOutput,
@@ -60,8 +63,19 @@ class ModelProtocolError(ValueError):
 class OpenAICompatibleProbeClient:
     """Small real HTTP adapter used by deployment preflight."""
 
-    def __init__(self, *, http: httpx.Client) -> None:
+    def __init__(
+        self,
+        *,
+        http: httpx.Client,
+        config: OAMConfig | None = None,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
         self._http = http
+        self._embedding_admission = (
+            configured_embedding_admission(config, environment)
+            if config
+            else embedding_admission(None, TokenizerConfig(type="o200k_base"))
+        )
 
     def probe_chat(
         self, binding: ResolvedModelBinding, *, max_output_tokens: int
@@ -74,6 +88,7 @@ class OpenAICompatibleProbeClient:
     def probe_embeddings(
         self, binding: ResolvedModelBinding, texts: tuple[str, ...]
     ) -> EmbeddingProbeOutput:
+        self._embedding_admission.validate(texts)
         payload = {"model": binding.model, "input": list(texts)}
         body = self._post(binding, "/embeddings", payload)
         try:

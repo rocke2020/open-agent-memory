@@ -22,6 +22,7 @@ from oam.auth.credentials import AuthorizedUser
 from oam.capacity import CAPACITY_POLL_SECONDS, CapacityUnavailable
 from oam.config import OAMConfig
 from oam.db.context import bind_user
+from oam.models.embedding_inputs import EmbeddingInputLimitError
 from oam.workers.claims import RENEW_LEASE_SQL, ClaimedWork
 
 if TYPE_CHECKING:
@@ -398,6 +399,15 @@ class IndexStore:
                     "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s",
                     (*self.key, self.claim.work_unit_id, self.claim.attempt_id),
                 )
+        except EmbeddingInputLimitError:
+            # The owning worker drains overlapping futures before leaving this scope.
+            # Keep any genuinely unsettled sibling; the rejected request sent no HTTP.
+            with self._model_stage_lock:
+                self._pipeline_owns_attempt = False
+                with self.transaction() as connection:
+                    self.guard(connection)
+                    self._record_model_stage_state(connection, "embedding_input_rejected")
+            raise
         finally:
             self._pipeline_owns_attempt = False
 
@@ -435,7 +445,11 @@ class IndexStore:
                 )
                 self._record_model_stage_state(connection, stage, dispatched=(stage,))
             self._unsettled_model_stages.add(stage)
-        output = produce()
+        try:
+            output = produce()
+        except EmbeddingInputLimitError:
+            self._settle_local_rejection(stage)
+            raise
         if hasattr(output, "model_dump"):
             output = output.model_dump(mode="json")
         usage = output.get("usage", {})
@@ -529,6 +543,8 @@ class IndexStore:
                 try:
                     output = future.result()
                 except Exception as error:
+                    if isinstance(error, EmbeddingInputLimitError):
+                        self._settle_local_rejection(stage)
                     failures.append((stage, error))
                     outputs[index] = error
                     continue
@@ -559,6 +575,14 @@ class IndexStore:
                 connection, failures[0][0] if failures else pending[-1][1]
             )
         return outputs
+
+    def _settle_local_rejection(self, stage: str) -> None:
+        """A local guard sent no request; unrelated outstanding calls stay unresolved."""
+        with self._model_stage_lock:
+            with self.transaction() as connection:
+                self.guard(connection)
+                self._record_model_stage_state(connection, stage, completed=(stage,))
+            self._unsettled_model_stages.discard(stage)
 
     def _record_model_stage_state(self, connection, stage_ref, *, dispatched=(), completed=()):
         # Local stage state changes after guarded commits under the stage lock.
@@ -895,20 +919,31 @@ class IndexStore:
         )
 
         diagnostic = {"error": type(error).__name__}
-        if isinstance(error, (ExtractionError, ModelOutputError)):
+        if isinstance(
+            error,
+            (
+                ExtractionError,
+                ModelOutputError,
+                EmbeddingInputLimitError,
+            ),
+        ):
             diagnostic["error_detail"] = str(error)
         known_usage = (
             error.usage if isinstance(error, (ExtractionError, ModelOutputError)) else None
         )
         retryable_http = retryable_model_http_error(error)
-        not_dispatched = isinstance(
-            error,
-            (
-                httpx.ConnectError,
-                httpx.ConnectTimeout,
-                httpx.PoolTimeout,
-                ExtractionInputTooLongError,
-            ),
+        not_dispatched = (
+            not self._unsettled_model_stages
+            and isinstance(error, EmbeddingInputLimitError)
+            or isinstance(
+                error,
+                (
+                    httpx.ConnectError,
+                    httpx.ConnectTimeout,
+                    httpx.PoolTimeout,
+                    ExtractionInputTooLongError,
+                ),
+            )
         )
         if retryable_http and not not_dispatched:
             known_usage = Usage(coverage="partial")
