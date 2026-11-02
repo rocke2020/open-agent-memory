@@ -267,10 +267,19 @@ class UserConfig(FrozenModel):
     concurrency: PositiveInt
 
 
+class InsightSourceBatchConfig(FrozenModel):
+    seed_max: PositiveInt = Field(le=64)
+    input_max_tokens: PositiveInt
+    target_max: PositiveInt = Field(le=128)
+
+
 class IndexConfig(FrozenModel):
     enable_causal_graph: bool
     insights_enabled: bool = True
     insight_consolidation_delay_hours: PositiveFloat
+    insight_generation_concurrency: PositiveInt
+    insight_seed_policy: Literal["related", "source"]
+    insight_source_batch: InsightSourceBatchConfig | None = None
     insight_seed_max: PositiveInt = Field(le=64)
     insight_candidate_max: PositiveInt = Field(le=64)
     insight_max_output_tokens: int = Field(ge=1024)
@@ -455,6 +464,25 @@ class OAMConfig(FrozenModel):
     export: ExportConfig
     backup: BackupConfig
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+
+    def for_insight_source_batch(self) -> OAMConfig:
+        """Apply source-batch packing limits without changing L1 or target lookup limits."""
+        batch = self.index.insight_source_batch
+        if batch is None:
+            return self
+        return self.model_copy(
+            update={
+                "extraction": self.extraction.model_copy(
+                    update={"max_input_tokens": batch.input_max_tokens}
+                ),
+                "index": self.index.model_copy(
+                    update={
+                        "insight_seed_max": batch.seed_max,
+                        "insight_candidate_max": batch.target_max,
+                    }
+                ),
+            }
+        )
 
     def required_model_roles(self) -> frozenset[str]:
         roles = set(REQUIRED_MODEL_ROLES)

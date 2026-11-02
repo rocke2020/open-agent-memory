@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from itertools import zip_longest
+from threading import Lock
 
 from psycopg.rows import dict_row
 
@@ -22,9 +24,15 @@ from oam.indexing.identity import INSIGHT_MODEL_RECIPE
 from oam.indexing.store import MEMORY_REVISION, StaleConsolidationInputs, input_digest, stable_id
 from oam.retrieval.repository import RecallRepository
 
+INSIGHT_PROTECTED_TARGET_RANKS = 2
+
 
 class InsightLookup(RecallRepository):
     """Reuse direct recall ranking with Insight eligibility before each limit."""
+
+    @property
+    def lexical_candidate_predicate(self) -> str:
+        return "u.kind='insight'"
 
     @property
     def candidate_units_sql(self) -> str:
@@ -46,6 +54,16 @@ def _rows(connection, query, parameters=()):
 
 def _vector(value):
     return json.loads(value) if isinstance(value, str) else list(value)
+
+
+def _set_preparation_timeout(connection, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Insight preparation deadline exhausted")
+    connection.execute(
+        "SELECT set_config('statement_timeout',%s,true)",
+        (str(max(1, int(remaining * 1000))),),
+    )
 
 
 def _pending_group(store, connection, new_fact_ids, examined):
@@ -71,13 +89,17 @@ def _pending_group(store, connection, new_fact_ids, examined):
     )
 
 
-def _lookup_targets(store, connection, seeds):
+def _lookup_targets(store, connection, seeds, *, deadline=None):
     limit = store.config.index.insight_candidate_max
     repository = InsightLookup(
         connection,
         store.authority,
         store.config,
-        deadline=time.monotonic() + store.config.model.attempt_timeout_seconds,
+        deadline=(
+            deadline
+            if deadline is not None
+            else time.monotonic() + store.config.model.attempt_timeout_seconds
+        ),
     )
     channels = []
     for seed in seeds:
@@ -96,6 +118,8 @@ def _lookup_targets(store, connection, seeds):
             break
     if not identifiers:
         return []
+    if deadline is not None:
+        _set_preparation_timeout(connection, deadline)
     return _rows(
         connection,
         f"WITH eligible AS ({ELIGIBLE_UNITS}) "
@@ -114,25 +138,37 @@ def _lookup_targets(store, connection, seeds):
     )
 
 
-def _fact_context(store, connection, seeds, targets):
+def _fact_context(store, connection, seeds, targets, *, seed_only=False):
     seed_ids = [seed["unit_id"] for seed in seeds]
     support_ids = sorted({support["id"] for target in targets for support in target["supports"]})
+    eligible = ELIGIBLE_UNITS + (" AND u.unit_id=ANY(%s)" if seed_only else "")
     return _rows(
         connection,
-        f"WITH eligible AS ({ELIGIBLE_UNITS}), seeds AS ("
+        f"WITH eligible AS NOT MATERIALIZED ({eligible}), seeds AS MATERIALIZED ("
         "SELECT embedding FROM eligible WHERE kind='fact' AND unit_id=ANY(%s)), "
+        "priority AS MATERIALIZED (SELECT * FROM eligible WHERE kind='fact' "
+        "AND (unit_id=ANY(%s) OR memory_id=ANY(%s))), "
+        "priority_count AS MATERIALIZED (SELECT count(*) AS total FROM priority), "
+        "candidates AS (SELECT * FROM priority WHERE (SELECT total FROM priority_count)>=%s "
+        "UNION ALL SELECT * FROM eligible WHERE kind='fact' "
+        "AND (SELECT total FROM priority_count)<%s), "
         "candidate_annotations AS (SELECT candidate.*,"
         "(SELECT jsonb_agg(ut.detail ORDER BY ut.annotation_id) FROM unit_times ut WHERE "
         "(ut.tenant_id,ut.user_id,ut.unit_id)="
         "(candidate.tenant_id,candidate.user_id,candidate.unit_id)) AS annotations "
-        "FROM eligible candidate WHERE candidate.kind='fact'), ranked AS ("
+        "FROM candidates candidate), ranked AS ("
         "SELECT candidate.*, (SELECT min(candidate.embedding <=> seeds.embedding) "
         "FROM seeds) AS distance FROM candidate_annotations candidate) "
         "SELECT * FROM ranked WHERE unit_id=ANY(%s) OR memory_id=ANY(%s) "
         "OR 1-distance>=%s ORDER BY (unit_id=ANY(%s)) DESC,"
         "(memory_id=ANY(%s)) DESC,distance,unit_id LIMIT %s",
-        (
+        ((seed_ids,) if seed_only else ())
+        + (
             seed_ids,
+            seed_ids,
+            support_ids,
+            store.config.extraction.max_facts_per_group,
+            store.config.extraction.max_facts_per_group,
             seed_ids,
             support_ids,
             store.config.index.semantic_link_min_similarity,
@@ -176,19 +212,252 @@ def _pack_facts(facts, seeds, targets, config):
     return selected
 
 
-def _freeze_group(store, connection, seeds):
+def _freeze_group(store, connection, seeds, *, initial_targets=None, deadline=None):
+    history_loads_avoided = 0
     while seeds:
-        targets = _lookup_targets(store, connection, seeds)
-        public_targets = tuple(
-            {key: value for key, value in target.items() if key != "vector"} for target in targets
+        if deadline is not None:
+            _set_preparation_timeout(connection, deadline)
+        targets = (
+            _lookup_targets(
+                store, connection, seeds, **({"deadline": deadline} if deadline else {})
+            )
+            if initial_targets is None
+            else initial_targets
         )
-        facts = tuple(_fact_input(row) for row in _fact_context(store, connection, seeds, targets))
-        seed_ids = tuple(seed["memory_id"] for seed in seeds)
-        packed = _pack_facts(facts, seed_ids, public_targets, store.config)
-        if packed is not None:
-            return packed, seed_ids, public_targets, targets
+        initial_targets = None
+        candidate_count = len(targets)
+        while True:
+            public_targets = tuple(
+                {key: value for key, value in target.items() if key != "vector"}
+                for target in targets
+            )
+            seed_ids = tuple(seed["memory_id"] for seed in seeds)
+            if deadline is not None:
+                _set_preparation_timeout(connection, deadline)
+            minimum = tuple(
+                _fact_input(row)
+                for row in _fact_context(store, connection, seeds, targets, seed_only=True)
+            )
+            packed = _pack_facts(minimum, seed_ids, public_targets, store.config)
+            if packed is None:
+                history_loads_avoided += 1
+            if packed is not None:
+                if deadline is not None:
+                    _set_preparation_timeout(connection, deadline)
+                facts = tuple(
+                    _fact_input(row) for row in _fact_context(store, connection, seeds, targets)
+                )
+                packed = _pack_facts(facts, seed_ids, public_targets, store.config)
+            if packed is not None:
+                if len(targets) != candidate_count:
+                    print(
+                        json.dumps(
+                            {
+                                "stage": "insight_target_admission",
+                                "operation_id": store.claim.operation_id,
+                                "candidate_count": candidate_count,
+                                "admitted_count": len(targets),
+                                "max_input_tokens": store.config.extraction.max_input_tokens,
+                                "history_loads_avoided": history_loads_avoided,
+                                "reason": "complete_input_budget",
+                            }
+                        ),
+                        flush=True,
+                    )
+                return packed, seed_ids, public_targets, targets
+            if len(seeds) > 1 or len(targets) <= 1:
+                break
+            targets = targets[:-1]
         seeds = seeds[:-1]
     raise ValueError("Insight input budget cannot fit one seed and its complete target context")
+
+
+def _pending_source_batch(store, connection, new_fact_ids, examined, *, config=None):
+    config = config or store.config
+    return _rows(
+        connection,
+        f"WITH eligible AS ({ELIGIBLE_UNITS}) "
+        "SELECT *,embedding::text AS vector FROM eligible WHERE kind='fact' "
+        "AND source_id=%s AND source_version=%s AND unit_id=ANY(%s) "
+        "AND NOT (unit_id=ANY(%s)) ORDER BY created_at,unit_id LIMIT %s",
+        (
+            store.source["source_id"],
+            store.source["source_version"],
+            new_fact_ids,
+            list(examined),
+            min(config.index.insight_seed_max, config.extraction.max_facts_per_group),
+        ),
+    )
+
+
+def _source_seed_targets(store, connection, seeds, deadline, blocked_targets):
+    def primary_lookup(seed):
+        return _lookup_targets(store, connection, [seed], deadline=deadline)
+
+    if (
+        blocked_targets
+        or store.pool is None
+        or store.config.index.insight_generation_concurrency == 1
+    ):
+        ranked = []
+        for seed in seeds:
+            targets = primary_lookup(seed)
+            if {
+                target["id"] for target in targets[:INSIGHT_PROTECTED_TARGET_RANKS]
+            } & blocked_targets:
+                return None
+            ranked.append(targets)
+        return ranked
+
+    read_lock = Lock()
+    active_reads = peak_reads = 0
+
+    def read(seed):
+        nonlocal active_reads, peak_reads
+        with store.transaction(nonblocking_read=True, deadline=deadline) as reader:
+            if reader is None:
+                return None
+            with read_lock:
+                active_reads += 1
+                peak_reads = max(peak_reads, active_reads)
+            try:
+                return _lookup_targets(store, reader, [seed], deadline=deadline)
+            finally:
+                with read_lock:
+                    active_reads -= 1
+
+    cap = min(store.config.index.insight_generation_concurrency, len(seeds))
+    ranked, next_submission, admitted, fallbacks = [], 1, 0, 0
+    with ThreadPoolExecutor(max_workers=cap) as executor:
+        futures = {}
+
+        def fill():
+            nonlocal next_submission
+            while len(futures) < cap - 1 and next_submission < len(seeds):
+                futures[next_submission] = executor.submit(read, seeds[next_submission])
+                next_submission += 1
+
+        fill()
+        try:
+            for position, seed in enumerate(seeds):
+                targets = (
+                    primary_lookup(seed)
+                    if position == 0 or cap == 1
+                    else futures.pop(position).result()
+                )
+                if targets is None:
+                    fallbacks += 1
+                    targets = primary_lookup(seed)
+                elif position > 0 and cap > 1:
+                    admitted += 1
+                ranked.append(targets)
+                fill()
+        finally:
+            for future in futures.values():
+                future.cancel()
+    print(
+        json.dumps(
+            {
+                "stage": "insight_source_lookup",
+                "operation_id": store.claim.operation_id,
+                "seeds": len(seeds),
+                "admitted_reads": admitted,
+                "serial_fallbacks": fallbacks,
+                "reader_peak": peak_reads,
+                "active_after": active_reads,
+                "indexing_db_cap": store.config.database.indexing_concurrency,
+            }
+        ),
+        flush=True,
+    )
+    return ranked
+
+
+def _freeze_source_batch(
+    store, connection, seeds, *, deadline, blocked_targets=frozenset(), config=None
+):
+    config = config or store.config
+    initial_count = len(seeds)
+    ranked = _source_seed_targets(store, connection, seeds, deadline, blocked_targets)
+    if ranked is None:
+        return None
+    while seeds:
+        targets = []
+        for level in zip_longest(*(rows[:INSIGHT_PROTECTED_TARGET_RANKS] for rows in ranked)):
+            for target in level:
+                if target is not None and target["id"] not in {row["id"] for row in targets}:
+                    targets.append(target)
+
+        def public(rows):
+            return tuple({k: v for k, v in target.items() if k != "vector"} for target in rows)
+
+        seed_ids = tuple(seed["memory_id"] for seed in seeds)
+        _set_preparation_timeout(connection, deadline)
+        minimum = tuple(
+            _fact_input(row)
+            for row in _fact_context(store, connection, seeds, targets, seed_only=True)
+        )
+
+        def fits(rows, required=minimum, required_ids=seed_ids):
+            return _pack_facts(required, required_ids, public(rows), config) is not None
+
+        if len(targets) <= config.index.insight_candidate_max and fits(targets):
+            break
+        seeds, ranked = seeds[:-1], ranked[:-1]
+    if not seeds:
+        raise ValueError("One seed and its complete protected targets exceed input budget")
+    protected_count = len(targets)
+    for level in zip_longest(*(rows[INSIGHT_PROTECTED_TARGET_RANKS:] for rows in ranked)):
+        for target in level:
+            if target is None or target["id"] in {row["id"] for row in targets}:
+                continue
+            if len(targets) < config.index.insight_candidate_max and fits([*targets, target]):
+                targets.append(target)
+    if {target["id"] for target in targets} & blocked_targets:
+        return None
+    public_targets = public(targets)
+    _set_preparation_timeout(connection, deadline)
+    facts = tuple(_fact_input(row) for row in _fact_context(store, connection, seeds, targets))
+    packed = _pack_facts(facts, seed_ids, public_targets, config)
+    if packed is None:
+        raise StaleConsolidationInputs("Protected source batch became ineligible")
+    print(
+        json.dumps(
+            {
+                "stage": "insight_source_batch",
+                "operation_id": store.claim.operation_id,
+                "initial_seeds": initial_count,
+                "admitted_seeds": len(seed_ids),
+                "protected_targets": protected_count,
+                "targets": len(targets),
+                "facts": len(packed),
+            }
+        ),
+        flush=True,
+    )
+    return packed, seed_ids, public_targets, targets
+
+
+def _source_groups(store, connection, new_fact_ids, examined, *, deadline, config=None):
+    selected, target_ids, fact_ids, reserved = [], set(), set(), set(examined)
+    for _ in range(store.config.index.insight_generation_concurrency):
+        _set_preparation_timeout(connection, deadline)
+        seeds = _pending_source_batch(store, connection, new_fact_ids, reserved, config=config)
+        if not seeds:
+            break
+        frozen = _freeze_source_batch(
+            store, connection, seeds, deadline=deadline, blocked_targets=target_ids, config=config
+        )
+        if frozen is None:
+            break
+        targets, facts = {target["id"] for target in frozen[2]}, {fact.id for fact in frozen[0]}
+        if targets & target_ids or facts & fact_ids:
+            break
+        selected.append(frozen)
+        target_ids.update(targets)
+        fact_ids.update(facts)
+        reserved.update(seed["unit_id"] for seed in seeds if seed["memory_id"] in frozen[1])
+    return selected
 
 
 def _prepared_actions(store, models, result, targets):
@@ -330,92 +599,272 @@ def _publish_group(store, connection, *, facts, seeds, targets, prepared, digest
     return published
 
 
+def _parallel_groups(store, connection, new_fact_ids, examined, *, deadline=None):
+    """Reserve a bounded lookahead and select non-overlapping frozen inputs."""
+    cap = store.config.index.insight_generation_concurrency
+    if deadline is None:
+        deadline = time.monotonic() + store.config.model.attempt_timeout_seconds
+    reserved, pending = set(examined), []
+    selected, target_ids, fact_ids = [], set(), set()
+    for _ in range(2 * cap):
+        _set_preparation_timeout(connection, deadline)
+        group = _pending_group(store, connection, new_fact_ids, reserved)
+        if not group:
+            break
+        reserved.update(row["unit_id"] for row in group)
+        pending.append(group)
+
+    def lookup(group):
+        with store.transaction(nonblocking_read=True, deadline=deadline) as read:
+            return None if read is None else _lookup_targets(store, read, group, deadline=deadline)
+
+    admitted_reads = fallbacks = next_result = 0
+    next_submission = 1
+    with ThreadPoolExecutor(max_workers=cap) as executor:
+        futures = {}
+
+        def fill():
+            nonlocal next_submission
+            needed = cap - len(selected) - (next_result == 0)
+            while len(futures) < needed and next_submission < len(pending):
+                futures[next_submission] = executor.submit(lookup, pending[next_submission])
+                next_submission += 1
+
+        fill()
+        try:
+            while next_result < len(pending) and len(selected) < cap:
+                group = pending[next_result]
+                if next_result == 0:
+                    initial_targets = _lookup_targets(store, connection, group, deadline=deadline)
+                else:
+                    initial_targets = futures.pop(next_result).result()
+                next_result += 1
+                if initial_targets is None:
+                    fallbacks += 1
+                    initial_targets = _lookup_targets(store, connection, group, deadline=deadline)
+                elif next_result > 1:
+                    admitted_reads += 1
+                if not ({target["id"] for target in initial_targets} & target_ids):
+                    frozen = _freeze_group(
+                        store, connection, group, initial_targets=initial_targets, deadline=deadline
+                    )
+                    facts, _, targets, _ = frozen
+                    candidate_targets = {target["id"] for target in targets}
+                    candidate_facts = {fact.id for fact in facts}
+                    if not (candidate_targets & target_ids or candidate_facts & fact_ids):
+                        selected.append(frozen)
+                        target_ids.update(candidate_targets)
+                        fact_ids.update(candidate_facts)
+                fill()
+        finally:
+            for future in futures.values():
+                future.cancel()
+    print(
+        json.dumps(
+            {
+                "stage": "insight_target_prefetch",
+                "operation_id": store.claim.operation_id,
+                "admitted_reads": admitted_reads,
+                "serial_fallbacks": fallbacks,
+                "indexing_db_cap": store.config.database.indexing_concurrency,
+                "selected_groups": len(selected),
+            }
+        ),
+        flush=True,
+    )
+    return selected
+
+
+def _group_inputs(store, facts, seeds, targets, private_targets, *, config=None):
+    config = config or store.config
+    return {
+        "recipe": INSIGHT_MODEL_RECIPE,
+        "system": INCREMENTAL_INSIGHT_SYSTEM,
+        "envelope": consolidation_envelope(facts, seeds, targets),
+        "private_facts": [fact.model_dump(mode="json") for fact in facts],
+        "private_targets": private_targets,
+        "generation_id": store.generation_id,
+        "config": {
+            "index": config.index.model_dump(
+                mode="json",
+                exclude={
+                    "insight_generation_concurrency",
+                    "insight_seed_policy",
+                    "insight_source_batch",
+                },
+            ),
+            "extraction": config.extraction.model_dump(mode="json"),
+        },
+    }
+
+
 def consolidate_source(store, models, new_fact_ids):
+    cap = store.config.index.insight_generation_concurrency
+    policy = None
+    config = store.config
     while True:
         started = time.monotonic()
         with store.transaction() as connection:
             store.guard(connection)
             examined, last_outcome = store.l2_progress(connection)
-            group = (
-                _pending_group(store, connection, new_fact_ids, examined) if new_fact_ids else []
-            )
-            if not group:
+            if policy is None:
+                policy = store.l2_seed_policy(connection)
+                if policy == "source":
+                    config = store.l2_source_config(connection)
+                print(
+                    json.dumps(
+                        {
+                            "stage": "insight_seed_policy",
+                            "operation_id": store.claim.operation_id,
+                            "policy": policy,
+                            "seed_max": config.index.insight_seed_max,
+                            "target_max": config.index.insight_candidate_max,
+                            "input_max_tokens": config.extraction.max_input_tokens,
+                        }
+                    ),
+                    flush=True,
+                )
+            deadline = None
+            if policy == "source" or cap > 1:
+                remaining = connection.execute(
+                    "SELECT EXTRACT(EPOCH FROM lease_expires_at-clock_timestamp()) "
+                    "FROM work_units WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
+                    (*store.key, store.claim.work_unit_id),
+                ).fetchone()[0]
+                deadline = time.monotonic() + min(
+                    float(remaining), store.config.model.attempt_timeout_seconds
+                )
+            if policy == "source":
+                groups = _source_groups(
+                    store, connection, new_fact_ids, examined, deadline=deadline, config=config
+                )
+            elif cap == 1:
+                group = (
+                    _pending_group(store, connection, new_fact_ids, examined)
+                    if new_fact_ids
+                    else []
+                )
+                groups = [_freeze_group(store, connection, group)] if group else []
+            else:
+                groups = _parallel_groups(
+                    store, connection, new_fact_ids, examined, deadline=deadline
+                )
+            if not groups:
                 store.readiness(connection, insights_ready=True, insight_outcome=last_outcome)
                 return
-            facts, seeds, targets, private_targets = _freeze_group(store, connection, group)
-        inputs = {
-            "recipe": INSIGHT_MODEL_RECIPE,
-            "system": INCREMENTAL_INSIGHT_SYSTEM,
-            "envelope": consolidation_envelope(facts, seeds, targets),
-            "private_facts": [fact.model_dump(mode="json") for fact in facts],
-            "private_targets": private_targets,
-            "generation_id": store.generation_id,
-            "config": {
-                "index": store.config.index.model_dump(mode="json"),
-                "extraction": store.config.extraction.model_dump(mode="json"),
-            },
-        }
-        print(
-            json.dumps(
-                {
-                    "stage": "insight_lookup",
-                    "operation_id": store.claim.operation_id,
-                    "generation_id": store.generation_id,
-                    "seed_count": len(seeds),
-                    "fact_count": len(facts),
-                    "target_count": len(targets),
-                    "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
-                }
-            ),
-            flush=True,
-        )
-        if len(facts) < 2 and not targets:
-            with store.transaction() as connection:
-                store.guard(connection)
-                store.mark_l2_group(connection, seeds, "no_insight")
-            continue
-        result = ConsolidationResult.model_validate(
-            store.checkpoint(
-                "insight",
-                inputs,
-                lambda facts=facts, seeds=seeds, targets=targets: consolidate_insights(
-                    models,
-                    facts=facts,
-                    seeds=seeds,
-                    targets=targets,
-                    config=store.config,
-                    timeout_seconds=store.config.model.attempt_timeout_seconds,
+        stages, ready = [], []
+        for facts, seeds, targets, private_targets in groups:
+            print(
+                json.dumps(
+                    {
+                        "stage": "insight_lookup",
+                        "operation_id": store.claim.operation_id,
+                        "generation_id": store.generation_id,
+                        "seed_count": len(seeds),
+                        "fact_count": len(facts),
+                        "target_count": len(targets),
+                        "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                    }
                 ),
+                flush=True,
             )
-        )
-        prepared = _prepared_actions(store, models, result, private_targets)
-        with store.transaction() as connection:
-            published = _publish_group(
-                store,
-                connection,
-                facts=facts,
-                seeds=seeds,
-                targets=targets,
-                prepared=prepared,
-                digest=input_digest(inputs),
+            if len(facts) < 2 and not targets:
+                with store.transaction() as connection:
+                    store.guard(connection)
+                    store.mark_l2_group(connection, seeds, "no_insight")
+                continue
+            inputs = _group_inputs(store, facts, seeds, targets, private_targets, config=config)
+            ready.append((facts, seeds, targets, private_targets, inputs))
+            stages.append(
+                (
+                    "insight",
+                    inputs,
+                    lambda facts=facts, seeds=seeds, targets=targets, config=config: (
+                        consolidate_insights(
+                            models,
+                            facts=facts,
+                            seeds=seeds,
+                            targets=targets,
+                            config=config,
+                            timeout_seconds=store.config.model.attempt_timeout_seconds,
+                        )
+                    ),
+                )
+            )
+        prepared_at = time.monotonic()
+        if len(stages) == 1:
+            stage, inputs, produce = stages[0]
+            outputs = [store.checkpoint(stage, inputs, produce)]
+        else:
+            outputs = store.checkpoints(stages) if stages else []
+        failures, prepared_groups = [], []
+        preparation_failed = False
+        for (facts, seeds, targets, private_targets, inputs), output in zip(
+            ready, outputs, strict=True
+        ):
+            if isinstance(output, Exception):
+                failures.append(output)
+                continue
+            try:
+                result = ConsolidationResult.model_validate(output)
+                prepared = _prepared_actions(store, models, result, private_targets)
+            except Exception as error:
+                failures.append(error)
+                preparation_failed = True
+                continue
+            prepared_groups.append((facts, seeds, targets, inputs, result, prepared))
+        published_groups = []
+        if prepared_groups and not preparation_failed:
+            try:
+                with store.transaction() as connection:
+                    for facts, seeds, targets, inputs, result, prepared in prepared_groups:
+                        published = _publish_group(
+                            store,
+                            connection,
+                            facts=facts,
+                            seeds=seeds,
+                            targets=targets,
+                            prepared=prepared,
+                            digest=input_digest(inputs),
+                        )
+                        published_groups.append((seeds, result, published))
+            except Exception as error:
+                published_groups.clear()
+                failures.append(error)
+        for seeds, result, published in published_groups:
+            print(
+                json.dumps(
+                    {
+                        "stage": "insight_published",
+                        "operation_id": store.claim.operation_id,
+                        "generation_id": store.generation_id,
+                        "published_count": len(published),
+                        "published": [
+                            {"insight_id": identifier, "revision": revision}
+                            for identifier, revision in published
+                        ],
+                        "seed_count": len(seeds),
+                        "actions": [action.action for action in result.actions],
+                        "model_actions": list(result.model_actions),
+                        "usage": result.usage.model_dump(mode="json"),
+                        "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                    }
+                ),
+                flush=True,
             )
         print(
             json.dumps(
                 {
-                    "stage": "insight_published",
+                    "stage": "insight_generation_batch",
                     "operation_id": store.claim.operation_id,
-                    "generation_id": store.generation_id,
-                    "published_count": len(published),
-                    "published": [
-                        {"insight_id": identifier, "revision": revision}
-                        for identifier, revision in published
-                    ],
-                    "seed_count": len(seeds),
-                    "actions": [action.action for action in result.actions],
-                    "model_actions": list(result.model_actions),
-                    "usage": result.usage.model_dump(mode="json"),
-                    "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                    "selected_groups": len(stages),
+                    "generation_cap": cap,
+                    "preparation_ms": round((prepared_at - started) * 1000, 2),
+                    "completion_ms": round((time.monotonic() - prepared_at) * 1000, 2),
+                    "failures": len(failures),
                 }
             ),
             flush=True,
         )
+        if failures:
+            raise failures[0]

@@ -157,6 +157,63 @@ def test_completed_checkpoint_is_reused_when_recipe_changes():
     ) == {"value": "stored"}
 
 
+@pytest.mark.parametrize("blocked_save", [False, True])
+def test_parallel_same_named_checkpoints_keep_distinct_outcomes(blocked_save):
+    from contextlib import contextmanager
+    from threading import Barrier, Lock
+
+    saved = []
+
+    class Connection:
+        def execute(self, sql, parameters=()):
+            if sql.startswith("INSERT INTO index_stage_results"):
+                saved.append(parameters[7].obj["value"])
+            return SimpleNamespace(fetchone=lambda: None)
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    store = guarded_store("consolidate")
+    store.claim.attempt_id = "attempt"
+    store._model_stage_lock = Lock()
+    store._unsettled_model_stages = set()
+    store.config = SimpleNamespace(
+        lease=SimpleNamespace(seconds=30, heartbeat_seconds=5),
+        model=SimpleNamespace(attempt_timeout_seconds=10),
+    )
+    store._record_model_stage_state = lambda *args, **kwargs: None
+    store.transaction = transaction
+    guard_calls = 0
+
+    def guard(connection):
+        nonlocal guard_calls
+        guard_calls += 1
+        if blocked_save and guard_calls == 2:
+            raise StaleIndexWork("claim cancelled before save")
+
+    store.guard = guard
+    barrier = Barrier(2)
+
+    def produce(value):
+        barrier.wait(timeout=2)
+        return {"value": value, "usage": {}}
+
+    outputs = store.checkpoints(
+        [
+            ("insight", {"group": 1}, lambda: produce("first")),
+            ("insight", {"group": 2}, lambda: produce("second")),
+        ]
+    )
+    if blocked_save:
+        assert sum(isinstance(value, StaleIndexWork) for value in outputs) == 1
+        assert len(saved) == 1
+        assert len(store._unsettled_model_stages) == 1
+    else:
+        assert [value["value"] for value in outputs] == ["first", "second"]
+        assert store._unsettled_model_stages == set()
+
+
 def test_legacy_recipe_qualified_checkpoint_remains_reusable():
     import sqlite3
     from contextlib import contextmanager
@@ -170,6 +227,7 @@ def test_legacy_recipe_qualified_checkpoint_remains_reusable():
             "CREATE TABLE index_stage_results(tenant_id,user_id,source_id,source_version,"
             "generation_id,stage_key,input_digest,output)"
         )
+
         db.execute(
             "INSERT INTO index_stage_results VALUES(?,?,?,?,?,?,?,?)",
             (
@@ -385,7 +443,7 @@ def test_local_terminal_failure_finishes_attempt_only_without_unknown_sibling(un
 
     class Connection:
         def execute(self, query, parameters=()):
-            statements.append(query)
+            statements.append((query, parameters))
             return SimpleNamespace(fetchone=lambda: ("failed_terminal",))
 
     @contextmanager
@@ -395,15 +453,77 @@ def test_local_terminal_failure_finishes_attempt_only_without_unknown_sibling(un
     store = guarded_store("index_source")
     store.claim.attempt_id = "attempt"
     store._unsettled_model_stages = set(unsettled)
+    store._model_stage_failures = {"rejected": EmbeddingInputLimitError("embedding limit")}
     store._inline_semantic = False
     store._semantic_handoff = False
     store.transaction = transaction
     store.summarize_usage = lambda connection: None
     store.fail(EmbeddingInputLimitError("embedding per-input token limit exceeded"))
 
-    attempt_updates = [query for query in statements if query.startswith("UPDATE attempts SET")]
+    assert statements[0][1][0] is False
+    attempt_updates = [query for query, _ in statements if query.startswith("UPDATE attempts SET")]
     assert bool(attempt_updates) is not bool(unsettled)
     if attempt_updates:
         assert "disposition='failed'" in attempt_updates[0]
         assert "finished_at=clock_timestamp()" in attempt_updates[0]
-    assert any(query.startswith("UPDATE operations SET status=") for query in statements)
+    assert any(query.startswith("UPDATE operations SET status=") for query, _ in statements)
+
+
+@pytest.mark.parametrize("case", ["uncached", "unknown_error", "embedding_timeout"])
+def test_uncached_success_cannot_be_settled_by_a_sibling_timeout(case):
+    from contextlib import contextmanager
+
+    import httpx
+
+    queries = []
+
+    class Connection:
+        def execute(self, sql, params=()):
+            queries.append((sql, params))
+            return SimpleNamespace(fetchone=lambda: ("failed_terminal",))
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    store = guarded_store("consolidate")
+    store.claim.attempt_id = "attempt"
+    store.transaction = transaction
+    store.summarize_usage = lambda connection: None
+    timeout = httpx.ReadTimeout("known timeout")
+    store._unsettled_model_stages = {"insight:timeout", "insight:uncached"}
+    store._model_stage_failures = {"insight:timeout": timeout}
+    if case == "unknown_error":
+        store._model_stage_failures["insight:uncached"] = RuntimeError("unknown outcome")
+    elif case == "embedding_timeout":
+        store._model_stage_failures = {}
+        store._uncached_model_stages = {"insight:uncached"}
+    store.fail(timeout)
+    assert queries[0][1][0] is False
+    assert not any(sql.startswith("UPDATE attempts") for sql, _ in queries)
+
+
+def test_failed_embedding_identity_survives_a_successful_sibling():
+    from contextlib import nullcontext
+    from threading import Lock
+
+    store = guarded_store("consolidate")
+    store.claim.attempt_id = "attempt"
+    store.config = SimpleNamespace(
+        lease=SimpleNamespace(seconds=30, heartbeat_seconds=5),
+        model=SimpleNamespace(attempt_timeout_seconds=10),
+    )
+    store._model_stage_lock = Lock()
+    store._unsettled_model_stages = set()
+    connection = SimpleNamespace(execute=lambda *args: SimpleNamespace(fetchone=lambda: None))
+    store.transaction = lambda: nullcontext(connection)
+    store.guard = lambda *args: None
+    store._record_model_stage_state = lambda *args, **kwargs: None
+
+    def fail():
+        raise RuntimeError("unknown embedding outcome")
+
+    with pytest.raises(RuntimeError):
+        store.checkpoint("insight_embed", "A", fail)
+    store.checkpoint("insight_embed", "B", lambda: {"vectors": [[1]], "usage": {}})
+    assert len(store._unsettled_model_stages) == 1

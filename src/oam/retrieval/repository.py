@@ -288,6 +288,10 @@ class RecallRepository:
             ELIGIBLE_UNITS_CANDIDATE if self.has_insights else ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
         )
 
+    @property
+    def lexical_candidate_predicate(self) -> str:
+        return "true"
+
     def _eligible(self, *, temporal: bool = False, candidate_facts: bool = False) -> str:
         predicate = "true"
         request = self.request
@@ -534,6 +538,7 @@ class RecallRepository:
                 "SELECT u.unit_id FROM search_units u,queries q WHERE "
                 "u.tenant_id=current_setting('oam.tenant_id',true) "
                 "AND u.user_id=current_setting('oam.user_id',true) "
+                f"AND {self.lexical_candidate_predicate} "
                 f"AND {lexical_vector} @@ q.candidate "
                 "UNION SELECT unit_id FROM query_entity_units)"
             )
@@ -558,7 +563,7 @@ class RecallRepository:
             f"FROM {hits_source},queries q WHERE "
             "u.tenant_id=current_setting('oam.tenant_id',true) "
             "AND u.user_id=current_setting('oam.user_id',true) "
-            f"AND {hits_predicate})"
+            f"AND {self.lexical_candidate_predicate} AND {hits_predicate})"
         )
         if whole_query:
             return self._execute(

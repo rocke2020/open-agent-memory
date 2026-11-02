@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from test_core_http import core_database as core_database
-from test_recall_repository import FixedModels, TransactionPool, add_fact
+from test_recall_repository import FixedModels, TransactionPool, add_fact, add_insight
 from test_recall_repository import recall_database as recall_database
 
 from oam.config import load_config
@@ -15,6 +15,68 @@ from oam.retrieval.repository import RecallRepository
 from oam.retrieval.service import RecallService
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize("ranking", ["per_term", "whole_query"])
+@pytest.mark.parametrize("query", ["Nova Research warranty", "NR warranty", "IT", "After"])
+def test_insight_candidate_pushdown_preserves_fact_backed_entity_names(
+    recall_database, ranking, query
+):
+    from oam.indexing.consolidation import InsightLookup
+
+    class UnfilteredLookup(InsightLookup):
+        @property
+        def lexical_candidate_predicate(self):
+            return "true"
+
+    connection, authority = recall_database
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={
+            "search": config.search.model_copy(
+                update={
+                    "normal": config.search.normal.model_copy(update={"lexical_ranking": ranking})
+                }
+            )
+        }
+    )
+    alias = query if query in {"IT", "After"} else "NR"
+    name = "Information Technology" if alias in {"IT", "After"} else "Nova Research"
+    definition = f"{name} is also called {alias}."
+    target = f"{name} approved the laptop warranty."
+    entities = EntityRepository(
+        connection, config, generation_id="generation", key=(authority.tenant_id, authority.user_id)
+    )
+    add_fact(connection, authority, "definition", definition)
+    entities.publish_fact(
+        "definition",
+        (name,),
+        definition,
+        aliases=({"canonical_name": name, "alias": alias, "quote": definition},),
+    )
+    add_fact(connection, authority, "target", target)
+    entities.publish_fact(
+        "target",
+        (name,),
+        target,
+        references=({"name": name, "reference_id": "definition", "quote": target},),
+    )
+    add_insight(connection, authority, "insight", ("definition", "target"))
+    text = f"{name} ({alias}) approved the laptop warranty."
+    connection.execute(
+        "UPDATE search_units SET content_text=%s,lexical_text=%s WHERE unit_id='insight'",
+        (text, text),
+    )
+    connection.execute("UPDATE insights SET synthesis_text=%s WHERE insight_id='insight'", (text,))
+    current = InsightLookup(connection, authority, config, deadline=time.monotonic() + 10)
+    original = UnfilteredLookup(connection, authority, config, deadline=time.monotonic() + 10)
+    names = current._query_entity_names(query)
+    assert names == original._query_entity_names(query)
+    assert names
+    assert current.lexical(query, 8) == original.lexical(query, 8)
+    assert [row["unit_id"] for row in current.lexical(query, 8)] == ["insight"]
+    connection.execute("UPDATE evidence SET learning_eligible=false WHERE evidence_id='definition'")
+    assert current.lexical(query, 8) == original.lexical(query, 8) == []
 
 
 def alias_history(connection, authority):
