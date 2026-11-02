@@ -13,6 +13,7 @@ from oam.models.runtime import ModelOutputTooLongError, Usage
 from oam.profiles import worker
 from oam.profiles.inputs import ProfileInputs
 from oam.profiles.service import profile_identity
+from oam.tokens import resolve_counter
 from oam.workers.claims import ClaimedWork
 
 
@@ -35,6 +36,8 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
         None,
         config.profile.max_input_tokens,
         (config.models.embedding.query_prefix if config.models.embedding else ""),
+        "o200k_base",
+        config.profile.max_memory_tokens,
     )
 
     class Connection:
@@ -94,7 +97,14 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
 
     monkeypatch.setattr(worker, "_guard", guard)
 
+    counter = resolve_counter(config.tokenizer)
+    monkeypatch.setattr(
+        worker, "resolve_counter", lambda *_: pytest.fail("worker must reuse runtime counter")
+    )
+
     class Models:
+        ingestion_counter = counter
+
         def embed(self, *args, **kwargs):
             clock["now"] += 150
             if mode == "embedding_timeout":

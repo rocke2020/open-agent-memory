@@ -9,32 +9,40 @@ from oam.profiles.service import _view
 
 def test_profile_input_budget_changes_refresh_identity() -> None:
     identity = b"x" * 32
-    assert profile_service.profile_identity(identity, None, 1000, "") != (
-        profile_service.profile_identity(identity, None, 2000, "")
+    assert profile_service.profile_identity(identity, None, 1000, "", "o200k_base", 8192) != (
+        profile_service.profile_identity(identity, None, 2000, "", "o200k_base", 8192)
     )
 
 
 def test_embedding_query_prefix_changes_refresh_identity() -> None:
     identity = b"x" * 32
-    assert profile_service.profile_identity(identity, None, 8192, "query: ") != (
-        profile_service.profile_identity(identity, None, 8192, "search: ")
-    )
+    assert profile_service.profile_identity(
+        identity, None, 8192, "query: ", "o200k_base", 8192
+    ) != (profile_service.profile_identity(identity, None, 8192, "search: ", "o200k_base", 8192))
 
 
 def test_profile_recipe_change_invalidates_an_unchanged_refresh(monkeypatch) -> None:
     input_identity = b"x" * 32
     for instruction in (None, "Return a JSON summary"):
-        before = profile_service.profile_identity(input_identity, instruction, 8192, "")
-        assert before != profile_service.profile_identity(b"y" * 32, instruction, 8192, "")
+        before = profile_service.profile_identity(
+            input_identity, instruction, 8192, "", "o200k_base", 8192
+        )
         assert before != profile_service.profile_identity(
-            input_identity, "Another format", 8192, ""
+            b"y" * 32, instruction, 8192, "", "o200k_base", 8192
+        )
+        assert before != profile_service.profile_identity(
+            input_identity, "Another format", 8192, "", "o200k_base", 8192
         )
         monkeypatch.setattr(
             profile_service, "PROFILE_SYSTEM", "Write a corrected current summary", raising=False
         )
-        after = profile_service.profile_identity(input_identity, instruction, 8192, "")
+        after = profile_service.profile_identity(
+            input_identity, instruction, 8192, "", "o200k_base", 8192
+        )
         assert after != before
-        assert after == profile_service.profile_identity(input_identity, instruction, 8192, "")
+        assert after == profile_service.profile_identity(
+            input_identity, instruction, 8192, "", "o200k_base", 8192
+        )
         monkeypatch.undo()
 
 
@@ -154,6 +162,8 @@ def test_profile_view_reports_only_a_recorded_publication_time(monkeypatch) -> N
         None,
         config.profile.max_input_tokens,
         (config.models.embedding.query_prefix if config.models.embedding else ""),
+        "o200k_base",
+        config.profile.max_memory_tokens,
     )
     assert _view(config, inputs, snapshot, 500)["freshness"] == "current"
 

@@ -2446,6 +2446,8 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
                                 if config.models.embedding
                                 else ""
                             ),
+                            "o200k_base",
+                            config.profile.max_memory_tokens,
                         ),
                         tenant,
                         claim.work_unit_id,

@@ -23,7 +23,7 @@ from oam.profiles.inputs import ProfileInputs, load_profile_inputs
 from oam.profiles.prompt import PROFILE_SYSTEM
 from oam.profiles.resources import public_profile_data_support
 from oam.profiles.selection import PROFILE_PURPOSE
-from oam.tokens import estimate_units, estimated_tokens
+from oam.tokens import estimate_units, estimated_tokens, resolve_counter
 
 
 class ProfileRefreshUnresolved(RuntimeError):
@@ -52,7 +52,12 @@ def profile_query_prefix(config: OAMConfig) -> str:
 
 
 def profile_identity(
-    input_identity: bytes, instruction: str | None, input_budget: int, query_prefix: str
+    input_identity: bytes,
+    instruction: str | None,
+    input_budget: int,
+    query_prefix: str,
+    tokenizer_identity: str,
+    memory_budget: int,
 ) -> bytes:
     recipe = json.dumps(
         [
@@ -62,6 +67,9 @@ def profile_identity(
             instruction,
             input_budget,
             query_prefix,
+            "profile-token-packing-v1",
+            tokenizer_identity,
+            memory_budget,
         ],
         ensure_ascii=False,
     )
@@ -126,6 +134,8 @@ def _view(
         snapshot["instruction"],
         config.profile.max_input_tokens,
         profile_query_prefix(config),
+        resolve_counter(config.tokenizer, os.environ).identity,
+        config.profile.max_memory_tokens,
     ):
         freshness = "dirty"
     elif uncovered:
@@ -242,6 +252,8 @@ class ProfileService:
                 selected_instruction,
                 self.config.profile.max_input_tokens,
                 profile_query_prefix(self.config),
+                resolve_counter(self.config.tokenizer, os.environ).identity,
+                self.config.profile.max_memory_tokens,
             )
             active_rows = connection.execute(
                 "SELECT o.operation_id,o.request_hash,o.stage_state,w.dependency_ids,"

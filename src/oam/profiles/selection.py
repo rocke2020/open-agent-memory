@@ -6,7 +6,7 @@ from typing import Any
 
 from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.profiles.document import profile_data_support
-from oam.tokens import estimate_units, estimated_tokens
+from oam.tokens import TokenCounter
 
 PROFILE_PURPOSE = (
     "Current information about the user: identity, background, relationships, "
@@ -29,6 +29,8 @@ class PackedProfileRequest:
     inputs: list[dict[str, Any]]
     user: str
     uncovered: int
+    memory_tokens: int
+    input_tokens: int
 
 
 def pack_profile_request(
@@ -38,6 +40,8 @@ def pack_profile_request(
     instruction: str | None,
     system: str,
     max_input_tokens: int,
+    max_memory_tokens: int,
+    counter: TokenCounter,
 ) -> PackedProfileRequest:
     selected: list[dict[str, Any]] = []
     model_fields = [
@@ -53,21 +57,19 @@ def pack_profile_request(
             default=str,
         )
 
-    def fits(user: str) -> bool:
-        text = system + user
-        # The general estimator can substantially undercount identifier-heavy JSON.
-        # Use a conservative byte ceiling as well; provider tokenization still varies.
+    def fits(items: list[dict[str, Any]], user: str) -> bool:
+        memory = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)
         return (
-            max(estimated_tokens(estimate_units(text)), len(text.encode("utf-8")))
-            <= max_input_tokens
+            counter.count(memory) <= max_memory_tokens
+            and counter.count(system + user) <= max_input_tokens
         )
 
     user = serialize(selected)
-    if not fits(user):
+    if not fits(selected, user):
         raise ValueError("Profile required input exceeds request budget")
     for item in candidates:
         proposed = serialize([*selected, item])
-        if not fits(proposed) and any(
+        if not fits([*selected, item], proposed) and any(
             "text" in passage for passage in item.get("source_passages", [])
         ):
             item = {
@@ -79,9 +81,16 @@ def pack_profile_request(
                 "source_passage_text_omitted": True,
             }
             proposed = serialize([*selected, item])
-        if fits(proposed):
+        if fits([*selected, item], proposed):
             selected.append(item)
             user = proposed
     if not selected and not model_fields:
         raise ValueError("Profile request has no fitting supported evidence")
-    return PackedProfileRequest(selected, user, len(candidates) - len(selected))
+    memory = json.dumps(selected, ensure_ascii=False, sort_keys=True, default=str)
+    return PackedProfileRequest(
+        selected,
+        user,
+        len(candidates) - len(selected),
+        counter.count(memory),
+        counter.count(system + user),
+    )

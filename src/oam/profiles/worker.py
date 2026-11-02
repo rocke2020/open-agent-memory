@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import logging
+import json
+import os
 import time
 
 import httpx
@@ -19,6 +20,7 @@ from oam.profiles.inputs import MAX_PROMPT_UNITS, load_profile_inputs
 from oam.profiles.prompt import PROFILE_SYSTEM
 from oam.profiles.selection import PROFILE_PURPOSE, pack_profile_request, rank_profile_candidates
 from oam.profiles.service import profile_identity, profile_query_prefix
+from oam.tokens import resolve_counter
 from oam.workers.claims import ClaimedWork
 
 
@@ -92,6 +94,9 @@ def process_profile_claim(
         claim.user_id,
         frozenset({"memory:read", "memory:append"}),
     )
+    counter = getattr(models, "ingestion_counter", None)
+    if counter is None:
+        counter = resolve_counter(config.tokenizer, os.environ)
     key = (claim.tenant_id, claim.user_id)
     generation = None
     usage = {}
@@ -125,6 +130,8 @@ def process_profile_claim(
                 instruction,
                 config.profile.max_input_tokens,
                 profile_query_prefix(config),
+                counter.identity,
+                config.profile.max_memory_tokens,
             )
             if dependencies:
                 if inputs.waiting_source_ids:
@@ -187,6 +194,8 @@ def process_profile_claim(
                             instruction,
                             config.profile.max_input_tokens,
                             profile_query_prefix(config),
+                            counter.identity,
+                            config.profile.max_memory_tokens,
                         )
                         != target_identity
                     ):
@@ -201,6 +210,8 @@ def process_profile_claim(
                 instruction=instruction,
                 system=PROFILE_SYSTEM,
                 max_input_tokens=config.profile.max_input_tokens,
+                max_memory_tokens=config.profile.max_memory_tokens,
+                counter=counter,
             )
             selected_inputs = packed.inputs
             uncovered = eligible_count - len(selected_inputs)
@@ -209,16 +220,24 @@ def process_profile_claim(
                 "budget_omitted": packed.uncovered,
                 "selected": len(selected_inputs),
             }
-            logging.getLogger(__name__).info(
-                "profile_selection operation_id=%s eligible=%d candidates=%d selected=%d "
-                "unexamined=%d budget_omitted=%d duration_ms=%.1f",
-                claim.operation_id,
-                eligible_count,
-                len(candidates),
-                len(selected_inputs),
-                eligible_count - len(candidates),
-                packed.uncovered,
-                (time.monotonic() - selection_started) * 1000,
+            print(
+                json.dumps(
+                    {
+                        "stage": "profile_selection",
+                        "operation_id": claim.operation_id,
+                        "eligible": eligible_count,
+                        "candidates": len(candidates),
+                        "selected": len(selected_inputs),
+                        "unexamined": eligible_count - len(candidates),
+                        "budget_omitted": packed.uncovered,
+                        "memory_tokens": packed.memory_tokens,
+                        "memory_limit": config.profile.max_memory_tokens,
+                        "input_tokens": packed.input_tokens,
+                        "input_limit": config.profile.max_input_tokens,
+                        "duration_ms": round((time.monotonic() - selection_started) * 1000, 2),
+                    }
+                ),
+                flush=True,
             )
             model_stage = "profile"
             result = models.generate(
@@ -261,6 +280,8 @@ def process_profile_claim(
                     instruction,
                     config.profile.max_input_tokens,
                     profile_query_prefix(config),
+                    counter.identity,
+                    config.profile.max_memory_tokens,
                 )
                 != target_identity
             ):

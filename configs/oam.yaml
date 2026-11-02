@@ -218,8 +218,10 @@ recall:
 
 profile:
   enabled: true
-  # Complete input budget with local token estimate and a conservative UTF-8 byte ceiling.
-  max_input_tokens: 8192
+  # Complete input budget counted with the configured tokenizer.
+  max_input_tokens: 49152
+  # Selected memory evidence and provenance, separate from instructions and exact fields.
+  max_memory_tokens: 32768
   # Stored Profile content budget for read/unchanged responses, using the local token estimate.
   max_response_tokens: 18000
   # Maximum accepted UTF-8 Profile content: 16 KB; separate from the model's token cap.
