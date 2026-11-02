@@ -7,7 +7,7 @@ import json
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from threading import BoundedSemaphore, Lock
 from typing import TYPE_CHECKING
@@ -16,11 +16,11 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 from oam.auth.credentials import AuthorizedUser
 from oam.capacity import CAPACITY_POLL_SECONDS, CapacityUnavailable
-from oam.config import OAMConfig
+from oam.config import InsightSourceBatchConfig, OAMConfig
 from oam.db.context import bind_user
 from oam.workers.claims import RENEW_LEASE_SQL, ClaimedWork
 
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 MEMORY_REVISION = 1
 _INDEXING_CONNECTION_SLOTS: dict[tuple[str, int], BoundedSemaphore] = {}
 _INDEXING_CONNECTION_SLOTS_LOCK = Lock()
+OPPORTUNISTIC_POOL_TIMEOUT_SECONDS = 0.05
 
 
 class StaleIndexWork(RuntimeError):
@@ -83,6 +84,10 @@ class IndexStore:
     pool: ConnectionPool | None = None
     _unsettled_model_stages: set[str] = field(default_factory=set, init=False, repr=False)
     _model_stage_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _model_stage_failures: dict[str, Exception] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _uncached_model_stages: set[str] = field(default_factory=set, init=False, repr=False)
     _inline_semantic: bool = field(default=False, init=False, repr=False)
     _semantic_handoff: bool = field(default=False, init=False, repr=False)
 
@@ -244,17 +249,31 @@ class IndexStore:
         return dict(rows)
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, *, nonblocking_read=False, deadline=None):
+        if nonblocking_read and self.pool is None:
+            yield None
+            return
         timeout = self.config.model.attempt_timeout_seconds
-        deadline = time.monotonic() + timeout
+        deadline = (
+            min(deadline, time.monotonic() + timeout)
+            if deadline is not None
+            else time.monotonic() + timeout
+        )
         limit = self.config.database.indexing_concurrency
         with _INDEXING_CONNECTION_SLOTS_LOCK:
             slots = _INDEXING_CONNECTION_SLOTS.setdefault(
                 (self.dsn, limit), BoundedSemaphore(limit)
             )
-        if not slots.acquire(timeout=timeout):
+        acquired = (
+            slots.acquire(blocking=False) if nonblocking_read else slots.acquire(timeout=timeout)
+        )
+        if not acquired:
+            if nonblocking_read:
+                yield None
+                return
             raise CapacityUnavailable("indexing database connection wait expired")
-        try:
+        with ExitStack() as stack:
+            stack.callback(slots.release)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise CapacityUnavailable("indexing database admission wait expired")
@@ -264,43 +283,57 @@ class IndexStore:
                 )
             else:
                 connection_context = self.pool.connection(
-                    timeout=min(remaining, self.config.database.pool_acquire_timeout_seconds)
-                )
-            with connection_context as connection:
-                original_timeout = connection.execute("SHOW statement_timeout").fetchone()[0]
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise CapacityUnavailable("indexing database admission wait expired")
-                    connection.execute(
-                        "SELECT set_config('statement_timeout',%s,true)",
-                        (str(max(1, int(remaining * 1000))),),
+                    timeout=min(
+                        remaining,
+                        self.config.database.pool_acquire_timeout_seconds,
+                        OPPORTUNISTIC_POOL_TIMEOUT_SECONDS if nonblocking_read else timeout,
                     )
-                    try:
-                        slot = connection.execute(
-                            "SELECT oam_indexing_db_admit(%s)", (limit,)
-                        ).fetchone()[0]
-                    except psycopg.errors.QueryCanceled as error:
-                        raise CapacityUnavailable(
-                            "indexing database admission wait expired"
-                        ) from error
-                    if time.monotonic() >= deadline:
-                        raise CapacityUnavailable("indexing database admission wait expired")
-                    if slot is not None:
-                        break
-                    time.sleep(min(CAPACITY_POLL_SECONDS, max(0, deadline - time.monotonic())))
-                connection.execute(
-                    "SELECT set_config('statement_timeout',%s,true)", (original_timeout,)
                 )
-                bind_user(connection.cursor(), self.authority)
-                yield connection
+            try:
+                connection = stack.enter_context(connection_context)
+            except PoolTimeout:
+                if not nonblocking_read:
+                    raise
+                stack.close()
+                yield None
+                return
+            if nonblocking_read:
+                connection.execute("SET TRANSACTION READ ONLY")
+            original_timeout = connection.execute("SHOW statement_timeout").fetchone()[0]
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CapacityUnavailable("indexing database admission wait expired")
+                connection.execute(
+                    "SELECT set_config('statement_timeout',%s,true)",
+                    (str(max(1, int(remaining * 1000))),),
+                )
+                try:
+                    slot = connection.execute(
+                        "SELECT oam_indexing_db_admit(%s)", (limit,)
+                    ).fetchone()[0]
+                except psycopg.errors.QueryCanceled as error:
+                    raise CapacityUnavailable("indexing database admission wait expired") from error
+                if time.monotonic() >= deadline:
+                    raise CapacityUnavailable("indexing database admission wait expired")
+                if slot is not None:
+                    break
+                if nonblocking_read:
+                    stack.close()
+                    yield None
+                    return
+                time.sleep(min(CAPACITY_POLL_SECONDS, max(0, deadline - time.monotonic())))
+            connection.execute(
+                "SELECT set_config('statement_timeout',%s,true)", (original_timeout,)
+            )
+            bind_user(connection.cursor(), self.authority)
+            yield connection
+            if not nonblocking_read:
                 connection.execute(
                     "UPDATE users SET projection_epoch=projection_epoch+1 "
                     "WHERE tenant_id=%s AND user_id=%s",
                     self.key,
                 )
-        finally:
-            slots.release()
 
     @contextmanager
     def read_only_connection(self):
@@ -403,6 +436,7 @@ class IndexStore:
 
     def checkpoint(self, stage: str, inputs: object, produce):
         digest = input_digest(inputs)
+        stage_ref = stage + ":" + digest.hex()
         identity = (
             *self.key,
             self.source["source_id"],
@@ -433,35 +467,64 @@ class IndexStore:
                         self.claim.fence,
                     ),
                 )
-                self._record_model_stage_state(connection, stage, dispatched=(stage,))
-            self._unsettled_model_stages.add(stage)
-        output = produce()
+                self._record_model_stage_state(connection, stage_ref, dispatched=(stage_ref,))
+            self._unsettled_model_stages.add(stage_ref)
+        try:
+            output = produce()
+        except Exception as error:
+            self._model_stage_failures = {
+                **getattr(self, "_model_stage_failures", {}),
+                stage_ref: error,
+            }
+            raise
         if hasattr(output, "model_dump"):
             output = output.model_dump(mode="json")
-        usage = output.get("usage", {})
+        return self._save_model_checkpoint(identity, output, stage_ref)
+
+    def _save_model_checkpoint(self, identity, output, stage_ref):
         policy_error = None
-        with self._model_stage_lock:
-            with self.transaction() as connection:
-                try:
-                    self.guard(connection)
-                except StaleConsolidationPolicy as error:
-                    # Persist a known completed response before restarting under new policy.
-                    self.guard(connection, allow_policy_change=True)
-                    policy_error = error
-                connection.execute(
-                    "INSERT INTO index_stage_results(tenant_id,user_id,source_id,source_version,"
-                    "generation_id,stage_key,input_digest,output,usage,work_unit_id,attempt_id) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                    (
-                        *identity,
-                        Jsonb(output),
-                        Jsonb(usage),
-                        self.claim.work_unit_id,
-                        self.claim.attempt_id,
-                    ),
-                )
-                self._record_model_stage_state(connection, stage, completed=(stage,))
-            self._unsettled_model_stages.remove(stage)
+        try:
+            with self._model_stage_lock:
+                with self.transaction() as connection:
+                    try:
+                        self.guard(connection)
+                    except StaleConsolidationPolicy as error:
+                        self.guard(connection, allow_policy_change=True)
+                        policy_error = error
+                    connection.execute(
+                        "INSERT INTO index_stage_results(tenant_id,user_id,source_id,"
+                        "source_version,"
+                        "generation_id,stage_key,input_digest,output,usage,"
+                        "work_unit_id,attempt_id) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                        (
+                            *identity,
+                            Jsonb(output),
+                            Jsonb(output.get("usage", {})),
+                            self.claim.work_unit_id,
+                            self.claim.attempt_id,
+                        ),
+                    )
+                    self._record_model_stage_state(connection, stage_ref, completed=(stage_ref,))
+                self._unsettled_model_stages.remove(stage_ref)
+        except Exception as error:
+            self._uncached_model_stages = getattr(self, "_uncached_model_stages", set()) | {
+                stage_ref
+            }
+            print(
+                json.dumps(
+                    {
+                        "stage": "model_checkpoint_unsaved",
+                        "operation_id": self.claim.operation_id,
+                        "request_ref": stage_ref,
+                        "outcome": "completed",
+                        "usage": output.get("usage", {}),
+                        "error": type(error).__name__,
+                    }
+                ),
+                flush=True,
+            )
+            raise
         if policy_error is not None:
             raise policy_error
         return output
@@ -498,7 +561,7 @@ class IndexStore:
                     if existing:
                         outputs[index] = existing[0]
                     else:
-                        pending.append((index, stage, identity, produce))
+                        pending.append((index, stage + ":" + digest.hex(), identity, produce))
                 if pending:
                     connection.execute(
                         RENEW_LEASE_SQL,
@@ -531,28 +594,20 @@ class IndexStore:
                 except Exception as error:
                     failures.append((stage, error))
                     outputs[index] = error
+                    if not hasattr(self, "_model_stage_failures"):
+                        self._model_stage_failures = {}
+                    self._model_stage_failures[stage] = error
                     continue
                 if hasattr(output, "model_dump"):
                     output = output.model_dump(mode="json")
-                with self._model_stage_lock:
-                    with self.transaction() as connection:
-                        self.guard(connection)
-                        connection.execute(
-                            "INSERT INTO index_stage_results(tenant_id,user_id,source_id,"
-                            "source_version,generation_id,stage_key,input_digest,output,usage,"
-                            "work_unit_id,attempt_id) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                            (
-                                *identity,
-                                Jsonb(output),
-                                Jsonb(output.get("usage", {})),
-                                self.claim.work_unit_id,
-                                self.claim.attempt_id,
-                            ),
-                        )
-                        self._record_model_stage_state(connection, stage, completed=(stage,))
-                    self._unsettled_model_stages.remove(stage)
-                outputs[index] = output
+                try:
+                    outputs[index] = self._save_model_checkpoint(identity, output, stage)
+                except Exception as error:
+                    # Every sibling is drained even when a completed response cannot be saved.
+                    outputs[index] = error
+                    failures.append((stage, error))
+        if any(isinstance(value, StaleIndexWork) for value in outputs):
+            return outputs
         with self._model_stage_lock, self.transaction() as connection:
             self.guard(connection)
             self._record_model_stage_state(
@@ -577,6 +632,84 @@ class IndexStore:
                 self.claim.attempt_id,
             ),
         )
+
+    def l2_seed_policy(self, connection) -> str:
+        """Pin batching before dispatch; existing paid work keeps its original grouping."""
+        row = connection.execute(
+            "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
+            "AND operation_id=%s FOR UPDATE",
+            (*self.key, self.claim.operation_id),
+        ).fetchone()
+        state = row[0] or {}
+        policy = state.get("l2_seed_policy")
+        if policy is not None:
+            if policy not in {"related", "source"}:
+                raise StaleConsolidationInputs("Unrecognized pinned Insight seed policy")
+            return policy
+        policy = self.config.index.insight_seed_policy
+        if policy == "source":
+            cached = connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM index_stage_results WHERE tenant_id=%s "
+                "AND user_id=%s AND source_id=%s AND source_version=%s AND generation_id=%s "
+                "AND starts_with(stage_key,'insight'))",
+                (
+                    *self.key,
+                    self.source["source_id"],
+                    self.source["source_version"],
+                    self.generation_id,
+                ),
+            ).fetchone()[0]
+            if state.get("l2_examined_ids") or cached:
+                policy = "related"
+        connection.execute(
+            "UPDATE operations SET stage_state=stage_state||%s::jsonb,updated_at=clock_timestamp() "
+            "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
+            (Jsonb({"l2_seed_policy": policy}), *self.key, self.claim.operation_id),
+        )
+        return policy
+
+    def l2_source_config(self, connection) -> OAMConfig:
+        """Pin source-batch limits before dispatch, retaining legacy completed work."""
+        row = connection.execute(
+            "SELECT stage_state FROM operations WHERE tenant_id=%s AND user_id=%s "
+            "AND operation_id=%s FOR UPDATE",
+            (*self.key, self.claim.operation_id),
+        ).fetchone()
+        state = row[0] or {}
+        if "l2_source_batch" in state:
+            value = state["l2_source_batch"]
+            batch = None if value is None else InsightSourceBatchConfig.model_validate(value)
+        else:
+            cached = connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM index_stage_results WHERE tenant_id=%s "
+                "AND user_id=%s AND source_id=%s AND source_version=%s AND generation_id=%s "
+                "AND starts_with(stage_key,'insight'))",
+                (
+                    *self.key,
+                    self.source["source_id"],
+                    self.source["source_version"],
+                    self.generation_id,
+                ),
+            ).fetchone()[0]
+            batch = (
+                None
+                if state.get("l2_examined_ids") or cached
+                else self.config.index.insight_source_batch
+            )
+            connection.execute(
+                "UPDATE operations SET stage_state=stage_state||%s::jsonb,"
+                "updated_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
+                "AND operation_id=%s",
+                (
+                    Jsonb({"l2_source_batch": None if batch is None else batch.model_dump()}),
+                    *self.key,
+                    self.claim.operation_id,
+                ),
+            )
+        selected = self.config.model_copy(
+            update={"index": self.config.index.model_copy(update={"insight_source_batch": batch})}
+        )
+        return selected.for_insight_source_batch()
 
     def l2_progress(self, connection) -> tuple[set[str], str]:
         row = connection.execute(
@@ -925,9 +1058,41 @@ class IndexStore:
             isinstance(error, StaleConsolidationInputs) and not self._unsettled_model_stages
         )
         retryable = retryable or inputs_changed
+        failures = getattr(self, "_model_stage_failures", {})
+        unresolved_batch = bool(failures and self._unsettled_model_stages - failures.keys())
+        if failures and self._unsettled_model_stages <= failures.keys():
+            from oam.indexing.extraction import _sum_extraction_usage
+
+            errors = [failures[stage] for stage in self._unsettled_model_stages]
+            known_failures = all(
+                isinstance(value, (httpx.HTTPError, ExtractionError, ModelOutputError))
+                for value in errors
+            )
+            if known_failures:
+                known_usage = _sum_extraction_usage(
+                    [getattr(value, "usage", None) for value in errors]
+                )
+                retryable = all(
+                    retryable_model_http_error(value)
+                    or isinstance(value, ModelEmptyContentError)
+                    or isinstance(value, ExtractionError)
+                    and value.retryable
+                    for value in errors
+                )
+            else:
+                unresolved_batch = True
+                known_usage = None
+                retryable = False
+                not_dispatched = False
+        elif failures and self._unsettled_model_stages - failures.keys():
+            # At least one successful response was not saved, or a call is still unknown.
+            # A sibling's known transport failure must not authorize replay of that input.
+            known_usage = None
+            retryable = False
+            not_dispatched = False
         # The source coordinator drains all producers before failure settlement.
         # One error cannot settle several stages with unsaved outcomes.
-        if len(self._unsettled_model_stages) > 1:
+        if len(self._unsettled_model_stages) > 1 and known_usage is None and not unresolved_batch:
             not_dispatched = False
             if retryable_http:
                 known_usage = Usage(coverage="partial")
@@ -941,6 +1106,11 @@ class IndexStore:
         )
         if semantic:
             retryable = retryable or isinstance(error, (psycopg.Error, OSError))
+        if getattr(self, "_uncached_model_stages", set()):
+            known_usage = None
+            retryable = False
+            not_dispatched = False
+            inputs_changed = False
         with self.transaction() as connection:
             owned = connection.execute(
                 "UPDATE work_units SET status=CASE WHEN %s AND attempts_remaining>0 "
@@ -1048,7 +1218,7 @@ class IndexStore:
         )
         for stage, usage in rows:
             if stage.startswith(
-                ("extract:", "vision:", "insight:recipe=", "abstract:recipe=")
+                ("extract:", "vision:", "insight:", "abstract:recipe=")
             ) or stage in {"insight", "abstract"}:
                 generation.append(usage)
             elif stage.startswith(("passage:", "facts_embed:", "insight_embed")):

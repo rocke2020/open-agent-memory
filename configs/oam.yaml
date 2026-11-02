@@ -44,7 +44,8 @@ chunk:
     previous_context_estimated_tokens: 128
 
 extraction:
-  # Complete model input, including instructions, passage metadata and references.
+  # Shared input ceiling (estimated tokens) for L1 extraction and L2 Insight synthesis/repair.
+  # Includes system instructions and the complete serialized input.
   max_input_tokens: 8192
   # Group planning estimates output as 3 * source tokens + 128 * passage count.
   # Multi-passage groups must fit this estimate and max_input_tokens; size is not fixed.
@@ -174,6 +175,15 @@ index:
   insights_enabled: true
   # Delay in hours from completed source indexing to newly queued L2 consolidation.
   insight_consolidation_delay_hours: 24
+  # Parallel independent Insight groups within one owned consolidation job.
+  insight_generation_concurrency: 1
+  # Related groups preserve cosine clustering; source batches protect ranked targets per seed.
+  insight_seed_policy: related
+  # Optional source-batch-only seed, full-input token and combined target caps.
+  # Set all three together: {seed_max: 32, input_max_tokens: 32768, target_max: 64}.
+  # Null preserves the shared limits below; per-seed target lookup keeps its own cap.
+  insight_source_batch: null
+  # L2 input uses extraction.max_input_tokens above, shared with L1 extraction.
   # Maximum related new facts and existing complete Insight bodies per L2 request.
   insight_seed_max: 8
   insight_candidate_max: 8

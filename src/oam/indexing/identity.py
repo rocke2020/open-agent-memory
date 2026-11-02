@@ -66,7 +66,12 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
         },
         "index": config.index.model_dump(
             mode="json",
-            exclude={"insight_consolidation_delay_hours"}
+            exclude={
+                "insight_consolidation_delay_hours",
+                "insight_generation_concurrency",
+                "insight_seed_policy",
+                "insight_source_batch",
+            }
             | (
                 set()
                 if config.index.insights_enabled

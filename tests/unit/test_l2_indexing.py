@@ -15,6 +15,54 @@ from oam.indexing.store import IndexStore
 from oam.models.runtime import ModelResult, Usage
 
 
+def test_l2_generation_capacity_is_validated_without_changing_content_identity(tmp_path):
+    from oam.indexing.identity import index_generation
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    override = tmp_path / "parallel.yaml"
+    override.write_text("index:\n  insight_generation_concurrency: 4\n")
+    parallel = load_config(override).config
+    assert parallel.index.insight_generation_concurrency == 4
+    environment = {
+        "VLM_MODEL": "synthetic",
+        "VLM_BASE_URL": "https://unused.test/v1",
+        "VLM_API_KEY": "synthetic",
+        "OAM_EMBEDDING_MODEL": "synthetic",
+        "OAM_EMBEDDING_URL": "https://unused.test/v1",
+        "OAM_EMBEDDING_KEY": "synthetic",
+    }
+    assert index_generation(config, environment) == index_generation(parallel, environment)
+
+
+def test_l2_capacity_keeps_captured_legacy_generation_and_checkpoint():
+    from oam.config import ModelsConfig
+    from oam.indexing.consolidation import _group_inputs
+    from oam.indexing.identity import index_generation
+    from oam.indexing.store import input_digest
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(update={"models": ModelsConfig()})
+    facts = (
+        InsightInput(id="a", text="The user uses glaze G41.", source_refs=("source:1",)),
+        InsightInput(id="b", text="The user fires at 1240 C.", source_refs=("source:1",)),
+    )
+    for cap in (1, 4):
+        selected = config.model_copy(
+            update={
+                "index": config.index.model_copy(update={"insight_generation_concurrency": cap})
+            }
+        )
+        assert index_generation(selected, {}) == (
+            "gen_bcbbe1a13f79116323228293c323d0ec162fe99987a3a54822029f0cb3563c8b"
+        )
+        inputs = _group_inputs(
+            SimpleNamespace(config=selected, generation_id="legacy"), facts, ("a", "b"), (), []
+        )
+        assert input_digest(inputs).hex() == (
+            "1ee6e49dc7e3abed2e8a68c3a8bd691c02e5469c0bd88c13b4a010ff8f297959"
+        )
+
+
 def test_insight_input_preserves_evidence_dates_and_temporal_annotations():
     mentioned_at = datetime(2026, 10, 5, 9, 0, tzinfo=UTC)
     annotation = TemporalAnnotation(
@@ -33,6 +81,57 @@ def test_insight_input_preserves_evidence_dates_and_temporal_annotations():
     assert fact.mentioned_at == mentioned_at
     assert fact.temporal_annotations == (annotation,)
     assert fact.model_dump(mode="json")["mentioned_at"] == "2026-10-05T09:00:00Z"
+
+
+def test_parallel_selection_defers_shared_targets_and_facts_and_refreshes(monkeypatch):
+    from oam.indexing import consolidation
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={"index": config.index.model_copy(update={"insight_generation_concurrency": 2})}
+    )
+    store = SimpleNamespace(
+        config=config,
+        transaction=lambda **kwargs: nullcontext(None),
+        claim=SimpleNamespace(operation_id="operation"),
+    )
+    groups = [{"unit_id": str(i), "memory_id": str(i)} for i in range(4)]
+    frozen, looked_up = [], []
+
+    def pending(store, connection, identifiers, examined):
+        return next(([group] for group in groups if group["unit_id"] not in examined), [])
+
+    def lookup(store, connection, group, **kwargs):
+        identifier = group[0]["unit_id"]
+        looked_up.append(identifier)
+        return ({"id": "same-target"},) if identifier in {"0", "1"} else ()
+
+    def freeze(store, connection, group, **kwargs):
+        identifier = group[0]["unit_id"]
+        frozen.append(identifier)
+        # Group 1 shares a target; group 2 shares evidence before any CREATE.
+        facts = (
+            InsightInput(
+                id="shared" if identifier in {"0", "2"} else identifier,
+                text="Grounded fact",
+                source_refs=("source:1",),
+            ),
+        )
+        targets = (
+            ({"id": "same-target", "text": "Supported state."},) if identifier in {"0", "1"} else ()
+        )
+        return facts, (identifier,), targets, targets
+
+    monkeypatch.setattr(consolidation, "_pending_group", pending)
+    monkeypatch.setattr(consolidation, "_set_preparation_timeout", lambda *args: None)
+    monkeypatch.setattr(consolidation, "_lookup_targets", lookup)
+    monkeypatch.setattr(consolidation, "_freeze_group", freeze)
+    selected = consolidation._parallel_groups(store, None, ["0", "1", "2", "3"], set())
+    assert [group[1] for group in selected] == [("0",), ("3",)]
+    selected = consolidation._parallel_groups(store, None, ["0", "1", "2", "3"], {"0", "3"})
+    assert [group[1] for group in selected] == [("1",), ("2",)]
+    assert looked_up.count("1") == 2 and looked_up.count("2") == 2
+    assert frozen.count("1") == 1 and frozen.count("2") == 2
 
 
 class ProgressConnection:
@@ -96,6 +195,45 @@ def test_l2_pack_samples_old_fact_bodies_without_losing_presented_seeds():
     assert packed == (seed, old)
 
 
+@pytest.mark.parametrize("oversized", ["suffix", "first", "neither"])
+def test_l2_freeze_admits_a_fitting_candidate_prefix_and_keeps_first_target(monkeypatch, oversized):
+    from oam.indexing import consolidation
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    seed = {"unit_id": "new", "memory_id": "new"}
+    fact = InsightInput(id="new", text="New supported state.", source_refs=("source:1",))
+    targets = [
+        {"id": key, "text": "Complete supported knowledge.", "vector": [1.0], "supports": []}
+        for key in ("first", "suffix")
+    ]
+    if oversized != "neither":
+        targets[0 if oversized == "first" else 1]["text"] = "Complete history. " * 10000
+    lookups = []
+    monkeypatch.setattr(consolidation, "_lookup_targets", lambda *args: targets)
+
+    def facts_for_targets(store, connection, seeds, admitted, *, seed_only=False):
+        if not seed_only:
+            lookups.append([target["id"] for target in admitted])
+        return [fact]
+
+    monkeypatch.setattr(consolidation, "_fact_context", facts_for_targets)
+    monkeypatch.setattr(consolidation, "_fact_input", lambda row: row)
+    store = SimpleNamespace(config=config, claim=SimpleNamespace(operation_id="test-operation"))
+    if oversized == "first":
+        with pytest.raises(ValueError, match="one seed"):
+            consolidation._freeze_group(store, None, [seed])
+        return
+    facts, seeds, public, private = consolidation._freeze_group(store, None, [seed])
+    assert facts == (fact,)
+    assert seeds == ("new",)
+    assert private == (targets[:1] if oversized == "suffix" else targets)
+    assert public == tuple(
+        {key: value for key, value in x.items() if key != "vector"} for x in private
+    )
+    assert lookups[-1] == (["first"] if oversized == "suffix" else ["first", "suffix"])
+    assert len(lookups) == 1
+
+
 @pytest.mark.parametrize("changed", ["revision", "supports", "vector", "source_refs", "recipe"])
 def test_private_changes_prevent_checkpoint_reuse_with_identical_model_input(monkeypatch, changed):
     from oam.indexing import consolidation
@@ -127,6 +265,9 @@ def test_private_changes_prevent_checkpoint_reuse_with_identical_model_input(mon
 
         def l2_progress(self, connection):
             return set(), None
+
+        def l2_seed_policy(self, connection):
+            return "related"
 
         def readiness(self, connection, **values):
             pass

@@ -118,7 +118,14 @@ def repair_insights(store, models) -> bool:
             "repair": repair,
             "generation_id": store.generation_id,
             "config": {
-                "index": store.config.index.model_dump(mode="json"),
+                "index": store.config.index.model_dump(
+                    mode="json",
+                    exclude={
+                        "insight_generation_concurrency",
+                        "insight_seed_policy",
+                        "insight_source_batch",
+                    },
+                ),
                 "extraction": store.config.extraction.model_dump(mode="json"),
             },
         }

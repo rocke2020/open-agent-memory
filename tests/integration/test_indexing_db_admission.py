@@ -12,6 +12,7 @@ import psycopg
 import pytest
 from api_test_app import create_api_only_app as create_app
 from psycopg.conninfo import make_conninfo
+from psycopg_pool import ConnectionPool
 from test_core_http import ROOT, use_created_user_key
 from test_core_http import core_database as core_database
 
@@ -22,6 +23,62 @@ from oam.indexing.store import IndexStore
 from oam.workers.claims import claim_one
 
 pytestmark = pytest.mark.integration
+
+
+def test_nonblocking_reads_share_admission_are_readonly_and_release(indexing_stores):
+    dsn, stores = indexing_stores
+    store = stores[4]
+    with ConnectionPool(store.dsn, min_size=1, max_size=2) as pool:
+        store.pool = pool
+        with ExitStack() as parents:
+            for parent in stores[:4]:
+                parents.enter_context(parent.transaction())
+            started = monotonic()
+            with store.transaction(nonblocking_read=True, deadline=started + 1) as unavailable:
+                assert unavailable is None
+            assert monotonic() - started < 0.5
+
+        with psycopg.connect(dsn) as read:
+            before = read.execute(
+                "SELECT projection_epoch FROM users WHERE tenant_id=%s AND user_id=%s", store.key
+            ).fetchone()[0]
+        with (
+            pytest.raises(psycopg.errors.ReadOnlySqlTransaction),
+            store.transaction(nonblocking_read=True, deadline=monotonic() + 5) as read,
+        ):
+            assert read is not None
+            assert read.execute("SHOW transaction_read_only").fetchone() == ("on",)
+            assert (
+                read.execute(
+                    "SELECT current_setting('oam.tenant_id'),current_setting('oam.user_id')"
+                ).fetchone()
+                == store.key
+            )
+            read.execute(
+                "UPDATE users SET projection_epoch=projection_epoch+1 "
+                "WHERE tenant_id=%s AND user_id=%s",
+                store.key,
+            )
+        with store.transaction(nonblocking_read=True, deadline=monotonic() + 5) as read:
+            assert read is not None
+            assert read.execute(
+                "SELECT projection_epoch FROM users WHERE tenant_id=%s AND user_id=%s", store.key
+            ).fetchone() == (before,)
+
+
+def test_nonblocking_read_pool_saturation_falls_back_without_leaking(indexing_stores):
+    _dsn, stores = indexing_stores
+    store = stores[0]
+    with ConnectionPool(store.dsn, min_size=1, max_size=1) as pool:
+        store.pool = pool
+        with store.transaction() as parent:
+            store.guard(parent)
+            started = monotonic()
+            with store.transaction(nonblocking_read=True, deadline=started + 1) as unavailable:
+                assert unavailable is None
+            assert monotonic() - started < 0.5
+        with store.transaction(nonblocking_read=True, deadline=monotonic() + 5) as read:
+            assert read is not None
 
 
 @pytest.fixture
