@@ -78,24 +78,61 @@ def test_cleanup_empty_baseline_accepts_no_change_and_new_claim() -> None:
     assert result["support_ids"] == ["new"]
 
 
-def test_incremental_edit_preserves_untouched_claim_and_citations() -> None:
+@pytest.mark.parametrize(
+    ("prefix", "expected_line"),
+    [
+        ("- ", "- The user is building a boat [3]."),
+        ("* ", "* The user is building a boat [3]."),
+        ("", "- The user is building a boat [3]."),
+    ],
+)
+def test_incremental_edit_preserves_untouched_claim_and_citations(prefix, expected_line) -> None:
     blocks = parse_profile_blocks(BASE, ["old_sailing", "old_language"])
     result = apply_profile_edits(
         blocks,
         [
             {
                 "action": "add",
-                "text": "- The user is building a boat [1].",
+                "text": prefix + "The user is building a boat [1].",
                 "support_ids": ["new_boat"],
             }
         ],
         {"old_sailing", "old_language", "new_boat"},
     )
     body, ids = render_profile_blocks(result)
-    assert "The user likes sailing [1]." in body
-    assert "The user prefers English [2]." in body
-    assert "The user is building a boat [3]." in body
+    assert body == (
+        "- The user likes sailing [1].\n- The user prefers English [2].\n" + expected_line
+    )
     assert ids == ["old_sailing", "old_language", "new_boat"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Uncited claim.", "Wrong citation [2].", "First [1].\nSecond [1].", "First [1].\rSecond [1]."],
+)
+def test_missing_bullet_does_not_bypass_citation_or_single_line_checks(text) -> None:
+    with pytest.raises(ValueError):
+        apply_profile_edits([], [{"action": "add", "text": text, "support_ids": ["new"]}], {"new"})
+
+
+def test_missing_bullet_is_normalized_on_replacement() -> None:
+    blocks = parse_profile_blocks(BASE, ["old_sailing", "old_language"])
+    result = apply_profile_edits(
+        blocks,
+        [
+            {
+                "action": "replace",
+                "block_id": blocks[1].block_id,
+                "text": "The user prefers Chinese [1].",
+                "support_ids": ["new"],
+            }
+        ],
+        {"new"},
+    )
+    assert render_profile_blocks(result) == (
+        "- The user likes sailing [1].\n- The user prefers Chinese [2].",
+        ["old_sailing", "new"],
+    )
 
 
 def test_incremental_rejects_unknown_targets_and_uncited_edits() -> None:

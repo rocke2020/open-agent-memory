@@ -1943,7 +1943,10 @@ async def test_profile_accepts_l1_when_insights_are_disabled(core_database, tmp_
         assert unchanged.status_code == 200 and unchanged.json()["generation_calls"] == 0
 
 
-async def test_profile_full_and_incremental_refresh_keep_supported_claims(core_database, tmp_path):
+@pytest.mark.parametrize("edit_prefix", ["- ", ""])
+async def test_profile_full_and_incremental_refresh_keep_supported_claims(
+    core_database, tmp_path, edit_prefix
+):
     from oam.config import load_config
     from oam.models.runtime import ModelResult, Usage
     from oam.workers.index_source import process_one
@@ -1968,7 +1971,7 @@ async def test_profile_full_and_incremental_refresh_keep_supported_claims(core_d
                     "edits": [
                         {
                             "action": "add",
-                            "text": "- The user studies memory systems [1].",
+                            "text": edit_prefix + "The user studies memory systems [1].",
                             "support_ids": [inputs[0]["id"]],
                         }
                     ],
@@ -2035,7 +2038,7 @@ async def test_profile_full_and_incremental_refresh_keep_supported_claims(core_d
         )
         updated = (await client.get("/v1/users/profile-modes/profile")).json()
         assert "prefers English" in updated["content"]
-        assert "studies memory systems" in updated["content"]
+        assert "\n- The user studies memory systems [2]." in updated["content"]
         assert len(updated["references"]) == 2
         operation = (
             await client.get(
@@ -2043,8 +2046,11 @@ async def test_profile_full_and_incremental_refresh_keep_supported_claims(core_d
             )
         ).json()
         assert operation["stage_state"]["mode"] == "incremental"
+        assert operation["status"] == "succeeded"
+        assert models.generation_calls.count("profile") == 2
         unchanged = await client.post("/v1/users/profile-modes/profile/refresh", json={})
         assert unchanged.status_code == 200
+        assert models.generation_calls.count("profile") == 2
         forced = await client.post("/v1/users/profile-modes/profile/refresh", json={"mode": "full"})
         assert forced.status_code == 202, forced.text
         assert process_one(

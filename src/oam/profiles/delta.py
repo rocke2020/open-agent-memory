@@ -98,6 +98,12 @@ def apply_profile_edits(
                 result.pop(index)
                 continue
         text = edit["text"]
+        if (
+            isinstance(text, str)
+            and not text.startswith(("- ", "* "))
+            and not any(separator in text for separator in "\r\n")
+        ):
+            text = "- " + text
         references = tuple(ids)
         _validate_text(text, references)
         if action == "add":
