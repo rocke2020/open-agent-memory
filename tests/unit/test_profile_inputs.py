@@ -216,7 +216,7 @@ class ProfileCursor:
             self.rows = self.connection.pending
         elif "/* profile:insight_support */" in query:
             self.rows = self.connection.insight_links
-        elif "/* profile:passages */" in query:
+        elif "/* profile:passages */" in query or "/* profile:manifest_support */" in query:
             self.rows = self.connection.passages
         elif "set_config('oam.tenant_id'" in query:
             self.rows = []

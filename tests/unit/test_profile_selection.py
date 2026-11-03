@@ -32,6 +32,23 @@ def test_profile_candidate_query_scopes_before_limit_and_preserves_ranked_order(
     ]
 
 
+def test_incremental_candidates_are_filtered_before_ranking_limit() -> None:
+    from oam.profiles.selection import rank_profile_candidates
+
+    class Connection:
+        def execute(self, statement, params):
+            assert statement.index("unit_id = ANY") < statement.index("LIMIT")
+            assert params == (["new", "old-unexamined"], "[0.1]", 2)
+            return self
+
+        def fetchall(self):
+            return [("new",)]
+
+    assert rank_profile_candidates(
+        Connection(), (0.1,), 2, candidate_ids=["new", "old-unexamined"]
+    ) == ["new"]
+
+
 def test_request_budget_includes_system_fields_and_does_not_split_inputs() -> None:
     items = [{"id": "one", "text": "A" * 400}, {"id": "two", "text": "B" * 400}]
     packed = pack_profile_request(

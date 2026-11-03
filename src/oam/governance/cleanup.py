@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import sys
+from typing import Any
 
 import psycopg
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
@@ -16,7 +19,117 @@ from oam.db.entity_eligibility import (
 )
 from oam.debug.traces import recorded_alias_witnesses, recorded_path_nodes
 from oam.indexing.store import input_digest
+from oam.profiles.delta import prune_profile_baseline
+from oam.profiles.document import build_profile_document
+from oam.profiles.inputs import ProfileInputs, load_profile_inputs
 from oam.workers.claims import ClaimedWork
+
+
+def sanitize_closed_profile(
+    snapshot: dict[str, Any], inputs: ProfileInputs
+) -> dict[str, Any] | None:
+    """Retain only independently eligible cited claims from a withdrawn snapshot."""
+    if snapshot.get("instruction") is not None or inputs.exact_fields:
+        return None
+    previous = snapshot.get("input_manifest")
+    if not isinstance(previous, dict) or not isinstance(previous.get("units"), dict):
+        return None
+    if not isinstance(previous.get("examined"), list) or not isinstance(
+        previous.get("recipe"), str
+    ):
+        return None
+    current = inputs.manifest
+    if not isinstance(current.get("units"), dict):
+        return None
+    try:
+        original_bytes = len(snapshot["content"].encode("utf-8"))
+        empty_document = build_profile_document(
+            None, [], (), instruction=None, max_content_bytes=sys.maxsize
+        )
+        document, _ = prune_profile_baseline(
+            snapshot,
+            current,
+            inputs.stored_support_inputs,
+            max_content_bytes=max(original_bytes, len(empty_document["content"].encode("utf-8"))),
+        )
+        if document["support_ids"] and len(document["content"].encode("utf-8")) > original_bytes:
+            return None
+        unchanged = {
+            key for key, digest in current["units"].items() if previous["units"].get(key) == digest
+        }
+        examined = set(previous["examined"]) & unchanged
+        pending = (set(previous.get("pending", ())) & set(current["units"])) | (
+            set(current["units"]) - unchanged
+        )
+        manifest = {
+            **current,
+            "recipe": previous["recipe"],
+            "examined": sorted(examined),
+            "pending": sorted(pending - examined),
+        }
+        return {
+            "content": document["content"],
+            "support_ids": document["support_ids"],
+            "references": document["references"],
+            "input_manifest": manifest,
+        }
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _scrub_removed_profile_copies(connection, authority, removed_ids) -> None:
+    key = (authority.tenant_id, authority.user_id)
+    with connection.cursor(row_factory=dict_row) as cursor:
+        bind_user(cursor, authority)
+        cursor.execute(
+            'SELECT profile_revision,content,instruction,support_ids,"references",'
+            "generation_id,input_manifest,visible_to FROM profiles "
+            "WHERE tenant_id=%s AND user_id=%s AND profile_id='user' "
+            "ORDER BY profile_revision DESC LIMIT 1 FOR UPDATE",
+            key,
+        )
+        snapshot = cursor.fetchone()
+    sanitized = None
+    if snapshot is not None and snapshot["visible_to"] is not None:
+        try:
+            inputs = load_profile_inputs(
+                connection,
+                authority,
+                snapshot["generation_id"],
+                insights_enabled=True,
+                stored_support_ids=set(snapshot["support_ids"]),
+                selected_unit_ids=[],
+                include_manifest=True,
+            )
+            sanitized = sanitize_closed_profile(snapshot, inputs)
+        except (ValueError, PermissionError):
+            pass
+    connection.execute(
+        "UPDATE profiles SET input_manifest=NULL WHERE tenant_id=%s AND user_id=%s "
+        "AND visible_to IS NOT NULL",
+        key,
+    )
+    connection.execute(
+        "UPDATE profiles SET content=NULL,sections='{}'::jsonb,support_ids='[]'::jsonb,"
+        "\"references\"='[]'::jsonb,input_manifest=NULL WHERE tenant_id=%s AND user_id=%s "
+        'AND visible_to IS NOT NULL AND (support_ids ?| %s OR "references" ?| %s)',
+        (*key, removed_ids, removed_ids),
+    )
+    if sanitized is not None:
+        connection.execute(
+            "UPDATE profiles SET sections='{}'::jsonb,content=%s,support_ids=%s,"
+            '"references"=%s,input_manifest=%s '
+            "WHERE tenant_id=%s AND user_id=%s AND profile_id='user' "
+            "AND profile_revision=%s AND visible_to IS NOT NULL",
+            (
+                sanitized["content"],
+                Jsonb(sanitized["support_ids"]),
+                Jsonb(sanitized["references"]),
+                Jsonb(sanitized["input_manifest"]),
+                *key,
+                snapshot["profile_revision"],
+            ),
+        )
 
 
 def affected_trace_ids(rows, removed_unit_ids, removed_support_ids=()):
@@ -282,7 +395,11 @@ def cleanup_removal_claim(
     """
     key = (claim.tenant_id, claim.user_id)
     authority = AuthorizedUser(
-        "worker", claim.tenant_id, "worker", claim.user_id, frozenset({"source:delete"})
+        "worker",
+        claim.tenant_id,
+        "worker",
+        claim.user_id,
+        frozenset({"source:delete", "memory:read"}),
     )
     connection_context = pool.connection() if pool is not None else psycopg.connect(dsn)
     try:
@@ -359,11 +476,8 @@ def cleanup_removal_claim(
             )
             # Admission closes Profiles conservatively. Scrub only those closed copies;
             # a supported explicit refresh published afterwards must survive old cleanup.
-            connection.execute(
-                "UPDATE profiles SET content=NULL,sections='{}'::jsonb,support_ids='[]'::jsonb,"
-                "\"references\"='[]'::jsonb WHERE tenant_id=%s AND user_id=%s "
-                'AND visible_to IS NOT NULL AND (support_ids ?| %s OR "references" ?| %s)',
-                (*key, [memory_target, *unit_ids], [insight_target, *unit_ids]),
+            _scrub_removed_profile_copies(
+                connection, authority, [memory_target, insight_target, *unit_ids]
             )
             if unit_ids:
                 connection.execute(

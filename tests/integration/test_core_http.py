@@ -1943,6 +1943,115 @@ async def test_profile_accepts_l1_when_insights_are_disabled(core_database, tmp_
         assert unchanged.status_code == 200 and unchanged.json()["generation_calls"] == 0
 
 
+async def test_profile_full_and_incremental_refresh_keep_supported_claims(core_database, tmp_path):
+    from oam.config import load_config
+    from oam.models.runtime import ModelResult, Usage
+    from oam.workers.index_source import process_one
+
+    dsn, _, headers = core_database
+    config_path = tmp_path / "profile-refresh-modes.yaml"
+    config_path.write_text("index:\n  insights_enabled: false\n")
+    config = load_config(config_path).config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+
+    class ProfileModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            if role != "profile":
+                return super().generate(role, **kwargs)
+            self.generation_calls.append(role)
+            inputs = json.loads(kwargs["user"])["inputs"]
+            if "Existing blocks:" in kwargs["system"]:
+                assert len(inputs) == 1
+                output = {
+                    "no_change": False,
+                    "edits": [
+                        {
+                            "action": "add",
+                            "text": "- The user studies memory systems [1].",
+                            "support_ids": [inputs[0]["id"]],
+                        }
+                    ],
+                }
+            else:
+                output = {
+                    "content": "\n".join(
+                        f"- {item['text']} [{i}]." for i, item in enumerate(inputs, 1)
+                    ),
+                    "support_ids": [item["id"] for item in inputs],
+                }
+            return ModelResult(
+                content=json.dumps(output),
+                usage=Usage(
+                    input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
+                ),
+            )
+
+    models = ProfileModels()
+    app = create_app(config_path)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "profile-modes")
+
+        async def retain(text, key):
+            response = await client.post(
+                "/v1/retain",
+                json={
+                    "user_id": "profile-modes",
+                    "input_type": "interaction",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": text,
+                            "event_time": "2026-10-01T00:00:00Z",
+                            "learning_eligible": True,
+                        }
+                    ],
+                },
+                headers={"Idempotency-Key": key},
+            )
+            assert response.status_code == 202, response.text
+            assert process_source(config, queue_dsn, content_dsn, models=models, worker_id=key)
+
+        await retain("The user prefers English", "first-source")
+        requested = await client.post(
+            "/v1/users/profile-modes/profile/refresh", json={"mode": "full"}
+        )
+        assert requested.status_code == 202, requested.text
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="full-profile")
+        initial = (await client.get("/v1/users/profile-modes/profile")).json()
+        assert "prefers English" in initial["content"]
+        await retain("The user studies memory systems", "second-source")
+        requested = await client.post(
+            "/v1/users/profile-modes/profile/refresh", json={"mode": "incremental"}
+        )
+        assert requested.status_code == 202, requested.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="incremental-profile"
+        )
+        updated = (await client.get("/v1/users/profile-modes/profile")).json()
+        assert "prefers English" in updated["content"]
+        assert "studies memory systems" in updated["content"]
+        assert len(updated["references"]) == 2
+        operation = (
+            await client.get(
+                f"/v1/users/profile-modes/operations/{requested.json()['operation_id']}"
+            )
+        ).json()
+        assert operation["stage_state"]["mode"] == "incremental"
+        unchanged = await client.post("/v1/users/profile-modes/profile/refresh", json={})
+        assert unchanged.status_code == 200
+        forced = await client.post("/v1/users/profile-modes/profile/refresh", json={"mode": "full"})
+        assert forced.status_code == 202, forced.text
+        assert process_one(
+            config, queue_dsn, content_dsn, models=models, worker_id="forced-profile"
+        )
+
+
 async def test_profile_rejects_source_revision_changed_during_generation(core_database, tmp_path):
     from oam.config import load_config
     from oam.models.runtime import ModelResult, Usage

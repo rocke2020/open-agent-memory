@@ -9,11 +9,14 @@ ROOT = Path(__file__).parents[2]
 
 
 async def test_profile_read_and_refresh_http_status_contract() -> None:
+    calls = []
+
     class Runtime:
         def get_profile(self, actor, user_id, max_tokens):
             return {"content": None, "freshness": "missing", "generation_calls": 0}
 
-        def refresh_profile(self, actor, user_id, instruction, reset_instruction):
+        def refresh_profile(self, actor, user_id, instruction, reset_instruction, mode):
+            calls.append(mode)
             return {"status": "accepted", "operation_id": "op_profile"}
 
     app = create_app(ROOT / "configs/oam.yaml", runtime=Runtime())
@@ -23,17 +26,22 @@ async def test_profile_read_and_refresh_http_status_contract() -> None:
         headers={"Authorization": "Bearer synthetic"},
     ) as client:
         read = await client.get("/v1/users/alice/profile")
-        accepted = await client.post("/v1/users/alice/profile/refresh", json={})
+        accepted = await client.post("/v1/users/alice/profile/refresh", json={"mode": "full"})
+        incremental = await client.post("/v1/users/alice/profile/refresh", json={})
+        invalid = await client.post("/v1/users/alice/profile/refresh", json={"mode": "auto"})
 
     assert read.status_code == 200
     assert read.json()["freshness"] == "missing"
     assert accepted.status_code == 202
     assert accepted.json() == {"status": "accepted", "operation_id": "op_profile"}
+    assert incremental.status_code == 202
+    assert invalid.status_code == 422
+    assert calls == ["full", "incremental"]
 
 
 async def test_unchanged_profile_refresh_returns_200_without_operation() -> None:
     class Runtime:
-        def refresh_profile(self, actor, user_id, instruction, reset_instruction):
+        def refresh_profile(self, actor, user_id, instruction, reset_instruction, mode):
             return {
                 "status": "unchanged",
                 "profile_revision": 3,

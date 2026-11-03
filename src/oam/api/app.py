@@ -1001,7 +1001,11 @@ def _register_reserved_routes(
         outcome = await run_in_threadpool(
             lambda: _content_call(
                 lambda: _require_runtime(runtime).refresh_profile(
-                    request.state.actor, user_id, body.instruction, body.reset_instruction
+                    request.state.actor,
+                    user_id,
+                    body.instruction,
+                    body.reset_instruction,
+                    body.mode,
                 )
             )
         )

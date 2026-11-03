@@ -7,6 +7,53 @@ from oam.profiles.inputs import ProfileInputs
 from oam.profiles.service import _view
 
 
+def test_manifest_detects_changed_provenance_even_when_unit_id_is_unchanged() -> None:
+    old = {
+        "units": {"fact": "support-v1"},
+        "sources": {"source": 1},
+        "exact": "x",
+        "examined": ["fact"],
+    }
+    assert not profile_service._manifest_inputs_changed(
+        old, {"units": {"fact": "support-v1"}, "sources": {"source": 1}, "exact": "x"}
+    )
+    assert profile_service._manifest_inputs_changed(
+        old, {"units": {"fact": "support-v2"}, "sources": {"source": 1}, "exact": "x"}
+    )
+
+
+def test_changed_cited_support_is_not_served_as_current() -> None:
+    import hashlib
+
+    key = hashlib.sha256(b"fact").hexdigest()
+    snapshot = {"support_ids": ["fact"], "input_manifest": {"units": {key: "old"}}}
+    assert profile_service._snapshot_support_unchanged(snapshot, {"units": {key: "old"}})
+    assert not profile_service._snapshot_support_unchanged(snapshot, {"units": {key: "new"}})
+
+
+def test_pending_new_evidence_can_be_retried_without_reexamining_old_omissions() -> None:
+    assert profile_service._has_pending_delta({"input_manifest": {"pending": ["new"]}})
+    assert not profile_service._has_pending_delta({"input_manifest": {"examined": []}})
+    assert not profile_service._has_pending_delta(
+        {"input_manifest": {"pending": ["new"], "fallback_reason": "incremental_input_budget"}}
+    )
+
+
+def test_saved_instruction_survives_a_closed_profile_revision() -> None:
+    class Connection:
+        def execute(self, query, params):
+            assert "ORDER BY profile_revision DESC LIMIT 1" in query
+            return self
+
+        def fetchone(self):
+            return ("Emphasize ongoing projects",)
+
+    assert (
+        profile_service._latest_profile_instruction(Connection(), ("tenant", "user"))
+        == "Emphasize ongoing projects"
+    )
+
+
 def test_profile_input_budget_changes_refresh_identity() -> None:
     identity = b"x" * 32
     assert profile_service.profile_identity(identity, None, 1000, "", "o200k_base", 8192) != (

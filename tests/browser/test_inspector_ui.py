@@ -204,6 +204,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
             page.route("**/v1/**", respond)
             try:
                 page.goto(f"http://127.0.0.1:{server.server_port}/ui/")
+                page.clock.set_fixed_time("2026-10-15T12:30:00Z")
                 header = page.locator(".site-header")
                 assert header.bounding_box()["height"] <= 72
                 repository = header.get_by_role("link", name="GitHub", exact=False)
@@ -324,6 +325,11 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert not customization.evaluate("element => element.open")
                 assert page.locator("#profile-instruction").is_hidden()
                 assert page.get_by_role("button", name="Refresh profile", exact=True).is_visible()
+                refresh_mode = page.get_by_role("combobox", name="Profile refresh mode", exact=True)
+                assert refresh_mode.input_value() == "incremental"
+                assert refresh_mode.locator("option").evaluate_all(
+                    "options => options.map(option => option.value)"
+                ) == ["incremental", "full"]
                 customization.get_by_text("Customize profile", exact=True).click()
                 prompt_details = page.locator("#profile-prompt-details")
                 prompt = page.locator("#profile-default-prompt")
@@ -380,16 +386,23 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 page.locator("#status").get_by_text(
                     "creation/refresh pending", exact=False
                 ).wait_for()
-                assert json.loads(calls[-1][2]) == {}
+                assert json.loads(calls[-1][2]) == {"mode": "incremental"}
                 page.locator('[data-view="profiles"]').click()
                 detail.locator(".profile-content").wait_for()
                 customization.get_by_text("Customize profile", exact=True).click()
                 assert page.locator("#profile-instruction").input_value() == "Return JSON."
+                refresh_mode.select_option("full")
                 page.get_by_role("button", name="Apply and refresh", exact=True).click()
                 page.locator("#status").get_by_text(
                     "creation/refresh pending", exact=False
                 ).wait_for()
-                assert json.loads(calls[-1][2]) == {"instruction": "Return JSON."}
+                assert json.loads(calls[-1][2]) == {"instruction": "Return JSON.", "mode": "full"}
+                refresh_mode.select_option("incremental")
+                page.locator("#refresh-profile").click()
+                page.locator("#status").get_by_text(
+                    "creation/refresh pending", exact=False
+                ).wait_for()
+                assert json.loads(calls[-1][2]) == {"mode": "incremental"}
                 customization.get_by_text("Customize profile", exact=True).click()
 
                 profile_overrides.update(freshness="uncovered", uncovered_inputs=115)
@@ -423,7 +436,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     "creation/refresh pending", exact=False
                 ).wait_for()
                 assert "Create profile" in page.locator("#refresh-profile").inner_text()
-                assert json.loads(calls[-1][2]) == {}
+                assert json.loads(calls[-1][2]) == {"mode": "incremental"}
 
                 profile_indexing = True
                 page.locator("#refresh-profile").click()
@@ -514,7 +527,10 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 page.locator("#status").get_by_text(
                     "creation/refresh pending", exact=False
                 ).wait_for()
-                assert json.loads(calls[-1][2]) == {"reset_instruction": True}
+                assert json.loads(calls[-1][2]) == {
+                    "reset_instruction": True,
+                    "mode": "incremental",
+                }
                 assert page.locator("#profile-instruction").input_value() == ""
                 page.set_viewport_size({"width": 390, "height": 844})
                 page.locator('[data-view="profiles"]').click()

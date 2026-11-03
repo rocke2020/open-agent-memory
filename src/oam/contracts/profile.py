@@ -8,6 +8,7 @@ class FrozenContract(BaseModel):
 
 
 class ProfileRefreshRequest(FrozenContract):
+    mode: Literal["full", "incremental"] = "incremental"
     instruction: str | None = Field(default=None, min_length=1, max_length=4000)
     reset_instruction: bool = False
 

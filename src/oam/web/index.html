@@ -80,7 +80,13 @@
           <section class="card detail-panel" aria-labelledby="detail-title">
             <div class="panel-heading">
               <h2 id="detail-title" data-i18n="Details">Details</h2>
-              <button id="refresh-profile" type="button" class="secondary" hidden data-i18n="Refresh profile">Refresh profile</button>
+              <div id="profile-refresh-controls" class="actions" hidden>
+                <select id="profile-refresh-mode" aria-label="Profile refresh mode" data-i18n-aria-label="Profile refresh mode">
+                  <option value="incremental" data-i18n="Incremental refresh">Incremental refresh</option>
+                  <option value="full" data-i18n="Full refresh">Full refresh</option>
+                </select>
+                <button id="refresh-profile" type="button" class="secondary" hidden data-i18n="Refresh profile">Refresh profile</button>
+              </div>
             </div>
             <div id="detail" class="detail-content"><p data-i18n="Select an item to inspect its source and readiness.">Select an item to inspect its source and readiness.</p></div>
             <form id="profile-form" class="profile-form" hidden>

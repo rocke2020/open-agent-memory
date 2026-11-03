@@ -2,6 +2,9 @@
 
 const INSPECTOR_LOCALES = {
   "zh-CN": {
+    "Profile refresh mode": "画像刷新模式",
+    "Full refresh": "全量刷新",
+    "Incremental refresh": "增量刷新",
     "Open Agent Memory Inspector": "Open Agent Memory 记忆查看器",
     "Memory Inspector": "记忆查看器",
     "Explore memories, insights, and the evidence connecting them.": "探索记忆、洞察及连接它们的证据。",
@@ -289,6 +292,9 @@ const INSPECTOR_LOCALES = {
     "{basis} · {duration} apart": "{basis} · 相隔 {duration}"
   },
   "es": {
+    "Profile refresh mode": "Modo de actualización del perfil",
+    "Full refresh": "Actualización completa",
+    "Incremental refresh": "Actualización incremental",
     "Open Agent Memory Inspector": "Inspector de Open Agent Memory",
     "Memory Inspector": "Inspector de memoria",
     "Explore memories, insights, and the evidence connecting them.": "Explora recuerdos, conclusiones y las evidencias que los conectan.",
@@ -576,6 +582,9 @@ const INSPECTOR_LOCALES = {
     "{basis} · {duration} apart": "{basis} · separación: {duration}"
   },
   "fr": {
+    "Profile refresh mode": "Mode d’actualisation du profil",
+    "Full refresh": "Actualisation complète",
+    "Incremental refresh": "Actualisation incrémentale",
     "Open Agent Memory Inspector": "Inspecteur Open Agent Memory",
     "Memory Inspector": "Inspecteur de mémoire",
     "Explore memories, insights, and the evidence connecting them.": "Explorez les souvenirs, les analyses et les éléments qui les relient.",
@@ -863,6 +872,9 @@ const INSPECTOR_LOCALES = {
     "{basis} · {duration} apart": "{basis} · écart de {duration}"
   },
   "de": {
+    "Profile refresh mode": "Profilaktualisierungsmodus",
+    "Full refresh": "Vollständig aktualisieren",
+    "Incremental refresh": "Inkrementell aktualisieren",
     "Open Agent Memory Inspector": "Open Agent Memory-Inspektor",
     "Memory Inspector": "Gedächtnisinspektor",
     "Explore memories, insights, and the evidence connecting them.": "Erkunden Sie Erinnerungen, Erkenntnisse und die Belege, die sie verbinden.",
@@ -1150,6 +1162,9 @@ const INSPECTOR_LOCALES = {
     "{basis} · {duration} apart": "{basis} · Abstand: {duration}"
   },
   "pt": {
+    "Profile refresh mode": "Modo de atualização do perfil",
+    "Full refresh": "Atualização completa",
+    "Incremental refresh": "Atualização incremental",
     "Open Agent Memory Inspector": "Inspetor do Open Agent Memory",
     "Memory Inspector": "Inspetor de memória",
     "Explore memories, insights, and the evidence connecting them.": "Explore memórias, conclusões e as evidências que as conectam.",
@@ -1437,6 +1452,9 @@ const INSPECTOR_LOCALES = {
     "{basis} · {duration} apart": "{basis} · intervalo de {duration}"
   },
   "ja": {
+    "Profile refresh mode": "プロファイル更新モード",
+    "Full refresh": "全体更新",
+    "Incremental refresh": "差分更新",
     "Open Agent Memory Inspector": "Open Agent Memory メモリインスペクター",
     "Memory Inspector": "メモリインスペクター",
     "Explore memories, insights, and the evidence connecting them.": "メモリ、インサイト、そしてそれらを結ぶ根拠を探索します。",
@@ -1724,6 +1742,9 @@ const INSPECTOR_LOCALES = {
     "{basis} · {duration} apart": "{basis} · {duration}の間隔"
   },
   "ko": {
+    "Profile refresh mode": "프로필 새로고침 모드",
+    "Full refresh": "전체 새로고침",
+    "Incremental refresh": "증분 새로고침",
     "Open Agent Memory Inspector": "Open Agent Memory 메모리 검사기",
     "Memory Inspector": "메모리 검사기",
     "Explore memories, insights, and the evidence connecting them.": "메모리와 인사이트, 이들을 연결하는 근거를 살펴보세요.",
@@ -2011,6 +2032,9 @@ const INSPECTOR_LOCALES = {
     "{basis} · {duration} apart": "{basis} · {duration} 간격"
   },
   "zh-TW": {
+    "Profile refresh mode": "輪廓重新整理模式",
+    "Full refresh": "完整重新整理",
+    "Incremental refresh": "增量重新整理",
     "Open Agent Memory Inspector": "Open Agent Memory 記憶檢視器",
     "Memory Inspector": "記憶檢視器",
     "Explore memories, insights, and the evidence connecting them.": "探索記憶、洞察及連結它們的證據。",

@@ -180,7 +180,12 @@ class APIRuntime(Protocol):
     def get_profile(self, actor: RequestActor, user_id: str, max_tokens: int) -> dict: ...
 
     def refresh_profile(
-        self, actor: RequestActor, user_id: str, instruction: str | None, reset_instruction: bool
+        self,
+        actor: RequestActor,
+        user_id: str,
+        instruction: str | None,
+        reset_instruction: bool,
+        mode: str,
     ) -> dict: ...
 
     def search_many(
@@ -377,7 +382,12 @@ class DatabaseRuntime:
         return ProfileService(self.config, self.pool).get(authority, max_tokens)
 
     def refresh_profile(
-        self, actor: RequestActor, user_id: str, instruction: str | None, reset_instruction: bool
+        self,
+        actor: RequestActor,
+        user_id: str,
+        instruction: str | None,
+        reset_instruction: bool,
+        mode: str,
     ) -> dict:
         from oam.profiles.service import ProfileService
 
@@ -388,7 +398,7 @@ class DatabaseRuntime:
             self._authorize(connection, actor, user_id, "memory:read")
             authority = replace(authority, capabilities=frozenset({"memory:append", "memory:read"}))
         return ProfileService(self.config, self.pool).refresh(
-            authority, instruction, reset_instruction=reset_instruction
+            authority, instruction, reset_instruction=reset_instruction, mode=mode
         )
 
     def list_profile_data(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict:

@@ -14,12 +14,18 @@ PROFILE_PURPOSE = (
 )
 
 
-def rank_profile_candidates(connection, vector: tuple[float, ...], limit: int) -> list[str]:
+def rank_profile_candidates(
+    connection, vector: tuple[float, ...], limit: int, *, candidate_ids: list[str] | None = None
+) -> list[str]:
+    candidate_filter = " AND unit_id = ANY(%s)" if candidate_ids is not None else ""
+    params: tuple[Any, ...] = (json.dumps(vector), limit)
+    if candidate_ids is not None:
+        params = (candidate_ids, *params)
     rows = connection.execute(
         f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}) "
         "SELECT unit_id FROM eligible WHERE origin='memory' AND kind IN ('fact','insight') "
-        "ORDER BY embedding <=> %s::vector, unit_id LIMIT %s",
-        (json.dumps(vector), limit),
+        f"{candidate_filter} ORDER BY embedding <=> %s::vector, unit_id LIMIT %s",
+        params,
     ).fetchall()
     return [row[0] for row in rows]
 

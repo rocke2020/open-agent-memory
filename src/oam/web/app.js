@@ -122,6 +122,7 @@
     setText(byId("profile-default-prompt"), "");
     byId("profile-prompt-details").open = false;
     byId("profile-customization").open = false;
+    byId("profile-refresh-mode").value = "incremental";
     byId("profile-use-default").hidden = true;
     byId("item-list").replaceChildren();
     setText(byId("list-summary"), "");
@@ -245,6 +246,7 @@
     setText(byId("search-form").querySelector("button"), view === "retrieve" ? msg("Retrieve evidence") : msg("Search"));
     byId("profile-form").hidden = view !== "profiles";
     byId("refresh-profile").hidden = view !== "profiles";
+    byId("profile-refresh-controls").hidden = view !== "profiles";
     setText(byId("detail-title"), view === "profiles" ? msg("User Profile") : msg("Details"));
     document.querySelector(".list-panel").hidden = view === "profiles";
     byId("workspace-grid").classList.toggle("profile-view", view === "profiles");
@@ -413,6 +415,7 @@
   }
 
   async function refreshProfile(body = {}) {
+    body = { ...body, mode: byId("profile-refresh-mode").value };
     const generation = state.generation;
     const requestId = ++state.profileRequest;
     try {

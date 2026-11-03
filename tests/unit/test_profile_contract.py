@@ -39,3 +39,13 @@ def test_changed_profile_response_is_an_async_receipt() -> None:
 
     assert response.status == "accepted"
     assert response.operation_id == "op_123"
+
+
+def test_profile_refresh_accepts_explicit_full_or_incremental_mode() -> None:
+    assert ProfileRefreshRequest().mode == "incremental"
+    assert ProfileRefreshRequest(mode="full").mode == "full"
+    assert ProfileRefreshRequest(mode="incremental").mode == "incremental"
+    with pytest.raises(ValidationError):
+        ProfileRefreshRequest.model_validate({"mode": "auto"})
+    with pytest.raises(ValidationError):
+        ProfileRefreshRequest.model_validate({"mode": "replace"})
