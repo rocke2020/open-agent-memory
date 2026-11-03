@@ -253,8 +253,13 @@ async def test_insight_lexical_lookup_ranks_only_insight_hits(
     authority = AuthorizedUser("probe", tenant, "probe", "scope", frozenset({"memory:read"}))
     plans = []
     with psycopg.connect(dsn) as connection:
-        lookup = InsightLookup(connection, authority, config, deadline=time.monotonic() + 60)
-        original = UnfilteredLookup(connection, authority, config, deadline=time.monotonic() + 60)
+        generation = connection.execute(
+            "SELECT index_generation_id FROM users WHERE tenant_id=%s AND user_id=%s",
+            (tenant, "scope"),
+        ).fetchone()[0]
+        kwargs = {"generation_id": generation, "deadline": time.monotonic() + 60}
+        lookup = InsightLookup(connection, authority, config, **kwargs)
+        original = UnfilteredLookup(connection, authority, config, **kwargs)
         if entity_candidates:
             for repository in (lookup, original):
                 monkeypatch.setattr(

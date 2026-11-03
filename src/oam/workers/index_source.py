@@ -151,6 +151,10 @@ def process_one(
         index_generation(config, os.environ),
         pool=content_pool,
     )
+    if store.source["input_role"] == "interaction":
+        from oam.indexing.budget import SourceBudgetModels
+
+        models = SourceBudgetModels(store, models)
     try:
         if claim.stage == "index_semantic_links":
             from oam.workers.semantic_links import process_semantic_claim

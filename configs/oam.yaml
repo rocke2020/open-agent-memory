@@ -183,6 +183,10 @@ index:
   insight_generation_concurrency: 1
   # Related groups preserve cosine clustering; source batches protect ranked targets per seed.
   insight_seed_policy: related
+  # Optional per-interaction-source/version/generation allowance for L1 and L2 together.
+  # Reservations use full text-request UTF-8 bytes plus the output ceiling, never refunded.
+  # Profile, embeddings and document Resources are separate; null leaves the guard disabled.
+  generation_token_budget: null
   # Optional source-batch-only seed, full-input token and combined target caps.
   # Set all three together: {seed_max: 32, input_max_tokens: 32768, target_max: 64}.
   # Null preserves the shared limits below; per-seed target lookup keeps its own cap.

@@ -72,6 +72,7 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
                 "insight_generation_concurrency",
                 "insight_seed_policy",
                 "insight_source_batch",
+                "generation_token_budget",
             }
             | (
                 set()

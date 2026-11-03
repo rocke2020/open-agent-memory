@@ -277,6 +277,7 @@ class InsightSourceBatchConfig(FrozenModel):
 class IndexConfig(FrozenModel):
     enable_causal_graph: bool
     insights_enabled: bool = True
+    generation_token_budget: PositiveInt | None = None
     insight_consolidation_delay_hours: PositiveFloat
     insight_generation_concurrency: PositiveInt
     insight_seed_policy: Literal["related", "source"]

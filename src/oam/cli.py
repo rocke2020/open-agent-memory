@@ -51,6 +51,14 @@ def _parser() -> argparse.ArgumentParser:
     l2_hold.add_argument("--tenant-id", required=True)
     l2_hold.add_argument("--user-id", required=True)
 
+    l2_index = commands.add_parser(
+        "l2-index", help="queue L2 over completed L1 without re-extraction"
+    )
+    l2_index.add_argument("--config", type=Path, default=selected_config_path)
+    l2_index.add_argument("--tenant-id", required=True)
+    l2_index.add_argument("--user-id", required=True)
+    l2_index.add_argument("--limit", type=int, required=True, help="maximum source jobs to enqueue")
+
     recovery = commands.add_parser(
         "recover-bootstrap", help="issue a replacement bootstrap administrator credential"
     )
@@ -177,6 +185,10 @@ def main(argv: list[str] | None = None) -> int:
         from oam.workers.l2_hold import l2_hold_from_environment
 
         return l2_hold_from_environment(args.config, args.action, args.tenant_id, args.user_id)
+    if args.command == "l2-index":
+        from oam.workers.l2_index import l2_index_from_environment
+
+        return l2_index_from_environment(args.config, args.tenant_id, args.user_id, args.limit)
     if args.command == "recover-bootstrap":
         from oam.auth.bootstrap import recover_bootstrap_from_environment
 
