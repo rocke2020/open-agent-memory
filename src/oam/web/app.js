@@ -84,6 +84,7 @@
     user: "",
     view: "memories",
     items: [],
+    selectedItemKey: null,
     nextAfter: null,
     generation: 0,
     draftKey: null,
@@ -92,7 +93,7 @@
     listRequest: 0,
     logErrorsOnly: false,
     logOffset: 0,
-    entityLayout: "relationships",
+    entityLayout: "list",
     graphDispose: null,
     savedProfileInstruction: "",
   };
@@ -115,6 +116,7 @@
     closeEntity();
     state.generation += 1;
     state.items = [];
+    state.selectedItemKey = null;
     state.nextAfter = null;
     state.draftKey = null;
     state.profileRequest += 1;
@@ -253,9 +255,10 @@
     state.detailRequest += 1;
     state.listRequest += 1;
     state.items = [];
+    state.selectedItemKey = null;
     state.nextAfter = null;
     byId("item-list").replaceChildren();
-    byId("detail").replaceChildren();
+    byId("detail").replaceChildren(element("p", msg("Loading details…")));
     setText(byId("list-summary"), "");
     byId("load-more").hidden = true;
     setText(byId("list-title"), viewLabel(view, true));
@@ -288,7 +291,7 @@
       tab.setAttribute("aria-pressed", String(tab.dataset.view === view));
     }
     if (view === "retrieve") {
-      byId("detail").append(element("p", msg("Enter a query to retrieve cited evidence. Open a result to inspect it.")));
+      byId("detail").replaceChildren(element("p", msg("Enter a query to retrieve cited evidence. Open a result to inspect it.")));
       return;
     }
     if (view === "profiles") {
@@ -479,7 +482,7 @@
     }
   }
 
-  async function loadList(append) {
+  async function loadList(append, updateDetail = true) {
     const view = state.view;
     if (!["memories", "insights", "resources", "entities", "request-logs"].includes(view)) return;
     const generation = state.generation;
@@ -511,15 +514,23 @@
           setText(byId("list-summary"), msg("{count} entities", { count: data.total }));
           if (data.truncated || data.edges_truncated) byId("entity-graph").append(element("p", msg("Showing up to 500 entities and 5,000 co-occurrences. Search to narrow the graph."), "graph-bound-note"));
           if (!data.nodes.length) byId("entity-graph").append(element("p", msg("No entities found."), "graph-empty"));
-        } else applyList(data, append, detailRequest === state.detailRequest);
+        } else applyList(data, append, updateDetail && detailRequest === state.detailRequest);
         status(msg("{count} current {view} shown.", { count: state.items.length, view: viewLabel(view) }));
       }
     } catch (error) {
-      if (current(generation) && view === state.view && requestId === state.listRequest) throw error;
+      if (current(generation) && view === state.view && requestId === state.listRequest) {
+        if (updateDetail && detailRequest === state.detailRequest && !state.items.length) byId("detail").replaceChildren(element("p", errorMessage(error)));
+        throw error;
+      }
     }
   }
 
-  function applyList(data, append, showEmptyState = true) {
+  function itemKey(item) {
+    return item.resource_id ? `resource:${item.resource_id}`
+      : item.kind === "insight" ? `insight:${item.insight_id}` : `memory:${item.memory_id || item.unit_id}`;
+  }
+
+  function applyList(data, append, updateDetail = true) {
     state.items = append ? state.items.concat(data.items) : data.items;
     state.nextAfter = data.next_after;
     const list = byId("item-list");
@@ -530,7 +541,7 @@
       byId("load-more").hidden = state.view === "request-logs" || !state.nextAfter;
       if (state.view === "request-logs") renderRequestOverview(data);
       setText(byId("list-summary"), state.view === "entities" ? msg("{count} entities", { count: data.total }) : "");
-      if (!state.items.length && showEmptyState) byId("detail").replaceChildren(element("p", msg(state.view === "entities" ? "No entities found." : "No requests match these filters.")));
+      if (!state.items.length && updateDetail) byId("detail").replaceChildren(element("p", msg(state.view === "entities" ? "No entities found." : "No requests match these filters.")));
       return;
     }
     for (const item of state.items) {
@@ -542,13 +553,23 @@
       const control = button(state.view === "resources" ? id : String(item.text || id), () => openItem(item), "list-item");
       if (state.view !== "resources") control.replaceChildren(element("span", item.text || id, "item-title"));
       control.dataset.unitId = item.unit_id || id;
+      control.setAttribute("aria-current", String(itemKey(item) === state.selectedItemKey));
       control.append(element("small", state.view === "resources" ? msg("{kind} · {media} · version {version}", { kind, media: item.media_type, version: item.active_version }) : msg("{kind} · {id}", { kind, id })));
       row.append(control);
       list.append(row);
     }
     byId("load-more").hidden = !state.nextAfter;
     setText(byId("list-summary"), msg(data.total == null ? "{count} shown{support}" : "{count} of {total} shown{support}", { count: state.items.length, total: data.total, support: state.view === "insights" ? msg(" · supported by memories") : "" }));
-    if (!state.items.length && showEmptyState) byId("detail").replaceChildren(element("p", msg("No current {view} are available.", { view: viewLabel(state.view) })));
+    if (!append && updateDetail && ["memories", "insights", "resources"].includes(state.view)) {
+      if (!state.items.length) {
+        state.detailRequest += 1;
+        state.selectedItemKey = null;
+        clearSourceMessages();
+        byId("detail").replaceChildren(element("p", msg("No current {view} are available.", { view: viewLabel(state.view) })));
+      } else if (!state.items.some(item => itemKey(item) === state.selectedItemKey)) {
+        openItem(state.items[0]);
+      }
+    }
   }
 
   function displayTime(value) {
@@ -754,6 +775,10 @@
 
   async function openItem(item) {
     clearSourceMessages();
+    state.selectedItemKey = itemKey(item);
+    for (const [index, control] of [...byId("item-list").querySelectorAll(".list-item")].entries()) {
+      control.setAttribute("aria-current", String(itemKey(state.items[index]) === state.selectedItemKey));
+    }
     const generation = state.generation;
     const requestId = ++state.detailRequest;
     const view = state.view;
@@ -776,9 +801,6 @@
         const id = isInsight ? item.insight_id : item.memory_id;
         const data = await json(route(`memories/${encodeURIComponent(id)}?memory_type=${isInsight ? "insight" : "basic"}`));
         if (!current(generation) || state.view !== view || requestId !== state.detailRequest) return;
-        for (const control of byId("item-list").querySelectorAll(".list-item")) {
-          control.setAttribute("aria-current", String(control.dataset.unitId === data.unit_id));
-        }
         await showMemory(data, generation, requestId);
       }
     } catch (error) {
@@ -1092,7 +1114,7 @@
       byId("item-list").replaceChildren();
       byId("load-more").hidden = true;
       try {
-        await loadList(false);
+        await loadList(false, false);
       } catch (error) {
         if (current(removalGeneration)) {
           showReceipt(receipt.operation_id, receipt);
@@ -1252,6 +1274,9 @@
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const generation = state.generation;
+      const view = state.view;
+      const requestId = state.detailRequest;
+      const listRequest = state.listRequest;
       if (!state.draftKey) state.draftKey = crypto.randomUUID();
       const headers = { "Idempotency-Key": state.draftKey };
       if (existing) headers["If-Match"] = String(existing.active_version);
@@ -1277,8 +1302,8 @@
         if (!current(generation)) return;
         state.draftKey = null;
         status(msg("Accepted version {version}; operation {id}.", { version: receipt.revision, id: receipt.operation_id }));
-        showReceipt(receipt.operation_id, receipt);
-        await loadList(false);
+        if (currentDetail(generation, view, requestId)) showReceipt(receipt.operation_id, receipt);
+        if (listRequest === state.listRequest) await loadList(false, false);
       } catch (error) { if (current(generation)) showError(error); }
     });
     detail.replaceChildren(form);
@@ -1287,6 +1312,7 @@
 
   function showReceipt(operationId, receipt) {
     clearSourceMessages();
+    state.detailRequest += 1;
     const detail = byId("detail");
     detail.replaceChildren(
       element("h3", msg("Durable operation")),
@@ -1335,7 +1361,7 @@
       showReceipt(receipt.cleanup_operation_id, receipt);
       status(msg("{target} excluded. Cleanup operation {id} is {status}.", { target, id: receipt.cleanup_operation_id, status: enumLabel(receipt.cleanup_status) }));
       try {
-        await loadList(false);
+        await loadList(false, false);
       } catch (error) {
         if (current(deletionGeneration)) status(msg("{target} excluded; list refresh failed: {error}", { target, error: errorMessage(error) }), true);
         return;
