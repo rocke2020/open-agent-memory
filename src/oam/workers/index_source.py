@@ -1064,7 +1064,10 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
         for fact in result.facts
     }
     prepared_entities = {}
-    if any(fact.entities or fact.entity_aliases for fact in result.facts):
+    if any(
+        (fact.entities or fact.entity_aliases) and fact.entity_mentions is None
+        for fact in result.facts
+    ):
         with store.transaction() as connection:
             entity_repository = EntityRepository(
                 connection, store.config, generation_id=store.generation_id, key=store.key
@@ -1076,7 +1079,9 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                     tuple(reference.model_dump() for reference in fact.entity_references),
                 )
                 for fact in result.facts
+                if fact.entity_mentions is None
             }
+    objects = {}
     with store.transaction() as connection:
         store.guard(connection)
         offered_ids = list(
@@ -1138,7 +1143,7 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                 source_updated_at=metadata.source_updated_at,
                 ordinal=fact.output_index,
             )
-            if fact.entities or fact.entity_aliases:
+            if fact.entities or fact.entity_aliases or fact.entity_mentions is not None:
                 entity_repository = EntityRepository(
                     connection, store.config, generation_id=store.generation_id, key=store.key
                 )
@@ -1150,7 +1155,16 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                     references=tuple(
                         reference.model_dump() for reference in fact.entity_references
                     ),
-                    prepared=prepared_entities[fact.output_index],
+                    prepared=prepared_entities.get(fact.output_index),
+                    entity_mentions=tuple(mention.model_dump() for mention in fact.entity_mentions)
+                    if fact.entity_mentions is not None
+                    else None,
+                    objects=objects,
+                    candidates=tuple(
+                        candidate
+                        for candidate in result.entity_candidates
+                        if candidate["output_index"] == str(fact.output_index)
+                    ),
                 )
                 diagnostics.extend(
                     {

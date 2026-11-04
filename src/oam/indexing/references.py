@@ -27,8 +27,8 @@ def eligible_reference_ids(connection, generation_id: str, ids: list[str]) -> se
         row[0]
         for row in connection.execute(
             f"SELECT unit_id FROM ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) eligible "
-            "WHERE kind='fact' AND generation_id=%s AND unit_id=ANY(%s)",
-            (generation_id, ids),
+            "WHERE kind='fact' AND unit_id=ANY(%s)",
+            (ids,),
         ).fetchall()
     }
 
@@ -43,7 +43,7 @@ def freeze_extraction_references(
 ) -> list[dict]:
     """Select and freeze prior-fact context before the existing extraction call.
 
-    Exclude the incoming source and offer only eligible L1 facts in this generation.
+    Offer eligible L1 facts, including previously completed source chunks.
     Reuse completed extraction; revise only unfinished inputs after revocation.
     """
     identity = (
@@ -93,11 +93,9 @@ def freeze_extraction_references(
             dense = connection.execute(
                 "SELECT unit_id "
                 f"FROM ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) eligible "
-                "WHERE kind='fact' AND generation_id=%s AND source_id<>%s "
+                "WHERE kind='fact' "
                 "ORDER BY " + distance + ",unit_id LIMIT %s",
                 (
-                    store.generation_id,
-                    store.source["source_id"],
                     *(str(list(query)) for query in queries),
                     store.config.extraction.reference_max_facts,
                 ),
@@ -126,9 +124,9 @@ def freeze_extraction_references(
                 "WHERE (times.tenant_id,times.user_id,times.unit_id)="
                 "(eligible.tenant_id,eligible.user_id,eligible.unit_id)) "
                 f"FROM ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) eligible "
-                "WHERE kind='fact' AND generation_id=%s AND unit_id=ANY(%s) "
+                "WHERE kind='fact' AND unit_id=ANY(%s) "
                 "ORDER BY array_position(%s,unit_id)",
-                (store.generation_id, selected_ids, selected_ids),
+                (selected_ids, selected_ids),
             ).fetchall()
             candidates = tuple(
                 {

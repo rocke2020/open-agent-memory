@@ -4,6 +4,7 @@ from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from oam.config import OAMConfig
 from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
@@ -49,9 +50,15 @@ class EntityRepository:
             f"SELECT DISTINCT binding.entity_id,binding.name_id,binding.name_kind FROM "
             f"({ELIGIBLE_ENTITY_MEMBERSHIPS}) member JOIN ({ELIGIBLE_ENTITY_NAME_SUPPORT}) binding "
             "USING(tenant_id,user_id,entity_id) WHERE member.unit_id=ANY(%s) "
-            "AND binding.name_key=%s AND binding.generation_id=%s "
+            "AND binding.name_key=%s "
+            "AND (%s::text[] IS NULL OR binding.name_id=ANY(%s)) "
             "ORDER BY binding.entity_id,binding.name_id LIMIT 2",
-            (offered, self._name_key(name), self.generation_id),
+            (
+                offered,
+                self._name_key(name),
+                [ref["name_id"] for ref in references if ref.get("name_id")] or None,
+                [ref["name_id"] for ref in references if ref.get("name_id")] or None,
+            ),
         )
         return rows[0] if len({row["entity_id"] for row in rows}) == 1 else None
 
@@ -95,7 +102,7 @@ class EntityRepository:
         )
         output: dict[str, list[dict]] = {}
         for row in rows:
-            metadata = {"name": row["name_text"], "quote": row["quote"]}
+            metadata = {"name": row["name_text"], "quote": row["quote"], "name_id": row["name_id"]}
             target = output.setdefault(row["unit_id"], [])
             if (
                 metadata not in target
@@ -107,6 +114,13 @@ class EntityRepository:
         return output
 
     def _add_name(self, entity_id: str, name: str, kind: str) -> str:
+        existing = self._rows(
+            "SELECT name_id FROM entity_names WHERE tenant_id=%s AND user_id=%s "
+            "AND entity_id=%s AND name_key=%s",
+            (*self.key, entity_id, self._name_key(name)),
+        )
+        if existing:
+            return existing[0]["name_id"]
         name_id = stable_id(
             "entity_name", *self.key, self.generation_id, entity_id, self._name_key(name)
         )
@@ -151,17 +165,282 @@ class EntityRepository:
             ),
         )
 
-    def _new_identity(self, memory_id: str, name: str, quote: str) -> dict:
-        entity_id = stable_id(
-            "entity", *self.key, self.generation_id, memory_id, self._name_key(name)
-        )
+    def _new_identity(self, memory_id: str, name: str, quote: str, *, object_key="") -> dict:
+        identity = (*self.key, self.generation_id, memory_id, self._name_key(name))
+        entity_id = stable_id("entity", *identity, *((object_key,) if object_key else ()))
         self.connection.execute(
-            "INSERT INTO entity_units VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+            "INSERT INTO entity_units(tenant_id,user_id,entity_id,generation_id,canonical_name) "
+            "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
             (*self.key, entity_id, self.generation_id, name),
         )
         name_id = self._add_name(entity_id, name, "canonical")
         self._support(name_id, memory_id, quote)
+        if object_key:
+            self._label(entity_id, name)
         return {"entity_id": entity_id, "name_id": name_id, "name_kind": "canonical"}
+
+    def _label(self, entity_id: str, name: str) -> None:
+        base_key = self._name_key(name)
+        row = self._rows(
+            "SELECT canonical_key FROM entity_units WHERE tenant_id=%s "
+            "AND user_id=%s AND entity_id=%s",
+            (*self.key, entity_id),
+        )[0]
+        if row["canonical_key"] is not None:
+            return
+        family = self._rows(
+            "SELECT DISTINCT e.entity_id,e.canonical_name,e.canonical_key "
+            f"FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) n JOIN entity_units e "
+            "USING(tenant_id,user_id,entity_id) WHERE n.name_key=%s "
+            "AND n.support_kind='canonical' AND e.entity_id<>%s ORDER BY e.entity_id",
+            (base_key, entity_id),
+        )
+
+        def assign(target, base, numbered):
+            suffix = 1 if numbered else 0
+            while True:
+                tail = f"-{suffix}" if suffix else ""
+                prefix = base
+                while True:
+                    try:
+                        key = self._name_key(prefix + tail)
+                        break
+                    except ValueError:
+                        prefix = prefix[:-1]
+                        if not prefix:
+                            raise
+                taken = self._rows(
+                    "SELECT entity_id FROM entity_units WHERE tenant_id=%s AND user_id=%s "
+                    "AND canonical_key=%s AND entity_id<>%s",
+                    (*self.key, key, target),
+                )
+                legacy = self._rows(
+                    f"SELECT 1 FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) n JOIN entity_units e "
+                    "USING(tenant_id,user_id,entity_id) WHERE e.canonical_key IS NULL "
+                    "AND n.support_kind='canonical' AND n.name_key=%s AND e.entity_id<>%s LIMIT 1",
+                    (key, target),
+                )
+                if legacy:
+                    suffix += 1
+                    continue
+                if not taken:
+                    self.connection.execute(
+                        "UPDATE entity_units SET canonical_name=%s,canonical_key=%s,"
+                        "canonical_base_key=%s WHERE tenant_id=%s AND user_id=%s AND entity_id=%s",
+                        (prefix + tail, key, self._name_key(base), *self.key, target),
+                    )
+                    return
+                holder = taken[0]["entity_id"]
+                supported = self._rows(
+                    f"SELECT 1 FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) n JOIN entity_units e "
+                    "USING(tenant_id,user_id,entity_id) WHERE e.entity_id=%s "
+                    "AND n.name_key=e.canonical_base_key AND n.support_kind='canonical' LIMIT 1",
+                    (holder,),
+                )
+                if not supported:
+                    self.connection.execute(
+                        "UPDATE entity_units SET canonical_key=NULL "
+                        "WHERE tenant_id=%s AND user_id=%s AND entity_id=%s",
+                        (*self.key, holder),
+                    )
+                    continue
+                suffix += 1
+
+        if len(family) == 1 and family[0]["canonical_key"] in (None, base_key):
+            assign(family[0]["entity_id"], family[0]["canonical_name"], True)
+        assign(entity_id, name, bool(family))
+
+    def _exact(self, name: str) -> list[dict]:
+        return self._rows(
+            "SELECT DISTINCT entity_id,name_id,name_kind FROM "
+            f"({ELIGIBLE_ENTITY_NAME_SUPPORT}) n WHERE n.name_key=%s "
+            "ORDER BY entity_id,name_id LIMIT %s",
+            (self._name_key(name), self.config.index.entity_resolution_candidates + 1),
+        )
+
+    def _publish_resolved(self, memory_id, mentions, aliases, objects, candidates):
+        published = []
+        for object_key in dict.fromkeys(mention["object"] for mention in mentions):
+            group = [m for m in mentions if m["object"] == object_key]
+            first = group[0]
+            if first["decision"] == "unresolved":
+                self.diagnostics.append("unresolved_entity")
+                continue
+            exact = self._exact(first["name"])
+            all_exact = {
+                row["entity_id"] for mention in group for row in self._exact(mention["name"])
+            }
+            if len(exact) > self.config.index.entity_resolution_candidates:
+                self.diagnostics.append("incomplete_entity_candidates")
+                continue
+            known = {binding["entity_id"] for binding in objects.values() if binding}
+            for candidate in candidates:
+                if self._name_key(candidate["name"]) in {self._name_key(m["name"]) for m in group}:
+                    binding = self._reference(candidate["name"], (candidate,))
+                    if binding:
+                        known.add(binding["entity_id"])
+            if all_exact - known:
+                self.diagnostics.append("incomplete_entity_candidates")
+                continue
+            resolved = objects.get(object_key)
+            if resolved is None and first["decision"] == "same":
+                reference = {"name": first["name"], "reference_id": first.get("reference_id")}
+                if first.get("reference_name_id"):
+                    reference["name_id"] = first["reference_name_id"]
+                selected = [
+                    candidate
+                    for candidate in candidates
+                    if candidate["reference_id"] == reference["reference_id"]
+                    and self._name_key(candidate["name"]) == self._name_key(first["name"])
+                    and (
+                        not reference.get("name_id") or candidate["name_id"] == reference["name_id"]
+                    )
+                ]
+                resolved = self._reference(first["name"], tuple(selected))
+            elif resolved is None and first["decision"] in {"new", "different"}:
+                if first["decision"] == "new" and exact:
+                    self.diagnostics.append("unresolved_entity")
+                    continue
+                if any(target not in objects for target in first.get("different_from", ())):
+                    self.diagnostics.append("invalid_entity_difference")
+                    continue
+                resolved = self._new_identity(
+                    memory_id, first["name"], first["quote"], object_key=object_key
+                )
+            if resolved is None:
+                self.diagnostics.append("unresolved_entity")
+                continue
+            # A local object handle carries identity, never proof for another spelling.
+            observed = next(
+                (
+                    binding
+                    for binding in self._exact(first["name"])
+                    if binding["entity_id"] == resolved["entity_id"]
+                ),
+                None,
+            )
+            if observed is None:
+                self.diagnostics.append("unresolved_entity")
+                continue
+            bindings = {}
+            representative = first
+            resolved = observed
+            for mention in group:
+                binding = next(
+                    (
+                        row
+                        for row in self._exact(mention["name"])
+                        if row["entity_id"] == resolved["entity_id"]
+                    ),
+                    None,
+                )
+                if binding is None:
+                    continue
+                bindings[self._name_key(mention["name"])] = binding
+                if binding["name_kind"] == "canonical":
+                    self._support(binding["name_id"], memory_id, mention["quote"])
+                    self._label(binding["entity_id"], mention["name"])
+                    resolved, representative = binding, mention
+            objects[object_key] = resolved
+            for assertion in aliases:
+                if assertion.get("object") not in (None, object_key):
+                    continue
+                assertion_keys = {
+                    self._name_key(assertion[key]) for key in ("canonical_name", "alias")
+                }
+                if not assertion_keys.intersection(bindings):
+                    continue
+                asserted = [
+                    self._reference(name, tuple(candidates))
+                    for name in (assertion["canonical_name"], assertion["alias"])
+                ]
+                if any(
+                    binding and binding["entity_id"] != resolved["entity_id"]
+                    for binding in asserted
+                ):
+                    self.diagnostics.append("entity_identity_conflict")
+                    continue
+                anchor = resolved
+                if anchor["name_kind"] != "canonical":
+                    anchors = self._rows(
+                        "SELECT DISTINCT name_id,name_key,name_text FROM "
+                        f"({ELIGIBLE_ENTITY_NAME_SUPPORT}) n "
+                        "WHERE entity_id=%s AND name_kind='canonical' AND support_kind='canonical' "
+                        "AND name_key=ANY(%s) ORDER BY name_id LIMIT 2",
+                        (resolved["entity_id"], list(assertion_keys)),
+                    )
+                    if len(anchors) != 1:
+                        self.diagnostics.append("dependent_alias_anchor")
+                        continue
+                    anchor = {
+                        **resolved,
+                        "name_id": anchors[0]["name_id"],
+                        "name_kind": "canonical",
+                    }
+                    self._support(anchor["name_id"], memory_id, assertion["quote"])
+                    self._label(anchor["entity_id"], anchors[0]["name_text"])
+                anchor_key = self._rows(
+                    "SELECT name_key FROM entity_names WHERE tenant_id=%s "
+                    "AND user_id=%s AND name_id=%s",
+                    (*self.key, anchor["name_id"]),
+                )[0]["name_key"]
+                for name in (assertion["canonical_name"], assertion["alias"]):
+                    key = self._name_key(name)
+                    if key == anchor_key:
+                        bindings[key] = anchor
+                        continue
+                    name_id = self._add_name(resolved["entity_id"], name, "alias")
+                    self._support(name_id, memory_id, assertion["quote"], anchor=anchor["name_id"])
+                    bindings[key] = {
+                        "entity_id": resolved["entity_id"],
+                        "name_id": name_id,
+                        "name_kind": "alias",
+                    }
+            source_mentions = [
+                {
+                    "name": m["name"],
+                    "quote": m["quote"],
+                    "span": m.get("span"),
+                    "kind": bindings[self._name_key(m["name"])]["name_kind"],
+                    "name_id": bindings[self._name_key(m["name"])]["name_id"],
+                }
+                for m in group
+                if self._name_key(m["name"]) in bindings
+            ]
+            self.connection.execute(
+                "INSERT INTO unit_entities(tenant_id,user_id,unit_id,entity_key,entity_id,name_id,"
+                "observed_mention,mention_quote,generation_id,source_mentions) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (tenant_id,user_id,unit_id,entity_id) WHERE entity_id IS NOT NULL "
+                "DO UPDATE SET name_id=CASE WHEN (SELECT name_kind FROM entity_names n "
+                "WHERE (n.tenant_id,n.user_id,n.name_id)="
+                "(EXCLUDED.tenant_id,EXCLUDED.user_id,EXCLUDED.name_id))='canonical' "
+                "THEN EXCLUDED.name_id ELSE unit_entities.name_id END,"
+                "observed_mention=CASE WHEN (SELECT name_kind FROM entity_names n "
+                "WHERE (n.tenant_id,n.user_id,n.name_id)="
+                "(EXCLUDED.tenant_id,EXCLUDED.user_id,EXCLUDED.name_id))='canonical' "
+                "THEN EXCLUDED.observed_mention ELSE unit_entities.observed_mention END,"
+                "mention_quote=CASE WHEN (SELECT name_kind FROM entity_names n "
+                "WHERE (n.tenant_id,n.user_id,n.name_id)="
+                "(EXCLUDED.tenant_id,EXCLUDED.user_id,EXCLUDED.name_id))='canonical' "
+                "THEN EXCLUDED.mention_quote ELSE unit_entities.mention_quote END,"
+                "source_mentions=(SELECT jsonb_agg(DISTINCT value) FROM "
+                "jsonb_array_elements(unit_entities.source_mentions||EXCLUDED.source_mentions))",
+                (
+                    *self.key,
+                    memory_id,
+                    "identity:" + resolved["entity_id"],
+                    resolved["entity_id"],
+                    resolved["name_id"],
+                    representative["name"],
+                    representative["quote"],
+                    self.generation_id,
+                    Jsonb(source_mentions),
+                ),
+            )
+            if resolved["entity_id"] not in published:
+                published.append(resolved["entity_id"])
+        return tuple(published)
 
     def publish_fact(
         self,
@@ -172,9 +451,20 @@ class EntityRepository:
         aliases: tuple[dict, ...] = (),
         references: tuple[dict, ...] = (),
         prepared: dict[str, dict | None] | None = None,
+        entity_mentions: tuple[dict, ...] | None = None,
+        objects: dict | None = None,
+        candidates: tuple[dict, ...] = (),
     ) -> tuple[str, ...]:
         selected: dict[str, dict] = {}
         self.diagnostics: list[str] = []
+        if entity_mentions is not None:
+            return self._publish_resolved(
+                memory_id,
+                entity_mentions,
+                aliases,
+                objects if objects is not None else {},
+                candidates,
+            )
         valid_mentions = []
         for name in mentions:
             try:

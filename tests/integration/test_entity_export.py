@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 from psycopg_pool import ConnectionPool
+from test_core_http import core_database as core_database
 from test_recall_repository import add_fact
 from test_recall_repository import recall_database as recall_database
 
@@ -100,7 +101,8 @@ def test_portable_export_preserves_current_entity_alias_witnesses(recall_databas
     connection, authority = recall_database
     config = seed_alias(connection, authority)
     connection.execute(
-        "INSERT INTO entity_units VALUES (%s,%s,'orphan','generation','Unsupported name')",
+        "INSERT INTO entity_units(tenant_id,user_id,entity_id,generation_id,canonical_name) "
+        "VALUES (%s,%s,'orphan','generation','Unsupported name')",
         (authority.tenant_id, authority.user_id),
     )
     records = snapshot(connection, authority, config, "initial", tmp_path)

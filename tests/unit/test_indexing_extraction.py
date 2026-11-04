@@ -1154,6 +1154,7 @@ def test_prompt_examples_validate_entities_relations_and_time_without_model_offs
             config,
             {None: TextChunk(text, 100, 100 + len(text), "", 1)},
             {reference["id"] for reference in references},
+            reference_facts=references,
         )
         assert not result.diagnostics
         for fact in result.facts:
@@ -1161,7 +1162,7 @@ def test_prompt_examples_validate_entities_relations_and_time_without_model_offs
         results.append(result)
     assert len(results) == 7
     assert len(results[3].facts[0].entity_aliases) == 2
-    assert {ref.reference_id for ref in results[4].facts[0].entity_references} == {"ref-1"}
+    assert {ref.reference_id for ref in results[4].facts[0].entity_mentions} == {"ref-1"}
     assert results[0].facts[1].text.endswith("because Acme closed its lab.")
     assert "so" in results[0].facts[1].quote
     if causal:
@@ -1173,5 +1174,5 @@ def test_prompt_examples_validate_entities_relations_and_time_without_model_offs
         annotation = result.facts[1].annotations[0]
         assert (annotation.end - annotation.start).days == 1
     assert results[1].facts[1].updates == (0,)
-    assert results[1].facts[1].entities == ("Beta",)
+    assert tuple(m.name for m in results[1].facts[1].entity_mentions) == ("Beta",)
     assert results[2].outcome == "no_facts"

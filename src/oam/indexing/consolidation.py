@@ -76,7 +76,7 @@ def _pending_group(store, connection, new_fact_ids, examined):
         connection,
         f"WITH eligible AS ({ELIGIBLE_UNITS}), pending AS MATERIALIZED ("
         "SELECT * FROM eligible WHERE kind='fact' AND source_id=%s AND source_version=%s "
-        "AND unit_id=ANY(%s) AND NOT (unit_id=ANY(%s))), "
+        "AND generation_id=%s AND unit_id=ANY(%s) AND NOT (unit_id=ANY(%s))), "
         "anchor AS (SELECT * FROM pending ORDER BY created_at,unit_id LIMIT 1) "
         "SELECT p.*,p.embedding::text AS vector FROM pending p CROSS JOIN anchor a "
         "WHERE p.unit_id=a.unit_id OR "
@@ -86,6 +86,7 @@ def _pending_group(store, connection, new_fact_ids, examined):
         (
             store.source["source_id"],
             store.source["source_version"],
+            store.generation_id,
             new_fact_ids,
             list(examined),
             store.config.index.semantic_link_min_similarity,
@@ -306,11 +307,12 @@ def _pending_source_batch(store, connection, new_fact_ids, examined, *, config=N
         connection,
         f"WITH eligible AS ({ELIGIBLE_UNITS}) "
         "SELECT *,embedding::text AS vector FROM eligible WHERE kind='fact' "
-        "AND source_id=%s AND source_version=%s AND unit_id=ANY(%s) "
+        "AND source_id=%s AND source_version=%s AND generation_id=%s AND unit_id=ANY(%s) "
         "AND NOT (unit_id=ANY(%s)) ORDER BY created_at,unit_id LIMIT %s",
         (
             store.source["source_id"],
             store.source["source_version"],
+            store.generation_id,
             new_fact_ids,
             list(examined),
             min(config.index.insight_seed_max, config.extraction.max_facts_per_group),

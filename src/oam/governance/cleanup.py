@@ -215,7 +215,16 @@ def _prune_entities(connection, key, entity_ids, prior_support_ids):
         "UPDATE entity_units e SET canonical_name=(SELECT name_text FROM entity_names n "
         "WHERE (n.tenant_id,n.user_id,n.entity_id)=(e.tenant_id,e.user_id,e.entity_id) "
         "AND name_kind='canonical' ORDER BY (name_text=e.canonical_name) DESC,name_id LIMIT 1) "
-        "WHERE e.tenant_id=%s AND e.user_id=%s AND e.entity_id=ANY(%s)",
+        "WHERE e.tenant_id=%s AND e.user_id=%s AND e.entity_id=ANY(%s) "
+        "AND e.canonical_key IS NULL",
+        (*key, entity_ids),
+    )
+    connection.execute(
+        "UPDATE entity_units e SET canonical_key=NULL,canonical_base_key=NULL "
+        "WHERE e.tenant_id=%s AND e.user_id=%s AND e.entity_id=ANY(%s) "
+        "AND NOT EXISTS (SELECT 1 FROM entity_names n WHERE "
+        "(n.tenant_id,n.user_id,n.entity_id)=(e.tenant_id,e.user_id,e.entity_id) "
+        "AND n.name_key=e.canonical_base_key AND n.name_kind='canonical')",
         (*key, entity_ids),
     )
     return prior_support_ids - support_ids

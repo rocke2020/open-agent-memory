@@ -448,8 +448,30 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 profile_missing = False
                 profile_failed = True
                 page.locator('[data-view="profiles"]').click()
-                detail.get_by_text("1 Insight input failed", exact=False).wait_for()
+                generation_details = detail.locator("details").filter(
+                    has=page.get_by_text("Generation details", exact=True)
+                )
+                generation_details.wait_for()
+                assert not generation_details.evaluate("element => element.open")
+                assert "Failed Insight inputs" not in detail.inner_text()
+                assert "1 Insight input failed" not in detail.inner_text()
+                assert detail.locator(".profile-content").is_visible()
+                assert page.locator("#refresh-profile").is_enabled()
+                assert "Refresh profile" in page.locator("#refresh-profile").inner_text()
                 assert summary.get_by_text("Some inputs unavailable", exact=True).is_visible()
+                generation_details.locator("summary").click()
+                assert generation_details.get_by_text(
+                    "Failed Insight inputs", exact=True
+                ).is_visible()
+                assert generation_details.get_by_text(
+                    "1 Insight input failed", exact=False
+                ).is_visible()
+                assert (
+                    generation_details.get_by_text(
+                        "Insights outside this summary", exact=True
+                    ).count()
+                    == 0
+                )
                 assert detail.get_by_text("partial", exact=True).count() == 0
 
                 profile_failed = False
@@ -485,7 +507,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     == 0
                 )
                 assert "no User Profile document" in page.locator("#status").inner_text()
-                assert detail.get_by_text("1 Insight input failed", exact=False).is_visible()
+                assert not detail.get_by_text("1 Insight input failed", exact=False).is_visible()
 
                 profile_overrides.update(
                     updated_at="2026-09-29T12:30:00+00:00",

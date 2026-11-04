@@ -89,6 +89,29 @@ class EntityAlias(FrozenProjection):
     canonical_name: str = Field(strict=True, min_length=1)
     alias: str = Field(strict=True, min_length=1)
     quote: str = Field(strict=True, min_length=1)
+    object: NonBlank | None = None
+    canonical_occurrence: Annotated[StrictInt, Field(ge=1)] = 1
+    alias_occurrence: Annotated[StrictInt, Field(ge=1)] = 1
+
+    @model_serializer(mode="wrap")
+    def omit_absent_object(self, serialize):
+        result = serialize(self)
+        if self.object is None:
+            for key in ("object", "canonical_occurrence", "alias_occurrence"):
+                result.pop(key, None)
+        return result
+
+
+class EntityMention(FrozenProjection):
+    name: NonBlank
+    quote: NonBlank
+    object: NonBlank
+    decision: Literal["same", "different", "new", "unresolved"]
+    reference_id: NonBlank | None = None
+    reference_name_id: NonBlank | None = None
+    different_from: tuple[NonBlank, ...] = ()
+    occurrence: Annotated[StrictInt, Field(ge=1)] = 1
+    span: tuple[Offset, Offset] | None = None
 
 
 class EntityReference(FrozenProjection):
@@ -105,6 +128,7 @@ class Fact(FrozenProjection):
     entities: tuple[NonBlank, ...] = ()
     entity_aliases: tuple[EntityAlias, ...] = ()
     entity_references: tuple[EntityReference, ...] = ()
+    entity_mentions: tuple[EntityMention, ...] | None = None
     caused_by: tuple[Offset, ...] = ()
     updates: tuple[Offset, ...] = ()
     annotations: tuple[TemporalAnnotation, ...] = ()
@@ -118,6 +142,8 @@ class Fact(FrozenProjection):
             output.pop("entity_aliases", None)
         if not self.entity_references:
             output.pop("entity_references", None)
+        if self.entity_mentions is None:
+            output.pop("entity_mentions", None)
         if not self.related_existing_ids:
             output.pop("related_existing_ids", None)
         if self.passage_id is None:
@@ -136,6 +162,14 @@ class FactExtraction(FrozenProjection):
     outcome: Literal["facts", "no_facts", "partial"]
     diagnostics: tuple[ExtractionDiagnostic, ...] = ()
     usage: Usage
+    entity_candidates: tuple[dict[str, str], ...] = ()
+
+    @model_serializer(mode="wrap")
+    def omit_absent_candidates(self, serialize):
+        result = serialize(self)
+        if not self.entity_candidates:
+            result.pop("entity_candidates", None)
+        return result
 
 
 class InsightInput(FrozenProjection):
@@ -566,7 +600,15 @@ def extract_facts(
             check_retry_claim,
         )
         return validate_passage_support(result, {None: chunk})
-    return validate_fact_output(body, usage, config, {None: chunk}, offered_ids)
+    return validate_fact_output(
+        body,
+        usage,
+        config,
+        {None: chunk},
+        offered_ids,
+        reference_facts=envelope.get("reference_facts", ()),
+        require_entity_mentions=True,
+    )
 
 
 def retry_split_extractions(
@@ -602,14 +644,38 @@ def retry_split_extractions(
             if any(usage is not None for usage in usages):
                 error.usage = _sum_extraction_usage(usages)
             raise
-    facts, diagnostics, offset = [], [], 0
-    for result in results:
+    facts, diagnostics, candidates, offset = [], [], [], 0
+    for split_index, result in enumerate(results):
+        prefix = f"split-{split_index}:"
+        candidates.extend(
+            {**candidate, "output_index": str(int(candidate["output_index"]) + offset)}
+            for candidate in result.entity_candidates
+        )
         facts.extend(
             fact.model_copy(
                 update={
                     "output_index": fact.output_index + offset,
                     "caused_by": tuple(target + offset for target in fact.caused_by),
                     "updates": tuple(target + offset for target in fact.updates),
+                    "entity_mentions": tuple(
+                        mention.model_copy(
+                            update={
+                                "object": prefix + mention.object,
+                                "different_from": tuple(
+                                    prefix + key for key in mention.different_from
+                                ),
+                            }
+                        )
+                        for mention in fact.entity_mentions
+                    )
+                    if fact.entity_mentions is not None
+                    else None,
+                    "entity_aliases": tuple(
+                        alias.model_copy(update={"object": prefix + alias.object})
+                        if alias.object
+                        else alias
+                        for alias in fact.entity_aliases
+                    ),
                 }
             )
             for fact in result.facts
@@ -627,6 +693,7 @@ def retry_split_extractions(
         diagnostics=tuple(diagnostics),
         outcome="partial" if diagnostics else ("facts" if facts else "no_facts"),
         usage=_sum_extraction_usage([*initial_usage, *(result.usage for result in results)]),
+        entity_candidates=tuple(candidates),
     )
 
 
@@ -655,6 +722,9 @@ def validate_fact_output(
     config: OAMConfig,
     chunks: dict[str | None, TextChunk],
     offered_ids: set[str],
+    *,
+    reference_facts=(),
+    require_entity_mentions=False,
 ) -> FactExtraction:
     if not {"outcome", "facts"} <= set(body) or not isinstance(body["facts"], list):
         raise ExtractionError("fact output requires outcome and facts", usage=usage, retryable=True)
@@ -726,6 +796,8 @@ def validate_fact_output(
             annotations = raw.pop("annotations", [])
             aliases = raw.pop("entity_aliases", [])
             entity_references = raw.pop("entity_references", [])
+            structured_mentions = "entity_mentions" in raw
+            entity_mentions = raw.pop("entity_mentions", [])
             if not config.index.enable_causal_graph:
                 discarded = raw.pop("caused_by", ())
                 if discarded not in ((), []):
@@ -735,7 +807,8 @@ def validate_fact_output(
                         )
                     )
             if not all(
-                isinstance(value, list) for value in (annotations, aliases, entity_references)
+                isinstance(value, list)
+                for value in (annotations, aliases, entity_references, entity_mentions)
             ):
                 raise ValueError
             fact = Fact.model_validate({**raw, "output_index": index})
@@ -760,6 +833,48 @@ def validate_fact_output(
                     )
                 )
         fact = fact.model_copy(update={"entities": tuple(valid_entities)})
+        valid_mentions = []
+        if require_entity_mentions and not structured_mentions:
+            structured_mentions = True
+            if fact.entities or aliases:
+                diagnostics.append(
+                    ExtractionDiagnostic(
+                        output_index=index,
+                        field="entity_mentions",
+                        code="missing_entity_decision",
+                    )
+                )
+        for raw_mention in entity_mentions:
+            try:
+                if not isinstance(raw_mention, dict) or "span" in raw_mention:
+                    raise ValueError("mention offsets are derived by the server")
+                mention = EntityMention.model_validate(raw_mention)
+                entity_name_key(mention.name, max_bytes=config.index.entity_name_max_bytes)
+                if mention.reference_id is not None and mention.reference_id not in offered_ids:
+                    raise ValueError("identity reference was not offered")
+                if mention.reference_name_id is not None and not any(
+                    ref.get("id") == mention.reference_id
+                    and any(
+                        n.get("name_id") == mention.reference_name_id
+                        and entity_name_key(n["name"], max_bytes=config.index.entity_name_max_bytes)
+                        == entity_name_key(
+                            mention.name, max_bytes=config.index.entity_name_max_bytes
+                        )
+                        for n in ref.get("entities", ())
+                    )
+                    for ref in reference_facts
+                ):
+                    raise ValueError("identity name handle was not offered")
+                span = entity_mention_span(
+                    chunk.text, fact, mention.name, mention.quote, mention.occurrence
+                )
+                valid_mentions.append(mention.model_copy(update={"span": span}))
+            except (ValueError, ValidationError):
+                diagnostics.append(
+                    ExtractionDiagnostic(
+                        output_index=index, field="entity_mentions", code="invalid_entity_mention"
+                    )
+                )
         valid_annotations = []
         for raw_annotation in annotations:
             try:
@@ -781,6 +896,27 @@ def validate_fact_output(
                 if not isinstance(raw_alias, dict):
                     raise ValueError
                 alias = EntityAlias.model_validate(raw_alias)
+                owners = {m.object for m in valid_mentions if m.name == alias.canonical_name}
+                if alias.object is not None:
+                    span = entity_mention_span(
+                        chunk.text,
+                        fact,
+                        alias.canonical_name,
+                        alias.quote,
+                        alias.canonical_occurrence,
+                    )
+                    entity_mention_span(
+                        chunk.text, fact, alias.alias, alias.quote, alias.alias_occurrence
+                    )
+                    if not any(
+                        m.object == alias.object
+                        and m.name == alias.canonical_name
+                        and m.span == span
+                        for m in valid_mentions
+                    ):
+                        raise ValueError("alias owner must select its original occurrence")
+                elif len(owners) > 1:
+                    raise ValueError("alias requires an unambiguous object owner")
                 canonical_key = entity_name_key(
                     alias.canonical_name, max_bytes=config.index.entity_name_max_bytes
                 )
@@ -837,6 +973,7 @@ def validate_fact_output(
                     "annotations": tuple(valid_annotations),
                     "entity_aliases": tuple(valid_aliases),
                     "entity_references": tuple(valid_entity_references),
+                    "entity_mentions": tuple(valid_mentions) if structured_mentions else None,
                 }
             )
         )
@@ -846,7 +983,38 @@ def validate_fact_output(
         outcome="partial" if diagnostics else "facts",
         diagnostics=tuple(diagnostics),
         usage=usage,
+        entity_candidates=tuple(
+            {
+                "reference_id": reference["id"],
+                "name": name["name"],
+                "name_id": name["name_id"],
+                "output_index": str(fact.output_index),
+            }
+            for fact in accepted
+            for reference in reference_facts
+            for name in reference.get("entities", ())
+            if name.get("name_id")
+        ),
     )
+
+
+def entity_mention_span(
+    content: str, fact: Fact, name: str, quote: str, occurrence: int
+) -> tuple[int, int]:
+    """Locate a whole original name; identity judgment remains the extractor's job."""
+    if not unique_quote(fact.quote, quote):
+        raise ValueError("mention quote must be unique within fact support")
+    start = content.index(fact.quote) + fact.quote.index(quote)
+    spans = [
+        (start + match.start(), start + match.end())
+        for match in re.finditer(re.escape(name), quote)
+        if _whole_source_mention(
+            content, name, start + match.start(), start + match.end(), fact.entities
+        )
+    ]
+    if occurrence > len(spans):
+        raise ValueError("mention occurrence is unavailable")
+    return spans[occurrence - 1]
 
 
 def _grounded_source_names(content: str, fact: Fact, quote: str, names: tuple[str, ...]) -> bool:
@@ -941,6 +1109,17 @@ def validate_passage_support(
                         output_index=fact.output_index, field=field, code="invalid_relation"
                     )
                 )
+        if fact.entity_mentions is not None:
+            relations["entity_mentions"] = tuple(
+                mention.model_copy(
+                    update={
+                        "span": entity_mention_span(
+                            chunk.text, fact, mention.name, mention.quote, mention.occurrence
+                        ),
+                    }
+                )
+                for mention in fact.entity_mentions
+            )
         accepted.append(fact.model_copy(update=relations))
         indices.add(fact.output_index)
     return result.model_copy(

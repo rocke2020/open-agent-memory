@@ -532,7 +532,8 @@ def test_fast_graph_projects_only_seed_entities_with_nonseed_alias_support(recal
     # An unsupported identity sorts before the valid one. Applying the entity
     # cap to raw seed identities would incorrectly hide the valid alias path.
     connection.execute(
-        "INSERT INTO entity_units VALUES (%s,%s,'000-invalid','generation','Unsupported')",
+        "INSERT INTO entity_units(tenant_id,user_id,entity_id,generation_id,canonical_name) "
+        "VALUES (%s,%s,'000-invalid','generation','Unsupported')",
         (authority.tenant_id, authority.user_id),
     )
     connection.execute(

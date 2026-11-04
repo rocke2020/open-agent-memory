@@ -34,7 +34,8 @@ def test_l2_generation_capacity_is_validated_without_changing_content_identity(t
     assert index_generation(config, environment) == index_generation(parallel, environment)
 
 
-def test_l2_capacity_keeps_captured_legacy_generation_and_checkpoint():
+def test_l2_capacity_keeps_captured_legacy_generation_and_checkpoint(monkeypatch):
+    monkeypatch.setattr("oam.indexing.identity.INDEX_RECIPE", "oam-source-fact-insight-v38")
     from oam.config import ModelsConfig, TokenizerConfig
     from oam.indexing.consolidation import _group_inputs
     from oam.indexing.identity import index_generation

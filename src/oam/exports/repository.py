@@ -371,10 +371,11 @@ class ExportRepository:
     def _entity_records(cursor) -> list[dict]:
         cursor.execute(
             f"WITH bindings AS NOT MATERIALIZED ({ELIGIBLE_ENTITY_NAME_SUPPORT}) "
-            "SELECT DISTINCT b.entity_id,b.generation_id,e.canonical_name,b.name_id,"
+            "SELECT DISTINCT b.entity_id,b.generation_id,e.generation_id AS identity_generation,"
+            "e.canonical_name,e.canonical_key,e.canonical_base_key,b.name_id,"
             "b.name_text,b.name_key,b.name_kind,b.support_id,b.memory_id,b.passage_id,"
             "b.quote,b.support_kind,b.anchor_name_id FROM bindings b JOIN entity_units e "
-            "USING(tenant_id,user_id,entity_id,generation_id) "
+            "USING(tenant_id,user_id,entity_id) "
             "ORDER BY b.entity_id,b.name_id,b.support_id"
         )
         records = []
@@ -387,8 +388,14 @@ class ExportRepository:
                         "kind": "entity",
                         **{
                             key: row[key]
-                            for key in ("entity_id", "generation_id", "canonical_name")
+                            for key in (
+                                "entity_id",
+                                "canonical_name",
+                                "canonical_key",
+                                "canonical_base_key",
+                            )
                         },
+                        "generation_id": row["identity_generation"],
                     }
                 )
             if row["name_id"] not in names:
@@ -401,12 +408,12 @@ class ExportRepository:
                             for key in (
                                 "name_id",
                                 "entity_id",
-                                "generation_id",
                                 "name_text",
                                 "name_key",
                                 "name_kind",
                             )
                         },
+                        "generation_id": row["identity_generation"],
                     }
                 )
             records.append(
@@ -429,10 +436,17 @@ class ExportRepository:
                 }
             )
         cursor.execute(
-            f"WITH members AS NOT MATERIALIZED ({ELIGIBLE_ENTITY_MEMBERSHIPS}) "
+            f"WITH members AS NOT MATERIALIZED ({ELIGIBLE_ENTITY_MEMBERSHIPS}), "
+            f"bindings AS NOT MATERIALIZED ({ELIGIBLE_ENTITY_NAME_SUPPORT}) "
             "SELECT m.unit_id,f.memory_id,m.entity_id,m.name_id,m.generation_id,"
-            "m.observed_mention,m.mention_quote FROM members m JOIN search_units f "
-            "USING(tenant_id,user_id,unit_id,generation_id) ORDER BY m.unit_id,m.entity_id"
+            "m.observed_mention,m.mention_quote,COALESCE((SELECT jsonb_agg(mention) "
+            "FROM jsonb_array_elements(raw.source_mentions) mention WHERE EXISTS ("
+            "SELECT 1 FROM bindings b WHERE (b.tenant_id,b.user_id,b.entity_id,b.name_id)="
+            "(m.tenant_id,m.user_id,m.entity_id,mention->>'name_id'))),'[]'::jsonb) "
+            "AS source_mentions "
+            "FROM members m JOIN unit_entities raw USING(tenant_id,user_id,unit_id,entity_key) "
+            "JOIN search_units f ON (f.tenant_id,f.user_id,f.unit_id,f.generation_id)="
+            "(m.tenant_id,m.user_id,m.unit_id,m.generation_id) ORDER BY m.unit_id,m.entity_id"
         )
         records.extend({"kind": "entity_membership", **dict(row)} for row in cursor.fetchall())
         return records

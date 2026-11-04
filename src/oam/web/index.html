@@ -8,6 +8,7 @@
   <link rel="icon" type="image/svg+xml" href="/ui/oam-logo.svg">
   <link rel="stylesheet" href="/ui/styles.css">
   <script src="/ui/locales.js" defer></script>
+  <script src="/ui/entity-graph.js" defer></script>
   <script src="/ui/app.js" defer></script>
 </head>
 <body>
@@ -45,18 +46,32 @@
       <nav class="tabs" aria-label="Inspector views" data-i18n-aria-label="Inspector views">
         <button type="button" data-view="memories" aria-pressed="true" data-i18n="Memories">Memories</button>
         <button type="button" data-view="insights" aria-pressed="false" data-i18n="Insights">Insights</button>
+        <button type="button" data-view="entities" aria-pressed="false" data-i18n="Entities">Entities</button>
         <button type="button" data-view="retrieve" aria-pressed="false" data-i18n="Retrieve">Retrieve</button>
         <button type="button" data-view="resources" aria-pressed="false" data-i18n="Resources">Resources</button>
         <button type="button" data-view="profiles" aria-pressed="false" data-i18n="User Profile">User Profile</button>
+        <button type="button" data-view="request-logs" aria-pressed="false" data-i18n="Request Logs">Request Logs</button>
       </nav>
 
       <div class="workspace-body">
         <div id="workspace-grid" class="workspace-grid">
+          <section id="request-overview" hidden aria-label="Request overview" data-i18n-aria-label="Request overview">
+            <p id="request-scope" class="request-scope"></p>
+            <div class="request-metrics">
+              <div class="card metric-card"><span data-i18n="Total calls">Total calls</span><strong id="log-total-calls">—</strong></div>
+              <div class="card metric-card"><span data-i18n="Success rate">Success rate</span><strong id="log-success-rate">—</strong></div>
+            </div>
+          </section>
           <section class="card list-panel" aria-labelledby="list-title">
             <div class="panel-heading">
               <h2 id="list-title" data-i18n="Memories">Memories</h2>
+              <div id="entity-layout-controls" class="log-scope" role="group" aria-label="Entity view" data-i18n-aria-label="Entity view" hidden>
+                <button id="entity-relations" type="button" class="secondary" aria-pressed="true" data-i18n="Relationships">Relationships</button>
+                <button id="entity-list" type="button" class="secondary" aria-pressed="false" data-i18n="List">List</button>
+              </div>
               <button id="refresh-list" type="button" class="secondary" data-i18n="Refresh">Refresh</button>
             </div>
+            <p id="entity-description" class="form-note" hidden data-i18n="Explore the people, organizations and places mentioned in your memories.">Explore the people, organizations and places mentioned in your memories.</p>
             <form id="search-form" class="search-form">
               <label id="query-label" for="query" data-i18n="Search current memory">Search current memory</label>
               <div class="inline-fields">
@@ -72,8 +87,31 @@
               </div>
             </form>
             <button id="new-resource" type="button" class="secondary" hidden data-i18n="Add Resource">Add Resource</button>
+            <form id="entity-search-form" class="search-form" hidden>
+              <label for="entity-query" data-i18n="Search entities">Search entities</label>
+              <div class="inline-fields"><input id="entity-query" autocomplete="off" maxlength="200"><button type="submit" data-i18n="Search">Search</button></div>
+            </form>
+            <form id="log-filter-form" class="log-filters" hidden>
+              <label class="log-id-filter"><span class="visually-hidden" data-i18n="Request ID">Request ID</span><input id="log-request-id" autocomplete="off" maxlength="200" placeholder="Exact Request ID" data-i18n-placeholder="Exact Request ID"></label>
+              <label class="log-status-filter"><span class="visually-hidden" data-i18n="Status code">Status code</span><input id="log-status" type="number" min="100" max="599" placeholder="Status code" data-i18n-placeholder="Status code"></label>
+              <label class="log-api-filter"><span class="visually-hidden" data-i18n="API type">API type</span><input id="log-operation" autocomplete="off" maxlength="200" placeholder="API type" data-i18n-placeholder="API type"></label>
+              <div class="log-scope" role="group" aria-label="Log scope" data-i18n-aria-label="Log scope">
+                <button id="log-all" type="button" class="secondary" aria-pressed="true" data-i18n="All logs">All logs</button>
+                <button id="log-errors" type="button" class="secondary" aria-pressed="false" data-i18n="Error logs">Error logs</button>
+              </div>
+              <button type="submit" data-i18n="Query">Query</button>
+              <button id="reset-logs" type="button" class="secondary" data-i18n="Reset">Reset</button>
+              <button id="refresh-logs" type="button" class="secondary" data-i18n="Refresh">Refresh</button>
+            </form>
+            <p id="log-note" class="form-note" hidden data-i18n="Recent authorized requests. Duration measures response preparation; background work may finish later.">Recent authorized requests. Duration measures response preparation; background work may finish later.</p>
             <p id="list-summary" class="form-note" aria-live="polite"></p>
+            <section id="entity-graph" class="entity-graph" aria-label="Entity relationships" data-i18n-aria-label="Entity relationships" hidden></section>
             <ul id="item-list" class="item-list" aria-label="Current items" data-i18n-aria-label="Current items"></ul>
+            <div id="log-pagination" class="log-pagination" hidden>
+              <span id="log-page-summary" class="form-note"></span>
+              <select id="log-page-size" aria-label="Rows per page" data-i18n-aria-label="Rows per page"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
+              <nav id="log-page-buttons" aria-label="Request log pages" data-i18n-aria-label="Request log pages"></nav>
+            </div>
             <button id="load-more" type="button" class="secondary" hidden data-i18n="Load more">Load more</button>
           </section>
 
@@ -119,5 +157,9 @@
 
     <p id="status" class="status" role="status" aria-live="polite"></p>
   </main>
+  <dialog id="entity-drawer" class="entity-drawer" aria-label="Entity details" data-i18n-aria-label="Entity details">
+    <div class="drawer-heading"><div><h3 id="entity-drawer-title"></h3><p class="form-note" data-i18n="Entity details">Entity details</p></div><button id="close-entity" type="button" class="secondary" aria-label="Close" data-i18n-aria-label="Close">×</button></div>
+    <div id="entity-drawer-content"></div>
+  </dialog>
 </body>
 </html>

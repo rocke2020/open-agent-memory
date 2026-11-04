@@ -75,7 +75,6 @@ def eligible_entity_name_candidates(
             "SELECT memory_id,quote FROM name_support s WHERE "
             "(s.tenant_id,s.user_id,s.entity_id,s.name_id)="
             "(n.tenant_id,n.user_id,n.entity_id,n.name_id) "
-            "AND s.generation_id=%(generation)s AND s.source_id<>%(excluded)s "
             "ORDER BY support_id LIMIT 1) s "
             "WHERE n.tenant_id=current_setting('oam.tenant_id',true) "
             "AND n.user_id=current_setting('oam.user_id',true) "

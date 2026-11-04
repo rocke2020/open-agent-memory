@@ -165,6 +165,8 @@ def extract_group(
         config,
         {alias: passage.chunk for alias, passage in passages_by_alias.items()},
         {ref["id"] for ref in envelope.get("reference_facts", [])},
+        reference_facts=envelope.get("reference_facts", ()),
+        require_entity_mentions=True,
     )
     return result.model_copy(
         update={
