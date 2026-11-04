@@ -98,6 +98,7 @@ def extraction_store(connection, authority, config, text, *, max_facts=2):
 
     store = object.__new__(RollbackStore)
     store.key = key
+    store.authority = authority
     store.worker_id = "worker"
     store.generation_id = "generation"
     store.claim = ClaimedWork(

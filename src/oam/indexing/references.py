@@ -25,6 +25,10 @@ def reference_candidate_ids(connection, authority, config, generation_id, exclud
     """Merge at most K owner-qualified ANN results per query, before existing name fusion."""
     if not vectors or not config.extraction.reference_max_facts:
         return []
+    planning = connection.execute(
+        "SELECT current_setting('enable_seqscan'),current_setting('enable_sort'),"
+        "current_setting('plan_cache_mode')"
+    ).fetchone()
     configure_ann(connection, config)
     probes = ",".join("(%s::vector)" for _ in vectors)
     rows = connection.execute(
@@ -48,6 +52,13 @@ def reference_candidate_ids(connection, authority, config, generation_id, exclud
         ),
         prepare=True,
     ).fetchall()
+    # Vector planner preferences must not penalize the following entity queries.
+    # On SQL failure the enclosing transaction rolls back its local settings.
+    connection.execute(
+        "SELECT set_config('enable_seqscan',%s,true),set_config('enable_sort',%s,true),"
+        "set_config('plan_cache_mode',%s,true)",
+        planning,
+    )
     return [row[0] for row in rows]
 
 

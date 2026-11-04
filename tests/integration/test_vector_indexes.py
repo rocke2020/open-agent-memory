@@ -289,15 +289,25 @@ def test_additional_vector_discovery_uses_scoped_ann(ann_database, consumer):
         assert "search_units_embedding" in index_names(repo.plan)
 
 
-def test_reference_lookup_merges_bounded_ann_probes(ann_database):
+@pytest.mark.parametrize("mode", ["small", "large"])
+def test_reference_lookup_merges_bounded_ann_probes(ann_database, mode):
     from oam.indexing import references
 
     lookup = getattr(references, "reference_candidate_ids", None)
     assert callable(lookup)
     dsn, authority, config = ann_database
+    config = config.model_copy(
+        update={"database": config.database.model_copy(update={"vector_index_mode": mode})}
+    )
     with psycopg.connect(dsn) as connection:
         connection.execute("SET LOCAL ROLE oam_content")
         bind_user(connection.cursor(), authority)
+        connection.execute("SET LOCAL plan_cache_mode=force_custom_plan")
+        settings = (
+            "SELECT current_setting('enable_seqscan'),current_setting('enable_sort'),"
+            "current_setting('plan_cache_mode')"
+        )
+        before = connection.execute(settings).fetchone()
         rows = lookup(
             connection,
             authority,
@@ -310,6 +320,7 @@ def test_reference_lookup_merges_bounded_ann_probes(ann_database):
         assert "fact-039" in rows and "fact-001" in rows
         assert "fact-000" not in rows
         assert all(value.startswith("fact-") for value in rows)
+        assert connection.execute(settings).fetchone() == before
 
 
 def test_index_maintenance_stops_admitting_after_current_build(ann_database):
