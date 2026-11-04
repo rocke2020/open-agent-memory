@@ -15,7 +15,8 @@ from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
-from oam.contracts.search import RecallLevel, SearchRequest
+from oam.contracts.search import SearchRequest
+from oam.db.ann import ANN_SETTINGS_SQL, ann_parameters, owner_scope
 from oam.db.context import SET_USER_CONTEXT_SQL
 from oam.db.eligibility import (
     ELIGIBLE_PASSAGE_UNITS,
@@ -163,7 +164,6 @@ def _causal_paths(rows):
 
 
 _ANCHOR = re.compile(r'"([^"\n]+)"|\b([A-Za-z][A-Za-z0-9]*-\d+[A-Za-z0-9-]*|[\w]+_[\w-]+)\b')
-EXACT_USER_ORDER_MIN_CANDIDATES = 64
 LEXICAL_DOCUMENT_LENGTH_NORMALIZATION = 2
 LEXICAL_WHOLE_QUERY_NORMALIZATION = 0
 _QUERY_FUNCTION_WORDS = frozenset(
@@ -341,23 +341,22 @@ class RecallRepository:
             raise TimeoutError("recall deadline exhausted")
         cursor = self.connection.cursor(row_factory=dict_row)
         if isinstance(parameters, dict):
-            parameters = {**self.time_parameters, **parameters}
+            parameters = {
+                **self.time_parameters,
+                **parameters,
+                "ann_tenant": self.authority.tenant_id,
+                "ann_user": self.authority.user_id,
+            }
         settings = "SELECT set_config('statement_timeout',%s,true)"
         setting_parameters = (str(max(1, int(remaining * 1000))),)
         if configure_ann:
-            settings += (
-                ", set_config('hnsw.iterative_scan',%s,true), "
-                "set_config('hnsw.max_scan_tuples',%s,true)"
-            )
-            setting_parameters += (
-                self.config.search.ann_iterative_scan,
-                str(self.config.search.ann_scan_max_tuples),
-            )
+            settings += ", " + ANN_SETTINGS_SQL
+            setting_parameters += ann_parameters(self.config)
         # Preserve backend command order while sending setup and query together.
         # Exit drains results before fetch or the owning transaction's rollback.
         with self.connection.pipeline() if Pipeline.is_supported() else nullcontext():
             self.connection.execute(settings, setting_parameters)
-            cursor.execute(sql, parameters)
+            cursor.execute(sql, parameters, prepare=True if configure_ann else None)
         return cursor.fetchall()
 
     def user_generation(self) -> str | None:
@@ -689,35 +688,16 @@ class RecallRepository:
         )
 
     def dense(self, vector: Sequence[float], limit: int) -> list[dict]:
-        scope = (
-            "u.tenant_id=current_setting('oam.tenant_id',true) "
-            "AND u.user_id=current_setting('oam.user_id',true) "
-        )
-        exact_user_order = self.request is not None and (
-            self.request.recall_level != RecallLevel.FAST
-            or limit >= EXACT_USER_ORDER_MIN_CANDIDATES
-        )
-        if exact_user_order:
-            # For larger pools, rank this user's vectors before the support
-            # check. The outer limit still admits eligible units only.
-            source = (
-                "(SELECT u.*,u.embedding <=> %(vector)s::vector AS distance "
-                "FROM search_units u WHERE " + scope + "ORDER BY distance OFFSET 0) u "
-            )
-            distance = "u.distance"
-            predicate = ""
-        else:
-            source = "search_units u "
-            distance = "u.embedding <=> %(vector)s::vector"
-            predicate = scope + "AND "
+        distance = "u.embedding <=> %(vector)s::vector"
         return self._execute(
             self._eligible(candidate_facts=True)
             + "SELECT u.unit_id,u.kind,u.source_id,u.source_version,u.passage_id,"
-            + f"1-({distance}) AS score FROM {source} WHERE "
-            + predicate
+            + f"1-({distance}) AS score FROM search_units u WHERE "
+            + owner_scope()
+            + "AND "
             + "(SELECT true FROM filtered f WHERE "
             "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
-            f"ORDER BY {distance}{',u.unit_id' if exact_user_order else ''} LIMIT %(limit)s",
+            f"ORDER BY {distance} LIMIT %(limit)s",
             {"vector": json.dumps(tuple(vector)), "limit": limit},
             configure_ann=True,
         )
@@ -725,10 +705,7 @@ class RecallRepository:
     def related_user_fact(self, unit_ids: Sequence[str]) -> dict | None:
         if not unit_ids:
             return None
-        scope = (
-            "u.tenant_id=current_setting('oam.tenant_id',true) "
-            "AND u.user_id=current_setting('oam.user_id',true) "
-        )
+        scope = owner_scope()
         user_fact = (
             "u.kind='fact' AND EXISTS (SELECT 1 FROM support sp WHERE "
             "(sp.tenant_id,sp.user_id,sp.memory_id)=(u.tenant_id,u.user_id,u.memory_id) "
@@ -751,19 +728,18 @@ class RecallRepository:
             + "ORDER BY u.position LIMIT 1), "
             "ranked AS MATERIALIZED (SELECT u.tenant_id,u.user_id,u.unit_id,"
             "u.source_id,u.source_version,u.distance FROM seed s CROSS JOIN LATERAL ("
-            "SELECT u.* FROM (SELECT u.tenant_id,u.user_id,u.unit_id,u.memory_id,"
+            "SELECT u.tenant_id,u.user_id,u.unit_id,u.memory_id,"
             "u.source_id,u.source_version,u.embedding <=> s.embedding AS distance "
             "FROM search_units u WHERE "
             + scope
             + "AND "
             + user_fact
             + "AND u.unit_id<>s.unit_id AND u.source_id IS NOT NULL "
-            "ORDER BY distance,u.unit_id OFFSET 0) u WHERE "
-            + eligible
-            + "ORDER BY u.distance,u.unit_id LIMIT 1) u) "
+            "AND " + eligible + "ORDER BY u.embedding <=> s.embedding LIMIT 1) u) "
             "SELECT s.unit_id AS seed_id,u.unit_id,u.source_id,u.source_version "
             "FROM seed s JOIN ranked u ON true",
             {"ids": list(unit_ids)},
+            configure_ann=True,
         )
         return rows[0] if rows else None
 
@@ -881,12 +857,17 @@ class RecallRepository:
         return self._execute(
             "WITH eligible AS NOT MATERIALIZED ("
             + ELIGIBLE_PASSAGE_UNITS
-            + ") SELECT u.unit_id FROM eligible u WHERE u.kind='passage' "
+            + ") SELECT u.unit_id FROM search_units u WHERE "
+            + owner_scope()
+            + "AND u.kind='passage' "
             "AND u.origin='memory' AND u.locator->>'role'='user' "
             "AND u.embedding IS NOT NULL AND (u.source_id,u.source_version) IN ("
             "SELECT * FROM unnest(%(source_ids)s::text[],%(source_versions)s::integer[])) "
             "AND NOT (u.unit_id=ANY(%(excluded_ids)s::text[])) "
-            "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id LIMIT %(limit)s",
+            "AND (SELECT true FROM eligible qualified WHERE "
+            "(qualified.tenant_id,qualified.user_id,qualified.unit_id)="
+            "(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
+            "ORDER BY u.embedding <=> %(vector)s::vector LIMIT %(limit)s",
             {
                 "source_ids": [key[0] for key in source_keys],
                 "source_versions": [key[1] for key in source_keys],
@@ -894,6 +875,7 @@ class RecallRepository:
                 "limit": limit,
                 "excluded_ids": list(excluded_ids),
             },
+            configure_ann=True,
         )
 
     def supported_fact_ids(
@@ -1172,23 +1154,24 @@ class RecallRepository:
                 self._basis_date("u") + " <@ tstzrange(%(time_start)s,%(time_end)s,'[)')"
             )
         rows = self._execute(
-            prefix
-            + "SELECT u.unit_id,LEAST(1.0,GREATEST(-1.0,1-u.distance)) AS cosine,"
-            + self._basis_date("u")
-            + " AS basis_date FROM (SELECT u.*,u.embedding <=> %(vector)s::vector AS distance "
-            "FROM search_units u WHERE u.tenant_id=current_setting('oam.tenant_id',true) "
-            "AND u.user_id=current_setting('oam.user_id',true) "
-            "AND u.kind='fact' AND u.embedding IS NOT NULL AND "
+            prefix + ", nearest AS MATERIALIZED (SELECT u.*,"
+            "u.embedding <=> %(vector)s::vector AS distance FROM search_units u WHERE "
+            + owner_scope()
+            + "AND u.kind='fact' AND u.embedding IS NOT NULL AND "
             + time_predicate
-            + " ORDER BY (u.embedding <=> %(vector)s::vector)+0,u.unit_id OFFSET 0) u "
-            "WHERE 1-u.distance>=%(floor)s AND (SELECT true FROM filtered f WHERE "
+            + " AND (SELECT true FROM filtered f WHERE "
             "(f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
+            "ORDER BY u.embedding <=> %(vector)s::vector LIMIT %(limit)s) "
+            "SELECT u.unit_id,LEAST(1.0,GREATEST(-1.0,1-u.distance)) AS cosine,"
+            + self._basis_date("u")
+            + " AS basis_date FROM nearest u WHERE 1-u.distance>=%(floor)s "
             "ORDER BY u.distance,u.unit_id LIMIT %(limit)s",
             {
                 "vector": json.dumps(tuple(vector)),
                 "floor": self.config.search.temporal_semantic_floor,
                 "limit": limit,
             },
+            configure_ann=True,
         )
         return tuple(TemporalNode(row["unit_id"], row["cosine"], row["basis_date"]) for row in rows)
 

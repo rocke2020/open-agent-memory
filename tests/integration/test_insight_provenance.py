@@ -12,6 +12,7 @@ from psycopg.conninfo import make_conninfo
 from test_core_http import ROOT, SyntheticIndexModels, process_source, use_created_user_key
 from test_core_http import core_database as core_database
 
+from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.indexing import consolidation
 from oam.models.runtime import ModelResult, Usage
@@ -72,10 +73,18 @@ async def test_fact_context_does_not_rescan_the_eligible_collection_per_candidat
             )
         ]
         assert len(identifiers) == 8
+        generation = connection.execute(
+            "SELECT generation_id FROM search_units WHERE tenant_id=%s AND unit_id=%s",
+            (tenant, identifiers[0]),
+        ).fetchone()[0]
         with monkeypatch.context() as patch:
-            patch.setattr(consolidation, "_rows", lambda _, query, params: (query, params))
+            patch.setattr(consolidation, "_rows", lambda _, query, params, **kw: (query, params))
             query, params = consolidation._fact_context(
-                SimpleNamespace(config=config),
+                SimpleNamespace(
+                    config=config,
+                    generation_id=generation,
+                    authority=AuthorizedUser("key", tenant, "worker", "scope", frozenset()),
+                ),
                 connection,
                 [{"unit_id": identifier} for identifier in identifiers[:2]],
                 [],
@@ -83,6 +92,7 @@ async def test_fact_context_does_not_rescan_the_eligible_collection_per_candidat
         plan = connection.execute("EXPLAIN (ANALYZE,FORMAT JSON) " + query, params).fetchone()[0][
             0
         ]["Plan"]
+        assert len(connection.execute(query, params).fetchall()) == len(identifiers)
 
     def eligible_scans(node):
         if node.get("Node Type") == "CTE Scan" and node.get("CTE Name") == "eligible":

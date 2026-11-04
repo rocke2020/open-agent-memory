@@ -8,6 +8,7 @@ from psycopg.pq import TransactionStatus
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
+from oam.db.ann import configure_ann
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE
 from oam.indexing.store import StaleIndexWork
@@ -29,7 +30,7 @@ seeds AS MATERIALIZED (
 
 
 _CANDIDATE = """
-candidate.tenant_id=seed.tenant_id AND candidate.user_id=seed.user_id
+candidate.tenant_id=%(tenant)s AND candidate.user_id=%(user)s
 AND candidate.kind='fact' AND candidate.generation_id=%(generation)s
 AND candidate.unit_id<>seed.unit_id
 AND (SELECT true FROM eligible qualified WHERE
@@ -54,11 +55,7 @@ _SEMANTIC_PROPOSALS = (
                     AND prior.kind='semantic'
               )
             ORDER BY candidate.embedding <=> seed.embedding
-            LIMIT GREATEST(0,%(semantic_neighbors)s-(
-                SELECT count(*) FROM unit_links prior
-                WHERE prior.tenant_id=seed.tenant_id AND prior.user_id=seed.user_id
-                  AND prior.source_id=seed.unit_id AND prior.kind='semantic'
-            ))
+            LIMIT %(semantic_neighbors)s
         )
         SELECT unit_id,1-distance AS weight FROM neighbors
         WHERE 1-distance>0 AND 1-distance>=%(similarity)s
@@ -248,15 +245,7 @@ def propose_semantic_links(connection, authority, config, generation_id, seed_id
         raise ValueError("semantic seed batch exceeds its bound")
     with connection.cursor() as cursor:
         bind_user(cursor, authority)
-        cursor.execute("SET LOCAL jit = off")
-        cursor.execute(
-            "SELECT set_config('hnsw.iterative_scan',%s,true), "
-            "set_config('hnsw.max_scan_tuples',%s,true)",
-            (
-                config.index.semantic_link_ann_iterative_scan,
-                str(config.index.semantic_link_ann_scan_max_tuples),
-            ),
-        )
+        configure_ann(cursor, config, semantic=True)
         cursor.execute(
             _SEMANTIC_PROPOSALS,
             {
@@ -267,6 +256,7 @@ def propose_semantic_links(connection, authority, config, generation_id, seed_id
                 "similarity": config.index.semantic_link_min_similarity,
                 "semantic_neighbors": config.index.semantic_link_max_neighbors,
             },
+            prepare=True,
         )
         return cursor.fetchall()
 

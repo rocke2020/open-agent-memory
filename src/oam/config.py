@@ -220,6 +220,9 @@ class DatabaseConfig(FrozenModel):
     pool_min_size: PositiveInt = 1
     pool_acquire_timeout_seconds: PositiveFloat = 5.0
     indexing_concurrency: PositiveInt
+    vector_index_mode: Literal["small", "large", "growing"]
+    vector_index_min_rows: PositiveInt
+    vector_index_poll_seconds: PositiveInt
 
     @model_validator(mode="after")
     def validate_pool_sizes(self) -> DatabaseConfig:

@@ -98,6 +98,7 @@ def extraction_store(connection, authority, config, text, *, max_facts=2):
 
     store = object.__new__(RollbackStore)
     store.key = key
+    store.authority = authority
     store.worker_id = "worker"
     store.generation_id = "generation"
     store.claim = ClaimedWork(
@@ -122,11 +123,17 @@ def test_lexical_alias_reference_survives_full_dense_pool_in_frozen_input(recall
 
     connection, authority = recall_database
     config, _, _ = candidate_history(connection, authority)
-    for memory_id in ("a_distractor", "b_distractor"):
-        add_fact(connection, authority, memory_id, "An unrelated nearby semantic fact.")
+    for memory_id, direction in (("a_distractor", 0.8), ("b_distractor", 0.4)):
+        add_fact(
+            connection,
+            authority,
+            memory_id,
+            "An unrelated nearby semantic fact.",
+            direction=direction,
+        )
     text = "I joined NR in June."
     store = extraction_store(connection, authority, config, text)
-    vector = (1.0,) + (0.0,) * (config.index.embedding_dimensions - 1)
+    vector = (0.8, 0.6) + (0.0,) * (config.index.embedding_dimensions - 2)
 
     references = freeze_extraction_references(store, "new-source", vector, {"text": text})
 
@@ -235,7 +242,7 @@ def test_revoked_alias_support_is_excluded_before_entity_candidate_cap(recall_da
     assert [row["entity_id"] for row in rows] == [visible]
 
 
-def test_candidate_name_scope_and_generation_are_filtered_before_bounds(recall_database):
+def test_candidate_names_preserve_owner_scope_across_generations_and_sources(recall_database):
     from oam.auth.credentials import AuthorizedUser
     from oam.db.context import bind_user
     from oam.indexing.entity_candidates import eligible_entity_name_candidates
@@ -267,26 +274,26 @@ def test_candidate_name_scope_and_generation_are_filtered_before_bounds(recall_d
     )
 
     assert [row["entity_id"] for row in rows] == [identity]
-    assert (
-        eligible_entity_name_candidates(
+    assert [
+        row["entity_id"]
+        for row in eligible_entity_name_candidates(
             connection,
             config,
             generation_id="old-generation",
             text="NR",
             excluded_source_id="new-source",
         )
-        == []
-    )
-    assert (
-        eligible_entity_name_candidates(
+    ] == [identity]
+    assert [
+        row["entity_id"]
+        for row in eligible_entity_name_candidates(
             connection,
             config,
             generation_id="generation",
             text="NR",
             excluded_source_id="definition",
         )
-        == []
-    )
+    ] == [identity]
 
 
 def test_unfinished_freeze_removes_revoked_alias_metadata_without_reselecting(recall_database):

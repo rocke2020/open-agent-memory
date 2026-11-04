@@ -368,6 +368,8 @@ async def test_retry_reuses_completed_extraction_and_revokes_only_unfinished_ref
             "WHERE kind='fact' GROUP BY source_id"
         ).fetchall()
     assert visible == [(new_source, 2)]
+    assert models.inputs[1]["reference_facts"]
+    assert operation["stage_state"]["extraction_diagnostics"] == []
 
 
 @pytest.mark.parametrize("reference_client", [1], indirect=True)

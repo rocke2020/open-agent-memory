@@ -1,14 +1,16 @@
-"""Read-only PostgreSQL proof of exact priority ordering and bounded distance work."""
+"""Read-only ANN proof of required priority ordering and bounded distance work."""
 
 from pathlib import Path
 from types import SimpleNamespace
 
 import psycopg
 import pytest
-from psycopg.rows import dict_row
 from test_core_http import core_database as core_database
+from test_index_links import add_fact
 
+from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
+from oam.db.context import bind_user
 from oam.indexing import consolidation
 
 pytestmark = pytest.mark.integration
@@ -29,37 +31,45 @@ def _distance_loops(node):
 def test_priority_context_exact_order_and_bounded_distance_work(
     monkeypatch, priority_count, seed_only, core_database
 ):
-    dsn = core_database[0]
+    dsn, tenant, _ = core_database
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    eligible = (
-        "SELECT u.* FROM (SELECT 'priority-test'::text AS tenant_id, 'scope'::text AS user_id,"
-        "'fact'::text AS kind,'f'||lpad(i::text,3,'0') AS unit_id,"
-        "'m'||lpad(i::text,3,'0') AS memory_id, 'fixture'::text AS content_text,"
-        "'fixture-generation'::text AS generation_id,"
-        "'source'::text AS source_id,1 AS source_version,NULL::timestamptz AS mentioned_at,"
-        "'{}'::jsonb AS locator,CASE WHEN i<2 OR i>="
-        + str(priority_count)
-        + " THEN '[1,0]'::vector ELSE '[0,1]'::vector END AS embedding "
-        "FROM generate_series(0,256) AS n(i)) u WHERE u.unit_id<>'f256'"
-    )
-    monkeypatch.setattr(consolidation, "ELIGIBLE_UNITS", eligible)
+    authority = AuthorizedUser("key", tenant, "reader", "scope", frozenset({"memory:read"}))
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime,index_generation_id) "
+            "VALUES (%s,'scope','synthetic','test','persistent','generation')",
+            (tenant,),
+        )
+        for index in range(256):
+            vector = (
+                (1.0, 0.0)
+                if index < 2
+                else (0.0, 1.0)
+                if index < priority_count
+                else (1.0, (index - priority_count + 1) / 256)
+            )
+            add_fact(connection, authority, f"f{index:03}", vector=vector)
+        add_fact(connection, authority, "f256", generation="historical", vector=(1.0, 0.0))
+
     original_rows = consolidation._rows
-    monkeypatch.setattr(consolidation, "_rows", lambda _connection, query, params: (query, params))
-    seeds = [{"unit_id": "f000"}, {"unit_id": "f001"}]
-    targets = [{"supports": [{"id": f"m{i:03}"} for i in range(priority_count)] + [{"id": "m256"}]}]
-    query, params = consolidation._fact_context(
-        SimpleNamespace(config=config, generation_id="fixture-generation"),
-        None,
-        seeds,
-        targets,
-        seed_only=seed_only,
+    monkeypatch.setattr(
+        consolidation, "_rows", lambda _connection, query, params, **kwargs: (query, params)
     )
-    monkeypatch.setattr(consolidation, "_rows", original_rows)
+    seeds = [{"unit_id": "f000"}, {"unit_id": "f001"}]
+    targets = [{"supports": [{"id": f"f{i:03}"} for i in range(priority_count)] + [{"id": "f256"}]}]
     with psycopg.connect(dsn, options="-c default_transaction_read_only=on") as connection:
         assert connection.execute("SHOW transaction_read_only").fetchone()[0] == "on"
-        with connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+        connection.execute("SET LOCAL ROLE oam_content")
+        bind_user(connection.cursor(), authority)
+        query, params = consolidation._fact_context(
+            SimpleNamespace(config=config, generation_id="generation", authority=authority),
+            connection,
+            seeds,
+            targets,
+            seed_only=seed_only,
+        )
+        monkeypatch.setattr(consolidation, "_rows", original_rows)
+        rows = original_rows(connection, query, params, prepare=True)
         expected = ["f000", "f001"] if seed_only else [f"f{i:03}" for i in range(64)]
         assert [row["unit_id"] for row in rows] == expected
         assert all(row["annotations"] is None for row in rows)
@@ -71,4 +81,4 @@ def test_priority_context_exact_order_and_bounded_distance_work(
     if seed_only or priority_count >= 64:
         assert max(loops) <= (2 if seed_only else priority_count), loops
     else:
-        assert max(loops) >= 256, "insufficient priority must retain the complete fallback"
+        assert max(loops) <= priority_count + len(seeds) * 64, loops
