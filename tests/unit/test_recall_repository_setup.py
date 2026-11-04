@@ -21,7 +21,7 @@ class RecordingConnection:
     def pipeline(self):
         return nullcontext()
 
-    def execute(self, sql, parameters=()):
+    def execute(self, sql, parameters=(), **kwargs):
         self.statements.append(sql)
         self.parameters.append(parameters)
         self.last_sql = sql
@@ -98,11 +98,11 @@ def test_dense_sets_ann_and_deadline_together_before_query(monkeypatch, pipeline
             finally:
                 self.active_pipeline = False
 
-        def execute(self, sql, parameters=()):
+        def execute(self, sql, parameters=(), **kwargs):
             if "hnsw.iterative_scan" in sql:
                 assert "statement_timeout" in sql
                 assert self.active_pipeline is pipeline_supported
-            return super().execute(sql, parameters)
+            return super().execute(sql, parameters, **kwargs)
 
     monkeypatch.setattr(
         "oam.retrieval.repository.Pipeline.is_supported", staticmethod(lambda: pipeline_supported)
@@ -115,7 +115,7 @@ def test_dense_sets_ann_and_deadline_together_before_query(monkeypatch, pipeline
     connection.parameters.clear()
     repository.dense((1.0,), 5)
     assert len(connection.statements) == 2
-    assert connection.parameters[0][1:] == (
+    assert connection.parameters[0][-2:] == (
         CONFIG.search.ann_iterative_scan,
         str(CONFIG.search.ann_scan_max_tuples),
     )

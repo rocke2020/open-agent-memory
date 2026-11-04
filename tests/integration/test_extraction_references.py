@@ -340,7 +340,10 @@ async def test_retry_reuses_completed_extraction_and_revokes_only_unfinished_ref
     assert operation["status"] == "succeeded"
     assert operation["usage"]["total_tokens"] == 90
     assert operation["usage"]["coverage"] == "complete"
-    assert operation["stage_state"]["extraction_diagnostics"][0]["code"] == "ineligible_reference"
+    # The completed first passage is preserved, so its model output is not
+    # revalidated/replayed merely because another passage needed a retry.
+    assert models.inputs[1]["reference_facts"]
+    assert operation["stage_state"]["extraction_diagnostics"] == []
 
 
 @pytest.mark.parametrize("reference_client", [1], indirect=True)

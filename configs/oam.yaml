@@ -276,6 +276,13 @@ database:
   pool_acquire_timeout_seconds: 5
   # Limit indexing database transactions across replicas.
   indexing_concurrency: 4
+  # Physical vector policy: small=shared HNSW, large=per-user HNSW,
+  # growing=provision per-user HNSW after the row threshold. Never changes extraction identity.
+  vector_index_mode: small
+  # Initial provisioning policy, not a measured performance crossover.
+  vector_index_min_rows: 10000
+  # Privileged vector-index maintenance interval; content roles cannot run DDL.
+  vector_index_poll_seconds: 900
 
 auth:
   # Authentication mode: dev, api_key or trusted; null selects from root-key/bootstrap state.

@@ -10,6 +10,7 @@ from threading import Lock
 
 from psycopg.rows import dict_row
 
+from oam.db.ann import configure_ann
 from oam.db.eligibility import ELIGIBLE_UNITS, ELIGIBLE_UNITS_CANDIDATE
 from oam.indexing.extraction import (
     INCREMENTAL_INSIGHT_SYSTEM,
@@ -46,9 +47,9 @@ class InsightLookup(RecallRepository):
         )
 
 
-def _rows(connection, query, parameters=()):
+def _rows(connection, query, parameters=(), *, prepare=None):
     with connection.cursor(row_factory=dict_row) as cursor:
-        cursor.execute(query, parameters)
+        cursor.execute(query, parameters, prepare=prepare)
         return cursor.fetchall()
 
 
@@ -142,6 +143,7 @@ def _fact_context(store, connection, seeds, targets, *, seed_only=False):
     seed_ids = [seed["unit_id"] for seed in seeds]
     support_ids = sorted({support["id"] for target in targets for support in target["supports"]})
     eligible = ELIGIBLE_UNITS + (" AND u.unit_id=ANY(%s)" if seed_only else "")
+    configure_ann(connection, store.config)
     return _rows(
         connection,
         f"WITH eligible AS NOT MATERIALIZED ({eligible}), seeds AS MATERIALIZED ("
@@ -149,9 +151,16 @@ def _fact_context(store, connection, seeds, targets, *, seed_only=False):
         "priority AS MATERIALIZED (SELECT * FROM eligible WHERE kind='fact' "
         "AND (unit_id=ANY(%s) OR memory_id=ANY(%s))), "
         "priority_count AS MATERIALIZED (SELECT count(*) AS total FROM priority), "
-        "candidates AS (SELECT * FROM priority WHERE (SELECT total FROM priority_count)>=%s "
-        "UNION ALL SELECT * FROM eligible WHERE kind='fact' "
-        "AND (SELECT total FROM priority_count)<%s), "
+        "candidate_ids AS (SELECT unit_id FROM priority UNION "
+        "SELECT n.unit_id FROM seeds seed CROSS JOIN LATERAL ("
+        "SELECT u.unit_id FROM search_units u WHERE u.tenant_id=%s AND u.user_id=%s "
+        "AND u.kind='fact' AND (SELECT total FROM priority_count)<%s "
+        "AND (SELECT true FROM eligible qualified WHERE "
+        "(qualified.tenant_id,qualified.user_id,qualified.unit_id)="
+        "(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
+        "ORDER BY u.embedding <=> seed.embedding LIMIT %s) n), "
+        "candidates AS (SELECT * FROM eligible WHERE kind='fact' "
+        "AND unit_id IN (SELECT unit_id FROM candidate_ids)), "
         "candidate_annotations AS (SELECT candidate.*,"
         "(SELECT jsonb_agg(ut.detail ORDER BY ut.annotation_id) FROM unit_times ut WHERE "
         "(ut.tenant_id,ut.user_id,ut.unit_id)="
@@ -167,6 +176,8 @@ def _fact_context(store, connection, seeds, targets, *, seed_only=False):
             seed_ids,
             seed_ids,
             support_ids,
+            store.authority.tenant_id,
+            store.authority.user_id,
             store.config.extraction.max_facts_per_group,
             store.config.extraction.max_facts_per_group,
             seed_ids,
@@ -176,6 +187,7 @@ def _fact_context(store, connection, seeds, targets, *, seed_only=False):
             support_ids,
             store.config.extraction.max_facts_per_group,
         ),
+        prepare=True,
     )
 
 

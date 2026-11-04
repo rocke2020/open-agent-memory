@@ -32,7 +32,14 @@ def test_fast_last_week_six_hops_keeps_direct_outside_but_rejects_outside_bridge
     instant = datetime(2026, 1, 8, tzinfo=UTC)
     for index in range(7):
         node = f"node{index}"
-        add_fact(connection, authority, node, f"Event {index}", direction=1 if index == 0 else 0.2)
+        add_fact(
+            connection,
+            authority,
+            node,
+            f"Event {index}",
+            direction=1 if index == 0 else 0.2,
+            with_original=True,
+        )
         annotate(connection, authority, node, instant)
         if index:
             previous = f"node{index - 1}"
@@ -40,14 +47,23 @@ def test_fast_last_week_six_hops_keeps_direct_outside_but_rejects_outside_bridge
                 "INSERT INTO temporal_links VALUES (%s,%s,'event',%s,%s,%s,%s,0,1)",
                 (authority.tenant_id, authority.user_id, previous, node, previous, node),
             )
-    add_fact(connection, authority, "outside", "last week what I did", direction=0.9)
+    add_fact(
+        connection,
+        authority,
+        "outside",
+        "last week what I did",
+        direction=0.9,
+        with_original=True,
+    )
     annotate(connection, authority, "outside", datetime(2025, 1, 8, tzinfo=UTC))
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     config = config.model_copy(
         update={
             "search": config.search.model_copy(
                 update={
-                    "fast": config.search.fast.model_copy(update={"channel_candidates": 2}),
+                    "fast": config.search.fast.model_copy(
+                        update={"channel_candidates": 2, "partial_match_gate": "off"}
+                    ),
                     "graph_seed_max": 1,
                     "temporal_seed_max": 1,
                 }
@@ -64,7 +80,8 @@ def test_fast_last_week_six_hops_keeps_direct_outside_but_rejects_outside_bridge
         query="last week what I did", recall_level="fast", reference_time="2026-01-14T12:00:00Z"
     )
     result = service.search(authority, request)
-    items = {item["unit_id"]: item for item in result["items"]}
+    # Required originals accompany the facts; this case checks temporal fact paths.
+    items = {item["unit_id"]: item for item in result["items"] if item["kind"] == "fact"}
     assert set(items) == {"outside", *(f"node{i}" for i in range(7))}
     assert items["outside"]["paths"] == []
     assert items["node0"]["paths"][0]["relation"] == "time_match"
@@ -96,7 +113,11 @@ def test_fast_last_week_six_hops_keeps_direct_outside_but_rejects_outside_bridge
     assert repository.valid_paths({"node6": items["node6"]["paths"]}, vector) == {"node6": []}
     assert [row["unit_id"] for row in repository.hydrate(("node2",))] == ["node2"]
     after = service.search(authority, request)
-    assert {item["unit_id"] for item in after["items"]} == {"outside", "node0", "node1"}
+    assert {item["unit_id"] for item in after["items"] if item["kind"] == "fact"} == {
+        "outside",
+        "node0",
+        "node1",
+    }
 
 
 def test_time_matched_raw_and_fully_supported_insight_receive_temporal_rank(recall_database):

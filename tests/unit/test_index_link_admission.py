@@ -29,10 +29,10 @@ class LinkConnection:
     def __exit__(self, *_):
         return False
 
-    def execute(self, statement, parameters=None):
-        if statement.startswith("SELECT set_config('hnsw.iterative_scan'"):
-            self.settings["hnsw.iterative_scan"] = parameters[0]
-            self.settings["hnsw.max_scan_tuples"] = parameters[1]
+    def execute(self, statement, parameters=None, **kwargs):
+        if "set_config('hnsw.iterative_scan'" in statement:
+            self.settings["hnsw.iterative_scan"] = parameters[-2]
+            self.settings["hnsw.max_scan_tuples"] = parameters[-1]
         self.row = (False,) * 5 if "bool_or" in statement else (0,)
 
     def fetchone(self):

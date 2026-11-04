@@ -396,14 +396,19 @@ def test_publication_rejects_changes_after_proposal_read(direct_store, monkeypat
         ),
         "withdraw": "UPDATE sources SET status='deleted' WHERE source_id='seed'",
         "supersede": "UPDATE source_versions SET status='superseded' WHERE source_id='seed'",
-        "endpoint": "UPDATE memories SET visible_to=2 WHERE memory_id='a'",
     }
 
     def mutate(connection, *args):
         proposals = original(connection, *args)
         assert proposals
         with psycopg.connect(fixture.dsn) as administrator:
-            administrator.execute(mutations[change])
+            if change == "endpoint":
+                # ANN may choose any of the tied neighbors; revoke an actual endpoint.
+                administrator.execute(
+                    "UPDATE memories SET visible_to=2 WHERE memory_id=%s", (proposals[0][1],)
+                )
+            else:
+                administrator.execute(mutations[change])
         return proposals
 
     monkeypatch.setattr(semantic_links, "propose_semantic_links", mutate)

@@ -7,12 +7,14 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import load_config
 from oam.db.context import bind_user
+from oam.db.vector_indexes import owner_index_name
 from oam.indexing.links import build_links
 
 pytestmark = pytest.mark.integration
@@ -49,6 +51,7 @@ def database():
         config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
         config = config.model_copy(
             update={
+                "database": config.database.model_copy(update={"vector_index_mode": "large"}),
                 "index": config.index.model_copy(
                     update={
                         "semantic_link_min_similarity": 0.5,
@@ -56,8 +59,20 @@ def database():
                         "temporal_link_max_neighbors": 1,
                         "temporal_link_horizon_seconds": 10 * 86400,
                     }
-                )
+                ),
             }
+        )
+        # Eligibility/capacity assertions use an owner graph, independently of
+        # shared-graph approximation under unrelated users' vector distributions.
+        connection.execute(
+            sql.SQL(
+                "CREATE INDEX {} ON search_units USING hnsw (embedding vector_cosine_ops) "
+                "WHERE tenant_id={} AND user_id={}"
+            ).format(
+                sql.Identifier(owner_index_name(tenant, "batch")),
+                sql.Literal(tenant),
+                sql.Literal("batch"),
+            )
         )
         yield connection, authority, config
 
@@ -364,7 +379,7 @@ def test_semantic_link_query_has_an_hnsw_access_path(database):
             *(indexes(child) for child in node.get("Plans", []))
         )
 
-    assert "search_units_embedding" in indexes(plan)
+    assert owner_index_name(authority.tenant_id, authority.user_id) in indexes(plan)
 
 
 def test_point_time_probes_preserve_equal_times_and_id_ties_across_directions(database):

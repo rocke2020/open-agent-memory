@@ -11,6 +11,7 @@ from __future__ import annotations
 from psycopg.types.json import Jsonb
 
 from oam.contracts.evidence import TemporalAnnotation
+from oam.db.ann import configure_ann
 from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
 from oam.indexing.entity_candidates import (
     eligible_entity_name_candidates,
@@ -18,6 +19,36 @@ from oam.indexing.entity_candidates import (
     source_query_text,
 )
 from oam.indexing.store import IndexStore, input_digest
+
+
+def reference_candidate_ids(connection, authority, config, generation_id, excluded_source, vectors):
+    """Merge at most K owner-qualified ANN results per query, before existing name fusion."""
+    if not vectors or not config.extraction.reference_max_facts:
+        return []
+    configure_ann(connection, config)
+    probes = ",".join("(%s::vector)" for _ in vectors)
+    rows = connection.execute(
+        f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}), "
+        f"probes AS MATERIALIZED (SELECT * FROM (VALUES {probes}) v(embedding)) "
+        "SELECT n.unit_id,min(n.distance) AS distance FROM probes p CROSS JOIN LATERAL ("
+        "SELECT u.unit_id,u.embedding <=> p.embedding AS distance FROM search_units u "
+        "WHERE u.tenant_id=%s AND u.user_id=%s AND u.kind='fact' "
+        "AND u.generation_id=%s AND u.source_id<>%s AND (SELECT true FROM eligible f "
+        "WHERE (f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
+        "ORDER BY u.embedding <=> p.embedding LIMIT %s) n "
+        "GROUP BY n.unit_id ORDER BY distance,n.unit_id LIMIT %s",
+        (
+            *(str(list(vector)) for vector in vectors),
+            authority.tenant_id,
+            authority.user_id,
+            generation_id,
+            excluded_source,
+            config.extraction.reference_max_facts,
+            config.extraction.reference_max_facts,
+        ),
+        prepare=True,
+    ).fetchall()
+    return [row[0] for row in rows]
 
 
 def eligible_reference_ids(connection, generation_id: str, ids: list[str]) -> set[str]:
@@ -88,20 +119,14 @@ def freeze_extraction_references(
             references = [ref for ref in references if ref["id"] in eligible]
         else:
             queries = vectors if vectors is not None else (vector,)
-            distances = ["embedding <=> %s::vector" for _ in queries]
-            distance = distances[0] if len(distances) == 1 else "LEAST(" + ",".join(distances) + ")"
-            dense = connection.execute(
-                "SELECT unit_id "
-                f"FROM ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) eligible "
-                "WHERE kind='fact' AND generation_id=%s AND source_id<>%s "
-                "ORDER BY " + distance + ",unit_id LIMIT %s",
-                (
-                    store.generation_id,
-                    store.source["source_id"],
-                    *(str(list(query)) for query in queries),
-                    store.config.extraction.reference_max_facts,
-                ),
-            ).fetchall()
+            dense = reference_candidate_ids(
+                connection,
+                store.authority,
+                store.config,
+                store.generation_id,
+                store.source["source_id"],
+                queries,
+            )
             name_candidates = eligible_entity_name_candidates(
                 connection,
                 store.config,
@@ -111,7 +136,7 @@ def freeze_extraction_references(
             )
             selected_ids = merge_reference_ids(
                 name_candidates,
-                [row[0] for row in dense],
+                dense,
                 store.config.extraction.reference_max_facts,
             )
             preferred_name_ids = [

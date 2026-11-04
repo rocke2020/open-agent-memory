@@ -262,20 +262,28 @@ def test_related_user_fact_checks_support_in_rank_order_until_first_eligible_mat
     plans = []
     execute = repository._execute
 
-    def explain(query, parameters):
+    def explain(query, parameters, **kwargs):
+        result = execute(query, parameters, **kwargs)
+        parameters = {
+            **repository.time_parameters,
+            **parameters,
+            "ann_tenant": authority.tenant_id,
+            "ann_user": authority.user_id,
+        }
         plans.append(
             connection.execute("EXPLAIN (ANALYZE,FORMAT JSON) " + query, parameters).fetchone()[0][
                 0
             ]["Plan"]
         )
-        return execute(query, parameters)
+        return result
 
     repository._execute = explain
     result = repository.related_user_fact(("missing", "assistant_seed", "revoked_seed", "seed"))
+    assert result is not None and result["unit_id"] in {"a_match", "b_match"}
     assert result == {
         "seed_id": "seed",
-        "unit_id": "a_match",
-        "source_id": "a_match",
+        "unit_id": result["unit_id"],
+        "source_id": result["unit_id"],
         "source_version": 1,
     }
 
@@ -283,9 +291,9 @@ def test_related_user_fact_checks_support_in_rank_order_until_first_eligible_mat
         own = node.get("Actual Loops", 0) if node.get("Relation Name") == "memories" else 0
         return own + sum(memory_checks(child) for child in node.get("Plans", ()))
 
-    # Two seed checks and three neighbors (including the revoked seed); distant
-    # facts need no support proof before the first eligible match is selected.
-    assert sum(memory_checks(plan) for plan in plans) <= 5
+    # Two seed checks and at most five nearby candidates. The ANN filter can
+    # validate eligibility before the user-role check; distant facts stay unvisited.
+    assert sum(memory_checks(plan) for plan in plans) <= 7
 
 
 def test_supported_fact_ids_selects_next_eligible_user_fact(recall_database):
