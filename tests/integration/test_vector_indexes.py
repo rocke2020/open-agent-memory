@@ -308,17 +308,34 @@ def test_reference_lookup_merges_bounded_ann_probes(ann_database, mode):
             "current_setting('plan_cache_mode')"
         )
         before = connection.execute(settings).fetchone()
+        # Eligible historical generations and completed chunks of the same source
+        # remain available to extraction references after adopting ANN discovery.
+        for table in ("memories", "passages", "search_units"):
+            connection.execute(
+                sql.SQL(
+                    "UPDATE {} SET generation_id='historical' WHERE tenant_id=%s "
+                    "AND user_id=%s AND {}=%s"
+                ).format(
+                    sql.Identifier(table),
+                    sql.Identifier(
+                        {
+                            "memories": "memory_id",
+                            "passages": "passage_id",
+                            "search_units": "unit_id",
+                        }[table]
+                    ),
+                ),
+                (authority.tenant_id, authority.user_id, "fact-039"),
+            )
         rows = lookup(
             connection,
             authority,
             config,
-            "generation",
-            "fact-000",
             [[1.0, *([0.0] * 7)], [1.0, 0.39, *([0.0] * 6)]],
         )
         assert len(rows) == config.extraction.reference_max_facts
         assert "fact-039" in rows and "fact-001" in rows
-        assert "fact-000" not in rows
+        assert "fact-000" in rows
         assert all(value.startswith("fact-") for value in rows)
         assert connection.execute(settings).fetchone() == before
 

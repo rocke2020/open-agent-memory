@@ -164,6 +164,7 @@ class ProfileInputs:
     eligible_support_ids: set[str]
     uncovered_inputs: int
     stored_support_inputs: list[dict[str, Any]] = dataclass_field(default_factory=list)
+    manifest: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 def _identity(payload: dict[str, Any]) -> bytes:
@@ -211,8 +212,8 @@ def _exact_fields(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
     return tuple(exact)
 
 
-def _prompt_inputs(cursor, authority: AuthorizedUser, units: list[dict]):
-    selected = units[:MAX_PROMPT_UNITS]
+def _prompt_inputs(cursor, authority: AuthorizedUser, units: list[dict], *, limit=MAX_PROMPT_UNITS):
+    selected = units[:limit] if limit is not None else units
     insight_keys = {
         (row["insight_id"], row["insight_revision"]) for row in selected if row["kind"] == "insight"
     }
@@ -283,6 +284,7 @@ def load_profile_inputs(
     insights_enabled: bool,
     stored_support_ids: set[str] | None = None,
     selected_unit_ids: list[str] | None = None,
+    include_manifest: bool = False,
 ) -> ProfileInputs:
     """Load current Profile inputs in one caller-owned PostgreSQL connection."""
     if not authority.allows("memory:read"):
@@ -314,6 +316,64 @@ def load_profile_inputs(
             (authority.tenant_id, authority.user_id, insights_enabled, insights_enabled),
         )
         pending = cursor.fetchall()
+        manifest: dict[str, Any] = {}
+        if include_manifest:
+            insight_ids = sorted({row["insight_id"] for row in units if row["kind"] == "insight"})
+            cursor.execute(
+                INSIGHT_SUPPORT_SQL, (authority.tenant_id, authority.user_id, insight_ids)
+            )
+            insight_support: dict[tuple[str, int], list[str]] = defaultdict(list)
+            for support in cursor.fetchall():
+                insight_support[(support["insight_id"], support["insight_revision"])].append(
+                    support["memory_id"]
+                )
+            memory_ids = {row["memory_id"] for row in units if row["kind"] == "fact"}
+            memory_ids.update(mid for mids in insight_support.values() for mid in mids)
+            cursor.execute(
+                f"/* profile:manifest_support */ SELECT sp.memory_id,sp.passage_id,"
+                f"sp.source_id,sp.source_version FROM ({ELIGIBLE_SUPPORT}) sp "
+                "WHERE sp.memory_id=ANY(%s) ORDER BY sp.memory_id,sp.passage_id",
+                (sorted(memory_ids),),
+            )
+            provenance: dict[str, list[list[Any]]] = defaultdict(list)
+            for support in cursor.fetchall():
+                provenance[support["memory_id"]].append(
+                    [support["source_id"], support["source_version"], support["passage_id"]]
+                )
+            unit_hashes = {}
+            for row in units:
+                mids = (
+                    [row["memory_id"]]
+                    if row["kind"] == "fact"
+                    else insight_support[(row["insight_id"], row["insight_revision"])]
+                )
+                identifier = hashlib.sha256(row["unit_id"].encode()).hexdigest()
+                unit_hashes[identifier] = _identity(
+                    {
+                        "unit": [
+                            row["unit_id"],
+                            row["kind"],
+                            row["memory_id"],
+                            row["insight_id"],
+                            row["insight_revision"],
+                            row["insight_subtype"],
+                            row["content_text"],
+                        ],
+                        "support": [[mid, provenance[mid]] for mid in mids],
+                    }
+                ).hex()
+            manifest = {
+                "units": unit_hashes,
+                "sources": {
+                    hashlib.sha256(
+                        f"{row['input_role']}\0{row['source_id']}".encode()
+                    ).hexdigest(): row["active_version"]
+                    for row in source_scope
+                },
+                "exact": _identity(
+                    {"sources": [[row["source_id"], row["source_version"]] for row in resources]}
+                ).hex(),
+            }
         profile_units = units
         if selected_unit_ids is None:
             selected_units = profile_units
@@ -326,6 +386,7 @@ def load_profile_inputs(
                 cursor,
                 authority,
                 [row for row in units if row["unit_id"] in stored_support_ids],
+                limit=None,
             )
             if stored_support_ids
             else []
@@ -400,4 +461,5 @@ def load_profile_inputs(
         eligible_support_ids=eligible_support_ids,
         uncovered_inputs=len(profile_units) - len(prompt_inputs),
         stored_support_inputs=stored_support_inputs,
+        manifest=manifest,
     )

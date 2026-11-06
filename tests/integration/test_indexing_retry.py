@@ -19,7 +19,7 @@ from test_core_http import core_database as core_database
 from oam.config import load_config
 from oam.indexing.extraction import ExtractionError
 from oam.indexing.identity import index_generation
-from oam.indexing.store import IndexStore
+from oam.indexing.store import IndexStore, input_digest
 from oam.models.runtime import ModelOutputError, ModelResult, Usage, _generation_result
 from oam.workers.claims import claim_one
 from oam.workers.index_source import process_one
@@ -601,7 +601,11 @@ async def test_overlapping_checkpoints_preserve_outstanding_external_state(
                 assert connection.execute(
                     "SELECT disposition,request_ref,response_ref FROM attempts "
                     "WHERE attempt_id='overlap-attempt'"
-                ).fetchone() == ("unknown_external_outcome", "extract:outstanding", None)
+                ).fetchone() == (
+                    "unknown_external_outcome",
+                    "extract:outstanding:" + input_digest({}).hex(),
+                    None,
+                )
         finally:
             release.set()
         if unresolved:
@@ -645,7 +649,11 @@ async def test_failed_checkpoint_commit_keeps_attempt_unresolved(accepted_source
         assert connection.execute(
             "SELECT disposition,request_ref,response_ref FROM attempts "
             "WHERE attempt_id='overlap-attempt'"
-        ).fetchone() == ("unknown_external_outcome", "extract:unsaved", None)
+        ).fetchone() == (
+            "unknown_external_outcome",
+            "extract:unsaved:" + input_digest({}).hex(),
+            None,
+        )
         assert (
             connection.execute(
                 "SELECT count(*) FROM index_stage_results WHERE stage_key='extract:unsaved'"
@@ -655,7 +663,7 @@ async def test_failed_checkpoint_commit_keeps_attempt_unresolved(accepted_source
 
 
 @pytest.mark.parametrize("known_usage", [False, True])
-async def test_consumer_failure_preserves_unknown_overlapping_extraction(
+async def test_consumer_failure_keeps_partial_usage_for_timed_out_extraction(
     accepted_source, known_usage
 ):
     client, dsn, tenant, config, operation_id = accepted_source
@@ -703,20 +711,25 @@ async def test_consumer_failure_preserves_unknown_overlapping_extraction(
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == "partial"
     assert operation["usage"]["coverage"] == "partial"
-    blocked = await client.post(
+    retried = await client.post(
         f"/v1/users/lin/operations/{operation_id}/retry",
-        headers={"Idempotency-Key": "unknown-retry"},
+        headers={"Idempotency-Key": "caught-timeout-retry"},
     )
-    assert blocked.status_code == 409, blocked.text
-    assert blocked.json()["detail"]["code"] == "RetryRequiresReconciliation"
+    assert retried.status_code == 201, retried.text
+    assert retried.json()["operation_id"] != operation_id
     with psycopg.connect(dsn) as connection:
         assert connection.execute(
             "SELECT disposition FROM attempts WHERE tenant_id=%s", (tenant,)
-        ).fetchone() == ("unknown_external_outcome",)
+        ).fetchone() == ("failed",)
         assert connection.execute(
-            "SELECT status FROM work_units WHERE tenant_id=%s", (tenant,)
+            "SELECT status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation_id),
         ).fetchone() == ("failed_terminal",)
-    assert run_source(dsn, config, SyntheticIndexModels()) is False
+        assert connection.execute(
+            "SELECT status FROM work_units WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, retried.json()["operation_id"]),
+        ).fetchone() == ("queued",)
+    assert run_source(dsn, config, SyntheticIndexModels()) is True
 
 
 async def test_two_extractions_overlap_and_keep_distinct_source_support(accepted_source):

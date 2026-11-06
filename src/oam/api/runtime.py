@@ -107,6 +107,18 @@ class APIRuntime(Protocol):
         self, actor: RequestActor, user_id: str, resource_id: str
     ) -> tuple[bytes, str]: ...
 
+    def list_entities(self, actor, user_id, *, query="", after=None) -> dict: ...
+
+    def entity_graph(self, actor, user_id, *, query="") -> dict: ...
+
+    def get_entity_memories(
+        self, actor, user_id, entity_id, *, after=None, names_after=None
+    ) -> dict: ...
+
+    def list_request_logs(self, actor, user_id, **filters) -> dict: ...
+
+    def record_request(self, authority, record) -> None: ...
+
     def list_memories(
         self,
         actor: RequestActor,
@@ -180,7 +192,12 @@ class APIRuntime(Protocol):
     def get_profile(self, actor: RequestActor, user_id: str, max_tokens: int) -> dict: ...
 
     def refresh_profile(
-        self, actor: RequestActor, user_id: str, instruction: str | None, reset_instruction: bool
+        self,
+        actor: RequestActor,
+        user_id: str,
+        instruction: str | None,
+        reset_instruction: bool,
+        mode: str,
     ) -> dict: ...
 
     def search_many(
@@ -377,7 +394,12 @@ class DatabaseRuntime:
         return ProfileService(self.config, self.pool).get(authority, max_tokens)
 
     def refresh_profile(
-        self, actor: RequestActor, user_id: str, instruction: str | None, reset_instruction: bool
+        self,
+        actor: RequestActor,
+        user_id: str,
+        instruction: str | None,
+        reset_instruction: bool,
+        mode: str,
     ) -> dict:
         from oam.profiles.service import ProfileService
 
@@ -388,7 +410,7 @@ class DatabaseRuntime:
             self._authorize(connection, actor, user_id, "memory:read")
             authority = replace(authority, capabilities=frozenset({"memory:append", "memory:read"}))
         return ProfileService(self.config, self.pool).refresh(
-            authority, instruction, reset_instruction=reset_instruction
+            authority, instruction, reset_instruction=reset_instruction, mode=mode
         )
 
     def list_profile_data(self, actor: RequestActor, user_id: str, *, after: str | None) -> dict:
@@ -442,6 +464,45 @@ class DatabaseRuntime:
         if result is None:
             raise SourceNotFound(resource_id)
         return result
+
+    def record_request(self, authority, record):
+        from oam.db.request_logs import record_request
+
+        with self.pool.connection() as connection:
+            record_request(connection, authority, record)
+
+    def list_request_logs(self, actor, user_id, **filters):
+        from oam.db.request_logs import list_request_logs
+
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            return list_request_logs(connection, authority, **filters)
+
+    def list_entities(self, actor, user_id, *, query="", after=None):
+        from oam.db.inspection_entities import list_entities
+
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            return list_entities(connection, authority, query=query, after=after)
+
+    def get_entity_memories(self, actor, user_id, entity_id, *, after=None, names_after=None):
+        from oam.db.inspection_entities import get_entity_memories
+
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            result = get_entity_memories(
+                connection, authority, entity_id, after=after, names_after=names_after
+            )
+        if result is None:
+            raise MemoryNotFound(entity_id)
+        return result
+
+    def entity_graph(self, actor, user_id, *, query=""):
+        from oam.db.inspection_entities import entity_graph
+
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+            return entity_graph(connection, authority, query=query)
 
     def list_memories(
         self,
@@ -1042,11 +1103,15 @@ class DatabaseRuntime:
                 expires_at=None,
             )
         try:
-            return self._auth.authorize_user(
-                connection,
-                principal,
-                user_id=user_id,
-                capability=capability,
+            from oam.api.request_logging import capture_authority
+
+            return capture_authority(
+                self._auth.authorize_user(
+                    connection,
+                    principal,
+                    user_id=user_id,
+                    capability=capability,
+                )
             )
         except UserDenied as exc:
             raise AuthorizationFailed from exc

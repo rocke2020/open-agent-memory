@@ -173,6 +173,7 @@ class ChunkConfig(FrozenModel):
 class ProfileConfig(FrozenModel):
     enabled: bool = True
     max_input_tokens: PositiveInt
+    max_memory_tokens: PositiveInt
     max_response_tokens: PositiveInt
     max_content_bytes: PositiveInt
     max_output_tokens: PositiveInt
@@ -279,6 +280,7 @@ class InsightSourceBatchConfig(FrozenModel):
 class IndexConfig(FrozenModel):
     enable_causal_graph: bool
     insights_enabled: bool = True
+    generation_token_budget: PositiveInt | None = None
     insight_consolidation_delay_hours: PositiveFloat
     insight_generation_concurrency: PositiveInt
     insight_seed_policy: Literal["related", "source"]

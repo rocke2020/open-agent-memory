@@ -83,6 +83,25 @@ class AliasModels(ReferenceModels):
                 entities=["NR"],
                 entity_references=[{"name": "NR", "reference_id": offered["id"], "quote": text}],
             )
+        if "entity_aliases" in fact:
+            fact["entity_mentions"] = [
+                {"name": name, "quote": name, "object": "lab", "decision": "new"}
+                for name in fact["entities"]
+            ]
+            for alias in fact["entity_aliases"]:
+                alias["object"] = "lab"
+        else:
+            name = next(name for name in offered["entities"] if name["name"] == "NR")
+            fact["entity_mentions"] = [
+                {
+                    "name": "NR",
+                    "quote": "NR",
+                    "object": "lab",
+                    "decision": "same",
+                    "reference_id": offered["id"],
+                    "reference_name_id": name["name_id"],
+                }
+            ]
         return ModelResult(
             content=json.dumps({"outcome": "facts", "facts": [fact]}),
             usage=Usage(

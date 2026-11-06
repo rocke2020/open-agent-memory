@@ -10,7 +10,7 @@ from oam.models.embedding_inputs import configured_embedding_admission
 from oam.retrieval.fts import FTS_RECIPE
 from oam.tokens import ESTIMATOR, resolve_counter
 
-INDEX_RECIPE = "oam-source-fact-insight-v38"
+INDEX_RECIPE = "oam-source-fact-insight-v39"
 RESOURCE_VISION_RECIPE = "oam-vision-downscale-v1"
 INSIGHT_RETRIEVAL_RECIPE = "oam-incremental-insight-v3"
 INSIGHT_MODEL_RECIPE = "oam-insight-model-v1"
@@ -72,6 +72,7 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
                 "insight_generation_concurrency",
                 "insight_seed_policy",
                 "insight_source_batch",
+                "generation_token_budget",
             }
             | (
                 set()

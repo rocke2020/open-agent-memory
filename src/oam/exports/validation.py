@@ -94,7 +94,6 @@ def _validate_entity_records(records: list[dict], generation: str | None) -> Non
         if (
             name is None
             or name["entity_id"] != support["entity_id"]
-            or name["generation_id"] != support["generation_id"]
             or name["name_kind"] != support["support_kind"]
             or memory is None
             or memory.get("generation_id") != support["generation_id"]
@@ -137,7 +136,6 @@ def _validate_entity_records(records: list[dict], generation: str | None) -> Non
             or not member["unit_id"].strip()
             or name is None
             or name["entity_id"] != member["entity_id"]
-            or name["generation_id"] != member["generation_id"]
             or memory is None
             or memory.get("generation_id") != member["generation_id"]
             or not isinstance(member["observed_mention"], str)
@@ -154,6 +152,32 @@ def _validate_entity_records(records: list[dict], generation: str | None) -> Non
             )
         ):
             raise ExportValidationError("entity membership reference or quote is invalid")
+        mentions = member.get("source_mentions", [])
+        if not isinstance(mentions, list):
+            raise ExportValidationError("entity source mentions must be an array")
+        for mention in mentions:
+            observed_name = (
+                names.get(mention["name_id"])
+                if isinstance(mention, dict) and isinstance(mention.get("name_id"), str)
+                else None
+            )
+            if (
+                observed_name is None
+                or observed_name["entity_id"] != member["entity_id"]
+                or observed_name["name_kind"] != mention.get("kind")
+                or not isinstance(mention.get("name"), str)
+                or not mention["name"].strip()
+                or not isinstance(mention.get("quote"), str)
+                or mention["name"] not in mention["quote"]
+                or not any(
+                    isinstance(span, dict)
+                    and isinstance(span.get("quote"), str)
+                    and mention["quote"] in span["quote"]
+                    for (memory_id, _), span in fact_support.items()
+                    if memory_id == member["memory_id"]
+                )
+            ):
+                raise ExportValidationError("entity source mention reference or quote is invalid")
         seen_memberships.add(identity)
 
 

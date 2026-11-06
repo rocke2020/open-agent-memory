@@ -22,6 +22,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.background import BackgroundTasks
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
@@ -287,6 +288,116 @@ def create_app(
         response.headers["OAM-Contract-Version"] = resolved.config.contract_version
         return response
 
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        import logging
+        from time import perf_counter
+
+        from starlette.concurrency import run_in_threadpool
+
+        from oam.api.request_logging import metadata
+
+        state = {}
+        token = metadata.set(state)
+        started = perf_counter()
+        response = None
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            metadata.reset(token)
+            route = request.scope.get("route")
+            template = getattr(route, "path", "")
+            authority = state.get("authority")
+            if (
+                authority is not None
+                and template.startswith("/v1/")
+                and not template.endswith("/request-logs")
+            ):
+                record = {
+                    "request_id": getattr(request.state, "request_id", ""),
+                    "operation": request.method + " " + template,
+                    "status": response.status_code if response is not None else 500,
+                    "duration_ms": (perf_counter() - started) * 1000,
+                    "error_code": state.get("error_code")
+                    if response is not None
+                    else "InternalError",
+                    "operation_id": state.get("operation_id"),
+                }
+
+                async def persist_record():
+                    try:
+                        await run_in_threadpool(runtime.record_request, authority, record)
+                    except Exception:
+                        logging.getLogger("uvicorn.error").warning(
+                            "request_log_write_failed request_id=%s", record["request_id"]
+                        )
+
+                if response is None:
+                    await persist_record()
+                else:
+                    background = BackgroundTasks()
+                    if response.background is not None:
+                        background.add_task(response.background)
+                    background.add_task(persist_record)
+                    response.background = background
+
+    @app.get("/v1/users/{user_id}/request-logs", tags=["Inspection"])
+    def request_logs(
+        request: Request,
+        user_id: str,
+        operation: str | None = None,
+        errors_only: bool = False,
+        request_id: str | None = None,
+        after: str | None = None,
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0, le=MAX_MEMORY_OFFSET),
+        status_code: int | None = Query(default=None, ge=100, le=599),
+    ):
+        return _content_call(
+            lambda: _require_runtime(runtime).list_request_logs(
+                request.state.actor,
+                user_id,
+                operation=operation,
+                errors_only=errors_only,
+                request_id=request_id,
+                after=after,
+                limit=limit,
+                offset=offset,
+                status_code=status_code,
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/entities", tags=["Inspection"])
+    def entities(request: Request, user_id: str, query: str = "", after: str | None = None):
+        return _content_call(
+            lambda: _require_runtime(runtime).list_entities(
+                request.state.actor, user_id, query=query, after=after
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/entities/graph", tags=["Inspection"])
+    def entity_graph(request: Request, user_id: str, query: str = ""):
+        return _content_call(
+            lambda: _require_runtime(runtime).entity_graph(
+                request.state.actor, user_id, query=query
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/entities/{entity_id}/memories", tags=["Inspection"])
+    def entity_memories(
+        request: Request,
+        user_id: str,
+        entity_id: str,
+        after: str | None = None,
+        names_after: str | None = None,
+    ):
+        return _content_call(
+            lambda: _require_runtime(runtime).get_entity_memories(
+                request.state.actor, user_id, entity_id, after=after, names_after=names_after
+            )
+        )
+
     @app.get("/health/live", tags=["Health"])
     async def liveness() -> dict[str, str]:
         return {"status": "alive", "contract_version": resolved.config.contract_version}
@@ -408,8 +519,9 @@ def create_app(
 
     @app.get("/ui/app.js", include_in_schema=False)
     @app.get("/ui/locales.js", include_in_schema=False)
+    @app.get("/ui/entity-graph.js", include_in_schema=False)
     async def inspector_script(request: Request) -> Response:
-        name = "locales.js" if request.url.path.endswith("/locales.js") else "app.js"
+        name = request.url.path.rsplit("/", 1)[-1]
         return Response(
             files("oam.web").joinpath(name).read_text(encoding="utf-8"),
             media_type="text/javascript",
@@ -1001,7 +1113,11 @@ def _register_reserved_routes(
         outcome = await run_in_threadpool(
             lambda: _content_call(
                 lambda: _require_runtime(runtime).refresh_profile(
-                    request.state.actor, user_id, body.instruction, body.reset_instruction
+                    request.state.actor,
+                    user_id,
+                    body.instruction,
+                    body.reset_instruction,
+                    body.mode,
                 )
             )
         )
@@ -1263,6 +1379,25 @@ def _memory_read_call(
 
 
 def _content_call(call):
+    from oam.api.request_logging import metadata
+
+    state = metadata.get()
+    try:
+        result = _content_call_inner(call)
+        if (
+            state is not None
+            and isinstance(result, dict)
+            and isinstance(result.get("operation_id"), str)
+        ):
+            state["operation_id"] = result["operation_id"]
+        return result
+    except HTTPException as exc:
+        if state is not None and isinstance(exc.detail, dict):
+            state["error_code"] = exc.detail.get("code")
+        raise
+
+
+def _content_call_inner(call):
     try:
         return call()
     except QueueAdmissionFull as exc:
@@ -1358,6 +1493,21 @@ def _require_runtime(runtime: APIRuntime | None) -> APIRuntime:
 
 
 def _operation_call(call) -> OperationResponse:
+    from oam.api.request_logging import metadata
+
+    state = metadata.get()
+    try:
+        result = _operation_call_inner(call)
+        if state is not None:
+            state["operation_id"] = result.operation_id
+        return result
+    except HTTPException as exc:
+        if state is not None and isinstance(exc.detail, dict):
+            state["error_code"] = exc.detail.get("code")
+        raise
+
+
+def _operation_call_inner(call) -> OperationResponse:
     try:
         return _operation_response(call())
     except QueueAdmissionFull as exc:

@@ -19,7 +19,7 @@ def _require_unfiltered_operator(connection: psycopg.Connection) -> None:
         "SELECT rolsuper,rolbypassrls FROM pg_catalog.pg_roles WHERE rolname=current_user"
     ).fetchone()
     if role is None or not (role[0] or role[1]):
-        raise ValueError("L2 hold requires an operator role with BYPASSRLS or superuser access")
+        raise ValueError("L2 operator control requires a role with BYPASSRLS or superuser access")
 
 
 def set_l2_hold(dsn: str, tenant_id: str, user_id: str, held: bool) -> None:

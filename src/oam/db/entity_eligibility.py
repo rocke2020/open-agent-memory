@@ -9,8 +9,7 @@ FROM entity_name_support ns
 JOIN entity_names n USING(tenant_id,user_id,name_id)
 JOIN ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) f
   ON (f.tenant_id,f.user_id,f.memory_id)=(ns.tenant_id,ns.user_id,ns.memory_id)
-JOIN entity_units e ON (e.tenant_id,e.user_id,e.entity_id,e.generation_id)=
-                      (n.tenant_id,n.user_id,n.entity_id,f.generation_id)
+JOIN entity_units e ON (e.tenant_id,e.user_id,e.entity_id)=(n.tenant_id,n.user_id,n.entity_id)
 WHERE f.kind='fact' AND f.locator->>'passage_id'=ns.passage_id
   AND position(ns.quote in f.locator->>'quote')>0
 """.strip()
@@ -26,16 +25,16 @@ WHERE binding.support_kind='canonical' OR EXISTS (
 """.strip()
 
 ELIGIBLE_ENTITY_MEMBERSHIPS = f"""
-SELECT membership.* FROM unit_entities membership
+SELECT membership.tenant_id,membership.user_id,membership.unit_id,membership.entity_key,
+       membership.entity_id,membership.name_id,membership.observed_mention,
+       membership.mention_quote,membership.generation_id FROM unit_entities membership
 JOIN ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) f
   ON (f.tenant_id,f.user_id,f.unit_id,f.generation_id)=
      (membership.tenant_id,membership.user_id,membership.unit_id,membership.generation_id)
 WHERE f.kind='fact' AND membership.entity_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) binding
-    WHERE (binding.tenant_id,binding.user_id,binding.entity_id,binding.name_id,
-           binding.generation_id)=
-          (membership.tenant_id,membership.user_id,membership.entity_id,membership.name_id,
-           membership.generation_id)
+    WHERE (binding.tenant_id,binding.user_id,binding.entity_id,binding.name_id)=
+          (membership.tenant_id,membership.user_id,membership.entity_id,membership.name_id)
 )
 """.strip()
 

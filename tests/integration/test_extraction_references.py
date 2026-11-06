@@ -327,6 +327,19 @@ async def test_retry_reuses_completed_extraction_and_revokes_only_unfinished_ref
     with pytest.raises(ExtractionError):
         run_source(dsn, config, models)
     with psycopg.connect(dsn) as connection:
+        new_source = connection.execute(
+            "SELECT source_id FROM operations WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation_id),
+        ).fetchone()[0]
+        # This fact was published while its historical reference was still eligible.
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM search_units WHERE tenant_id=%s AND source_id=%s "
+                "AND kind='fact'",
+                (tenant, new_source),
+            ).fetchone()[0]
+            == 1
+        )
         connection.execute(
             "UPDATE sources SET status='deleted' WHERE tenant_id=%s AND source_id=%s",
             (tenant, old_source),
@@ -340,8 +353,21 @@ async def test_retry_reuses_completed_extraction_and_revokes_only_unfinished_ref
     assert operation["status"] == "succeeded"
     assert operation["usage"]["total_tokens"] == 90
     assert operation["usage"]["coverage"] == "complete"
-    # The completed first passage is preserved, so its model output is not
-    # revalidated/replayed merely because another passage needed a retry.
+    # Resume keeps completed publication; only unfinished extraction is revalidated.
+    assert not any(
+        diagnostic["code"] == "ineligible_reference"
+        for diagnostic in operation["stage_state"]["extraction_diagnostics"]
+    )
+    from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
+
+    with psycopg.connect(dsn) as connection:
+        connection.execute("SELECT set_config('oam.tenant_id',%s,true)", (tenant,))
+        connection.execute("SELECT set_config('oam.user_id','lin',true)")
+        visible = connection.execute(
+            f"SELECT source_id,count(*) FROM ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) f "
+            "WHERE kind='fact' GROUP BY source_id"
+        ).fetchall()
+    assert visible == [(new_source, 2)]
     assert models.inputs[1]["reference_facts"]
     assert operation["stage_state"]["extraction_diagnostics"] == []
 

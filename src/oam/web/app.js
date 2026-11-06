@@ -29,7 +29,7 @@
 
   const setText = (node, value) => bind(node, "textContent", value);
   const setAttribute = (node, attribute, value) => bind(node, attribute, value);
-  const viewLabel = (view, title = false) => msg(title ? { resources: "Resources", profiles: "User Profile", memories: "Memories", insights: "Insights", retrieve: "Retrieved evidence" }[view] : view);
+  const viewLabel = (view, title = false) => msg(title ? { resources: "Resources", profiles: "User Profile", memories: "Memories", insights: "Insights", retrieve: "Retrieved evidence", entities: "Entities", "request-logs": "Request Logs" }[view] : view);
   const enumValues = new Set(["fact", "insight", "memory", "basic", "preferences", "patterns", "projects", "relationships", "experiences", "general_insights", "chat", "interaction", "evidence", "resource", "pending", "processing", "succeeded", "partial", "failed", "cancelled", "ready", "missing", "blocked", "unavailable", "complete", "completed", "not_required", "fast", "mid", "deep", "normal", "user", "assistant", "system", "developer", "tool"]);
   const enumLabel = (value) => enumValues.has(value) ? msg(value) : value;
 
@@ -84,12 +84,17 @@
     user: "",
     view: "memories",
     items: [],
+    selectedItemKey: null,
     nextAfter: null,
     generation: 0,
     draftKey: null,
     profileRequest: 0,
     detailRequest: 0,
     listRequest: 0,
+    logErrorsOnly: false,
+    logOffset: 0,
+    entityLayout: "list",
+    graphDispose: null,
     savedProfileInstruction: "",
   };
   function element(tag, text, className) {
@@ -107,8 +112,11 @@
 
   function resetContent() {
     clearSourceMessages();
+    disposeEntityGraph();
+    closeEntity();
     state.generation += 1;
     state.items = [];
+    state.selectedItemKey = null;
     state.nextAfter = null;
     state.draftKey = null;
     state.profileRequest += 1;
@@ -116,12 +124,24 @@
     state.listRequest += 1;
     byId("recall-level").value = "fast";
     byId("query").value = "";
+    byId("entity-search-form").reset();
+    byId("log-filter-form").reset();
+    setLogScope(false);
+    state.logOffset = 0;
+    byId("log-page-size").value = "10";
+    setText(byId("log-total-calls"), "—");
+    setText(byId("log-success-rate"), "—");
+    setText(byId("request-scope"), "");
+    setText(byId("log-page-summary"), "");
+    byId("log-page-buttons").replaceChildren();
+    state.requestScope = null;
     state.savedProfileInstruction = "";
     byId("profile-instruction").value = "";
     setText(byId("profile-instruction-status"), "");
     setText(byId("profile-default-prompt"), "");
     byId("profile-prompt-details").open = false;
     byId("profile-customization").open = false;
+    byId("profile-refresh-mode").value = "incremental";
     byId("profile-use-default").hidden = true;
     byId("item-list").replaceChildren();
     setText(byId("list-summary"), "");
@@ -228,33 +248,50 @@
 
   function setView(view, initial) {
     clearSourceMessages();
+    disposeEntityGraph();
+    closeEntity();
+    state.logOffset = 0;
     state.view = view;
     state.detailRequest += 1;
     state.listRequest += 1;
     state.items = [];
+    state.selectedItemKey = null;
     state.nextAfter = null;
     byId("item-list").replaceChildren();
-    byId("detail").replaceChildren();
+    byId("detail").replaceChildren(element("p", msg("Loading details…")));
     setText(byId("list-summary"), "");
     byId("load-more").hidden = true;
     setText(byId("list-title"), viewLabel(view, true));
     byId("new-resource").hidden = view !== "resources";
+    byId("entity-search-form").hidden = view !== "entities";
+    byId("log-filter-form").hidden = view !== "request-logs";
+    byId("log-note").hidden = true;
+    byId("request-overview").hidden = view !== "request-logs";
+    byId("log-pagination").hidden = view !== "request-logs";
+    byId("entity-layout-controls").hidden = view !== "entities";
+    byId("entity-description").hidden = view !== "entities";
+    byId("entity-graph").hidden = view !== "entities" || state.entityLayout !== "relationships";
+    byId("workspace-grid").classList.toggle("entities-view", view === "entities");
+    document.querySelector(".detail-panel").hidden = ["entities", "request-logs"].includes(view);
+    if (view === "request-logs") setText(byId("list-title"), msg("Captured requests"));
+    byId("workspace-grid").classList.toggle("logs-view", view === "request-logs");
     byId("search-form").hidden = !["memories", "retrieve"].includes(view);
     setText(byId("query-label"), view === "retrieve" ? msg("What would you like to retrieve?") : msg("Search current memory"));
     byId("retrieval-mode-field").hidden = view !== "retrieve";
     setText(byId("search-form").querySelector("button"), view === "retrieve" ? msg("Retrieve evidence") : msg("Search"));
     byId("profile-form").hidden = view !== "profiles";
     byId("refresh-profile").hidden = view !== "profiles";
+    byId("profile-refresh-controls").hidden = view !== "profiles";
     setText(byId("detail-title"), view === "profiles" ? msg("User Profile") : msg("Details"));
     document.querySelector(".list-panel").hidden = view === "profiles";
     byId("workspace-grid").classList.toggle("profile-view", view === "profiles");
-    byId("item-list").hidden = view === "profiles";
-    byId("refresh-list").hidden = ["profiles", "retrieve"].includes(view);
+    byId("item-list").hidden = view === "profiles" || (view === "entities" && state.entityLayout === "relationships");
+    byId("refresh-list").hidden = ["profiles", "retrieve", "request-logs"].includes(view);
     for (const tab of document.querySelectorAll("[data-view]")) {
       tab.setAttribute("aria-pressed", String(tab.dataset.view === view));
     }
     if (view === "retrieve") {
-      byId("detail").append(element("p", msg("Enter a query to retrieve cited evidence. Open a result to inspect it.")));
+      byId("detail").replaceChildren(element("p", msg("Enter a query to retrieve cited evidence. Open a result to inspect it.")));
       return;
     }
     if (view === "profiles") {
@@ -364,7 +401,6 @@
     detail.replaceChildren();
     detail.append(profileStatusLine(profile));
     if (profile.content) detail.append(renderProfileContent(profile.content));
-    if (failedInputs > 0) detail.append(labelValue(msg("Failed Insight inputs"), failedInputs));
     if (blockedInputs > 0) detail.append(labelValue(msg("Failed initial processing"), blockedInputs));
     let message = "";
     if (!profile.content) {
@@ -379,12 +415,15 @@
       }
       detail.append(element("p", message));
     }
-    if (failedInputs > 0) detail.append(element("p", msg("{count} Insight input{plural} failed. {lead} only ready information.", { count: failedInputs, plural: failedInputs === 1 ? "" : "s", lead: profile.content ? msg("This User Profile uses") : msg("A refreshed User Profile can use") })));
     if (blockedInputs > 0) detail.append(element("p", msg("{count} memory input{plural} could not be prepared. Check the input operation before refreshing the User Profile.", { count: blockedInputs, plural: blockedInputs === 1 ? "" : "s" })));
-    if (uncoveredInputs > 0) {
+    if (failedInputs > 0 || uncoveredInputs > 0) {
       const generationDetails = element("details");
       generationDetails.append(element("summary", msg("Generation details")));
-      generationDetails.append(labelValue(msg("Insights outside this summary"), uncoveredInputs));
+      if (failedInputs > 0) {
+        generationDetails.append(labelValue(msg("Failed Insight inputs"), failedInputs));
+        generationDetails.append(element("p", msg("{count} Insight input{plural} failed. {lead} only ready information.", { count: failedInputs, plural: failedInputs === 1 ? "" : "s", lead: profile.content ? msg("This User Profile uses") : msg("A refreshed User Profile can use") })));
+      }
+      if (uncoveredInputs > 0) generationDetails.append(labelValue(msg("Insights outside this summary"), uncoveredInputs));
       detail.append(generationDetails);
     }
     const references = profile.references || [];
@@ -413,6 +452,7 @@
   }
 
   async function refreshProfile(body = {}) {
+    body = { ...body, mode: byId("profile-refresh-mode").value };
     const generation = state.generation;
     const requestId = ++state.profileRequest;
     try {
@@ -442,34 +482,68 @@
     }
   }
 
-  async function loadList(append) {
+  async function loadList(append, updateDetail = true) {
     const view = state.view;
-    if (!["memories", "insights", "resources"].includes(view)) return;
+    if (!["memories", "insights", "resources", "entities", "request-logs"].includes(view)) return;
     const generation = state.generation;
     const requestId = ++state.listRequest;
     const detailRequest = state.detailRequest;
     const params = new URLSearchParams();
-    if (append && state.nextAfter) params.set("after", state.nextAfter);
+    if (append && state.nextAfter && view !== "request-logs") params.set("after", state.nextAfter);
     if (view === "insights") params.set("memory_type", "insight");
-    const endpoint = view === "insights" ? "memories" : view;
+    if (view === "entities") params.set("query", byId("entity-query").value.trim());
+    if (view === "request-logs") {
+      if (byId("log-operation").value.trim()) params.set("operation", byId("log-operation").value.trim());
+      if (byId("log-request-id").value.trim()) params.set("request_id", byId("log-request-id").value.trim());
+      if (state.logErrorsOnly) params.set("errors_only", "true");
+      if (byId("log-status").value) params.set("status_code", byId("log-status").value);
+      params.set("limit", byId("log-page-size").value);
+      params.set("offset", String(state.logOffset));
+    }
+    const isGraph = view === "entities" && state.entityLayout === "relationships";
+    const endpoint = isGraph ? "entities/graph" : view === "insights" ? "memories" : view;
     const suffix = params.size ? `?${params}` : "";
     status(msg("Loading {view}…", { view: viewLabel(view) }));
     try {
       const data = await json(route(`${endpoint}${suffix}`));
       if (current(generation) && view === state.view && requestId === state.listRequest) {
-        applyList(data, append, detailRequest === state.detailRequest);
+        if (isGraph) {
+          disposeEntityGraph();
+          state.items = data.nodes;
+          state.graphDispose = drawEntityGraph(byId("entity-graph"), data, { element, button, msg, setAttribute, setText, onSelect: openEntity, onError: showError });
+          setText(byId("list-summary"), msg("{count} entities", { count: data.total }));
+          if (data.truncated || data.edges_truncated) byId("entity-graph").append(element("p", msg("Showing up to 500 entities and 5,000 co-occurrences. Search to narrow the graph."), "graph-bound-note"));
+          if (!data.nodes.length) byId("entity-graph").append(element("p", msg("No entities found."), "graph-empty"));
+        } else applyList(data, append, updateDetail && detailRequest === state.detailRequest);
         status(msg("{count} current {view} shown.", { count: state.items.length, view: viewLabel(view) }));
       }
     } catch (error) {
-      if (current(generation) && view === state.view && requestId === state.listRequest) throw error;
+      if (current(generation) && view === state.view && requestId === state.listRequest) {
+        if (updateDetail && detailRequest === state.detailRequest && !state.items.length) byId("detail").replaceChildren(element("p", errorMessage(error)));
+        throw error;
+      }
     }
   }
 
-  function applyList(data, append, showEmptyState = true) {
+  function itemKey(item) {
+    return item.resource_id ? `resource:${item.resource_id}`
+      : item.kind === "insight" ? `insight:${item.insight_id}` : `memory:${item.memory_id || item.unit_id}`;
+  }
+
+  function applyList(data, append, updateDetail = true) {
     state.items = append ? state.items.concat(data.items) : data.items;
     state.nextAfter = data.next_after;
     const list = byId("item-list");
     list.replaceChildren();
+    if (["entities", "request-logs"].includes(state.view)) {
+      if (state.view === "request-logs") state.requestScope = data.scope;
+      renderInspectionTable(list);
+      byId("load-more").hidden = state.view === "request-logs" || !state.nextAfter;
+      if (state.view === "request-logs") renderRequestOverview(data);
+      setText(byId("list-summary"), state.view === "entities" ? msg("{count} entities", { count: data.total }) : "");
+      if (!state.items.length && updateDetail) byId("detail").replaceChildren(element("p", msg(state.view === "entities" ? "No entities found." : "No requests match these filters.")));
+      return;
+    }
     for (const item of state.items) {
       const id = state.view === "resources" ? item.resource_id
         : item.kind === "insight" ? item.insight_id : item.memory_id || item.unit_id;
@@ -479,17 +553,232 @@
       const control = button(state.view === "resources" ? id : String(item.text || id), () => openItem(item), "list-item");
       if (state.view !== "resources") control.replaceChildren(element("span", item.text || id, "item-title"));
       control.dataset.unitId = item.unit_id || id;
+      control.setAttribute("aria-current", String(itemKey(item) === state.selectedItemKey));
       control.append(element("small", state.view === "resources" ? msg("{kind} · {media} · version {version}", { kind, media: item.media_type, version: item.active_version }) : msg("{kind} · {id}", { kind, id })));
       row.append(control);
       list.append(row);
     }
     byId("load-more").hidden = !state.nextAfter;
     setText(byId("list-summary"), msg(data.total == null ? "{count} shown{support}" : "{count} of {total} shown{support}", { count: state.items.length, total: data.total, support: state.view === "insights" ? msg(" · supported by memories") : "" }));
-    if (!state.items.length && showEmptyState) byId("detail").replaceChildren(element("p", msg("No current {view} are available.", { view: viewLabel(state.view) })));
+    if (!append && updateDetail && ["memories", "insights", "resources"].includes(state.view)) {
+      if (!state.items.length) {
+        state.detailRequest += 1;
+        state.selectedItemKey = null;
+        clearSourceMessages();
+        byId("detail").replaceChildren(element("p", msg("No current {view} are available.", { view: viewLabel(state.view) })));
+      } else if (!state.items.some(item => itemKey(item) === state.selectedItemKey)) {
+        openItem(state.items[0]);
+      }
+    }
+  }
+
+  function displayTime(value) {
+    return value ? new Date(value).toLocaleString(language) : translate(msg("Unavailable"));
+  }
+
+  function setLogScope(errorsOnly) {
+    state.logErrorsOnly = errorsOnly;
+    byId("log-all").setAttribute("aria-pressed", String(!errorsOnly));
+    byId("log-errors").setAttribute("aria-pressed", String(errorsOnly));
+  }
+
+  function disposeEntityGraph() {
+    state.graphDispose?.();
+    state.graphDispose = null;
+    byId("entity-graph").replaceChildren();
+  }
+
+  function closeEntity() {
+    const drawer = byId("entity-drawer");
+    state.detailRequest += 1;
+    if (drawer.open) drawer.close();
+    byId("entity-drawer-content").replaceChildren();
+    setText(byId("entity-drawer-title"), "");
+  }
+
+  function requestParts(operation) {
+    const separator = operation.indexOf(" ");
+    const method = separator < 0 ? "" : operation.slice(0, separator);
+    const path = separator < 0 ? operation : operation.slice(separator + 1);
+    const parts = path.split("/");
+    return { method, path, type: parts[2] === "users" ? parts[4] || "users" : parts[2] || "" };
+  }
+
+  function renderRequestOverview(data) {
+    const summary = data.summary || {};
+    setText(byId("log-total-calls"), summary.total_calls == null ? "—" : String(summary.total_calls));
+    setText(byId("log-success-rate"), summary.success_rate == null ? "—" : `${Number(summary.success_rate).toFixed(0)}%`);
+    const scope = data.scope || {};
+    setText(byId("request-scope"), msg("Current scope: {tenant} / {user}", { tenant: scope.tenant_id || state.tenant, user: scope.user_id || state.user }));
+    const limit = data.limit || Number(byId("log-page-size").value), offset = data.offset || 0;
+    const page = Math.floor(offset / limit) + 1, pages = Math.max(1, Math.ceil(data.total / limit));
+    setText(byId("log-page-summary"), msg("{total} requests · Page {page} / {pages}", { total: data.total, page, pages }));
+    const controls = byId("log-page-buttons");
+    const go = next => { state.logOffset = (next - 1) * limit; loadList(false).catch(showError); };
+    const previous = button(msg("Previous page"), () => go(page - 1));
+    previous.disabled = page <= 1;
+    controls.replaceChildren(previous);
+    let previousNumber = 0;
+    for (const number of [...new Set([1, page - 1, page, page + 1, pages])].filter(n => n >= 1 && n <= pages).sort((a, b) => a - b)) {
+      if (previousNumber && number > previousNumber + 1) controls.append(element("span", "…", "pagination-gap"));
+      previousNumber = number;
+      const control = button(String(number), () => go(number));
+      if (number === page) control.setAttribute("aria-current", "page");
+      controls.append(control);
+    }
+    const next = button(msg("Next page"), () => go(page + 1));
+    next.disabled = page >= pages;
+    controls.append(next);
+  }
+
+  function renderInspectionTable(list) {
+    const entities = state.view === "entities";
+    const row = element("li", undefined, "table-scroll");
+    const table = element("table", undefined, "inspection-table");
+    const header = element("tr");
+    const labels = entities ? ["Name", "Linked memories", "First seen", "Last seen"] : ["Time", "API type", "Method", "Path", "HTTP status", "Duration", "Request ID", "Account ID", "User ID"];
+    for (const label of labels) {
+      const cell = element("th", msg(label)); cell.scope = "col";
+      if (entities && label === "Linked memories") cell.setAttribute("aria-sort", "descending");
+      header.append(cell);
+    }
+    const head = element("thead"); head.append(header);
+    const body = element("tbody");
+    for (const item of state.items) {
+      const tr = element("tr");
+      if (entities) {
+        const name = element("td");
+        name.append(button(item.name, () => openEntity(item), "table-link secondary"));
+        tr.append(name, element("td", String(item.memory_count)), element("td", () => displayTime(item.first_mentioned_at)), element("td", () => displayTime(item.last_mentioned_at)));
+      } else {
+        const code = element("span", String(item.status), "http-status");
+        code.dataset.state = item.status >= 400 ? "error" : "success";
+        if (item.error_code) code.title = item.error_code;
+        const statusCell = element("td"); statusCell.append(code);
+        const id = element("td");
+        const copy = button(item.request_id, async () => {
+          try { await navigator.clipboard.writeText(item.request_id); status(msg("Request ID copied.")); }
+          catch (_) { status(msg("Could not copy. Select the Request ID to copy it manually."), true); }
+        }, "table-link secondary request-id");
+        setAttribute(copy, "title", msg("Copy Request ID"));
+        id.append(copy);
+        const parts = requestParts(item.operation);
+        tr.append(element("td", () => displayTime(item.time)), element("td", parts.type, "request-api"), element("td", parts.method, "request-method"), element("td", parts.path, "request-operation"), statusCell, element("td", `${Number(item.duration_ms).toFixed(1)} ms`), id, element("td", state.requestScope?.tenant_id || state.tenant), element("td", state.requestScope?.user_id || state.user));
+      }
+      body.append(tr);
+    }
+    table.append(head, body); row.append(table);
+    list.append(row);
+    if (!state.items.length) {
+      const empty = element("p", msg(entities ? "No entities found." : "No requests match these filters."), "table-empty");
+      row.append(empty);
+    }
+  }
+
+  function highlightedChunk(text, mentions, quotes, spans) {
+    const paragraph = element("pre", undefined, "entity-source-chunk");
+    // Python offsets count Unicode code points, so convert before slicing in JS.
+    const chars = Array.from(text);
+    let located = spans;
+    if (located == null) {
+      located = [];
+      for (const name of new Set(mentions.filter(Boolean))) {
+        const start = text.indexOf(name);
+        // Ambiguous legacy occurrences stay unhighlighted.
+        if (start >= 0 && text.indexOf(name, start + name.length) < 0 &&
+            quotes.some(quote => quote && quote.includes(name) && text.includes(quote))) {
+          const left = Array.from(text.slice(0, start)).length;
+          located.push([left, left + Array.from(name).length]);
+        }
+      }
+    }
+    let start = 0;
+    for (const [left, right] of located.filter(span => Array.isArray(span) && span.length === 2)
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+      if (!Number.isInteger(left) || !Number.isInteger(right) || left < start || right <= left || right > chars.length) continue;
+      paragraph.append(document.createTextNode(chars.slice(start, left).join("")), element("mark", chars.slice(left, right).join("")));
+      start = right;
+    }
+    paragraph.append(document.createTextNode(chars.slice(start).join("")));
+    return paragraph;
+  }
+
+  async function openEntity(item) {
+    const generation = state.generation, requestId = ++state.detailRequest, view = state.view;
+    const drawer = byId("entity-drawer"), content = byId("entity-drawer-content");
+    setText(byId("entity-drawer-title"), item.name);
+    content.replaceChildren(element("p", msg("Loading details…")));
+    if (!drawer.open) drawer.showModal();
+    const memories = element("div", undefined, "entity-timeline");
+    const displayedChunks = new Map();
+    const originalNames = element("p"), aliases = element("p");
+    const nameSets = { original_names: new Set(), aliases: new Set() };
+    const moreNames = button(msg("Load more names"), () => loadNames(moreNames.dataset.after));
+    function appendNames(data) {
+      for (const key of ["original_names", "aliases"]) for (const name of data[key] || []) nameSets[key].add(name);
+      originalNames.textContent = [...nameSets.original_names].join(", ") || "—";
+      aliases.textContent = [...nameSets.aliases].join(", ") || "—";
+      moreNames.hidden = !data.names_next_after; moreNames.dataset.after = data.names_next_after || "";
+    }
+    async function loadNames(namesAfter) {
+      moreNames.disabled = true;
+      try {
+        const data = await json(route(`entities/${encodeURIComponent(item.entity_id)}/memories?${new URLSearchParams({ names_after: namesAfter })}`));
+        if (currentDetail(generation, view, requestId) && drawer.open) appendNames(data);
+      } catch (error) { if (currentDetail(generation, view, requestId) && drawer.open) showError(error); }
+      finally { moreNames.disabled = false; }
+    }
+    const more = button(msg("Load more"), () => loadPage(more.dataset.after));
+    async function loadPage(after) {
+      more.disabled = true;
+      try {
+        const suffix = after ? `?${new URLSearchParams({ after })}` : "";
+        const data = await json(route(`entities/${encodeURIComponent(item.entity_id)}/memories${suffix}`));
+        if (!currentDetail(generation, view, requestId) || !drawer.open) return;
+        if (!after) {
+          const info = element("div", undefined, "entity-info-grid");
+          info.append(labelValue(msg("Linked memories"), String(data.memory_count ?? item.memory_count)), labelValue(msg("First seen"), () => displayTime(data.first_mentioned_at || item.first_mentioned_at)));
+          setText(byId("entity-drawer-title"), data.name);
+          appendNames(data);
+          content.replaceChildren(info, labelValue(msg("Entity ID"), item.entity_id), element("h4", msg("Original names")), originalNames, element("h4", msg("Aliases")), aliases, moreNames, element("h4", msg("Original chunks")), element("p", msg("Recorded entity mentions are highlighted in their original source chunks."), "form-note"), memories, more);
+        }
+        for (const memory of data.items) {
+          for (const chunk of memory.source_chunks || []) {
+            const key = JSON.stringify([chunk.source_id, chunk.source_version, chunk.passage_id]);
+            const previous = displayedChunks.get(key);
+            if (previous) {
+              previous.mentions.push(...chunk.mentions);
+              previous.quotes.push(chunk.quote);
+              if (chunk.mention_spans != null) previous.spans = [...(previous.spans || []), ...chunk.mention_spans];
+              const paragraph = highlightedChunk(chunk.text, previous.mentions, previous.quotes, previous.spans);
+              previous.paragraph.replaceWith(paragraph);
+              previous.paragraph = paragraph;
+              continue;
+            }
+            const entry = element("div", undefined, "entity-timeline-entry");
+            const paragraph = highlightedChunk(chunk.text, chunk.mentions || [], [chunk.quote], chunk.mention_spans);
+            entry.append(element("small", () => displayTime(memory.mention_time || memory.created_at)), paragraph,
+              element("small", msg("Source {source} · chunk {passage}", { source: chunk.source_id, passage: chunk.passage_id }), "form-note"),
+              button(msg("Open learned memory"), () => { closeEntity(); openMemory(memory.memory_id); }, "secondary"));
+            memories.append(entry);
+            displayedChunks.set(key, { paragraph, mentions: [...(chunk.mentions || [])], quotes: [chunk.quote], spans: chunk.mention_spans });
+          }
+        }
+        if (!displayedChunks.size && !data.next_after) memories.replaceChildren(element("p", msg("No original chunks are currently available."), "form-note"));
+        more.hidden = !data.next_after; more.dataset.after = data.next_after || "";
+      } catch (error) {
+        if (currentDetail(generation, view, requestId) && drawer.open) { content.replaceChildren(element("p", errorMessage(error))); showError(error); }
+      } finally { more.disabled = false; }
+    }
+    await loadPage(null);
   }
 
   async function openItem(item) {
     clearSourceMessages();
+    state.selectedItemKey = itemKey(item);
+    for (const [index, control] of [...byId("item-list").querySelectorAll(".list-item")].entries()) {
+      control.setAttribute("aria-current", String(itemKey(state.items[index]) === state.selectedItemKey));
+    }
     const generation = state.generation;
     const requestId = ++state.detailRequest;
     const view = state.view;
@@ -512,9 +801,6 @@
         const id = isInsight ? item.insight_id : item.memory_id;
         const data = await json(route(`memories/${encodeURIComponent(id)}?memory_type=${isInsight ? "insight" : "basic"}`));
         if (!current(generation) || state.view !== view || requestId !== state.detailRequest) return;
-        for (const control of byId("item-list").querySelectorAll(".list-item")) {
-          control.setAttribute("aria-current", String(control.dataset.unitId === data.unit_id));
-        }
         await showMemory(data, generation, requestId);
       }
     } catch (error) {
@@ -828,7 +1114,7 @@
       byId("item-list").replaceChildren();
       byId("load-more").hidden = true;
       try {
-        await loadList(false);
+        await loadList(false, false);
       } catch (error) {
         if (current(removalGeneration)) {
           showReceipt(receipt.operation_id, receipt);
@@ -988,6 +1274,9 @@
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const generation = state.generation;
+      const view = state.view;
+      const requestId = state.detailRequest;
+      const listRequest = state.listRequest;
       if (!state.draftKey) state.draftKey = crypto.randomUUID();
       const headers = { "Idempotency-Key": state.draftKey };
       if (existing) headers["If-Match"] = String(existing.active_version);
@@ -1013,8 +1302,8 @@
         if (!current(generation)) return;
         state.draftKey = null;
         status(msg("Accepted version {version}; operation {id}.", { version: receipt.revision, id: receipt.operation_id }));
-        showReceipt(receipt.operation_id, receipt);
-        await loadList(false);
+        if (currentDetail(generation, view, requestId)) showReceipt(receipt.operation_id, receipt);
+        if (listRequest === state.listRequest) await loadList(false, false);
       } catch (error) { if (current(generation)) showError(error); }
     });
     detail.replaceChildren(form);
@@ -1023,6 +1312,7 @@
 
   function showReceipt(operationId, receipt) {
     clearSourceMessages();
+    state.detailRequest += 1;
     const detail = byId("detail");
     detail.replaceChildren(
       element("h3", msg("Durable operation")),
@@ -1071,7 +1361,7 @@
       showReceipt(receipt.cleanup_operation_id, receipt);
       status(msg("{target} excluded. Cleanup operation {id} is {status}.", { target, id: receipt.cleanup_operation_id, status: enumLabel(receipt.cleanup_status) }));
       try {
-        await loadList(false);
+        await loadList(false, false);
       } catch (error) {
         if (current(deletionGeneration)) status(msg("{target} excluded; list refresh failed: {error}", { target, error: errorMessage(error) }), true);
         return;
@@ -1164,6 +1454,40 @@
   byId("load-more").addEventListener("click", () => loadList(true).catch(showError));
   byId("new-resource").addEventListener("click", () => showResourceForm());
   byId("search-form").addEventListener("submit", search);
+  for (const id of ["entity-search-form", "log-filter-form"]) {
+    byId(id).addEventListener("submit", event => {
+      event.preventDefault();
+      state.detailRequest += 1;
+      state.logOffset = 0;
+      byId("detail").replaceChildren();
+      if (state.view === "entities") disposeEntityGraph();
+      loadList(false).catch(showError);
+    });
+  }
+  for (const [id, errorsOnly] of [["log-all", false], ["log-errors", true]]) {
+    byId(id).addEventListener("click", () => {
+      setLogScope(errorsOnly);
+      state.detailRequest += 1;
+      state.logOffset = 0;
+      byId("detail").replaceChildren();
+      if (state.view === "entities") disposeEntityGraph();
+      loadList(false).catch(showError);
+    });
+  }
+  byId("close-entity").addEventListener("click", closeEntity);
+  byId("entity-drawer").addEventListener("cancel", () => { state.detailRequest += 1; });
+  for (const [id, layout] of [["entity-relations", "relationships"], ["entity-list", "list"]]) {
+    byId(id).addEventListener("click", () => {
+      state.entityLayout = layout;
+      for (const [key, value] of [["entity-relations", "relationships"], ["entity-list", "list"]]) byId(key).setAttribute("aria-pressed", String(value === layout));
+      setView("entities");
+    });
+  }
+  byId("log-page-size").addEventListener("change", () => { state.logOffset = 0; loadList(false).catch(showError); });
+  byId("reset-logs").addEventListener("click", () => {
+    byId("log-filter-form").reset(); setLogScope(false); state.logOffset = 0; loadList(false).catch(showError);
+  });
+  byId("refresh-logs").addEventListener("click", () => loadList(false).catch(showError));
   byId("profile-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const instruction = byId("profile-instruction").value.trim();

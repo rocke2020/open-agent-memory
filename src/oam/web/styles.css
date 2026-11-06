@@ -364,6 +364,97 @@ label {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.workspace-grid.logs-view {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.log-filters > label {
+  flex: 1 1 14rem;
+}
+
+.log-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.15rem;
+  border-radius: 0.4rem;
+  background: var(--background);
+}
+
+.log-scope button {
+  border-color: transparent;
+  background: transparent;
+  white-space: nowrap;
+}
+
+.log-scope button[aria-pressed="true"] {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--accent);
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.inspection-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.inspection-table th, .inspection-table td {
+  padding: 0.65rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.inspection-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.inspection-table .table-link {
+  min-height: 2rem;
+  padding: 0.2rem 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.request-operation {
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+
+.http-status {
+  border-radius: 0.3rem;
+  padding: 0.1rem 0.35rem;
+  background: var(--background);
+  font-weight: 650;
+  color: var(--positive);
+}
+
+.http-status[data-state="error"] {
+  color: var(--error);
+}
+
+.entity-memories {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
 .workspace-grid.with-memory {
   grid-template-columns: minmax(17rem, 0.7fr) minmax(0, 1.6fr) minmax(0, 1.1fr);
 }
@@ -818,3 +909,102 @@ pre {
     scroll-behavior: auto !important;
   }
 }
+
+/* Entity exploration and request activity share the Inspector's color system. */
+.workspace-grid.entities-view { grid-template-columns: minmax(0, 1fr); }
+.entities-view > .list-panel { padding: 0.5rem 0; border: 0; background: transparent; }
+.entities-view .panel-heading { align-items: center; }
+.entities-view .panel-heading h2 { font-size: 1.85rem; margin-right: auto; }
+.entities-view #entity-description { margin-top: 0.35rem; font-size: 0.95rem; }
+.entities-view #entity-search-form { max-width: 24rem; margin-top: 1rem; }
+.entities-view #entity-search-form > label { font-size: 0.8rem; color: var(--muted); }
+.entities-view .inspection-table { background: var(--surface); }
+.entities-view .inspection-table tbody tr:hover { background: var(--selected); }
+.entities-view #list-summary { margin: 0.8rem 0; }
+.entity-graph { position: relative; height: min(68vh, 46rem); min-height: 26rem; background: var(--surface); border: 1px solid var(--border); border-radius: 0.65rem; overflow: hidden; }
+.entity-graph:fullscreen { width: 100vw; height: 100vh; border: 0; border-radius: 0; }
+.entity-graph > svg { width: 100%; height: 100%; touch-action: none; cursor: grab; }
+.entity-graph > svg:active { cursor: grabbing; }
+.entity-graph-node { cursor: pointer; outline: none; transition: opacity 150ms; }
+.entity-graph-node.dimmed { opacity: 0.18; }
+.entity-graph-node text { fill: var(--muted); font: 12px system-ui,sans-serif; opacity: 0.78; }
+.entity-graph-node:hover text, .entity-graph-node:focus text { fill: var(--text); opacity: 1; font-weight: 650; }
+.entity-graph-node:focus circle:first-child { stroke: var(--accent); stroke-width: 2; }
+.entity-graph-links line { stroke: var(--border); stroke-opacity: 0.22; }
+.entity-graph-links line.highlighted { stroke: var(--accent); stroke-opacity: 0.7; }
+.entity-graph-legend { position: absolute; left: 0.85rem; top: 0.65rem; display: grid; gap: 0.2rem; font-size: 0.7rem; color: var(--muted); pointer-events: none; z-index: 1; }
+.entity-graph-legend p { margin: 0 0 0.15rem; }
+.entity-graph-legend strong { font-size: 0.7rem; }
+.recency-ramp { width: 9rem; height: 0.3rem; background: linear-gradient(90deg,#6ea7ee,#b1afdb,#f8947b); }
+.size-legend { letter-spacing: 0.25rem; }
+.entity-graph-tools, .entity-graph-zoom { position: absolute; display: flex; gap: 0.3rem; z-index: 2; }
+.entity-graph-tools { right: 0.65rem; top: 0.65rem; }
+.entity-graph-zoom { right: 0.65rem; bottom: 0.65rem; }
+.entity-graph-tools button, .entity-graph-zoom button { font-size: 0.75rem; min-height: 2rem; padding: 0.25rem 0.5rem; }
+.graph-empty { position: absolute; top: 45%; width: 100%; text-align: center; color: var(--muted); }
+.graph-bound-note { position: absolute; bottom: 0.5rem; left: 0.8rem; margin: 0; max-width: 65%; font-size: 0.75rem; color: var(--muted); }
+.entity-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(38.75rem,95vw); height: 100dvh; max-height: 100dvh; padding: 1.5rem; border: 0; border-left: 2px solid var(--accent); background: var(--surface); color: var(--text); box-shadow: -8px 0 36px #0002; overflow-y: auto; }
+.entity-drawer::backdrop { background: #10202725; }
+.drawer-heading { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 1rem; margin-bottom: 1.25rem; border-bottom: 1px solid var(--border); }
+.drawer-heading h3 { margin: 0; font-size: 1.4rem; }
+.drawer-heading p { margin: 0.2rem 0 0; }
+.drawer-heading button { border-color: transparent; min-height: 2rem; font-size: 1.25rem; padding: 0 0.6rem; }
+.entity-info-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1rem; margin-bottom: 1rem; }
+.entity-info-grid .detail-row { padding: 1rem; border: 0; border-radius: 0.5rem; background: var(--background); display: flex; flex-direction: column; align-items: flex-start; gap: 0.6rem; }
+.entity-info-grid strong { color: var(--muted); font-size: 0.75rem; }
+.entity-info-grid span { font-size: 1.1rem; }
+.entity-timeline { border-left: 1px solid var(--border); margin: 1.25rem 0 1.25rem 0.4rem; padding-left: 1.2rem; }
+.entity-timeline-entry { position: relative; margin-bottom: 1.1rem; }
+.entity-timeline-entry::before { content: ""; position: absolute; left: -1.48rem; top: 0.35rem; height: 0.45rem; width: 0.45rem; border-radius: 50%; background: var(--accent); }
+.entity-timeline-entry > small { color: var(--muted); }
+.entity-timeline-entry .list-item { margin-top: 0.35rem; font-weight: 400; font-size: 0.9rem; }
+.request-scope { margin: 0 0 1rem; padding: 0.65rem 0.85rem; border: 1px solid var(--border); border-radius: 0.45rem; color: var(--muted); font-size: 0.85rem; }
+.request-metrics { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1rem; }
+.metric-card { position: relative; min-height: 8.5rem; display: flex; flex-direction: column; justify-content: center; padding: 1.5rem; }
+.metric-card > span:first-child { color: var(--muted); font-size: 0.9rem; }
+.metric-card > strong { font-size: 1.7rem; line-height: 1.5; }
+.logs-view .list-panel { display: grid; grid-template-columns: auto minmax(0,1fr); padding: 0; overflow: hidden; }
+.logs-view .list-panel > .panel-heading { margin: 0; padding: 1.25rem 0.9rem 1.25rem 1.2rem; }
+.logs-view .list-panel h2 { font-size: 0.95rem; }
+.logs-view .log-filters { margin: 0; padding: 1.25rem 1.2rem 1.25rem 0; gap: 0.4rem; align-items: center; }
+.logs-view .log-filters input, .logs-view .log-filters button { min-height: 2.3rem; padding: 0.4rem 0.5rem; font-size: 0.8rem; }
+.logs-view .log-filters > label { flex: 1 1 6rem; }
+.logs-view .log-filters > .log-id-filter { flex: 3 1 12rem; }
+.logs-view .log-filters > .log-status-filter { flex: 0 1 6rem; }
+.logs-view .log-filters > .log-api-filter { flex: 0 1 8rem; }
+.logs-view #item-list { grid-column: 1 / -1; margin: 0; border-top: 1px solid var(--border); }
+.logs-view #list-summary { display: none; }
+.logs-view .inspection-table { font-size: 0.78rem; }
+.logs-view .inspection-table th { padding: 0.8rem 0.7rem; color: var(--text); white-space: nowrap; }
+.logs-view .inspection-table td { padding: 0.4rem 0.7rem; color: var(--muted); }
+.logs-view .inspection-table td:first-child { white-space: nowrap; }
+.logs-view .inspection-table .table-link { font-size: 0.75rem; font-weight: 400; color: var(--muted); }
+.logs-view .request-operation { min-width: 12rem; color: var(--text); }
+.logs-view .request-method { color: var(--accent); font-weight: 650; font-family: ui-monospace,monospace; }
+.logs-view .request-id { min-width: 12rem; }
+.http-status { background: color-mix(in srgb,var(--positive) 10%,var(--surface)); }
+.http-status[data-state="error"] { background: color-mix(in srgb,var(--error) 10%,var(--surface)); }
+.log-pagination { grid-column: 1 / -1; display: flex; align-items: center; gap: 0.75rem; padding: 0.9rem 1.2rem; }
+.log-pagination > select { width: 4.7rem; min-height: 2rem; padding: 0.3rem; font-size: 0.8rem; }
+.log-pagination nav { display: flex; align-items: center; gap: 0.3rem; margin-left: auto; }
+.log-pagination button { min-height: 2rem; padding: 0.25rem 0.5rem; font-size: 0.8rem; border-color: transparent; }
+.log-pagination button[aria-current="page"] { border-color: var(--border); color: var(--accent); }
+.table-empty { text-align: center; padding: 2rem; color: var(--muted); }
+@media (max-width: 960px) {
+  .logs-view .list-panel { grid-template-columns: minmax(0,1fr); }
+  .logs-view .list-panel > .panel-heading { padding-bottom: 0; }
+  .logs-view .log-filters { padding: 0.8rem 1.2rem; }
+  .entity-graph-legend p { max-width: 11rem; }
+}
+@media (max-width: 600px) {
+  .request-metrics { gap: 0.6rem; }
+  .metric-card { min-height: 6rem; padding: 1rem; }
+  .entity-graph-tools { top: auto; bottom: 3.2rem; }
+  .entity-graph { min-height: 28rem; }
+  .log-pagination { flex-wrap: wrap; }
+  .log-pagination nav { margin-left: 0; }
+}
+.entity-source-chunk { margin: 0.5rem 0; padding: 0.9rem; border: 1px solid var(--border); border-radius: 0.45rem; background: var(--background); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 0.9rem; }
+.entity-source-chunk mark { background: color-mix(in srgb,var(--warning) 28%,var(--surface)); color: var(--text); padding: 0.05rem 0.1rem; border-radius: 0.15rem; font-weight: 650; }
+.entity-timeline-entry > .form-note { display: block; margin-bottom: 0.5rem; font-size: 0.7rem; overflow-wrap: anywhere; }
+.entity-timeline-entry > button { font-size: 0.75rem; min-height: 2rem; padding: 0.3rem 0.5rem; }

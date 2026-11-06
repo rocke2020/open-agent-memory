@@ -1,6 +1,15 @@
 import json
+from functools import partial
 
 import pytest
+
+from oam.config import TokenizerConfig
+from oam.profiles.selection import pack_profile_request as pack
+from oam.tokens import resolve_counter
+
+pack_profile_request = partial(
+    pack, counter=resolve_counter(TokenizerConfig(type="o200k_base")), max_memory_tokens=10000
+)
 
 
 def test_profile_candidate_query_scopes_before_limit_and_preserves_ranked_order() -> None:
@@ -23,27 +32,44 @@ def test_profile_candidate_query_scopes_before_limit_and_preserves_ranked_order(
     ]
 
 
-def test_request_budget_includes_system_fields_and_does_not_split_inputs() -> None:
-    from oam.profiles.selection import pack_profile_request
-    from oam.tokens import estimate_units, estimated_tokens
+def test_incremental_candidates_are_filtered_before_ranking_limit() -> None:
+    from oam.profiles.selection import rank_profile_candidates
 
+    class Connection:
+        def execute(self, statement, params):
+            assert statement.index("unit_id = ANY") < statement.index("LIMIT")
+            assert params == (["new", "old-unexamined"], "[0.1]", 2)
+            return self
+
+        def fetchall(self):
+            return [("new",)]
+
+    assert rank_profile_candidates(
+        Connection(), (0.1,), 2, candidate_ids=["new", "old-unexamined"]
+    ) == ["new"]
+
+
+def test_request_budget_includes_system_fields_and_does_not_split_inputs() -> None:
     items = [{"id": "one", "text": "A" * 400}, {"id": "two", "text": "B" * 400}]
     packed = pack_profile_request(
         items,
         exact_fields=[{"value": "fixed"}],
         instruction="Use bullets",
         system="system instructions",
-        max_input_tokens=560,
+        max_input_tokens=140,
     )
     assert [item["id"] for item in packed.inputs] == ["one"]
     assert packed.uncovered == 1
     assert json.loads(packed.user)["exact_fields"] == [{"value": "fixed"}]
-    assert estimated_tokens(estimate_units("system instructions" + packed.user)) <= 560
-    assert len(("system instructions" + packed.user).encode("utf-8")) <= 560
+    assert (
+        resolve_counter(TokenizerConfig(type="o200k_base")).count(
+            "system instructions" + packed.user
+        )
+        <= 140
+    )
 
 
 def test_exact_fields_expose_their_citable_identifier_to_the_model() -> None:
-    from oam.profiles.selection import pack_profile_request
 
     field = {
         "key": "response_language",
@@ -57,7 +83,6 @@ def test_exact_fields_expose_their_citable_identifier_to_the_model() -> None:
 
 
 def test_request_fails_if_required_exact_fields_exceed_budget() -> None:
-    from oam.profiles.selection import pack_profile_request
 
     with pytest.raises(ValueError, match="budget"):
         pack_profile_request(
@@ -70,7 +95,6 @@ def test_request_fails_if_required_exact_fields_exceed_budget() -> None:
 
 
 def test_large_source_detail_does_not_exclude_a_supported_fact() -> None:
-    from oam.profiles.selection import pack_profile_request
 
     item = {
         "id": "fact",
@@ -79,16 +103,14 @@ def test_large_source_detail_does_not_exclude_a_supported_fact() -> None:
         "source_passages": [{"source_id": "source", "passage_id": "p", "text": "源" * 1000}],
     }
     packed = pack_profile_request(
-        [item], exact_fields=[], instruction=None, system="x" * 4059, max_input_tokens=8192
+        [item], exact_fields=[], instruction=None, system="x" * 4059, max_input_tokens=1500
     )
     assert packed.inputs[0]["text"] == item["text"]
     assert packed.inputs[0]["source_passages"][0]["source_id"] == "source"
     assert packed.inputs[0]["source_passage_text_omitted"] is True
-    assert len(("x" * 4059 + packed.user).encode()) <= 8192
 
 
 def test_request_without_any_supported_input_fails_before_generation() -> None:
-    from oam.profiles.selection import pack_profile_request
 
     with pytest.raises(ValueError, match="no .* evidence"):
         pack_profile_request(
@@ -105,3 +127,92 @@ def test_profile_input_budget_is_configurable_and_positive(tmp_path) -> None:
     path.write_text("profile:\n  max_input_tokens: 0\n")
     with pytest.raises(ConfigurationError):
         load_config(path)
+
+
+def test_profile_budget_counts_tokens_instead_of_utf8_bytes() -> None:
+
+    items = [{"id": "one", "text": "A" * 400}, {"id": "two", "text": "B" * 400}]
+    packed = pack_profile_request(
+        items, exact_fields=[], instruction=None, system="system", max_input_tokens=300
+    )
+    assert [item["id"] for item in packed.inputs] == ["one", "two"]
+    assert packed.uncovered == 0
+
+
+def test_profile_memory_budget_is_independent_of_complete_request_budget(tmp_path) -> None:
+    from oam.config import load_config
+
+    path = tmp_path / "profile.yaml"
+    path.write_text("profile:\n  max_input_tokens: 16000\n  max_memory_tokens: 8000\n")
+    config = load_config(path).config.profile
+    assert config.max_input_tokens == 16000
+    assert getattr(config, "max_memory_tokens", None) == 8000
+
+
+def test_memory_budget_is_independent_from_system_and_enforces_total_cap() -> None:
+    items = [{"id": "one", "text": "A" * 400}, {"id": "two", "text": "B" * 400}]
+    short = pack_profile_request(
+        items,
+        system="system",
+        max_input_tokens=2000,
+        exact_fields=[],
+        instruction=None,
+        max_memory_tokens=180,
+    )
+    long = pack_profile_request(
+        items,
+        system="system " * 300,
+        max_input_tokens=2000,
+        exact_fields=[],
+        instruction=None,
+        max_memory_tokens=180,
+    )
+    assert [item["id"] for item in short.inputs] == ["one", "two"]
+    assert long.inputs == short.inputs
+    limited = pack_profile_request(
+        items,
+        system="system",
+        max_input_tokens=2000,
+        exact_fields=[],
+        instruction=None,
+        max_memory_tokens=160,
+    )
+    assert [item["id"] for item in limited.inputs] == ["one"]
+    assert limited.uncovered == 1
+    tight = pack_profile_request(
+        items,
+        system="system " * 300,
+        max_input_tokens=400,
+        exact_fields=[],
+        instruction=None,
+        max_memory_tokens=180,
+    )
+    assert len(tight.inputs) < len(long.inputs)
+
+
+def test_memory_budget_omits_large_passage_text_before_dropping_fact() -> None:
+    item = {
+        "id": "fact",
+        "text": "prefers English",
+        "source_passages": [{"source_id": "s", "text": "源" * 1000}],
+    }
+    packed = pack_profile_request(
+        [item],
+        exact_fields=[],
+        instruction=None,
+        system="system",
+        max_input_tokens=4000,
+        max_memory_tokens=100,
+    )
+    assert len(packed.inputs) == 1
+    assert packed.inputs[0]["source_passage_text_omitted"] is True
+    assert packed.inputs[0]["source_passages"][0]["source_id"] == "s"
+    assert packed.uncovered == 0
+
+
+def test_profile_identity_changes_with_memory_budget() -> None:
+    from oam.profiles.service import profile_identity
+
+    assert profile_identity(b"i" * 32, None, 16000, "", "o200k_base", 8000) != (
+        profile_identity(b"i" * 32, None, 16000, "", "o200k_base", 4000)
+    )

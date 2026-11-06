@@ -21,7 +21,7 @@ from oam.indexing.entity_candidates import (
 from oam.indexing.store import IndexStore, input_digest
 
 
-def reference_candidate_ids(connection, authority, config, generation_id, excluded_source, vectors):
+def reference_candidate_ids(connection, authority, config, vectors):
     """Merge at most K owner-qualified ANN results per query, before existing name fusion."""
     if not vectors or not config.extraction.reference_max_facts:
         return []
@@ -37,7 +37,7 @@ def reference_candidate_ids(connection, authority, config, generation_id, exclud
         "SELECT n.unit_id,min(n.distance) AS distance FROM probes p CROSS JOIN LATERAL ("
         "SELECT u.unit_id,u.embedding <=> p.embedding AS distance FROM search_units u "
         "WHERE u.tenant_id=%s AND u.user_id=%s AND u.kind='fact' "
-        "AND u.generation_id=%s AND u.source_id<>%s AND (SELECT true FROM eligible f "
+        "AND (SELECT true FROM eligible f "
         "WHERE (f.tenant_id,f.user_id,f.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
         "ORDER BY u.embedding <=> p.embedding LIMIT %s) n "
         "GROUP BY n.unit_id ORDER BY distance,n.unit_id LIMIT %s",
@@ -45,8 +45,6 @@ def reference_candidate_ids(connection, authority, config, generation_id, exclud
             *(str(list(vector)) for vector in vectors),
             authority.tenant_id,
             authority.user_id,
-            generation_id,
-            excluded_source,
             config.extraction.reference_max_facts,
             config.extraction.reference_max_facts,
         ),
@@ -69,8 +67,8 @@ def eligible_reference_ids(connection, generation_id: str, ids: list[str]) -> se
         row[0]
         for row in connection.execute(
             f"SELECT unit_id FROM ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) eligible "
-            "WHERE kind='fact' AND generation_id=%s AND unit_id=ANY(%s)",
-            (generation_id, ids),
+            "WHERE kind='fact' AND unit_id=ANY(%s)",
+            (ids,),
         ).fetchall()
     }
 
@@ -85,7 +83,7 @@ def freeze_extraction_references(
 ) -> list[dict]:
     """Select and freeze prior-fact context before the existing extraction call.
 
-    Exclude the incoming source and offer only eligible L1 facts in this generation.
+    Offer eligible L1 facts, including previously completed source chunks.
     Reuse completed extraction; revise only unfinished inputs after revocation.
     """
     identity = (
@@ -130,14 +128,7 @@ def freeze_extraction_references(
             references = [ref for ref in references if ref["id"] in eligible]
         else:
             queries = vectors if vectors is not None else (vector,)
-            dense = reference_candidate_ids(
-                connection,
-                store.authority,
-                store.config,
-                store.generation_id,
-                store.source["source_id"],
-                queries,
-            )
+            dense = reference_candidate_ids(connection, store.authority, store.config, queries)
             name_candidates = eligible_entity_name_candidates(
                 connection,
                 store.config,
@@ -162,9 +153,9 @@ def freeze_extraction_references(
                 "WHERE (times.tenant_id,times.user_id,times.unit_id)="
                 "(eligible.tenant_id,eligible.user_id,eligible.unit_id)) "
                 f"FROM ({ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS}) eligible "
-                "WHERE kind='fact' AND generation_id=%s AND unit_id=ANY(%s) "
+                "WHERE kind='fact' AND unit_id=ANY(%s) "
                 "ORDER BY array_position(%s,unit_id)",
-                (store.generation_id, selected_ids, selected_ids),
+                (selected_ids, selected_ids),
             ).fetchall()
             candidates = tuple(
                 {

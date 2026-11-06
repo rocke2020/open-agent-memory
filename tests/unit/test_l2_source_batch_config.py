@@ -61,7 +61,8 @@ def test_source_batch_accepts_upper_bounds(tmp_path):
     "bundle",
     [None, {"seed_max": 32, "input_max_tokens": 32768, "target_max": 64}],
 )
-def test_source_batch_preserves_captured_legacy_index_generation(tmp_path, bundle):
+def test_source_batch_preserves_captured_legacy_index_generation(tmp_path, bundle, monkeypatch):
+    monkeypatch.setattr("oam.indexing.identity.INDEX_RECIPE", "oam-source-fact-insight-v38")
     config = _config(tmp_path, bundle).model_copy(
         update={
             "models": ModelsConfig(),

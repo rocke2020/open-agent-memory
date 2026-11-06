@@ -23,7 +23,7 @@ from oam.profiles.inputs import ProfileInputs, load_profile_inputs
 from oam.profiles.prompt import PROFILE_SYSTEM
 from oam.profiles.resources import public_profile_data_support
 from oam.profiles.selection import PROFILE_PURPOSE
-from oam.tokens import estimate_units, estimated_tokens
+from oam.tokens import estimate_units, estimated_tokens, resolve_counter
 
 
 class ProfileRefreshUnresolved(RuntimeError):
@@ -39,7 +39,7 @@ def _current_snapshot(connection, authority: AuthorizedUser):
         bind_user(cursor, authority)
         cursor.execute(
             'SELECT profile_revision,sections,content,instruction,support_ids,"references",'
-            "input_identity,policy_epoch,generation_id,published_at,input_coverage "
+            "input_identity,policy_epoch,generation_id,published_at,input_coverage,input_manifest "
             "FROM profiles WHERE tenant_id=%s AND user_id=%s AND profile_id='user' "
             "AND visible_to IS NULL ORDER BY profile_revision DESC LIMIT 1",
             (authority.tenant_id, authority.user_id),
@@ -47,12 +47,49 @@ def _current_snapshot(connection, authority: AuthorizedUser):
         return cursor.fetchone()
 
 
+def _latest_profile_instruction(connection, key: tuple[str, str]) -> str | None:
+    row = connection.execute(
+        "SELECT instruction FROM profiles WHERE tenant_id=%s AND user_id=%s "
+        "AND profile_id='user' ORDER BY profile_revision DESC LIMIT 1",
+        key,
+    ).fetchone()
+    return row[0] if row else None
+
+
 def profile_query_prefix(config: OAMConfig) -> str:
     return config.models.embedding.query_prefix if config.models.embedding else ""
 
 
+def _manifest_inputs_changed(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    return any(previous.get(key) != current.get(key) for key in ("units", "sources", "exact"))
+
+
+def _has_pending_delta(snapshot: dict[str, Any]) -> bool:
+    manifest = snapshot.get("input_manifest") or {}
+    return bool(manifest.get("pending")) and manifest.get("fallback_reason") != (
+        "incremental_input_budget"
+    )
+
+
+def _snapshot_support_unchanged(snapshot: dict[str, Any], current: dict[str, Any]) -> bool:
+    previous = snapshot.get("input_manifest") or {}
+    old_units, new_units = previous.get("units"), current.get("units")
+    if not isinstance(old_units, dict) or not isinstance(new_units, dict):
+        return True
+    for identifier in snapshot["support_ids"]:
+        key = hashlib.sha256(identifier.encode()).hexdigest()
+        if key in old_units and old_units[key] != new_units.get(key):
+            return False
+    return True
+
+
 def profile_identity(
-    input_identity: bytes, instruction: str | None, input_budget: int, query_prefix: str
+    input_identity: bytes,
+    instruction: str | None,
+    input_budget: int,
+    query_prefix: str,
+    tokenizer_identity: str,
+    memory_budget: int,
 ) -> bytes:
     recipe = json.dumps(
         [
@@ -62,6 +99,9 @@ def profile_identity(
             instruction,
             input_budget,
             query_prefix,
+            "profile-token-packing-v1",
+            tokenizer_identity,
+            memory_budget,
         ],
         ensure_ascii=False,
     )
@@ -102,6 +142,7 @@ def _view(
         snapshot is not None
         and not legacy_unavailable
         and set(snapshot["support_ids"]) <= inputs.eligible_support_ids
+        and _snapshot_support_unchanged(snapshot, inputs.manifest)
     )
     content = snapshot["content"] if snapshot and supported else None
     budget_omitted = content is not None and estimated_tokens(estimate_units(content)) > max_tokens
@@ -126,6 +167,8 @@ def _view(
         snapshot["instruction"],
         config.profile.max_input_tokens,
         profile_query_prefix(config),
+        resolve_counter(config.tokenizer, os.environ).identity,
+        config.profile.max_memory_tokens,
     ):
         freshness = "dirty"
     elif uncovered:
@@ -193,6 +236,7 @@ class ProfileService:
                 generation,
                 insights_enabled=self.config.index.insights_enabled,
                 stored_support_ids=stored_profile_support_ids(snapshot),
+                include_manifest=True,
             )
             result = _public_view(self.config, inputs, snapshot, max_tokens)
             SourceInspector._check_policy(connection, authority, inputs.policy_epoch)
@@ -209,11 +253,14 @@ class ProfileService:
         instruction: str | None = None,
         *,
         reset_instruction: bool = False,
+        mode: str = "incremental",
     ) -> dict[str, Any]:
         if not authority.allows("memory:append") or not authority.allows("memory:read"):
             raise PermissionError("Profile refresh is denied")
         if instruction is not None and reset_instruction:
             raise ValueError("instruction and reset_instruction cannot be combined")
+        if mode not in {"full", "incremental"}:
+            raise ValueError("Invalid Profile refresh mode")
         with self.pool.connection() as connection, connection.transaction():
             with connection.cursor() as cursor:
                 bind_user(cursor, authority)
@@ -229,6 +276,7 @@ class ProfileService:
                 authority,
                 generation,
                 insights_enabled=self.config.index.insights_enabled,
+                include_manifest=True,
             )
             snapshot = _current_snapshot(connection, authority)
             if reset_instruction:
@@ -236,12 +284,20 @@ class ProfileService:
             elif instruction is not None:
                 selected_instruction = instruction
             else:
-                selected_instruction = snapshot["instruction"] if snapshot else None
+                selected_instruction = (
+                    snapshot["instruction"]
+                    if snapshot
+                    else _latest_profile_instruction(
+                        connection, (authority.tenant_id, authority.user_id)
+                    )
+                )
             target_identity = profile_identity(
                 inputs.identity,
                 selected_instruction,
                 self.config.profile.max_input_tokens,
                 profile_query_prefix(self.config),
+                resolve_counter(self.config.tokenizer, os.environ).identity,
+                self.config.profile.max_memory_tokens,
             )
             active_rows = connection.execute(
                 "SELECT o.operation_id,o.request_hash,o.stage_state,w.dependency_ids,"
@@ -254,22 +310,39 @@ class ProfileService:
                 (authority.tenant_id, authority.user_id, generation),
             ).fetchall()
             for active in active_rows:
-                if active[2].get("instruction") != selected_instruction:
+                active_mode = active[2].get("mode") or "incremental"
+                if active_mode == "auto":
+                    active_mode = "incremental"
+                if (active[2].get("instruction"), active_mode) != (
+                    selected_instruction,
+                    mode,
+                ):
                     OperationRepository().cancel(connection, authority, active[0])
             row = next(
                 (
                     active
                     for active in active_rows
                     if active[2].get("instruction") == selected_instruction
+                    and (
+                        active[2].get("mode") == mode
+                        or mode == "incremental"
+                        and active[2].get("mode") in {None, "auto"}
+                    )
                 ),
                 None,
             )
             if (
                 snapshot is not None
+                and mode != "full"
                 and snapshot["content"] is not None
                 and set(snapshot["support_ids"]) <= inputs.eligible_support_ids
                 and bytes(snapshot["input_identity"]) == target_identity
+                and not _manifest_inputs_changed(
+                    snapshot.get("input_manifest") or {}, inputs.manifest
+                )
                 and not inputs.waiting_source_ids
+                and not _has_pending_delta(snapshot)
+                and not (mode == "incremental" and not snapshot.get("input_manifest"))
             ):
                 return {
                     "status": "unchanged",
@@ -359,6 +432,7 @@ class ProfileService:
                             "uncovered_inputs": inputs.uncovered_inputs,
                             "scope_identity": inputs.scope_identity.hex(),
                             "instruction": selected_instruction,
+                            "mode": mode,
                         }
                     ),
                 ),

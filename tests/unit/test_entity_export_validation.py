@@ -169,3 +169,24 @@ def test_validator_rejects_entity_quote_outside_owning_fact_support(tmp_path, wi
 
     with pytest.raises(ExportValidationError, match="entity"):
         validate_directory(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "change", [{"name_id": "withdrawn"}, {"kind": "canonical"}, {"quote": "invented"}]
+)
+def test_validator_rejects_invalid_nested_entity_mention(tmp_path, change):
+    records = entity_records()
+    member = next(r for r in records if r["kind"] == "entity_membership")
+    member["source_mentions"] = [
+        {
+            "name_id": "alias",
+            "name": "NR",
+            "kind": "alias",
+            "quote": "Nova Research, also called NR",
+            "span": [26, 28],
+            **change,
+        }
+    ]
+    write_export(tmp_path, records)
+    with pytest.raises(ExportValidationError, match="entity"):
+        validate_directory(tmp_path)

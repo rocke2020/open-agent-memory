@@ -53,6 +53,8 @@ class MemoryStore:
 
     def execute(self, query, parameters):
         self.statements.append((query, parameters))
+        if "SELECT o.operation_id,o.stage_state FROM operations o JOIN work_units w" in query:
+            return SimpleNamespace(fetchone=lambda: (self.claim.operation_id, self.stages))
         if "SELECT stage_state FROM operations" in query:
             return SimpleNamespace(fetchone=lambda: (self.stages,))
         if "lifecycle_state='excluded'" in query:

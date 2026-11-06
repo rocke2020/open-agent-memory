@@ -216,7 +216,7 @@ class ProfileCursor:
             self.rows = self.connection.pending
         elif "/* profile:insight_support */" in query:
             self.rows = self.connection.insight_links
-        elif "/* profile:passages */" in query:
+        elif "/* profile:passages */" in query or "/* profile:manifest_support */" in query:
             self.rows = self.connection.passages
         elif "set_config('oam.tenant_id'" in query:
             self.rows = []
@@ -590,6 +590,8 @@ def test_profile_read_uses_stored_collection_generation_and_keeps_support_checks
             None,
             config.profile.max_input_tokens,
             (config.models.embedding.query_prefix if config.models.embedding else ""),
+            "o200k_base",
+            config.profile.max_memory_tokens,
         ),
         "published_at": None,
     }
@@ -642,6 +644,8 @@ def test_profile_read_reports_published_selection_coverage(monkeypatch) -> None:
             None,
             config.profile.max_input_tokens,
             (config.models.embedding.query_prefix if config.models.embedding else ""),
+            "o200k_base",
+            config.profile.max_memory_tokens,
         ),
         "published_at": None,
         "input_coverage": {"unexamined": 3, "budget_omitted": 2},
@@ -678,6 +682,8 @@ def test_unindexed_stored_profile_keeps_its_generation_and_current_identity(
             None,
             config.profile.max_input_tokens,
             (config.models.embedding.query_prefix if config.models.embedding else ""),
+            "o200k_base",
+            config.profile.max_memory_tokens,
         ),
         "published_at": None,
     }

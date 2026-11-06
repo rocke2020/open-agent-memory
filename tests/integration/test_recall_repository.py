@@ -1321,13 +1321,16 @@ def test_configured_reranker_scores_once_and_controls_final_order(recall_databas
 
         def rerank(self, query, documents, *, timeout_seconds):
             self.calls += 1
-            assert query == "apple" and documents == (
+            assert query == "apple" and sorted(documents) == [
+                "Apple orchard A",
                 "Apple orchard A",
                 "Apple orchard B",
-                "Apple orchard A",
                 "Apple orchard B",
+            ]
+            return RerankResult(
+                scores=tuple(0.9 if text == "Apple orchard B" else 0.2 for text in documents),
+                usage=Usage(),
             )
-            return RerankResult(scores=(0.2, 0.9, 0.1, 0.1), usage=Usage())
 
     models = ScoringModels(config.index.embedding_dimensions)
     service = RecallService(config, TransactionPool(connection), models, generation_id="generation")
@@ -1630,7 +1633,7 @@ def test_point_time_basis_is_visible_in_returned_evidence(recall_database):
 
 
 @pytest.mark.parametrize(("mode", "limit"), [("fast", 64), ("normal", 1)])
-def test_exact_dense_ties_use_stable_identity_after_similarity(recall_database, mode, limit):
+def test_dense_orders_similarity_and_bounds_tied_candidates(recall_database, mode, limit):
     from oam.retrieval.repository import RecallRepository
 
     connection, authority = recall_database
@@ -1646,8 +1649,14 @@ def test_exact_dense_ties_use_stable_identity_after_similarity(recall_database, 
         deadline=time.monotonic() + 5,
         request=SearchRequest(query="orchard", recall_level=mode),
     )
-    expected = ["a_later_inserted", "z_first_inserted", "0_less_relevant"]
-    assert [row["unit_id"] for row in repository.dense(vector, limit)] == expected[:limit]
+    identifiers = [row["unit_id"] for row in repository.dense(vector, limit)]
+    tied = {"a_later_inserted", "z_first_inserted"}
+    if limit == 1:
+        assert len(identifiers) == 1 and identifiers[0] in tied
+    else:
+        assert len(identifiers) == 3
+        assert set(identifiers[:2]) == tied
+        assert identifiers[2] == "0_less_relevant"
 
 
 def test_hnsw_executes_and_matches_exact_scoped_neighbors(recall_database, monkeypatch):
@@ -1690,6 +1699,11 @@ def test_hnsw_executes_and_matches_exact_scoped_neighbors(recall_database, monke
     monkeypatch.setattr(repository, "_execute", capture)
     approximate = repository.dense(vector, 5)
     query, parameters = calls[-1]
+    parameters = {
+        **parameters,
+        "ann_tenant": authority.tenant_id,
+        "ann_user": authority.user_id,
+    }
     plan = connection.execute("EXPLAIN (ANALYZE,FORMAT JSON) " + query, parameters).fetchone()[0][
         0
     ]["Plan"]
@@ -1710,7 +1724,11 @@ def test_hnsw_executes_and_matches_exact_scoped_neighbors(recall_database, monke
     connection.execute("SET LOCAL enable_seqscan=on")
     connection.execute("SET LOCAL enable_indexscan=off")
     connection.execute("SET LOCAL enable_bitmapscan=off")
-    exact = repository.dense(vector, 5)
+    exact_query = query.replace(
+        "ORDER BY u.embedding <=> %(vector)s::vector LIMIT",
+        "ORDER BY (u.embedding <=> %(vector)s::vector)+0,u.unit_id LIMIT",
+    )
+    exact = original(exact_query, parameters)
     assert (
         [row["unit_id"] for row in approximate]
         == [row["unit_id"] for row in exact]

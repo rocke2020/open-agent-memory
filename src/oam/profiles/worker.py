@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import logging
+import hashlib
+import json
+import os
 import time
 
 import httpx
 import psycopg
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
@@ -14,16 +17,42 @@ from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.db.context import bind_user
 from oam.models.runtime import ModelOutputError
+from oam.profiles.delta import (
+    INCREMENTAL_SYSTEM,
+    build_incremental_document,
+    incremental_candidates,
+    incremental_system,
+    parse_profile_blocks,
+    prune_profile_baseline,
+)
 from oam.profiles.document import build_profile_document
 from oam.profiles.inputs import MAX_PROMPT_UNITS, load_profile_inputs
 from oam.profiles.prompt import PROFILE_SYSTEM
 from oam.profiles.selection import PROFILE_PURPOSE, pack_profile_request, rank_profile_candidates
 from oam.profiles.service import profile_identity, profile_query_prefix
+from oam.tokens import resolve_counter
 from oam.workers.claims import ClaimedWork
 
 
 class StaleProfileWork(RuntimeError):
     """A claimed refresh no longer owns the current target."""
+
+
+def _latest_snapshot(connection, authority: AuthorizedUser):
+    """Worker-only baseline, including a closed copy sanitized by removal cleanup."""
+    with connection.cursor(row_factory=dict_row) as cursor:
+        bind_user(cursor, authority)
+        cursor.execute(
+            'SELECT profile_revision,content,instruction,support_ids,"references",input_manifest '
+            "FROM profiles WHERE tenant_id=%s AND user_id=%s AND profile_id='user' "
+            "ORDER BY profile_revision DESC LIMIT 1",
+            (authority.tenant_id, authority.user_id),
+        )
+        return cursor.fetchone()
+
+
+def _snapshot_fingerprint(snapshot) -> str:
+    return json.dumps(snapshot, sort_keys=True, default=str)
 
 
 def _guard(connection, claim: ClaimedWork, worker_id: str) -> None:
@@ -85,6 +114,7 @@ def process_profile_claim(
     claim: ClaimedWork,
     worker_id: str,
 ) -> None:
+    started = time.monotonic()
     authority = AuthorizedUser(
         "worker",
         claim.tenant_id,
@@ -92,6 +122,9 @@ def process_profile_claim(
         claim.user_id,
         frozenset({"memory:read", "memory:append"}),
     )
+    counter = getattr(models, "ingestion_counter", None)
+    if counter is None:
+        counter = resolve_counter(config.tokenizer, os.environ)
     key = (claim.tenant_id, claim.user_id)
     generation = None
     usage = {}
@@ -107,17 +140,25 @@ def process_profile_claim(
             bind_user(connection.cursor(), authority)
             _guard(connection, claim, worker_id)
             generation = claim_generation(connection, claim)
+            baseline = _latest_snapshot(connection, authority)
+            baseline_fingerprint = _snapshot_fingerprint(baseline)
             inputs = load_profile_inputs(
-                connection, authority, generation, insights_enabled=config.index.insights_enabled
+                connection,
+                authority,
+                generation,
+                insights_enabled=config.index.insights_enabled,
+                include_manifest=True,
+                stored_support_ids=set(baseline["support_ids"]) if baseline else None,
             )
-            digest, dependencies, scope_identity, instruction = connection.execute(
+            digest, dependencies, scope_identity, instruction, requested_mode = connection.execute(
                 "SELECT w.input_digest,w.dependency_ids,o.stage_state->>'scope_identity',"
-                "o.stage_state->>'instruction' "
+                "o.stage_state->>'instruction',o.stage_state->>'mode' "
                 "FROM work_units w JOIN operations o "
                 "USING(tenant_id,user_id,operation_id) "
                 "WHERE w.tenant_id=%s AND w.user_id=%s AND w.work_unit_id=%s",
                 (*key, claim.work_unit_id),
             ).fetchone()
+            requested_mode = "incremental" if requested_mode in {None, "auto"} else requested_mode
             if scope_identity is not None and scope_identity != inputs.scope_identity.hex():
                 raise StaleProfileWork("Profile source scope changed before generation")
             target_identity = profile_identity(
@@ -125,7 +166,57 @@ def process_profile_claim(
                 instruction,
                 config.profile.max_input_tokens,
                 profile_query_prefix(config),
+                counter.identity,
+                config.profile.max_memory_tokens,
             )
+            manifest = dict(inputs.manifest)
+            recipe = profile_identity(
+                bytes(32),
+                instruction,
+                config.profile.max_input_tokens,
+                profile_query_prefix(config),
+                counter.identity,
+                config.profile.max_memory_tokens,
+            )
+            manifest["recipe"] = hashlib.sha256(recipe + INCREMENTAL_SYSTEM.encode()).hexdigest()
+            candidate_ids = None
+            candidate_keys: set[str] = set()
+            pruned_blocks = 0
+            actual_mode, fallback_reason = "full", None
+            if requested_mode != "full":
+                fallback_reason = "incompatible_baseline"
+                if (
+                    baseline
+                    and baseline["content"]
+                    and instruction is None
+                    and not inputs.exact_fields
+                ):
+                    remaining = incremental_candidates(baseline.get("input_manifest"), manifest)
+                    if remaining is not None:
+                        try:
+                            baseline, pruned_blocks = prune_profile_baseline(
+                                baseline,
+                                manifest,
+                                inputs.stored_support_inputs,
+                                max_content_bytes=max(
+                                    config.profile.max_content_bytes,
+                                    len(baseline["content"].encode()),
+                                ),
+                            )
+                            blocks = parse_profile_blocks(
+                                baseline["content"], baseline["support_ids"]
+                            )
+                        except ValueError:
+                            pass
+                        else:
+                            candidate_keys = remaining
+                            candidate_ids = [
+                                identifier
+                                for identifier in inputs.supported
+                                if hashlib.sha256(identifier.encode()).hexdigest() in remaining
+                            ]
+                            actual_mode, fallback_reason = "incremental", None
+            system = incremental_system(blocks) if actual_mode == "incremental" else PROFILE_SYSTEM
             if dependencies:
                 if inputs.waiting_source_ids:
                     raise StaleProfileWork("New Profile inputs are still processing")
@@ -142,7 +233,11 @@ def process_profile_claim(
                 "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
                 (*key, claim.operation_id),
             )
-            needs_model = bool(inputs.prompt_inputs or instruction and inputs.exact_fields)
+            needs_model = (
+                bool(candidate_ids)
+                if actual_mode == "incremental"
+                else bool(inputs.prompt_inputs or instruction and inputs.exact_fields)
+            )
             if needs_model:
                 _renew_profile_lease(connection, config, claim, worker_id)
                 connection.execute(
@@ -163,67 +258,120 @@ def process_profile_claim(
                 )
                 embedding_usage = embedding.usage.model_dump(mode="json")
                 model_stage = None
-                connection_context = (
-                    pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
-                    if pool is not None
-                    else psycopg.connect(content_dsn)
-                )
-                with connection_context as connection, connection.transaction():
-                    bind_user(connection.cursor(), authority)
-                    _guard(connection, claim, worker_id)
-                    selected_ids = rank_profile_candidates(
-                        connection, embedding.vectors[0], MAX_PROMPT_UNITS
+
+                def select_candidates(candidate_scope):
+                    connection_context = (
+                        pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
+                        if pool is not None
+                        else psycopg.connect(content_dsn)
                     )
-                    ranked = load_profile_inputs(
-                        connection,
-                        authority,
-                        generation,
-                        insights_enabled=config.index.insights_enabled,
-                        selected_unit_ids=selected_ids,
-                    )
-                    if (
-                        profile_identity(
-                            ranked.identity,
-                            instruction,
-                            config.profile.max_input_tokens,
-                            profile_query_prefix(config),
+                    with connection_context as connection, connection.transaction():
+                        bind_user(connection.cursor(), authority)
+                        _guard(connection, claim, worker_id)
+                        selected_ids = rank_profile_candidates(
+                            connection,
+                            embedding.vectors[0],
+                            MAX_PROMPT_UNITS,
+                            **(
+                                {"candidate_ids": candidate_scope}
+                                if candidate_scope is not None
+                                else {}
+                            ),
                         )
-                        != target_identity
-                    ):
-                        raise StaleProfileWork("Profile inputs changed during selection")
-                    _renew_profile_lease(connection, config, claim, worker_id)
-                candidates = ranked.prompt_inputs
+                        ranked = load_profile_inputs(
+                            connection,
+                            authority,
+                            generation,
+                            insights_enabled=config.index.insights_enabled,
+                            selected_unit_ids=selected_ids,
+                            include_manifest=True,
+                        )
+                        if ranked.manifest != inputs.manifest:
+                            raise StaleProfileWork("Profile support changed during selection")
+                        if (
+                            profile_identity(
+                                ranked.identity,
+                                instruction,
+                                config.profile.max_input_tokens,
+                                profile_query_prefix(config),
+                                counter.identity,
+                                config.profile.max_memory_tokens,
+                            )
+                            != target_identity
+                        ):
+                            raise StaleProfileWork("Profile inputs changed during selection")
+                        _renew_profile_lease(connection, config, claim, worker_id)
+                    return ranked.prompt_inputs
+
+                candidates = select_candidates(candidate_ids)
             else:
                 candidates = []
-            packed = pack_profile_request(
-                candidates,
-                exact_fields=inputs.exact_fields,
-                instruction=instruction,
-                system=PROFILE_SYSTEM,
-                max_input_tokens=config.profile.max_input_tokens,
-            )
+
+            def pack_candidates():
+                return pack_profile_request(
+                    candidates,
+                    exact_fields=inputs.exact_fields,
+                    instruction=instruction,
+                    system=system,
+                    max_input_tokens=config.profile.max_input_tokens,
+                    max_memory_tokens=config.profile.max_memory_tokens,
+                    counter=counter,
+                )
+
+            try:
+                packed = pack_candidates()
+            except ValueError:
+                if actual_mode != "incremental":
+                    raise
+                actual_mode, fallback_reason = "full", "incremental_input_budget"
+                system = PROFILE_SYSTEM
+                candidates = select_candidates(None)
+                packed = pack_candidates()
             selected_inputs = packed.inputs
-            uncovered = eligible_count - len(selected_inputs)
-            input_coverage = {
-                "unexamined": eligible_count - len(candidates),
-                "budget_omitted": packed.uncovered,
-                "selected": len(selected_inputs),
+            examined_before = (
+                {
+                    key
+                    for key in baseline["input_manifest"]["examined"]
+                    if manifest["units"].get(key) == baseline["input_manifest"]["units"].get(key)
+                }
+                if actual_mode == "incremental"
+                else set()
+            )
+            examined = examined_before | {
+                hashlib.sha256(item["id"].encode()).hexdigest() for item in selected_inputs
             }
-            logging.getLogger(__name__).info(
-                "profile_selection operation_id=%s eligible=%d candidates=%d selected=%d "
-                "unexamined=%d budget_omitted=%d duration_ms=%.1f",
-                claim.operation_id,
-                eligible_count,
-                len(candidates),
-                len(selected_inputs),
-                eligible_count - len(candidates),
-                packed.uncovered,
-                (time.monotonic() - selection_started) * 1000,
+            uncovered = eligible_count - len(examined)
+            input_coverage = {
+                "unexamined": uncovered - packed.uncovered,
+                "budget_omitted": packed.uncovered,
+                "selected": len(examined),
+            }
+            print(
+                json.dumps(
+                    {
+                        "stage": "profile_selection",
+                        "operation_id": claim.operation_id,
+                        "eligible": eligible_count,
+                        "candidates": len(candidates),
+                        "selected": len(selected_inputs),
+                        "unexamined": input_coverage["unexamined"],
+                        "mode": actual_mode,
+                        "fallback_reason": fallback_reason,
+                        "previously_examined": len(examined_before),
+                        "budget_omitted": packed.uncovered,
+                        "memory_tokens": packed.memory_tokens,
+                        "memory_limit": config.profile.max_memory_tokens,
+                        "input_tokens": packed.input_tokens,
+                        "input_limit": config.profile.max_input_tokens,
+                        "duration_ms": round((time.monotonic() - selection_started) * 1000, 2),
+                    }
+                ),
+                flush=True,
             )
             model_stage = "profile"
             result = models.generate(
                 "profile",
-                system=PROFILE_SYSTEM,
+                system=system,
                 user=packed.user,
                 max_output_tokens=config.profile.max_output_tokens,
                 timeout_seconds=config.profile.attempt_timeout_seconds,
@@ -236,14 +384,40 @@ def process_profile_claim(
             content, usage, generation_calls = None, {}, 0
             embedding_usage = {}
             selected_inputs, uncovered = [], 0
-            input_coverage = {"unexamined": 0, "budget_omitted": 0, "selected": 0}
-        document = build_profile_document(
-            content,
-            selected_inputs,
-            inputs.exact_fields,
-            instruction=instruction if needs_model else None,
-            max_content_bytes=config.profile.max_content_bytes,
-        )
+            examined = (
+                {
+                    key
+                    for key in baseline["input_manifest"]["examined"]
+                    if manifest["units"].get(key) == baseline["input_manifest"]["units"].get(key)
+                }
+                if actual_mode == "incremental"
+                else set()
+            )
+            uncovered = len(inputs.supported) - len(examined)
+            input_coverage = {
+                "unexamined": uncovered,
+                "budget_omitted": 0,
+                "selected": len(examined),
+            }
+        manifest["examined"] = sorted(examined)
+        manifest["pending"] = sorted(candidate_keys - examined)
+        if fallback_reason == "incremental_input_budget":
+            manifest["fallback_reason"] = fallback_reason
+        if actual_mode == "incremental":
+            document = build_incremental_document(
+                content if needs_model else '{"no_change":true,"edits":[]}',
+                baseline,
+                selected_inputs,
+                max_content_bytes=config.profile.max_content_bytes,
+            )
+        else:
+            document = build_profile_document(
+                content,
+                selected_inputs,
+                inputs.exact_fields,
+                instruction=instruction if needs_model else None,
+                max_content_bytes=config.profile.max_content_bytes,
+            )
         connection_context = (
             pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
             if pool is not None
@@ -253,14 +427,25 @@ def process_profile_claim(
             bind_user(connection.cursor(), authority)
             _guard(connection, claim, worker_id)
             current = load_profile_inputs(
-                connection, authority, generation, insights_enabled=config.index.insights_enabled
+                connection,
+                authority,
+                generation,
+                insights_enabled=config.index.insights_enabled,
+                include_manifest=True,
             )
+            current_baseline = _latest_snapshot(connection, authority)
+            if _snapshot_fingerprint(current_baseline) != baseline_fingerprint:
+                raise StaleProfileWork("Profile baseline changed during generation")
+            if current.manifest != inputs.manifest:
+                raise StaleProfileWork("Profile support changed during generation")
             if (
                 profile_identity(
                     current.identity,
                     instruction,
                     config.profile.max_input_tokens,
                     profile_query_prefix(config),
+                    counter.identity,
+                    config.profile.max_memory_tokens,
                 )
                 != target_identity
             ):
@@ -283,8 +468,9 @@ def process_profile_claim(
             connection.execute(
                 "INSERT INTO profiles(tenant_id,user_id,profile_id,profile_revision,sections,"
                 'content,instruction,support_ids,"references",input_identity,policy_epoch,'
-                "generation_id,visible_from,published_at,input_coverage) "
-                "VALUES (%s,%s,'user',%s,'{}'::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp(),%s)",
+                "generation_id,visible_from,published_at,input_manifest,input_coverage) "
+                "VALUES (%s,%s,'user',%s,'{}'::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,"
+                "clock_timestamp(),%s,%s)",
                 (
                     *key,
                     revision,
@@ -296,6 +482,7 @@ def process_profile_claim(
                     inputs.policy_epoch,
                     generation,
                     visible_from,
+                    Jsonb(manifest),
                     Jsonb(input_coverage),
                 ),
             )
@@ -321,6 +508,10 @@ def process_profile_claim(
                 (
                     Jsonb(
                         {
+                            "mode": actual_mode,
+                            "requested_mode": requested_mode or "incremental",
+                            "fallback_reason": fallback_reason,
+                            "pruned_blocks": pruned_blocks,
                             "profile_current": not inputs.pending_inputs and not uncovered,
                             "pending_inputs": inputs.pending_inputs,
                             "failed_inputs": inputs.failed_inputs,
@@ -335,6 +526,21 @@ def process_profile_claim(
                     claim.operation_id,
                 ),
             )
+        print(
+            json.dumps(
+                {
+                    "stage": "profile_refresh_published",
+                    "operation_id": claim.operation_id,
+                    "mode": actual_mode,
+                    "fallback_reason": fallback_reason,
+                    "pruned_blocks": pruned_blocks,
+                    "generation_calls": generation_calls,
+                    "uncovered_inputs": uncovered,
+                    "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                }
+            ),
+            flush=True,
+        )
     except Exception as error:
         if isinstance(error, ModelOutputError) and error.usage is not None:
             if model_stage == "embedding":

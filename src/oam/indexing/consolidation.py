@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import zip_longest
 from threading import Lock
 
+from psycopg import sql
 from psycopg.rows import dict_row
 
 from oam.db.ann import configure_ann
@@ -31,13 +32,17 @@ INSIGHT_PROTECTED_TARGET_RANKS = 2
 class InsightLookup(RecallRepository):
     """Reuse direct recall ranking with Insight eligibility before each limit."""
 
+    def __init__(self, connection, authority, config, *, generation_id, deadline):
+        self.generation_predicate = "u.generation_id=" + sql.Literal(generation_id).as_string()
+        super().__init__(connection, authority, config, deadline=deadline)
+
     @property
     def lexical_candidate_predicate(self) -> str:
-        return "u.kind='insight'"
+        return "u.kind='insight' AND " + self.generation_predicate
 
     @property
     def candidate_units_sql(self) -> str:
-        return ELIGIBLE_UNITS_CANDIDATE + " AND u.kind='insight'"
+        return ELIGIBLE_UNITS_CANDIDATE + " AND u.kind='insight' AND " + self.generation_predicate
 
     def _eligible(self, *, temporal=False, candidate_facts=False) -> str:
         return (
@@ -72,7 +77,7 @@ def _pending_group(store, connection, new_fact_ids, examined):
         connection,
         f"WITH eligible AS ({ELIGIBLE_UNITS}), pending AS MATERIALIZED ("
         "SELECT * FROM eligible WHERE kind='fact' AND source_id=%s AND source_version=%s "
-        "AND unit_id=ANY(%s) AND NOT (unit_id=ANY(%s))), "
+        "AND generation_id=%s AND unit_id=ANY(%s) AND NOT (unit_id=ANY(%s))), "
         "anchor AS (SELECT * FROM pending ORDER BY created_at,unit_id LIMIT 1) "
         "SELECT p.*,p.embedding::text AS vector FROM pending p CROSS JOIN anchor a "
         "WHERE p.unit_id=a.unit_id OR "
@@ -82,6 +87,7 @@ def _pending_group(store, connection, new_fact_ids, examined):
         (
             store.source["source_id"],
             store.source["source_version"],
+            store.generation_id,
             new_fact_ids,
             list(examined),
             store.config.index.semantic_link_min_similarity,
@@ -96,6 +102,7 @@ def _lookup_targets(store, connection, seeds, *, deadline=None):
         connection,
         store.authority,
         store.config,
+        generation_id=store.generation_id,
         deadline=(
             deadline
             if deadline is not None
@@ -133,16 +140,18 @@ def _lookup_targets(store, connection, seeds, *, deadline=None):
         "FROM eligible u JOIN insights i ON "
         "(i.tenant_id,i.user_id,i.insight_id,i.revision)="
         "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision) "
-        "WHERE u.kind='insight' AND u.unit_id=ANY(%s) "
+        "WHERE u.kind='insight' AND u.generation_id=%s AND u.unit_id=ANY(%s) "
         "ORDER BY array_position(%s,u.unit_id)",
-        (identifiers, identifiers),
+        (store.generation_id, identifiers, identifiers),
     )
 
 
 def _fact_context(store, connection, seeds, targets, *, seed_only=False):
     seed_ids = [seed["unit_id"] for seed in seeds]
     support_ids = sorted({support["id"] for target in targets for support in target["supports"]})
-    eligible = ELIGIBLE_UNITS + (" AND u.unit_id=ANY(%s)" if seed_only else "")
+    eligible = (
+        ELIGIBLE_UNITS + " AND u.generation_id=%s" + (" AND u.unit_id=ANY(%s)" if seed_only else "")
+    )
     configure_ann(connection, store.config)
     return _rows(
         connection,
@@ -159,7 +168,7 @@ def _fact_context(store, connection, seeds, targets, *, seed_only=False):
         "(qualified.tenant_id,qualified.user_id,qualified.unit_id)="
         "(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
         "ORDER BY u.embedding <=> seed.embedding LIMIT %s) n), "
-        "candidates AS (SELECT * FROM eligible WHERE kind='fact' "
+        "candidates AS MATERIALIZED (SELECT * FROM eligible WHERE kind='fact' "
         "AND unit_id IN (SELECT unit_id FROM candidate_ids)), "
         "candidate_annotations AS (SELECT candidate.*,"
         "(SELECT jsonb_agg(ut.detail ORDER BY ut.annotation_id) FROM unit_times ut WHERE "
@@ -171,7 +180,8 @@ def _fact_context(store, connection, seeds, targets, *, seed_only=False):
         "SELECT * FROM ranked WHERE unit_id=ANY(%s) OR memory_id=ANY(%s) "
         "OR 1-distance>=%s ORDER BY (unit_id=ANY(%s)) DESC,"
         "(memory_id=ANY(%s)) DESC,distance,unit_id LIMIT %s",
-        ((seed_ids,) if seed_only else ())
+        (store.generation_id,)
+        + ((seed_ids,) if seed_only else ())
         + (
             seed_ids,
             seed_ids,
@@ -224,19 +234,38 @@ def _pack_facts(facts, seeds, targets, config):
     return selected
 
 
-def _freeze_group(store, connection, seeds, *, initial_targets=None, deadline=None):
+def _seed_target_candidates(store, connection, seeds, *, deadline=None):
+    return [_lookup_targets(store, connection, [seed], deadline=deadline) for seed in seeds]
+
+
+def _merge_target_candidates(ranked, limit):
+    targets, seen = [], set()
+    for level in zip_longest(*ranked):
+        for target in level:
+            if target is not None and target["id"] not in seen:
+                seen.add(target["id"])
+                targets.append(target)
+                if len(targets) == limit:
+                    return targets
+    return targets
+
+
+def _freeze_group(store, connection, seeds, *, initial_candidates=None, deadline=None):
+    ranked = (
+        _seed_target_candidates(store, connection, seeds, deadline=deadline)
+        if initial_candidates is None
+        else initial_candidates
+    )
     history_loads_avoided = 0
     while seeds:
         if deadline is not None:
             _set_preparation_timeout(connection, deadline)
-        targets = (
-            _lookup_targets(
-                store, connection, seeds, **({"deadline": deadline} if deadline else {})
-            )
-            if initial_targets is None
-            else initial_targets
-        )
-        initial_targets = None
+        candidates = ranked[: len(seeds)]
+        targets = _merge_target_candidates(candidates, store.config.index.insight_candidate_max)
+        required = {rows[0]["id"] for rows in candidates if rows}
+        if not required <= {target["id"] for target in targets}:
+            seeds = seeds[:-1]
+            continue
         candidate_count = len(targets)
         while True:
             public_targets = tuple(
@@ -290,11 +319,12 @@ def _pending_source_batch(store, connection, new_fact_ids, examined, *, config=N
         connection,
         f"WITH eligible AS ({ELIGIBLE_UNITS}) "
         "SELECT *,embedding::text AS vector FROM eligible WHERE kind='fact' "
-        "AND source_id=%s AND source_version=%s AND unit_id=ANY(%s) "
+        "AND source_id=%s AND source_version=%s AND generation_id=%s AND unit_id=ANY(%s) "
         "AND NOT (unit_id=ANY(%s)) ORDER BY created_at,unit_id LIMIT %s",
         (
             store.source["source_id"],
             store.source["source_version"],
+            store.generation_id,
             new_fact_ids,
             list(examined),
             min(config.index.insight_seed_max, config.extraction.max_facts_per_group),
@@ -519,8 +549,8 @@ def _publish_group(store, connection, *, facts, seeds, targets, prepared, digest
     }
     eligible = connection.execute(
         f"WITH eligible AS ({ELIGIBLE_UNITS}) SELECT DISTINCT memory_id FROM eligible "
-        "WHERE kind='fact' AND memory_id=ANY(%s)",
-        (sorted(required_support),),
+        "WHERE kind='fact' AND generation_id=%s AND memory_id=ANY(%s)",
+        (store.generation_id, sorted(required_support)),
     ).fetchall()
     if {row[0] for row in eligible} != required_support or any(
         support["revision"] != MEMORY_REVISION
@@ -628,7 +658,11 @@ def _parallel_groups(store, connection, new_fact_ids, examined, *, deadline=None
 
     def lookup(group):
         with store.transaction(nonblocking_read=True, deadline=deadline) as read:
-            return None if read is None else _lookup_targets(store, read, group, deadline=deadline)
+            return (
+                None
+                if read is None
+                else _seed_target_candidates(store, read, group, deadline=deadline)
+            )
 
     admitted_reads = fallbacks = next_result = 0
     next_submission = 1
@@ -647,18 +681,29 @@ def _parallel_groups(store, connection, new_fact_ids, examined, *, deadline=None
             while next_result < len(pending) and len(selected) < cap:
                 group = pending[next_result]
                 if next_result == 0:
-                    initial_targets = _lookup_targets(store, connection, group, deadline=deadline)
+                    initial_candidates = _seed_target_candidates(
+                        store, connection, group, deadline=deadline
+                    )
                 else:
-                    initial_targets = futures.pop(next_result).result()
+                    initial_candidates = futures.pop(next_result).result()
                 next_result += 1
-                if initial_targets is None:
+                if initial_candidates is None:
                     fallbacks += 1
-                    initial_targets = _lookup_targets(store, connection, group, deadline=deadline)
+                    initial_candidates = _seed_target_candidates(
+                        store, connection, group, deadline=deadline
+                    )
                 elif next_result > 1:
                     admitted_reads += 1
+                initial_targets = _merge_target_candidates(
+                    initial_candidates, store.config.index.insight_candidate_max
+                )
                 if not ({target["id"] for target in initial_targets} & target_ids):
                     frozen = _freeze_group(
-                        store, connection, group, initial_targets=initial_targets, deadline=deadline
+                        store,
+                        connection,
+                        group,
+                        initial_candidates=initial_candidates,
+                        deadline=deadline,
                     )
                     facts, _, targets, _ = frozen
                     candidate_targets = {target["id"] for target in targets}
@@ -703,6 +748,7 @@ def _group_inputs(store, facts, seeds, targets, private_targets, *, config=None)
                     "insight_generation_concurrency",
                     "insight_seed_policy",
                     "insight_source_batch",
+                    "generation_token_budget",
                 },
             ),
             "extraction": config.extraction.model_dump(mode="json"),

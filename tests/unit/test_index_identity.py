@@ -197,7 +197,8 @@ def test_extraction_prompt_revision_invalidates_index_generation(monkeypatch):
     assert identity.index_generation(config, {}) != current
 
 
-def test_explicit_legacy_counter_preserves_compatible_prior_generation():
+def test_explicit_legacy_counter_preserves_compatible_prior_generation(monkeypatch):
+    monkeypatch.setattr("oam.indexing.identity.INDEX_RECIPE", "oam-source-fact-insight-v38")
     from oam.config import TokenizerConfig
     from oam.indexing.identity import index_generation
 

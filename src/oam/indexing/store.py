@@ -22,6 +22,7 @@ from oam.auth.credentials import AuthorizedUser
 from oam.capacity import CAPACITY_POLL_SECONDS, CapacityUnavailable
 from oam.config import InsightSourceBatchConfig, OAMConfig
 from oam.db.context import bind_user
+from oam.indexing.budget import GenerationBudgetRejection
 from oam.models.embedding_inputs import EmbeddingInputLimitError
 from oam.workers.claims import RENEW_LEASE_SQL, ClaimedWork
 
@@ -481,8 +482,11 @@ class IndexStore:
             self._unsettled_model_stages.add(stage_ref)
         try:
             output = produce()
-        except EmbeddingInputLimitError:
-            self._settle_local_rejection(stage_ref)
+        except (EmbeddingInputLimitError, GenerationBudgetRejection) as error:
+            if isinstance(error, GenerationBudgetRejection) and error.has_prior_generation_usage:
+                self._model_stage_failures[stage_ref] = error
+            else:
+                self._settle_local_rejection(stage_ref)
             raise
         except Exception as error:
             self._model_stage_failures = {
@@ -605,7 +609,10 @@ class IndexStore:
                 try:
                     output = future.result()
                 except Exception as error:
-                    if isinstance(error, EmbeddingInputLimitError):
+                    if isinstance(error, EmbeddingInputLimitError) or (
+                        isinstance(error, GenerationBudgetRejection)
+                        and not error.has_prior_generation_usage
+                    ):
                         self._settle_local_rejection(stage)
                     else:
                         self._model_stage_failures[stage] = error
@@ -906,58 +913,15 @@ class IndexStore:
                     },
                 )
             if schedule_consolidation:
-                consolidation_id = stable_id(
-                    "op_consolidate", self.claim.operation_id, self.generation_id
-                )
-                work_id = stable_id("work_consolidate", consolidation_id)
-                connection.execute(
-                    "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,"
-                    "source_id,source_version,accepted_seq,kind,schema_version,status,"
-                    "plan_sealed,stage_state) SELECT tenant_id,user_id,%s,principal_id,"
-                    "source_id,source_version,accepted_seq,'consolidate',schema_version,"
-                    "'accepted',true,%s::jsonb FROM operations WHERE tenant_id=%s "
-                    "AND user_id=%s AND operation_id=%s ON CONFLICT DO NOTHING",
-                    (
-                        consolidation_id,
-                        Jsonb({"source_operation_id": self.claim.operation_id}),
-                        *self.key,
-                        self.claim.operation_id,
-                    ),
-                )
-                l2_priority_at = connection.execute(
-                    "SELECT COALESCE(min(created_at),clock_timestamp()) "
-                    "FROM search_units WHERE tenant_id=%s AND user_id=%s "
-                    "AND kind='fact' AND source_id=%s AND source_version=%s "
-                    "AND generation_id=%s",
-                    (
-                        *self.key,
-                        self.source["source_id"],
-                        self.source["source_version"],
-                        self.generation_id,
-                    ),
-                ).fetchone()[0]
-                connection.execute(
-                    "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,"
-                    "stage,input_digest,generation_id,status,available_at,attempts_remaining,"
-                    "l2_priority_at) "
-                    "VALUES (%s,%s,%s,%s,'consolidate',%s,%s,'queued',"
-                    "clock_timestamp()+(%s*interval '1 hour'),%s,%s) ON CONFLICT DO NOTHING",
-                    (
-                        *self.key,
-                        work_id,
-                        consolidation_id,
-                        self.source["input_digest"],
-                        self.generation_id,
-                        self.config.index.insight_consolidation_delay_hours,
-                        self.config.retry.max_attempts,
-                        l2_priority_at,
-                    ),
-                )
-                self.readiness(
+                from oam.indexing.scheduling import enqueue_consolidation
+
+                enqueue_consolidation(
                     connection,
-                    insights_ready=False,
-                    consolidation_operation_id=consolidation_id,
-                    consolidation_status="pending",
+                    self.config,
+                    key=self.key,
+                    source_operation_id=self.claim.operation_id,
+                    source=self.source,
+                    generation_id=self.generation_id,
                 )
             if semantic_completion:
                 self.guard(connection)
@@ -1065,7 +1029,11 @@ class IndexStore:
         retryable_http = retryable_model_http_error(error)
         not_dispatched = (
             not self._unsettled_model_stages
-            and isinstance(error, EmbeddingInputLimitError)
+            and (
+                isinstance(error, EmbeddingInputLimitError)
+                or isinstance(error, GenerationBudgetRejection)
+                and not error.has_prior_generation_usage
+            )
             or isinstance(
                 error,
                 (
@@ -1106,9 +1074,18 @@ class IndexStore:
                 for value in errors
             )
             if known_failures:
-                known_usage = _sum_extraction_usage(
-                    [getattr(value, "usage", None) for value in errors]
-                )
+                if all(
+                    isinstance(value, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+                    and getattr(value, "usage", None) is None
+                    for value in errors
+                ):
+                    known_usage = None
+                else:
+                    known_usage = _sum_extraction_usage(
+                        [getattr(value, "usage", None) for value in errors]
+                    )
+                    if any(retryable_model_http_error(value) for value in errors):
+                        known_usage = known_usage.model_copy(update={"coverage": "partial"})
                 retryable = all(
                     retryable_model_http_error(value)
                     or isinstance(value, ModelEmptyContentError)

@@ -6,6 +6,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import pytest
@@ -20,6 +21,139 @@ WEB = Path(__file__).parents[2] / "src" / "oam" / "web"
 class QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+
+@pytest.mark.parametrize("revise", [False, True])
+@pytest.mark.parametrize("destination", ["selection", "memories", "resources"])
+def test_resource_receipt_preserves_newer_browse_intent(tmp_path, revise, destination):
+    try:
+        with urlopen("http://127.0.0.1:9222/json/version", timeout=5) as response:
+            websocket = json.load(response)["webSocketDebuggerUrl"]
+    except OSError:
+        pytest.skip("Existing debug Chrome is unavailable")
+    (tmp_path / "ui").symlink_to(WEB, target_is_directory=True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(tmp_path)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    resources = [
+        {
+            "resource_id": name,
+            "media_type": "text/html",
+            "active_version": 1,
+            "abstract": f"Content for {name}.",
+        }
+        for name in ["first", "second"]
+    ]
+    writes = []
+    details = []
+    lists = []
+    hold_detail = False
+    hold_lists = False
+    memory = {
+        "memory_id": "memory-one",
+        "unit_id": "unit-one",
+        "kind": "fact",
+        "text": "Memory content.",
+        "citations": [],
+        "supports": [],
+    }
+
+    def respond(route):
+        path = urlparse(route.request.url).path
+        if route.request.method in {"POST", "PUT"}:
+            writes.append(route)
+            return
+        if path.endswith("/memories"):
+            data = {"items": [memory] if hold_lists else [], "next_after": None}
+        elif path.endswith("/resources"):
+            data = {"items": resources, "next_after": None}
+        elif path.endswith("/memories/memory-one"):
+            data = memory
+        else:
+            data = next(item for item in resources if path.endswith("/" + item["resource_id"]))
+            if hold_detail:
+                details.append((route, data))
+                return
+        if hold_lists and path.endswith("/" + destination):
+            lists.append((route, data))
+            return
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
+
+    try:
+        with playwright.sync_playwright() as api:
+            browser = api.chromium.connect_over_cdp(websocket)
+            context = browser.new_context(locale="en-US")
+            page = context.new_page()
+            page.set_default_timeout(3000)
+            page.add_init_script("""
+                const originalFetch = window.fetch;
+                window.completedWrites = 0;
+                window.fetch = async (...args) => {
+                    const response = await originalFetch(...args);
+                    if (["POST", "PUT"].includes(args[1]?.method)) {
+                        const originalJson = response.json.bind(response);
+                        response.json = async () => {
+                            const data = await originalJson();
+                            window.completedWrites += 1;
+                            return data;
+                        };
+                    }
+                    return response;
+                };
+            """)
+            page.route("**/v1/**", respond)
+            try:
+                page.goto(f"http://127.0.0.1:{server.server_port}/ui/")
+                page.locator("#user").fill("alice")
+                page.locator("#connect-form button").click()
+                page.locator('[data-view="resources"]').click()
+                page.locator("#item-list .list-item").first.click()
+                detail = page.locator("#detail")
+                detail.get_by_text("Content for first.", exact=True).wait_for()
+                if revise:
+                    detail.get_by_role("button", name="Revise", exact=True).click()
+                else:
+                    page.get_by_role("button", name="Add Resource", exact=True).click()
+                    page.get_by_label("Resource ID", exact=True).fill("new-resource")
+                page.get_by_label("Original text", exact=True).fill("Updated content.")
+                with page.expect_request(lambda request: request.method in {"POST", "PUT"}):
+                    page.locator(".resource-form button[type=submit]").click()
+                if destination == "selection":
+                    hold_detail = True
+                    with page.expect_request("**/resources/second"):
+                        page.locator("#item-list .list-item").nth(1).click()
+                else:
+                    hold_lists = True
+                    page.locator('[data-view="retrieve"]').click()
+                    with page.expect_request("**/" + destination):
+                        page.locator(f'[data-view="{destination}"]').click()
+                with page.expect_response(writes[0].request.url) as written:
+                    writes.pop().fulfill(
+                        status=202,
+                        content_type="application/json",
+                        body=json.dumps({"revision": 2, "operation_id": "resource-op"}),
+                    )
+                written.value.finished()
+                page.wait_for_function("window.completedWrites === 1")
+                for pending, data in details if destination == "selection" else reversed(lists):
+                    pending.fulfill(
+                        status=200, content_type="application/json", body=json.dumps(data)
+                    )
+                expected = {
+                    "selection": "Content for second.",
+                    "memories": "Memory content.",
+                    "resources": "Content for first.",
+                }[destination]
+                detail.get_by_text(expected, exact=True).wait_for()
+                assert (
+                    detail.get_by_role("heading", name="Durable operation", exact=True).count() == 0
+                )
+            finally:
+                context.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_memory_source_messages_and_profile_create_flow(tmp_path):
@@ -204,6 +338,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
             page.route("**/v1/**", respond)
             try:
                 page.goto(f"http://127.0.0.1:{server.server_port}/ui/")
+                page.clock.set_fixed_time("2026-10-15T12:30:00Z")
                 header = page.locator(".site-header")
                 assert header.bounding_box()["height"] <= 72
                 repository = header.get_by_role("link", name="GitHub", exact=False)
@@ -226,7 +361,6 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     navigation.get_by_role("button", name="Profile Data", exact=True).count() == 0
                 )
                 assert page.get_by_role("button", name="Create export", exact=True).count() == 0
-                page.locator("#item-list button").first.click()
                 detail = page.locator("#detail")
                 sources = page.get_by_role("region", name="Source messages", exact=True)
                 sources.get_by_text("Please keep replies brief.").wait_for()
@@ -296,6 +430,13 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert page.locator(".resource-form textarea").input_value() == "The first report."
                 page.locator("#language").select_option("en")
                 page.get_by_role("button", name="Create Resource", exact=True).click()
+                page.locator("#item-list").get_by_role(
+                    "button", name="report", exact=False
+                ).wait_for()
+                page.wait_for_load_state("networkidle")
+                assert detail.get_by_role(
+                    "heading", name="Durable operation", exact=True
+                ).is_visible()
                 page.locator("#item-list").get_by_role("button", name="report", exact=False).click()
                 detail.get_by_text("The first report.", exact=True).wait_for()
                 detail.get_by_role("button", name="Revise", exact=True).click()
@@ -324,6 +465,11 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert not customization.evaluate("element => element.open")
                 assert page.locator("#profile-instruction").is_hidden()
                 assert page.get_by_role("button", name="Refresh profile", exact=True).is_visible()
+                refresh_mode = page.get_by_role("combobox", name="Profile refresh mode", exact=True)
+                assert refresh_mode.input_value() == "incremental"
+                assert refresh_mode.locator("option").evaluate_all(
+                    "options => options.map(option => option.value)"
+                ) == ["incremental", "full"]
                 customization.get_by_text("Customize profile", exact=True).click()
                 prompt_details = page.locator("#profile-prompt-details")
                 prompt = page.locator("#profile-default-prompt")
@@ -380,16 +526,23 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 page.locator("#status").get_by_text(
                     "creation/refresh pending", exact=False
                 ).wait_for()
-                assert json.loads(calls[-1][2]) == {}
+                assert json.loads(calls[-1][2]) == {"mode": "incremental"}
                 page.locator('[data-view="profiles"]').click()
                 detail.locator(".profile-content").wait_for()
                 customization.get_by_text("Customize profile", exact=True).click()
                 assert page.locator("#profile-instruction").input_value() == "Return JSON."
+                refresh_mode.select_option("full")
                 page.get_by_role("button", name="Apply and refresh", exact=True).click()
                 page.locator("#status").get_by_text(
                     "creation/refresh pending", exact=False
                 ).wait_for()
-                assert json.loads(calls[-1][2]) == {"instruction": "Return JSON."}
+                assert json.loads(calls[-1][2]) == {"instruction": "Return JSON.", "mode": "full"}
+                refresh_mode.select_option("incremental")
+                page.locator("#refresh-profile").click()
+                page.locator("#status").get_by_text(
+                    "creation/refresh pending", exact=False
+                ).wait_for()
+                assert json.loads(calls[-1][2]) == {"mode": "incremental"}
                 customization.get_by_text("Customize profile", exact=True).click()
 
                 profile_overrides.update(freshness="uncovered", uncovered_inputs=115)
@@ -423,7 +576,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     "creation/refresh pending", exact=False
                 ).wait_for()
                 assert "Create profile" in page.locator("#refresh-profile").inner_text()
-                assert json.loads(calls[-1][2]) == {}
+                assert json.loads(calls[-1][2]) == {"mode": "incremental"}
 
                 profile_indexing = True
                 page.locator("#refresh-profile").click()
@@ -435,8 +588,30 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 profile_missing = False
                 profile_failed = True
                 page.locator('[data-view="profiles"]').click()
-                detail.get_by_text("1 Insight input failed", exact=False).wait_for()
+                generation_details = detail.locator("details").filter(
+                    has=page.get_by_text("Generation details", exact=True)
+                )
+                generation_details.wait_for()
+                assert not generation_details.evaluate("element => element.open")
+                assert "Failed Insight inputs" not in detail.inner_text()
+                assert "1 Insight input failed" not in detail.inner_text()
+                assert detail.locator(".profile-content").is_visible()
+                assert page.locator("#refresh-profile").is_enabled()
+                assert "Refresh profile" in page.locator("#refresh-profile").inner_text()
                 assert summary.get_by_text("Some inputs unavailable", exact=True).is_visible()
+                generation_details.locator("summary").click()
+                assert generation_details.get_by_text(
+                    "Failed Insight inputs", exact=True
+                ).is_visible()
+                assert generation_details.get_by_text(
+                    "1 Insight input failed", exact=False
+                ).is_visible()
+                assert (
+                    generation_details.get_by_text(
+                        "Insights outside this summary", exact=True
+                    ).count()
+                    == 0
+                )
                 assert detail.get_by_text("partial", exact=True).count() == 0
 
                 profile_failed = False
@@ -472,7 +647,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     == 0
                 )
                 assert "no User Profile document" in page.locator("#status").inner_text()
-                assert detail.get_by_text("1 Insight input failed", exact=False).is_visible()
+                assert not detail.get_by_text("1 Insight input failed", exact=False).is_visible()
 
                 profile_overrides.update(
                     updated_at="2026-09-29T12:30:00+00:00",
@@ -514,7 +689,10 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 page.locator("#status").get_by_text(
                     "creation/refresh pending", exact=False
                 ).wait_for()
-                assert json.loads(calls[-1][2]) == {"reset_instruction": True}
+                assert json.loads(calls[-1][2]) == {
+                    "reset_instruction": True,
+                    "mode": "incremental",
+                }
                 assert page.locator("#profile-instruction").input_value() == ""
                 page.set_viewport_size({"width": 390, "height": 844})
                 page.locator('[data-view="profiles"]').click()
