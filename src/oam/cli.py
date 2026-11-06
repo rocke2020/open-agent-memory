@@ -114,7 +114,9 @@ def _preflight(
             report = run_model_preflight(
                 resolved.config.models,
                 runtime_environment,
-                OpenAICompatibleProbeClient(http=http),
+                OpenAICompatibleProbeClient(
+                    http=http, config=resolved.config, environment=runtime_environment
+                ),
                 required_roles=resolved.config.required_model_roles(),
             )
     else:

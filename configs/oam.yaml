@@ -30,6 +30,10 @@ api:
   # HTTP request-body cap, including upload framing: 128 MB.
   max_request_bytes: 134217728
 
+# Ingestion packing only; extraction and recall budgets retain their existing estimate.
+tokenizer:
+  type: o200k_base
+
 chunk:
   # Split each message/document into passages before indexing, in either extraction mode.
   # These are per-passage limits using the local token estimate, not batch group sizes.
@@ -214,6 +218,8 @@ recall:
 
 profile:
   enabled: true
+  # Complete input budget with local token estimate and a conservative UTF-8 byte ceiling.
+  max_input_tokens: 8192
   # Stored Profile content budget for read/unchanged responses, using the local token estimate.
   max_response_tokens: 18000
   # Maximum accepted UTF-8 Profile content: 16 KB; separate from the model's token cap.
@@ -377,6 +383,12 @@ models:
     planner: null
   embedding:
     # Optional query-only encoder instruction, including syntax and trailing separator.
+    # Count final embedding inputs with this override, or the ingestion counter when null.
+    # A counter is only model-matched when verified against the selected deployment.
+    tokenizer: null
+    max_input_tokens: null
+    max_request_tokens: null
+    max_request_items: null
     # Document embeddings and the complete original query remain unchanged.
     query_prefix: ""
     # Embedding wire protocol; only OpenAI-compatible embeddings is supported.

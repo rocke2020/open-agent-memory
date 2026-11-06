@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import json
+import logging
+import time
 
 import httpx
 import psycopg
@@ -12,10 +13,12 @@ from psycopg_pool import ConnectionPool
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
 from oam.db.context import bind_user
+from oam.models.runtime import ModelOutputError
 from oam.profiles.document import build_profile_document
-from oam.profiles.inputs import load_profile_inputs
+from oam.profiles.inputs import MAX_PROMPT_UNITS, load_profile_inputs
 from oam.profiles.prompt import PROFILE_SYSTEM
-from oam.profiles.service import profile_identity
+from oam.profiles.selection import PROFILE_PURPOSE, pack_profile_request, rank_profile_candidates
+from oam.profiles.service import profile_identity, profile_query_prefix
 from oam.workers.claims import ClaimedWork
 
 
@@ -54,6 +57,25 @@ def claim_generation(connection, claim: ClaimedWork) -> str:
     return row[0]
 
 
+def _renew_profile_lease(connection, config: OAMConfig, claim: ClaimedWork, worker_id: str) -> None:
+    renewed = connection.execute(
+        "UPDATE work_units SET lease_expires_at=clock_timestamp() + "
+        "(%s * interval '1 second') WHERE tenant_id=%s AND user_id=%s "
+        "AND work_unit_id=%s AND owner_id=%s AND fence=%s AND status='running' "
+        "AND lease_expires_at>clock_timestamp() RETURNING work_unit_id",
+        (
+            config.profile.attempt_timeout_seconds + config.lease.heartbeat_seconds,
+            claim.tenant_id,
+            claim.user_id,
+            claim.work_unit_id,
+            worker_id,
+            claim.fence,
+        ),
+    ).fetchone()
+    if renewed is None:
+        raise StaleProfileWork("Profile lease expired before generation")
+
+
 def process_profile_claim(
     config: OAMConfig,
     content_dsn: str,
@@ -72,6 +94,9 @@ def process_profile_claim(
     )
     key = (claim.tenant_id, claim.user_id)
     generation = None
+    usage = {}
+    embedding_usage = {}
+    model_stage = None
     try:
         connection_context = (
             pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
@@ -82,7 +107,9 @@ def process_profile_claim(
             bind_user(connection.cursor(), authority)
             _guard(connection, claim, worker_id)
             generation = claim_generation(connection, claim)
-            inputs = load_profile_inputs(connection, authority, generation)
+            inputs = load_profile_inputs(
+                connection, authority, generation, insights_enabled=config.index.insights_enabled
+            )
             digest, dependencies, scope_identity, instruction = connection.execute(
                 "SELECT w.input_digest,w.dependency_ids,o.stage_state->>'scope_identity',"
                 "o.stage_state->>'instruction' "
@@ -93,7 +120,12 @@ def process_profile_claim(
             ).fetchone()
             if scope_identity is not None and scope_identity != inputs.scope_identity.hex():
                 raise StaleProfileWork("Profile source scope changed before generation")
-            target_identity = profile_identity(inputs.identity, instruction)
+            target_identity = profile_identity(
+                inputs.identity,
+                instruction,
+                config.profile.max_input_tokens,
+                profile_query_prefix(config),
+            )
             if dependencies:
                 if inputs.waiting_source_ids:
                     raise StaleProfileWork("New Profile inputs are still processing")
@@ -112,21 +144,7 @@ def process_profile_claim(
             )
             needs_model = bool(inputs.prompt_inputs or instruction and inputs.exact_fields)
             if needs_model:
-                renewed = connection.execute(
-                    "UPDATE work_units SET lease_expires_at=clock_timestamp() + "
-                    "(%s * interval '1 second') WHERE tenant_id=%s AND user_id=%s "
-                    "AND work_unit_id=%s AND owner_id=%s AND fence=%s AND status='running' "
-                    "AND lease_expires_at>clock_timestamp() RETURNING work_unit_id",
-                    (
-                        config.profile.attempt_timeout_seconds + config.lease.heartbeat_seconds,
-                        *key,
-                        claim.work_unit_id,
-                        worker_id,
-                        claim.fence,
-                    ),
-                ).fetchone()
-                if renewed is None:
-                    raise StaleProfileWork("Profile lease expired before generation")
+                _renew_profile_lease(connection, config, claim, worker_id)
                 connection.execute(
                     "UPDATE attempts SET disposition='unknown_external_outcome',"
                     "request_ref='profile' "
@@ -134,30 +152,94 @@ def process_profile_claim(
                     (*key, claim.work_unit_id, claim.attempt_id),
                 )
         if needs_model:
+            selection_started = time.monotonic()
+            eligible_count = len(inputs.supported)
+            if eligible_count:
+                query = PROFILE_PURPOSE + (f"\n{instruction}" if instruction else "")
+                prefix = profile_query_prefix(config)
+                model_stage = "embedding"
+                embedding = models.embed(
+                    (prefix + query,), timeout_seconds=config.profile.attempt_timeout_seconds
+                )
+                embedding_usage = embedding.usage.model_dump(mode="json")
+                model_stage = None
+                connection_context = (
+                    pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
+                    if pool is not None
+                    else psycopg.connect(content_dsn)
+                )
+                with connection_context as connection, connection.transaction():
+                    bind_user(connection.cursor(), authority)
+                    _guard(connection, claim, worker_id)
+                    selected_ids = rank_profile_candidates(
+                        connection, embedding.vectors[0], MAX_PROMPT_UNITS
+                    )
+                    ranked = load_profile_inputs(
+                        connection,
+                        authority,
+                        generation,
+                        insights_enabled=config.index.insights_enabled,
+                        selected_unit_ids=selected_ids,
+                    )
+                    if (
+                        profile_identity(
+                            ranked.identity,
+                            instruction,
+                            config.profile.max_input_tokens,
+                            profile_query_prefix(config),
+                        )
+                        != target_identity
+                    ):
+                        raise StaleProfileWork("Profile inputs changed during selection")
+                    _renew_profile_lease(connection, config, claim, worker_id)
+                candidates = ranked.prompt_inputs
+            else:
+                candidates = []
+            packed = pack_profile_request(
+                candidates,
+                exact_fields=inputs.exact_fields,
+                instruction=instruction,
+                system=PROFILE_SYSTEM,
+                max_input_tokens=config.profile.max_input_tokens,
+            )
+            selected_inputs = packed.inputs
+            uncovered = eligible_count - len(selected_inputs)
+            input_coverage = {
+                "unexamined": eligible_count - len(candidates),
+                "budget_omitted": packed.uncovered,
+                "selected": len(selected_inputs),
+            }
+            logging.getLogger(__name__).info(
+                "profile_selection operation_id=%s eligible=%d candidates=%d selected=%d "
+                "unexamined=%d budget_omitted=%d duration_ms=%.1f",
+                claim.operation_id,
+                eligible_count,
+                len(candidates),
+                len(selected_inputs),
+                eligible_count - len(candidates),
+                packed.uncovered,
+                (time.monotonic() - selection_started) * 1000,
+            )
+            model_stage = "profile"
             result = models.generate(
                 "profile",
                 system=PROFILE_SYSTEM,
-                user=json.dumps(
-                    {
-                        "inputs": inputs.prompt_inputs,
-                        "exact_fields": inputs.exact_fields,
-                        "instruction": instruction,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    default=str,
-                ),
+                user=packed.user,
                 max_output_tokens=config.profile.max_output_tokens,
                 timeout_seconds=config.profile.attempt_timeout_seconds,
             )
             content = result.content
             usage = result.usage.model_dump(mode="json")
+            model_stage = None
             generation_calls = 1
         else:
             content, usage, generation_calls = None, {}, 0
+            embedding_usage = {}
+            selected_inputs, uncovered = [], 0
+            input_coverage = {"unexamined": 0, "budget_omitted": 0, "selected": 0}
         document = build_profile_document(
             content,
-            inputs.prompt_inputs,
+            selected_inputs,
             inputs.exact_fields,
             instruction=instruction if needs_model else None,
             max_content_bytes=config.profile.max_content_bytes,
@@ -170,8 +252,18 @@ def process_profile_claim(
         with connection_context as connection, connection.transaction():
             bind_user(connection.cursor(), authority)
             _guard(connection, claim, worker_id)
-            current = load_profile_inputs(connection, authority, generation)
-            if profile_identity(current.identity, instruction) != target_identity:
+            current = load_profile_inputs(
+                connection, authority, generation, insights_enabled=config.index.insights_enabled
+            )
+            if (
+                profile_identity(
+                    current.identity,
+                    instruction,
+                    config.profile.max_input_tokens,
+                    profile_query_prefix(config),
+                )
+                != target_identity
+            ):
                 raise StaleProfileWork("Profile inputs changed during generation")
             user = connection.execute(
                 "SELECT published_seq FROM users WHERE tenant_id=%s AND user_id=%s FOR UPDATE",
@@ -191,8 +283,8 @@ def process_profile_claim(
             connection.execute(
                 "INSERT INTO profiles(tenant_id,user_id,profile_id,profile_revision,sections,"
                 'content,instruction,support_ids,"references",input_identity,policy_epoch,'
-                "generation_id,visible_from,published_at) "
-                "VALUES (%s,%s,'user',%s,'{}'::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp())",
+                "generation_id,visible_from,published_at,input_coverage) "
+                "VALUES (%s,%s,'user',%s,'{}'::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp(),%s)",
                 (
                     *key,
                     revision,
@@ -204,6 +296,7 @@ def process_profile_claim(
                     inputs.policy_epoch,
                     generation,
                     visible_from,
+                    Jsonb(input_coverage),
                 ),
             )
             connection.execute(
@@ -228,13 +321,14 @@ def process_profile_claim(
                 (
                     Jsonb(
                         {
-                            "profile_current": not inputs.pending_inputs
-                            and not inputs.uncovered_inputs,
+                            "profile_current": not inputs.pending_inputs and not uncovered,
                             "pending_inputs": inputs.pending_inputs,
                             "failed_inputs": inputs.failed_inputs,
                             "blocked_inputs": inputs.blocked_inputs,
-                            "uncovered_inputs": inputs.uncovered_inputs,
+                            "uncovered_inputs": uncovered,
                             "generation_calls": generation_calls,
+                            "usage": usage,
+                            "embedding_usage": embedding_usage,
                         }
                     ),
                     *key,
@@ -242,6 +336,14 @@ def process_profile_claim(
                 ),
             )
     except Exception as error:
+        if isinstance(error, ModelOutputError) and error.usage is not None:
+            if model_stage == "embedding":
+                embedding_usage = error.usage.model_dump(mode="json")
+            elif model_stage == "profile":
+                usage = error.usage.model_dump(mode="json")
+        attempt_usage: dict[str, object] = dict(usage)
+        if embedding_usage:
+            attempt_usage["embedding_usage"] = embedding_usage
         connection_context = (
             pool.connection(timeout=config.database.pool_acquire_timeout_seconds)
             if pool is not None
@@ -259,18 +361,46 @@ def process_profile_claim(
             if not (
                 isinstance(error, httpx.RequestError)
                 and not isinstance(error, httpx.ConnectTimeout)
+                and model_stage != "embedding"
             ):
                 connection.execute(
-                    "UPDATE attempts SET disposition='failed',finished_at=clock_timestamp() "
+                    "UPDATE attempts SET disposition='failed',usage=COALESCE(%s,usage),"
+                    "finished_at=clock_timestamp() "
                     "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND attempt_id=%s "
+                    "AND owner_id=%s AND fence=%s AND finished_at IS NULL",
+                    (
+                        Jsonb(attempt_usage) if attempt_usage else None,
+                        *key,
+                        claim.work_unit_id,
+                        claim.attempt_id,
+                        worker_id,
+                        claim.fence,
+                    ),
+                )
+            elif attempt_usage:
+                connection.execute(
+                    "UPDATE attempts SET usage=%s WHERE tenant_id=%s AND user_id=%s "
+                    "AND work_unit_id=%s AND attempt_id=%s AND owner_id=%s AND fence=%s "
                     "AND finished_at IS NULL",
-                    (*key, claim.work_unit_id, claim.attempt_id),
+                    (
+                        Jsonb(attempt_usage),
+                        *key,
+                        claim.work_unit_id,
+                        claim.attempt_id,
+                        worker_id,
+                        claim.fence,
+                    ),
                 )
             if owned:
+                failure_state: dict[str, object] = {"error": type(error).__name__}
+                if usage:
+                    failure_state["usage"] = usage
+                if embedding_usage:
+                    failure_state["embedding_usage"] = embedding_usage
                 connection.execute(
                     "UPDATE operations SET status='partial_failed',stage_state=stage_state||%s,"
                     "updated_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
                     "AND operation_id=%s",
-                    (Jsonb({"error": type(error).__name__}), *key, claim.operation_id),
+                    (Jsonb(failure_state), *key, claim.operation_id),
                 )
         raise

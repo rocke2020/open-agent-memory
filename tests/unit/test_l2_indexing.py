@@ -35,13 +35,18 @@ def test_l2_generation_capacity_is_validated_without_changing_content_identity(t
 
 
 def test_l2_capacity_keeps_captured_legacy_generation_and_checkpoint():
-    from oam.config import ModelsConfig
+    from oam.config import ModelsConfig, TokenizerConfig
     from oam.indexing.consolidation import _group_inputs
     from oam.indexing.identity import index_generation
     from oam.indexing.store import input_digest
 
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    config = config.model_copy(update={"models": ModelsConfig()})
+    config = config.model_copy(
+        update={
+            "models": ModelsConfig(),
+            "tokenizer": TokenizerConfig(type="oam-unicode-quarter-v1"),
+        }
+    )
     facts = (
         InsightInput(id="a", text="The user uses glaze G41.", source_refs=("source:1",)),
         InsightInput(id="b", text="The user fires at 1240 C.", source_refs=("source:1",)),

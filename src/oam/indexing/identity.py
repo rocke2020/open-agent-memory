@@ -6,8 +6,9 @@ from collections.abc import Mapping
 
 from oam.config import OAMConfig
 from oam.models.bindings import resolve_model_binding
+from oam.models.embedding_inputs import configured_embedding_admission
 from oam.retrieval.fts import FTS_RECIPE
-from oam.tokens import ESTIMATOR
+from oam.tokens import ESTIMATOR, resolve_counter
 
 INDEX_RECIPE = "oam-source-fact-insight-v38"
 RESOURCE_VISION_RECIPE = "oam-vision-downscale-v1"
@@ -80,6 +81,25 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
         ),
         "roles": roles,
     }
+    ingestion_counter = resolve_counter(config.tokenizer, environment).identity
+    admission = configured_embedding_admission(config, environment)
+    limits = [
+        bound
+        for bound in (admission.max_input_tokens, admission.max_request_tokens)
+        if bound is not None
+    ]
+    effective_limit = min(limits) if limits else None
+    # Preserve the existing recipe identity when the explicit legacy path is unchanged.
+    if (
+        ingestion_counter != ESTIMATOR
+        or admission.counter.identity != ESTIMATOR
+        or effective_limit is not None
+    ):
+        identity["ingestion_counter"] = ingestion_counter
+        identity["embedding_input"] = {
+            "counter": admission.counter.identity,
+            "max_input_tokens": effective_limit,
+        }
     if config.index.insights_enabled:
         identity["insight_retrieval_recipe"] = INSIGHT_RETRIEVAL_RECIPE
     return (

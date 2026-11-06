@@ -1422,7 +1422,7 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
                 for field in prompt["exact_fields"]
                 if field["key"] == "date_of_birth"
             )
-            assert all(item["kind"] == "insight" for item in prompt["inputs"])
+            assert all(item["kind"] in {"fact", "insight"} for item in prompt["inputs"])
             insight = next(
                 item for item in prompt["inputs"] if "brief explanations" in item["text"]
             )
@@ -1787,7 +1787,14 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
         assert changed_operation.json()["status"] == "succeeded"
         updated = await client.get("/v1/users/scope/profile")
         assert updated.status_code == 200, updated.text
-        assert updated.json()["freshness"] == "current"
+        updated_profile = updated.json()
+        assert updated_profile["freshness"] == (
+            "uncovered" if updated_profile["uncovered_inputs"] else "current"
+        )
+        coverage = updated_profile["selection_coverage"]
+        assert updated_profile["uncovered_inputs"] == (
+            coverage["unexamined"] + coverage["budget_omitted"]
+        )
         assert updated.json()["profile_revision"] > after_l2.json()["profile_revision"]
         assert "brief" in updated.json()["content"]
         assert updated.json()["generation_calls"] == 0
@@ -1868,6 +1875,171 @@ async def test_empty_user_profile_refresh_publishes_without_a_model_call(core_da
         assert profile.json()["freshness"] == "current"
         assert profile.json()["content"].startswith("## Main content")
         assert models.generation_calls == []
+
+
+async def test_profile_accepts_l1_when_insights_are_disabled(core_database, tmp_path):
+    from oam.config import load_config
+    from oam.models.runtime import ModelResult, Usage
+    from oam.workers.index_source import process_one
+
+    dsn, _, headers = core_database
+    config_path = tmp_path / "profile-without-insights.yaml"
+    config_path.write_text("index:\n  insights_enabled: false\n")
+    config = load_config(config_path).config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+
+    class ProfileModels(SyntheticIndexModels):
+        def generate(self, role, **kwargs):
+            if role != "profile":
+                return super().generate(role, **kwargs)
+            self.generation_calls.append(role)
+            fact = next(
+                item for item in json.loads(kwargs["user"])["inputs"] if item["kind"] == "fact"
+            )
+            return ModelResult(
+                content=json.dumps(
+                    {"content": "The user prefers English [1].", "support_ids": [fact["id"]]}
+                ),
+                usage=Usage(
+                    input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
+                ),
+            )
+
+    models = ProfileModels()
+    app = create_app(config_path)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "profile-l1")
+        retained = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "profile-l1",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Please reply in English.",
+                        "event_time": "2026-10-01T00:00:00Z",
+                        "learning_eligible": True,
+                    }
+                ],
+            },
+            headers={"Idempotency-Key": "l1-only"},
+        )
+        assert retained.status_code == 202
+        assert process_source(config, queue_dsn, content_dsn, models=models, worker_id="l1-only")
+        requested = await client.post("/v1/users/profile-l1/profile/refresh", json={})
+        assert requested.status_code == 202, requested.text
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="l1-profile")
+        profile = await client.get("/v1/users/profile-l1/profile")
+        assert "English" in profile.json()["content"]
+        assert profile.json()["references"][0]["kind"] == "fact"
+        unchanged = await client.post("/v1/users/profile-l1/profile/refresh", json={})
+        assert unchanged.status_code == 200 and unchanged.json()["generation_calls"] == 0
+
+
+async def test_profile_rejects_source_revision_changed_during_generation(core_database, tmp_path):
+    from oam.config import load_config
+    from oam.models.runtime import ModelResult, Usage
+    from oam.profiles.worker import StaleProfileWork
+    from oam.workers.index_source import process_one
+
+    dsn, tenant, headers = core_database
+    config_path = tmp_path / "profile-source-revision.yaml"
+    config_path.write_text("index:\n  insights_enabled: false\n")
+    config = load_config(config_path).config
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+    content_dsn = make_conninfo(dsn, options="-c role=oam_content")
+    source_id = None
+
+    class ProfileModels(SyntheticIndexModels):
+        change_source = False
+
+        def generate(self, role, **kwargs):
+            if role != "profile":
+                return super().generate(role, **kwargs)
+            fact = next(
+                item for item in json.loads(kwargs["user"])["inputs"] if item["kind"] == "fact"
+            )
+            if self.change_source:
+                with psycopg.connect(dsn) as connection:
+                    connection.execute(
+                        "INSERT INTO source_versions(tenant_id,user_id,source_id,source_version,"
+                        "media_type,original_bytes,content_sha256,byte_length,status) "
+                        "SELECT tenant_id,user_id,source_id,2,media_type,original_bytes,"
+                        "content_sha256,"
+                        "byte_length,'active' FROM source_versions WHERE tenant_id=%s AND "
+                        "user_id='profile-race' AND source_id=%s AND source_version=1",
+                        (tenant, source_id),
+                    )
+                    connection.execute(
+                        "UPDATE source_versions SET status='superseded' WHERE tenant_id=%s AND "
+                        "user_id='profile-race' AND source_id=%s AND source_version=1",
+                        (tenant, source_id),
+                    )
+                    connection.execute(
+                        "UPDATE sources SET active_version=2 WHERE tenant_id=%s AND "
+                        "user_id='profile-race' AND source_id=%s",
+                        (tenant, source_id),
+                    )
+            return ModelResult(
+                content=json.dumps({"content": "English [1]", "support_ids": [fact["id"]]}),
+                usage=Usage(
+                    input_tokens=20, output_tokens=10, total_tokens=30, coverage="complete"
+                ),
+            )
+
+    models = ProfileModels()
+    app = create_app(config_path)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "profile-race")
+        retained = await client.post(
+            "/v1/retain",
+            json={
+                "user_id": "profile-race",
+                "input_type": "interaction",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Please reply in English.",
+                        "event_time": "2026-10-01T00:00:00Z",
+                        "learning_eligible": True,
+                    }
+                ],
+            },
+            headers={"Idempotency-Key": "profile-race"},
+        )
+        assert retained.status_code == 202
+        source_id = retained.json()["source_id"]
+        assert process_source(config, queue_dsn, content_dsn, models=models, worker_id="race-input")
+        first = await client.post("/v1/users/profile-race/profile/refresh", json={})
+        assert first.status_code == 202
+        assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="race-first")
+        models.change_source = True
+        second = await client.post(
+            "/v1/users/profile-race/profile/refresh", json={"instruction": "Use bullets"}
+        )
+        assert second.status_code == 202
+        with pytest.raises(StaleProfileWork):
+            process_one(config, queue_dsn, content_dsn, models=models, worker_id="race-second")
+        profile = await client.get("/v1/users/profile-race/profile")
+        assert profile.json()["content"] is None
+        with psycopg.connect(dsn) as connection:
+            count = connection.execute(
+                "SELECT count(*) FROM profiles WHERE tenant_id=%s AND user_id='profile-race'",
+                (tenant,),
+            ).fetchone()[0]
+        assert count == 1
 
 
 @pytest.mark.parametrize("first_running", [False, True])
@@ -2139,7 +2311,11 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
                 return super().generate(role, **kwargs)
             self.generation_calls.append(role)
             prompt_inputs = json.loads(kwargs["user"])["inputs"]
-            support = next(item for item in prompt_inputs if item["kind"] == "insight")
+            support = next(
+                item
+                for item in prompt_inputs
+                if item["kind"] == ("fact" if insight_failure else "insight")
+            )
             return ModelResult(
                 content=json.dumps(
                     {
@@ -2261,7 +2437,16 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
                     "UPDATE work_units SET input_digest=%s,dependency_ids='{}' "
                     "WHERE tenant_id=%s AND user_id='scope' AND work_unit_id=%s",
                     (
-                        profile_identity(bytes.fromhex(current.json()["input_identity"]), None),
+                        profile_identity(
+                            bytes.fromhex(current.json()["input_identity"]),
+                            None,
+                            config.profile.max_input_tokens,
+                            (
+                                config.models.embedding.query_prefix
+                                if config.models.embedding
+                                else ""
+                            ),
+                        ),
                         tenant,
                         claim.work_unit_id,
                     ),
@@ -2294,16 +2479,15 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
         assert profile.json()["pending_inputs"] == (1 if insight_failure else 0)
         assert profile.json()["failed_inputs"] == (1 if insight_failure else 0)
         if insight_failure:
-            assert profile.json()["support_ids"] == []
-            assert profile.json()["references"] == []
-            assert "brief" not in profile.json()["content"]
+            assert "brief" in profile.json()["content"]
+            assert profile.json()["references"][0]["kind"] == "fact"
         else:
             assert "brief" in profile.json()["content"]
             assert profile.json()["references"][0]["kind"] == "insight"
         unchanged = await client.post("/v1/users/scope/profile/refresh", json={})
         assert unchanged.status_code == 200, unchanged.text
         assert unchanged.json()["status"] == "unchanged"
-        assert models.generation_calls.count("profile") == (0 if insight_failure else 1)
+        assert models.generation_calls.count("profile") == 1
 
 
 @pytest.mark.parametrize(
@@ -2437,8 +2621,7 @@ async def test_profile_main_builds_dated_age_career_and_family_from_supported_in
             assert kwargs["max_output_tokens"] == config.profile.max_output_tokens
             assert kwargs["timeout_seconds"] == config.profile.attempt_timeout_seconds
             inputs = json.loads(kwargs["user"])["inputs"]
-            assert len(inputs) == 1 and inputs[0]["kind"] == "insight"
-            insight = inputs[0]
+            insight = next(item for item in inputs if item["kind"] == "insight")
             for claim in ("44 years old", "engineer", "maternal uncles"):
                 assert claim in insight["text"]
             assert len(insight["support_memory_ids"]) == 3

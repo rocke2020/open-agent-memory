@@ -215,6 +215,7 @@ class ExportRepository:
             connection,
             profile_authority,
             generation,
+            insights_enabled=self.config.index.insights_enabled,
             stored_support_ids=stored_profile_support_ids(snapshot),
         )
         view = _view(self.config, inputs, snapshot, sys.maxsize)

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from oam.config import ConfigurationError, ModelsConfig, load_config
+from oam.config import ConfigurationError, ModelsConfig, TokenizerConfig, load_config
 from oam.indexing.identity import index_generation
 
 
@@ -62,7 +62,12 @@ def test_source_batch_accepts_upper_bounds(tmp_path):
     [None, {"seed_max": 32, "input_max_tokens": 32768, "target_max": 64}],
 )
 def test_source_batch_preserves_captured_legacy_index_generation(tmp_path, bundle):
-    config = _config(tmp_path, bundle).model_copy(update={"models": ModelsConfig()})
+    config = _config(tmp_path, bundle).model_copy(
+        update={
+            "models": ModelsConfig(),
+            "tokenizer": TokenizerConfig(type="oam-unicode-quarter-v1"),
+        }
+    )
     assert index_generation(config, {}) == (
         "gen_bcbbe1a13f79116323228293c323d0ec162fe99987a3a54822029f0cb3563c8b"
     )

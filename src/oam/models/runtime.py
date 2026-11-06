@@ -18,7 +18,9 @@ from pydantic import BaseModel, ConfigDict
 from oam.capacity import CapacityUnavailable, PostgresCapacity
 from oam.config import OAMConfig
 from oam.models.bindings import ResolvedModelBinding, resolve_model_binding
+from oam.models.embedding_inputs import configured_embedding_admission
 from oam.models.protocols import generation_request, normalize_generation
+from oam.tokens import resolve_counter
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,8 @@ class RuntimeModels:
         stop_event: Event | None = None,
     ) -> None:
         self.config = config
+        self.ingestion_counter = resolve_counter(config.tokenizer, environment)
+        self.embedding_admission = configured_embedding_admission(config, environment)
         self._environment = dict(environment)
         self._http = http
         self._background = background
@@ -216,7 +220,7 @@ class RuntimeModels:
         return result
 
     def embed(self, texts: tuple[str, ...], *, timeout_seconds: float) -> EmbeddingResult:
-        _require_texts(texts)
+        self.embedding_admission.validate(texts)
         binding = self._binding("embedding", "embeddings")
         body = self._post(
             binding,

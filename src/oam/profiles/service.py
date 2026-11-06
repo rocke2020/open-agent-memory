@@ -22,6 +22,7 @@ from oam.profiles.document import render_stored_profile_fields
 from oam.profiles.inputs import ProfileInputs, load_profile_inputs
 from oam.profiles.prompt import PROFILE_SYSTEM
 from oam.profiles.resources import public_profile_data_support
+from oam.profiles.selection import PROFILE_PURPOSE
 from oam.tokens import estimate_units, estimated_tokens
 
 
@@ -38,7 +39,7 @@ def _current_snapshot(connection, authority: AuthorizedUser):
         bind_user(cursor, authority)
         cursor.execute(
             'SELECT profile_revision,sections,content,instruction,support_ids,"references",'
-            "input_identity,policy_epoch,generation_id,published_at "
+            "input_identity,policy_epoch,generation_id,published_at,input_coverage "
             "FROM profiles WHERE tenant_id=%s AND user_id=%s AND profile_id='user' "
             "AND visible_to IS NULL ORDER BY profile_revision DESC LIMIT 1",
             (authority.tenant_id, authority.user_id),
@@ -46,8 +47,24 @@ def _current_snapshot(connection, authority: AuthorizedUser):
         return cursor.fetchone()
 
 
-def profile_identity(input_identity: bytes, instruction: str | None) -> bytes:
-    recipe = json.dumps([input_identity.hex(), PROFILE_SYSTEM, instruction], ensure_ascii=False)
+def profile_query_prefix(config: OAMConfig) -> str:
+    return config.models.embedding.query_prefix if config.models.embedding else ""
+
+
+def profile_identity(
+    input_identity: bytes, instruction: str | None, input_budget: int, query_prefix: str
+) -> bytes:
+    recipe = json.dumps(
+        [
+            input_identity.hex(),
+            PROFILE_SYSTEM,
+            PROFILE_PURPOSE,
+            instruction,
+            input_budget,
+            query_prefix,
+        ],
+        ensure_ascii=False,
+    )
     return hashlib.sha256(recipe.encode("utf-8")).digest()
 
 
@@ -90,6 +107,12 @@ def _view(
     budget_omitted = content is not None and estimated_tokens(estimate_units(content)) > max_tokens
     if budget_omitted:
         content = None
+    coverage = snapshot.get("input_coverage") if snapshot else None
+    uncovered = (
+        coverage["unexamined"] + coverage["budget_omitted"]
+        if coverage is not None
+        else inputs.uncovered_inputs
+    )
     if snapshot is None or snapshot["content"] is None and not legacy_unavailable:
         freshness = "missing"
     elif not supported:
@@ -99,10 +122,13 @@ def _view(
     elif inputs.failed_inputs:
         freshness = "partial"
     elif bytes(snapshot["input_identity"]) != profile_identity(
-        inputs.identity, snapshot["instruction"]
+        inputs.identity,
+        snapshot["instruction"],
+        config.profile.max_input_tokens,
+        profile_query_prefix(config),
     ):
         freshness = "dirty"
-    elif inputs.uncovered_inputs:
+    elif uncovered:
         freshness = "uncovered"
     else:
         freshness = "current"
@@ -122,7 +148,8 @@ def _view(
         "pending_inputs": inputs.pending_inputs,
         "failed_inputs": inputs.failed_inputs,
         "blocked_inputs": inputs.blocked_inputs,
-        "uncovered_inputs": inputs.uncovered_inputs,
+        "uncovered_inputs": uncovered,
+        "selection_coverage": coverage,
         "omitted": [{"reason": "budget"}] if budget_omitted else [],
         "tokens": estimated_tokens(estimate_units(content)) if content else 0,
         "generation_calls": 0,
@@ -164,6 +191,7 @@ class ProfileService:
                 connection,
                 authority,
                 generation,
+                insights_enabled=self.config.index.insights_enabled,
                 stored_support_ids=stored_profile_support_ids(snapshot),
             )
             result = _public_view(self.config, inputs, snapshot, max_tokens)
@@ -196,7 +224,12 @@ class ProfileService:
                 )
                 row = cursor.fetchone()
                 generation = (row[0] if row else None) or index_generation(self.config, os.environ)
-            inputs = load_profile_inputs(connection, authority, generation)
+            inputs = load_profile_inputs(
+                connection,
+                authority,
+                generation,
+                insights_enabled=self.config.index.insights_enabled,
+            )
             snapshot = _current_snapshot(connection, authority)
             if reset_instruction:
                 selected_instruction = None
@@ -204,7 +237,12 @@ class ProfileService:
                 selected_instruction = instruction
             else:
                 selected_instruction = snapshot["instruction"] if snapshot else None
-            target_identity = profile_identity(inputs.identity, selected_instruction)
+            target_identity = profile_identity(
+                inputs.identity,
+                selected_instruction,
+                self.config.profile.max_input_tokens,
+                profile_query_prefix(self.config),
+            )
             active_rows = connection.execute(
                 "SELECT o.operation_id,o.request_hash,o.stage_state,w.dependency_ids,"
                 "w.input_digest "

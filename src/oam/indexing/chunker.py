@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from oam.config import IngestionChunkConfig
 from oam.text_boundaries import punctuation_ends
-from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimated_tokens
+from oam.tokens import (
+    ESTIMATOR,
+    UNITS_PER_TOKEN,
+    TokenCounter,
+    cumulative_units,
+    estimate_units,
+    estimated_tokens,
+)
 
 # Portions Copyright (c) 2025 Vectorize AI, Inc.
 # MIT license: third_party_licenses/extraction-split-MIT.txt.
@@ -31,17 +38,44 @@ class TextChunk:
 
 
 def chunk_text(
-    text: str, config: IngestionChunkConfig, *, previous_context: str = ""
+    text: str,
+    config: IngestionChunkConfig,
+    *,
+    previous_context: str = "",
+    counter: TokenCounter | None = None,
+    embedding_fits: Callable[[str], bool] | None = None,
 ) -> tuple[TextChunk, ...]:
     """Pack lossless structural units at original offsets under a hard token bound."""
+    if counter is not None and counter.identity == ESTIMATOR:
+        counter = None
     if config.extractable_overlap_estimated_tokens:
         raise ValueError("owned source overlap must remain zero")
     if not text:
         return ()
-    weights = cumulative_units(text)
-    if any(
-        weights[index + 1] - weights[index] > config.max_estimated_tokens * UNITS_PER_TOKEN
-        for index in range(len(text))
+    weights = cumulative_units(text) if counter is None else []
+
+    def fits(start: int, end: int) -> bool:
+        content = text[start:end]
+        count = (
+            counter.count(content)
+            if counter is not None
+            else estimated_tokens(weights[end] - weights[start])
+        )
+        return count <= config.max_estimated_tokens and (
+            embedding_fits is None or embedding_fits(content)
+        )
+
+    def count(start: int, end: int) -> int:
+        return (
+            counter.count(text[start:end])
+            if counter is not None
+            else estimated_tokens(weights[end] - weights[start])
+        )
+
+    if (
+        counter is None
+        and embedding_fits is None
+        and any(not fits(index, index + 1) for index in range(len(text)))
     ):
         raise ValueError("single source character exceeds chunk hard maximum")
     paragraphs = [match.end() for match in _PARAGRAPH_END.finditer(text)]
@@ -49,12 +83,21 @@ def chunk_text(
         paragraphs.append(len(text))
     sentences, clauses = punctuation_ends(text)
     levels = (sentences, clauses, [match.end() for match in re.finditer(r"\s+", text)])
-    hard_units = config.max_estimated_tokens * UNITS_PER_TOKEN
+
+    def bounded_characters(start: int, end: int) -> Iterator[tuple[int, int]]:
+        if fits(start, end):
+            yield start, end
+        elif end - start == 1:
+            raise ValueError("single source character exceeds chunk hard maximum")
+        else:
+            middle = start + (end - start) // 2
+            yield from bounded_characters(start, middle)
+            yield from bounded_characters(middle, end)
 
     def bounded_units(start: int, end: int, level: int) -> Iterator[tuple[int, int]]:
         if start == end:
             return
-        if weights[end] - weights[start] <= hard_units:
+        if fits(start, end):
             yield start, end
         elif level < len(levels):
             boundaries = levels[level]
@@ -63,7 +106,10 @@ def chunk_text(
                 start = stop
             yield from bounded_units(start, end, level + 1)
         else:
-            while weights[end] - weights[start] > hard_units:
+            if counter is not None or embedding_fits is not None:
+                yield from bounded_characters(start, end)
+                return
+            while not fits(start, end):
                 stop = max(start + 1, _bounded_end(weights, start, config.target_estimated_tokens))
                 yield start, stop
                 start = stop
@@ -82,7 +128,7 @@ def chunk_text(
                 start=start,
                 end=end,
                 previous_context=context,
-                estimated_tokens=estimated_tokens(weights[end] - weights[start]),
+                estimated_tokens=estimated_tokens(estimate_units(content)),
             )
         )
         context = _tail(context + content, config.previous_context_estimated_tokens)
@@ -90,14 +136,11 @@ def chunk_text(
     paragraph_start = chunk_start = chunk_end = 0
     for paragraph_end in paragraphs:
         for start, end in bounded_units(paragraph_start, paragraph_end, 0):
-            if chunk_end > chunk_start and weights[end] - weights[chunk_start] > hard_units:
+            if chunk_end > chunk_start and not fits(chunk_start, end):
                 emit(chunk_start, chunk_end)
                 chunk_start = start
             chunk_end = end
-            if (
-                weights[chunk_end] - weights[chunk_start]
-                >= config.target_estimated_tokens * UNITS_PER_TOKEN
-            ):
+            if count(chunk_start, chunk_end) >= config.target_estimated_tokens:
                 emit(chunk_start, chunk_end)
                 chunk_start = chunk_end
         paragraph_start = paragraph_end
@@ -112,6 +155,8 @@ def resume_chunks(
     config: IngestionChunkConfig,
     *,
     previous_context: str = "",
+    counter: TokenCounter | None = None,
+    embedding_fits: Callable[[str], bool] | None = None,
 ) -> tuple[TextChunk, ...]:
     """Keep published passage boundaries and chunk only the unprocessed suffix."""
     chunks = []
@@ -129,11 +174,17 @@ def resume_chunks(
                 previous_context=_tail(
                     previous_context + text[:start], config.previous_context_estimated_tokens
                 ),
-                estimated_tokens=estimated_tokens(cumulative_units(content)[-1]),
+                estimated_tokens=estimated_tokens(estimate_units(content)),
             )
         )
         offset = end
-    remaining = chunk_text(text[offset:], config, previous_context=previous_context + text[:offset])
+    remaining = chunk_text(
+        text[offset:],
+        config,
+        previous_context=previous_context + text[:offset],
+        counter=counter,
+        embedding_fits=embedding_fits,
+    )
     chunks.extend(
         TextChunk(
             text=chunk.text,
@@ -191,19 +242,21 @@ def split_chunk_for_output_retry(
             chunk.start,
             chunk.start + best_split,
             chunk.previous_context,
-            estimated_tokens(cumulative_units(first_half)[-1]),
+            estimated_tokens(estimate_units(first_half)),
         ),
         TextChunk(
             second_half,
             chunk.start + best_split,
             chunk.end,
             _tail(chunk.previous_context + first_half, config.previous_context_estimated_tokens),
-            estimated_tokens(cumulative_units(second_half)[-1]),
+            estimated_tokens(estimate_units(second_half)),
         ),
     )
 
 
 def _tail(text: str, tokens: int) -> str:
+    # Every character costs at least one quarter-unit, so earlier text cannot fit.
+    text = text[-tokens * UNITS_PER_TOKEN :]
     weights = cumulative_units(text)
     start = bisect_left(weights, weights[-1] - tokens * UNITS_PER_TOKEN)
     return text[start:]

@@ -163,3 +163,47 @@ def test_recipe_qualified_checkpoint_keeps_plain_input_digest_for_removal(pipeli
         ).fetchone()
     assert bytes(stored[1]) == input_digest({"value": "test"})
     assert stored[0].startswith("insight")
+
+
+def test_local_embedding_rejection_finishes_attempt_without_dispatch(pipeline_store):
+    from oam.models.embedding_inputs import EmbeddingInputLimitError
+    from oam.models.runtime import RuntimeModels
+
+    dsn, store = pipeline_store
+    binding = store.config.models.embedding
+    assert binding is not None
+    limited_binding = binding.model_copy(update={"max_input_tokens": 1})
+    models_config = store.config.models.model_copy(update={"embedding": limited_binding})
+    config = store.config.model_copy(update={"models": models_config})
+
+    def reject_http(_request):
+        pytest.fail("local admission dispatched an HTTP request")
+
+    with httpx.Client(transport=httpx.MockTransport(reject_http)) as client:
+        models = RuntimeModels(config, os.environ, client)
+        with pytest.raises(EmbeddingInputLimitError) as rejected, store.model_pipeline():
+            store.checkpoint(
+                "passage:oversized",
+                ["a much longer embedding input"],
+                lambda: models.embed(("a much longer embedding input",), timeout_seconds=1),
+            )
+    store.fail(rejected.value)
+
+    with psycopg.connect(dsn) as connection:
+        attempt = connection.execute(
+            "SELECT disposition,finished_at IS NOT NULL FROM attempts "
+            "WHERE tenant_id=%s AND user_id=%s AND attempt_id=%s",
+            (*store.key, store.claim.attempt_id),
+        ).fetchone()
+        work = connection.execute(
+            "SELECT status FROM work_units WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
+            (*store.key, store.claim.work_unit_id),
+        ).fetchone()
+        operation = connection.execute(
+            "SELECT status,stage_state->>'error_detail' FROM operations "
+            "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
+            (*store.key, store.claim.operation_id),
+        ).fetchone()
+    assert attempt == ("failed", True)
+    assert work == ("failed_terminal",)
+    assert operation == ("partial_failed", "embedding per-input token limit exceeded")
