@@ -80,3 +80,51 @@ def test_embedding_query_prefix_rejects_non_text(tmp_path, prefix):
 
 
 CONFIG_PATH = default_config_path()
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_query_prefix_admission_counts_the_complete_nonadditive_string(tmp_path, mode):
+    import tiktoken
+
+    from oam.models.embedding_inputs import EmbeddingInputLimitError
+    from oam.retrieval.service import RecallUnavailable
+
+    path = tmp_path / "prefix-limit.yaml"
+    path.write_text(
+        "models:\n  embedding:\n    query_prefix: a\n    max_input_tokens: 1\n"
+        "    tokenizer:\n      type: cl100k_base\n"
+    )
+    config = load_config(path).config
+    independent = tiktoken.get_encoding("cl100k_base")
+    assert len(independent.encode_ordinary("a")) + len(independent.encode_ordinary("b")) == 2
+    assert len(independent.encode_ordinary("ab")) == 1
+    sent = []
+
+    def respond(request):
+        sent.append(json.loads(request.content)["input"])
+        return httpx.Response(
+            200,
+            json={"data": [{"index": 0, "embedding": [1.0] * config.index.embedding_dimensions}]},
+        )
+
+    class Service(RecallService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield DatedRepository(request)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        models = RuntimeModels(
+            config,
+            {
+                "OAM_EMBEDDING_MODEL": "synthetic",
+                "OAM_EMBEDDING_URL": "http://model.test",
+                "OAM_EMBEDDING_KEY": "synthetic",
+            },
+            http,
+        )
+        service = Service(config, None, models, generation_id="generation")
+        service.search(object(), SearchRequest(query="b", recall_level=mode))
+        with pytest.raises(RecallUnavailable, match="embedding stage failed") as failure:
+            service.search(object(), SearchRequest(query="b c", recall_level=mode))
+        assert isinstance(failure.value.__cause__, EmbeddingInputLimitError)
+    assert sent == [["ab"]]

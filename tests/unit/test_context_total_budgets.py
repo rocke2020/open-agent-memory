@@ -16,6 +16,35 @@ from oam.contracts.search import SearchManyRequest, SearchRequest
 from oam.retrieval.context import context_token_count
 
 
+@pytest.mark.parametrize("budget,expected", [(36, ["x"]), (37, ["x", "y"])])
+def test_complete_native_render_controls_admission_at_exact_boundary(budget, expected):
+    import tiktoken
+
+    from oam.retrieval.context import assemble_context, render_context
+
+    rows = [
+        {
+            "unit_id": identity,
+            "kind": "passage",
+            "origin": "memory",
+            "text": text,
+            "citations": [
+                {"source_id": "src", "source_version": 1, "role": "user", "message_id": "0"}
+            ],
+            "time_evidence": [],
+        }
+        for identity, text in [("x", "A."), ("y", "B.")]
+    ]
+    independent = tiktoken.get_encoding("o200k_base")
+    assert len(independent.encode_ordinary(render_context(rows))) == 37
+    selected, _, _, oversized = assemble_context(
+        rows, [], context_max_tokens=budget, include_chunks=True, max_results=10
+    )
+    assert [item["unit_id"] for item in selected] == expected
+    assert len(independent.encode_ordinary(render_context(selected))) <= budget
+    assert not oversized
+
+
 @pytest.mark.parametrize(
     "request_type,query",
     [(SearchRequest, {"query": "launch"}), (SearchManyRequest, {"queries": ["launch"]})],
@@ -52,6 +81,21 @@ def ranked_service(rows, mode="normal", budget=2048, **tier_options):
     return RankedService(rows, config=config)
 
 
+def test_final_context_reuses_count_when_rendered_string_is_unchanged(evidence_rows, monkeypatch):
+    from oam.retrieval import service
+
+    counted = []
+    count = service.context_token_count
+
+    def measured(text):
+        counted.append(text)
+        return count(text)
+
+    monkeypatch.setattr(service, "context_token_count", measured)
+    result = ranked_service([evidence_rows[2]]).search(object(), SearchRequest(query="source"))
+    assert counted == [result["context"]]
+
+
 def test_packing_does_not_recount_unchanged_rendered_blocks(evidence_rows, monkeypatch):
     from oam.retrieval import context
 
@@ -83,7 +127,7 @@ def test_extreme_budget_preserves_answer_only_in_original(evidence_rows, mode, a
     original = deepcopy(evidence_rows[2])
     original["text"] = answer + " Background." * 550
     lower_fact = deepcopy(evidence_rows[0])
-    lower_fact["text"] = "An unrelated detail. " * 200
+    lower_fact["text"] = "An unrelated detail. " * 400
     lower_fact["citations"][0]["span"]["quote"] = answer
     service = ranked_service([original, lower_fact], mode)
     result = service.search(object(), SearchRequest(query="source detail", recall_level=mode))
@@ -142,7 +186,7 @@ def test_fact_and_source_share_total_and_deduplicate(evidence_rows):
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_only_fact_retains_its_full_oversized_bundle(evidence_rows, mode):
     fact, original = deepcopy(evidence_rows[0]), deepcopy(evidence_rows[2])
-    original["text"] += " Background." * 1000
+    original["text"] += " Background." * 1100
     result = ranked_service([fact, original], mode).search(
         object(), SearchRequest(query="workshop", recall_level=mode)
     )
@@ -161,7 +205,7 @@ def test_only_fact_retains_its_full_oversized_bundle(evidence_rows, mode):
 def test_two_oversized_facts_have_no_singleton_exception(evidence_rows):
     fact, original = deepcopy(evidence_rows[0]), deepcopy(evidence_rows[2])
     second = {**deepcopy(fact), "unit_id": "fact2"}
-    original["text"] += " Background." * 1000
+    original["text"] += " Background." * 1100
     result = ranked_service([fact, second, original]).search(
         object(), SearchRequest(query="workshop")
     )
@@ -182,7 +226,7 @@ def test_native_mode_ceiling_controls_actual_original_admission(
     originals = []
     for index in range(6):
         row = deepcopy(evidence_rows[2])
-        row.update(unit_id=f"original{index}", text="x" * 14000)
+        row.update(unit_id=f"original{index}", text="x" * 28000)
         row["citations"][0].update(message_id=str(index), message_index=index)
         originals.append(row)
     budget = getattr(CONFIG.search, mode).context_max_tokens

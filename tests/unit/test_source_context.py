@@ -1094,13 +1094,17 @@ def test_recorded_replay_reassembles_the_same_grouped_context(evidence_rows, met
     result = SourceService(evidence_rows).search(
         object(), SearchRequest(include={"chunks": True}, query="workshops")
     )
+    result["tokenizer"] = method
     if method == "o200k_base":
         import tiktoken
 
-        result["tokenizer"] = method
         result["context_tokens"] = len(
             tiktoken.get_encoding(method).encode_ordinary(result["context"])
         )
+    else:
+        from oam.tokens import estimate_units, estimated_tokens
+
+        result["context_tokens"] = estimated_tokens(estimate_units(result["context"]))
 
     class RecordedTrace(TraceRepository):
         def get(self, connection, authority, trace_id):
@@ -1109,6 +1113,38 @@ def test_recorded_replay_reassembles_the_same_grouped_context(evidence_rows, met
     replayed = RecordedTrace().replay(None, None, "trace", "reassemble_recorded")
     assert replayed["status"] == "exact"
     assert replayed["result"] == result
+
+
+@pytest.mark.parametrize("method,tokens", [("oam-unicode-quarter-v1", 13), ("o200k_base", 18)])
+def test_replay_counts_saved_render_with_its_recorded_identity(method, tokens):
+    from oam.debug.traces import TraceRepository
+
+    item = {
+        "unit_id": "x",
+        "kind": "passage",
+        "origin": "memory",
+        "text": "A.",
+        "citations": [{"source_id": "src", "source_version": 1, "role": "user", "message_id": "0"}],
+        "time_evidence": [],
+    }
+    result = {
+        "items": [item],
+        "context": "[1] passage memory\nA.\nSource: S1@1 user message:0",
+        "context_tokens": tokens,
+        "tokenizer": method,
+    }
+
+    class RecordedTrace(TraceRepository):
+        def get(self, connection, authority, trace_id):
+            return {"status": "recorded", "result": result}
+
+    replay = RecordedTrace().replay(None, None, "trace", "reassemble_recorded")
+    assert replay["status"] == "exact"
+    assert replay["result"] == result
+    result["tokenizer"] = "unknown-vocabulary"
+    assert (
+        RecordedTrace().replay(None, None, "trace", "reassemble_recorded")["status"] == "divergent"
+    )
 
 
 def test_seed_packing_represents_other_sources_before_repeating_one_source():

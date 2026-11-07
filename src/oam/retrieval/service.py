@@ -1169,16 +1169,13 @@ class RecallService:
             ]
         items = bundle_items(admitted_roots)
         context = render_context(items)
-        while (
-            context_token_count(context) > context_limit
-            and admitted_roots
-            and not oversized_single_fact
-        ):
+        context_tokens = context_token_count(context)
+        while context_tokens > context_limit and admitted_roots and not oversized_single_fact:
             removed = admitted_roots.pop()
             budget_omissions.append(removed[0]["unit_id"])
             items = bundle_items(admitted_roots)
             context = render_context(items)
-        context_tokens = context_token_count(context)
+            context_tokens = context_token_count(context)
         selected_ids = {item["unit_id"] for item in items}
         omitted_by_gate = [node for node in gate_omissions if node not in selected_ids]
         for diagnostic in l2_diagnostics:

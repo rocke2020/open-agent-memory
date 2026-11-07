@@ -13,7 +13,6 @@ from oam.models.runtime import Usage
 from oam.retrieval.algorithms import TemporalExpansion, TemporalNode
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.service import RecallService, RecallUnavailable
-from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 CONFIG = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
 # These repository fakes isolate time/source mechanics from relevance selection.
@@ -433,14 +432,18 @@ def test_ambiguous_query_retains_ordinary_recall_with_diagnostic():
     assert "temporal" in result["diagnostics"]["omitted_stages"]
 
 
-def test_context_reports_estimated_tokens_of_complete_rendered_blocks():
+def test_context_reports_native_tokens_of_complete_rendered_blocks():
+    import tiktoken
+
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     result = service.search(
         object(),
         SearchRequest(include={"chunks": True}, query="apple", recall_level="fast"),
     )
-    assert result["tokenizer"] == ESTIMATOR
-    assert result["context_tokens"] == estimated_tokens(estimate_units(result["context"]))
+    assert result["tokenizer"] == "o200k_base"
+    assert result["context_tokens"] == len(
+        tiktoken.get_encoding("o200k_base").encode_ordinary(result["context"])
+    )
     assert len(result["items"]) == 2
 
 

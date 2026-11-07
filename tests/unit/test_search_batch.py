@@ -32,7 +32,7 @@ def test_batch_shares_one_budget_and_runs_two_queries_concurrently() -> None:
             "items": [{"unit_id": request.query}],
             "context": "x" * (4 * request.context_limit(config)),
             "context_tokens": request.context_limit(config),
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -82,7 +82,7 @@ def test_batch_query_overlap_stays_within_configured_cap() -> None:
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -123,7 +123,7 @@ def test_batch_splits_total_in_stable_order_without_erasing_zero_share() -> None
             "items": [{"unit_id": request.query, "kind": "passage"}],
             "context": "Original with citations and qualifiers",
             "context_tokens": 10,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -139,7 +139,7 @@ def test_batch_splits_total_in_stable_order_without_erasing_zero_share() -> None
     assert calls == {"one": (1, False), "two": (1, False), "three": (0, False)}
     assert response["status"] == "ok"
     assert response["context_tokens"] == 30
-    assert response["tokenizer"] == "oam-unicode-quarter-v1"
+    assert response["tokenizer"] == "o200k_base"
     assert all(row["result"]["items"] for row in response["results"])
 
 
@@ -155,7 +155,7 @@ def test_batch_resolves_mode_default_before_splitting() -> None:
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -199,7 +199,7 @@ def test_batch_reports_failed_query_without_hiding_successful_empty_result() -> 
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -224,7 +224,7 @@ def test_batch_isolates_database_failure_after_authorized_dispatch() -> None:
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -248,7 +248,7 @@ def test_batch_marks_partial_when_a_child_has_partial_coverage() -> None:
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {
                 "generative_calls": 0,
                 "partial": request.query == "incomplete source",
@@ -280,7 +280,7 @@ def test_expired_child_does_not_hold_batch_response_open() -> None:
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -311,7 +311,7 @@ def test_batch_preserves_explicit_time_window_for_each_query() -> None:
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -341,7 +341,7 @@ def test_batch_freezes_one_implicit_time_reference_for_all_queries() -> None:
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -376,7 +376,7 @@ def test_database_runtime_authorizes_batch_once_before_search(monkeypatch) -> No
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -427,7 +427,7 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -512,7 +512,7 @@ def test_invalid_plan_falls_back_to_direct_query_with_measured_usage(tmp_path: P
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -575,7 +575,7 @@ def test_unresolved_planner_binding_falls_back_without_claiming_a_model_call(
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -614,7 +614,7 @@ def test_planner_capacity_timeout_before_dispatch_reports_zero_calls(tmp_path: P
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -652,7 +652,7 @@ def test_expired_delegated_deadline_starts_no_search_after_planner(tmp_path: Pat
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 
@@ -697,7 +697,7 @@ def test_delegated_deadline_does_not_wait_for_a_stalled_planner(tmp_path: Path) 
             "items": [],
             "context": "",
             "context_tokens": 0,
-            "tokenizer": "oam-unicode-quarter-v1",
+            "tokenizer": "o200k_base",
             "diagnostics": {"generative_calls": 0},
         }
 

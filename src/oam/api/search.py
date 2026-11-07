@@ -19,9 +19,10 @@ from oam.models.runtime import (
     ModelDispatchUnavailable,
     ModelOutputError,
 )
+from oam.retrieval.context import CONTEXT_TOKENIZER
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.service import RecallUnavailable
-from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
+from oam.tokens import estimate_units, estimated_tokens
 
 SearchOne = Callable[[SearchRequest, datetime], dict]
 PLANNER_SYSTEM_TEMPLATE = (
@@ -243,7 +244,7 @@ def _run_batch(
         "status": "partial" if partial else "ok",
         "results": results,
         "context_tokens": sum(row["result"]["context_tokens"] for row in successes),
-        "tokenizer": ESTIMATOR,
+        "tokenizer": CONTEXT_TOKENIZER,
         "diagnostics": {
             "recall_level": request.recall_level.value,
             "deadline_at": deadline.isoformat(),

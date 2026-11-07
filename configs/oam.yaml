@@ -30,7 +30,8 @@ api:
   # HTTP request-body cap, including upload framing: 128 MB.
   max_request_bytes: 134217728
 
-# Ingestion packing only; extraction and recall budgets retain their existing estimate.
+# General counter for Profile budgets and source sizing without an embedding override.
+# Extraction estimates keep their policy; recall uses fixed local o200k_base counting.
 tokenizer:
   type: o200k_base
 
@@ -389,7 +390,7 @@ models:
     planner: null
   embedding:
     # Optional query-only encoder instruction, including syntax and trailing separator.
-    # Count final embedding inputs with this override, or the ingestion counter when null.
+    # Source sizing and final embedding inputs use this override, or the general counter.
     # A counter is only model-matched when verified against the selected deployment.
     tokenizer: null
     max_input_tokens: null

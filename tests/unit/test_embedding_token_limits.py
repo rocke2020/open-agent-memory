@@ -27,6 +27,25 @@ def test_native_counter_counts_literal_special_tokens_without_changing_legacy(tm
     assert tokens.estimated_tokens(tokens.estimate_units("abcd")) == 1
 
 
+def test_source_counter_prefers_embedding_vocabulary_without_changing_profile_counter(tmp_path):
+    from oam.workers.index_source import _ingestion_counter
+
+    config = configured(
+        tmp_path,
+        "tokenizer:\n  type: oam-unicode-quarter-v1\n"
+        "models:\n  embedding:\n    tokenizer:\n      type: cl100k_base\n",
+    )
+    limits = config.chunk.ingestion.model_copy(
+        update={"target_estimated_tokens": 12, "max_estimated_tokens": 12}
+    )
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500))) as http:
+        models = RuntimeModels(config, {}, http)
+        chunks = chunk_text("x" * 80, limits, counter=_ingestion_counter(config, models))
+    assert [chunk.text for chunk in chunks] == ["x" * 80]
+    assert models.ingestion_counter.identity == tokens.ESTIMATOR
+    assert chunks[0].estimated_tokens == 20
+
+
 def test_selected_ingestion_counter_preserves_offsets_and_legacy_metadata(tmp_path):
     config = configured(tmp_path, "tokenizer:\n  type: cl100k_base\n")
     counter = tokens.resolve_counter(config.tokenizer)
@@ -121,6 +140,36 @@ def test_local_tokenizer_requires_explicit_environment_and_counts_untruncated_in
         tokens.resolve_counter(config.tokenizer, {"TEST_TOKENIZER_FILE": str(copied)}).identity
         == counter.identity
     )
+
+
+@pytest.mark.parametrize("asset", ["unset", "missing", "malformed"])
+def test_explicit_embedding_asset_failure_never_falls_back_or_dispatches(tmp_path, asset):
+    config = configured(
+        tmp_path,
+        "models:\n  embedding:\n    tokenizer:\n      type: tokenizer_json\n"
+        "      file_env: TEST_TOKENIZER_FILE\n",
+    )
+    environment = {}
+    if asset != "unset":
+        path = tmp_path / "tokenizer.json"
+        environment["TEST_TOKENIZER_FILE"] = str(path)
+        if asset == "malformed":
+            path.write_text("not a tokenizer")
+    sent = []
+
+    def respond(request):
+        sent.append(request)
+        return httpx.Response(500)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        expected = {
+            "unset": "requires environment variable",
+            "missing": "cannot load configured tokenizer asset",
+            "malformed": "expected ident",
+        }[asset]
+        with pytest.raises(Exception, match=expected):
+            RuntimeModels(config, environment, http)
+    assert not sent
 
 
 def test_nonmonotonic_counter_never_publishes_an_unchecked_chunk():

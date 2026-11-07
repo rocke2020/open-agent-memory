@@ -8,7 +8,7 @@ from oam.config import OAMConfig
 from oam.models.bindings import resolve_model_binding
 from oam.models.embedding_inputs import configured_embedding_admission
 from oam.retrieval.fts import FTS_RECIPE
-from oam.tokens import ESTIMATOR, resolve_counter
+from oam.tokens import ESTIMATOR
 
 INDEX_RECIPE = "oam-source-fact-insight-v39"
 RESOURCE_VISION_RECIPE = "oam-vision-downscale-v1"
@@ -82,8 +82,8 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
         ),
         "roles": roles,
     }
-    ingestion_counter = resolve_counter(config.tokenizer, environment).identity
     admission = configured_embedding_admission(config, environment)
+    ingestion_counter = admission.counter.identity
     limits = [
         bound
         for bound in (admission.max_input_tokens, admission.max_request_tokens)

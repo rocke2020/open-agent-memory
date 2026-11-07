@@ -8,19 +8,20 @@ from test_context_total_budgets import ranked_service
 from test_source_context import evidence_rows as evidence_rows
 
 from oam.contracts.search import SearchRequest
-from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 
-def test_online_recall_uses_compiled_estimates_without_bpe(evidence_rows, monkeypatch):
+def test_online_recall_uses_native_counter_without_python_token_ids(evidence_rows, monkeypatch):
+    independent = tiktoken.get_encoding("o200k_base")
+
     def forbidden(*args, **kwargs):
-        raise AssertionError("real-time recall must not invoke BPE")
+        raise AssertionError("real-time recall must not initialize the Python token-ID counter")
 
     monkeypatch.setattr(tiktoken, "get_encoding", forbidden)
     original = deepcopy(evidence_rows[2])
     original["text"] = "周一工作坊。🎯"
     result = ranked_service([original]).search(object(), SearchRequest(query="workshop"))
-    assert result["tokenizer"] == ESTIMATOR
-    assert result["context_tokens"] == estimated_tokens(estimate_units(result["context"]))
+    assert result["tokenizer"] == "o200k_base"
+    assert result["context_tokens"] == len(independent.encode_ordinary(result["context"]))
     assert result["items"][0]["text"] == original["text"]
     assert not result["items"][0].get("truncated")
 

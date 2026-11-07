@@ -39,7 +39,6 @@ from oam.indexing.references import eligible_reference_ids, freeze_extraction_re
 from oam.indexing.store import IndexStore, stable_id
 from oam.models.embedding_inputs import configured_embedding_admission
 from oam.models.runtime import retryable_model_http_error
-from oam.tokens import resolve_counter
 from oam.workers.claims import claim_one
 
 ABSTRACT_SYSTEM = (
@@ -76,8 +75,7 @@ EXTRACTION_WINDOW_BATCHES = 2
 
 
 def _ingestion_counter(config, models):
-    counter = getattr(models, "ingestion_counter", None)
-    return counter if counter is not None else resolve_counter(config.tokenizer)
+    return _embedding_admission(config, models).counter
 
 
 def _embedding_admission(config, models):

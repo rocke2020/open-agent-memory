@@ -155,6 +155,8 @@ async def test_public_batch_and_planned_search_use_current_authorized_index(
         assert payload["context_tokens"] == sum(
             row["result"]["context_tokens"] for row in payload["results"]
         )
+        assert payload["tokenizer"] == "o200k_base"
+        assert all(row["result"]["tokenizer"] == payload["tokenizer"] for row in payload["results"])
         assert payload["context_tokens"] <= config.search.fast.context_max_tokens
         assert all(
             row["result"]["diagnostics"]["generative_calls"] == 0 for row in payload["results"]

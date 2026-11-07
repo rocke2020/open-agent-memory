@@ -9,7 +9,7 @@ from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.db.entity_eligibility import ELIGIBLE_ENTITY_NAME_SUPPORT
 from oam.retrieval.context import context_token_count, render_context
-from oam.tokens import ESTIMATOR
+from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
 
 
 class TraceNotFound(LookupError):
@@ -124,11 +124,9 @@ class TraceRepository:
             raise ValueError("unsupported recorded replay mode")
         context = render_context(result["items"])
         if result["tokenizer"] == ESTIMATOR:
-            tokens = context_token_count(context)
+            tokens = estimated_tokens(estimate_units(context))
         elif result["tokenizer"] == "o200k_base":
-            import tiktoken
-
-            tokens = len(tiktoken.get_encoding("o200k_base").encode_ordinary(context))
+            tokens = context_token_count(context)
         else:
             tokens = None
         exact = (

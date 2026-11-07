@@ -240,3 +240,25 @@ def test_request_scheduling_limit_does_not_change_source_recipe_above_item_limit
     assert index_generation(
         config, {"VECTOR_URL": "https://vector.example/v1"}
     ) == index_generation(smaller, {"VECTOR_URL": "https://vector.example/v1"})
+
+
+def test_source_recipe_hashes_effective_embedding_counter_not_unused_general_counter():
+    from oam.config import TokenizerConfig
+    from oam.indexing.identity import index_generation
+
+    config = load_config(default_config_path()).config
+    assert config.models.embedding is not None
+    binding = config.models.embedding.model_copy(
+        update={
+            "tokenizer": TokenizerConfig(type="cl100k_base"),
+            "model": "fixture",
+            "model_env": None,
+            "api_key_env": None,
+        }
+    )
+    selected = config.model_copy(update={"models": ModelsConfig(embedding=binding)})
+    other_general = selected.model_copy(
+        update={"tokenizer": TokenizerConfig(type="oam-unicode-quarter-v1")}
+    )
+    environment = {"OAM_EMBEDDING_URL": "https://vector.example/v1"}
+    assert index_generation(selected, environment) == index_generation(other_general, environment)

@@ -44,7 +44,7 @@ def fact(identity, original, text):
     )
 
 
-@pytest.mark.parametrize("budget,cap", [(560, 96), (10000, 2)])
+@pytest.mark.parametrize("budget,cap", [(575, 96), (10000, 2)])
 def test_distinct_events_from_one_source_keep_both_originals(budget, cap):
     first = passage("event1", "A", "I attended the workshop on June 3. " * 30)
     second = passage("event2", "A", "I attended the workshop on June 10. " * 30)
@@ -93,7 +93,7 @@ def test_distinct_event_facts_keep_rank_when_original_bodies_are_hidden():
         facts,
         [],
         evidence_groups=[[facts[0], first], [facts[1], second], [facts[2], other]],
-        context_max_tokens=771,
+        context_max_tokens=780,
         include_chunks=False,
         max_results=96,
     )

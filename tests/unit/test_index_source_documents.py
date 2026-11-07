@@ -837,6 +837,71 @@ def test_partial_interaction_reuses_published_passage_boundaries():
     assert "".join(unit["text"] for unit in store.units) == request.messages[0].content
 
 
+@pytest.mark.parametrize("source_kind", ["interaction", "text", "native_pdf"])
+def test_existing_source_chunking_paths_prefer_embedding_counter(source_kind, monkeypatch):
+    from oam.config import TokenizerConfig
+    from oam.contracts.evidence import EvidenceAppendRequest
+    from oam.models.embedding_inputs import configured_embedding_admission
+    from oam.resources.pdf_isolated import InspectedPdfPage
+
+    text = "x" * 80
+    store = MemoryStore(content=text.encode())
+    defaults = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    assert defaults.models.embedding is not None
+    binding = defaults.models.embedding.model_copy(
+        update={"tokenizer": TokenizerConfig(type="cl100k_base")}
+    )
+    store.config = store.config.model_copy(
+        update={
+            "tokenizer": TokenizerConfig(type="oam-unicode-quarter-v1"),
+            "models": ModelsConfig(embedding=binding),
+            "chunk": store.config.chunk.model_copy(
+                update={
+                    "ingestion": store.config.chunk.ingestion.model_copy(
+                        update={"target_estimated_tokens": 12, "max_estimated_tokens": 12}
+                    )
+                }
+            ),
+            "extraction": store.config.extraction.model_copy(update={"reference_max_facts": 0}),
+        }
+    )
+    models = LocalModels()
+    models.embedding_admission = configured_embedding_admission(store.config)
+    if source_kind == "interaction":
+        request = EvidenceAppendRequest.model_validate(
+            {
+                "source_id": "document",
+                "messages": [
+                    {
+                        "message_id": "first",
+                        "role": "user",
+                        "content": text,
+                        "learning_eligible": True,
+                        "event_time": "2026-11-07T00:00:00Z",
+                    }
+                ],
+            }
+        )
+        index_source._index_interaction(store.config, store, models, request)
+    else:
+        if source_kind == "native_pdf":
+            from oam.resources import pdf_isolated
+
+            store.source.update(
+                media_type="application/pdf",
+                original_bytes=(MEDICAL_FIXTURES / "bilingual/en-native.pdf").read_bytes(),
+            )
+            monkeypatch.setattr(
+                pdf_isolated,
+                "inspect_pdf",
+                lambda original, limits: (
+                    InspectedPdfPage("pdf:page:0001", 1, text, needs_vision=False),
+                ),
+            )
+        index_source._resource(store, models)
+    assert [unit["text"] for unit in store.units] == [text]
+
+
 def test_partial_interaction_does_not_extract_a_published_fact_again():
     from oam.contracts.evidence import EvidenceAppendRequest
 

@@ -3,21 +3,23 @@
 import json
 from datetime import datetime
 
+from oam.config import TokenizerConfig
 from oam.quotes import unique_quote
 from oam.text_boundaries import punctuation_ends
 from oam.tokens import (
-    ESTIMATOR,
     estimate_units,
     estimated_tokens,
+    resolve_counter,
 )
 
-CONTEXT_TOKENIZER = ESTIMATOR
+CONTEXT_TOKENIZER = "o200k_base"
+_CONTEXT_COUNTER = resolve_counter(TokenizerConfig(type=CONTEXT_TOKENIZER))
 ORIGINAL_KINDS = frozenset({"passage", "resource_passage"})
 
 
 def context_token_count(text: str) -> int:
-    """Estimate recall tokens with the compiled Unicode regex counter."""
-    return estimated_tokens(estimate_units(text))
+    """Count complete recall strings with the cached local context vocabulary."""
+    return _CONTEXT_COUNTER.count(text)
 
 
 def render_context(items: list[dict]) -> str:
@@ -80,8 +82,8 @@ class _ContextRenderer:
                 compact_blocks.append(
                     self._block(key, _render_compact_item, item, references, sources, owner)
                 )
-        # The Unicode estimator is additive; round only after summing all blocks
-        # and separators, exactly as when counting the complete joined string.
+        # Preserve the formatting choice for recorded replay. These additive units
+        # choose presentation only; live admission counts the complete BPE string.
         separators = max(0, len(blocks) - 1) * 2
         legacy_units = sum(units for _, units in blocks) + separators
         compact_units = sum(units for _, units in compact_blocks) + separators
@@ -531,8 +533,8 @@ def assemble_context(
         tentative = bundle_items([*admitted, group])
         originals = sum(row["kind"] in ORIGINAL_KINDS for row in tentative)
         pools_fit = originals <= max_results and len(tentative) - originals <= max_results
-        tokens_fit = pools_fit and (
-            estimated_tokens(renderer.render(tentative)[1]) <= context_max_tokens
+        tokens_fit = (
+            pools_fit and context_token_count(renderer.render(tentative)[0]) <= context_max_tokens
         )
         return tentative, pools_fit, tokens_fit
 
