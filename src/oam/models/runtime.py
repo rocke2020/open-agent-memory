@@ -98,9 +98,9 @@ class RuntimeModels:
         stop_event: Event | None = None,
     ) -> None:
         self.config = config
-        self.ingestion_counter = resolve_counter(config.tokenizer, environment)
-        self.embedding_admission = configured_embedding_admission(config, environment)
         self._environment = dict(environment)
+        self.ingestion_counter = resolve_counter(config.tokenizer, self._environment)
+        self.embedding_admission = configured_embedding_admission(config, self._environment)
         self._http = http
         self._background = background
         self._admission = admission
@@ -220,7 +220,7 @@ class RuntimeModels:
         return result
 
     def embed(self, texts: tuple[str, ...], *, timeout_seconds: float) -> EmbeddingResult:
-        self.embedding_admission.validate(texts)
+        texts = self.embedding_admission.prepare(texts)
         binding = self._binding("embedding", "embeddings")
         body = self._post(
             binding,

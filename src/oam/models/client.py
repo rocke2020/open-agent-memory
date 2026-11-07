@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from PIL import Image
 
-from oam.config import OAMConfig, TokenizerConfig
+from oam.config import EmbeddingModelBinding, OAMConfig, TokenizerConfig
 from oam.models.bindings import ResolvedModelBinding
 from oam.models.embedding_inputs import configured_embedding_admission, embedding_admission
 from oam.models.preflight import (
@@ -71,10 +71,10 @@ class OpenAICompatibleProbeClient:
         environment: Mapping[str, str] | None = None,
     ) -> None:
         self._http = http
+        self._config = config
+        self._environment = dict(environment or {})
         self._embedding_admission = (
-            configured_embedding_admission(config, environment)
-            if config
-            else embedding_admission(None, TokenizerConfig(type="o200k_base"))
+            configured_embedding_admission(config, self._environment) if config else None
         )
 
     def probe_chat(
@@ -88,7 +88,24 @@ class OpenAICompatibleProbeClient:
     def probe_embeddings(
         self, binding: ResolvedModelBinding, texts: tuple[str, ...]
     ) -> EmbeddingProbeOutput:
-        self._embedding_admission.validate(texts)
+        admission = self._embedding_admission or embedding_admission(
+            EmbeddingModelBinding(
+                protocol="openai_compatible",
+                model=binding.model,
+                endpoint_env="UNUSED_EMBEDDING_URL",
+                capabilities=binding.capabilities,
+            ),
+            TokenizerConfig(type="o200k_base"),
+        )
+        if self._config is not None and self._config.models.embedding is not None:
+            admission = embedding_admission(
+                self._config.models.embedding.model_copy(
+                    update={"model": binding.model, "model_env": None}
+                ),
+                self._config.tokenizer,
+                self._environment,
+            )
+        texts = admission.prepare(texts)
         payload = {"model": binding.model, "input": list(texts)}
         body = self._post(binding, "/embeddings", payload)
         try:

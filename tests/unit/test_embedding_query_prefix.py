@@ -83,11 +83,8 @@ CONFIG_PATH = default_config_path()
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
-def test_query_prefix_admission_counts_the_complete_nonadditive_string(tmp_path, mode):
+def test_query_prefix_preparation_counts_the_complete_nonadditive_string(tmp_path, mode):
     import tiktoken
-
-    from oam.models.embedding_inputs import EmbeddingInputLimitError
-    from oam.retrieval.service import RecallUnavailable
 
     path = tmp_path / "prefix-limit.yaml"
     path.write_text(
@@ -99,6 +96,7 @@ def test_query_prefix_admission_counts_the_complete_nonadditive_string(tmp_path,
     assert len(independent.encode_ordinary("a")) + len(independent.encode_ordinary("b")) == 2
     assert len(independent.encode_ordinary("ab")) == 1
     sent = []
+    lexical_queries = []
 
     def respond(request):
         sent.append(json.loads(request.content)["input"])
@@ -107,10 +105,19 @@ def test_query_prefix_admission_counts_the_complete_nonadditive_string(tmp_path,
             json={"data": [{"index": 0, "embedding": [1.0] * config.index.embedding_dimensions}]},
         )
 
+    class Repository(DatedRepository):
+        def lexical(self, text, limit):
+            lexical_queries.append(text)
+            return super().lexical(text, limit)
+
+        def anchors(self, text, limit):
+            assert text in {"b", "b c"}
+            return super().anchors(text, limit)
+
     class Service(RecallService):
         @contextmanager
         def _repository(self, authority, request, deadline):
-            yield DatedRepository(request)
+            yield Repository(request)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as http:
         models = RuntimeModels(
@@ -124,7 +131,6 @@ def test_query_prefix_admission_counts_the_complete_nonadditive_string(tmp_path,
         )
         service = Service(config, None, models, generation_id="generation")
         service.search(object(), SearchRequest(query="b", recall_level=mode))
-        with pytest.raises(RecallUnavailable, match="embedding stage failed") as failure:
-            service.search(object(), SearchRequest(query="b c", recall_level=mode))
-        assert isinstance(failure.value.__cause__, EmbeddingInputLimitError)
-    assert sent == [["ab"]]
+        service.search(object(), SearchRequest(query="b c", recall_level=mode))
+    assert sent == [["ab"], ["ab"]]
+    assert lexical_queries == ["b", "b c"]

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import re
+from bisect import bisect_right
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
+from importlib.resources import files
 from itertools import accumulate
 from pathlib import Path
 
@@ -53,19 +56,39 @@ class TokenCounter:
 
     identity: str
     _count: Callable[[str], int] = field(repr=False, compare=False)
+    _truncate: Callable[[str, int], str] | None = field(default=None, repr=False, compare=False)
 
     def count(self, text: str) -> int:
         return self._count(text)
+
+    def truncate(self, text: str, max_tokens: int) -> str:
+        """Retain an original Unicode prefix, verified under the complete counting policy."""
+        if self.count(text) <= max_tokens:
+            return text
+        if self._truncate is None:
+            raise ValueError("token counter does not support truncation")
+        candidate = self._truncate(text, max_tokens)
+        if not text.startswith(candidate):
+            raise ValueError("token counter truncation must preserve an original text prefix")
+        if self.count(candidate) > max_tokens:
+            raise ValueError("token counter truncation exceeds the token limit")
+        return candidate
 
 
 @lru_cache(maxsize=8)
 def _named_counter(name: str) -> TokenCounter:
     if name == ESTIMATOR:
-        return TokenCounter(name, lambda text: estimated_tokens(estimate_units(text)))
+        return TokenCounter(
+            name,
+            lambda text: estimated_tokens(estimate_units(text)),
+            lambda text, limit: text[
+                : bisect_right(cumulative_units(text), limit * UNITS_PER_TOKEN) - 1
+            ],
+        )
     import toktok  # type: ignore[import-untyped]
 
     encoding = toktok._encoding(name)
-    return TokenCounter(name, encoding.count)
+    return TokenCounter(name, encoding.count, lambda text, limit: encoding.truncate(text, limit)[0])
 
 
 @lru_cache(maxsize=8)
@@ -78,10 +101,57 @@ def _asset_counter(content: bytes, add_special_tokens: bool) -> TokenCounter:
     tokenizer.no_padding()
     identity = "tokenizer_json:" + hashlib.sha256(content).hexdigest()
     identity += ":special=" + str(add_special_tokens).lower()
+
+    def truncate(text: str, limit: int) -> str:
+        encoded = tokenizer.encode(text, add_special_tokens=add_special_tokens)
+        available = limit - sum(encoded.special_tokens_mask)
+        offsets = [
+            (start, end)
+            for (start, end), special in zip(
+                encoded.offsets, encoded.special_tokens_mask, strict=True
+            )
+            if not special and 0 <= start < end <= len(text)
+        ]
+        if available <= 0 or not offsets:
+            return ""
+        position = min(available, len(offsets)) - 1
+        end = offsets[position][1]
+        neighbor = offsets[position + 1][0] if position + 1 < len(offsets) else len(text)
+        near = max(end, neighbor)
+        # Neighboring starts preserve original combining sequences omitted by normalization.
+        candidates = {point for pair in offsets for point in pair if 0 < point <= near}
+        candidates.add(near)
+        for cut in sorted(candidates, reverse=True):
+            candidate = text[:cut]
+            if len(tokenizer.encode(candidate, add_special_tokens=add_special_tokens).ids) <= limit:
+                return candidate
+        return ""
+
     return TokenCounter(
         identity,
         lambda text: len(tokenizer.encode(text, add_special_tokens=add_special_tokens).ids),
+        truncate,
     )
+
+
+@lru_cache(maxsize=2)
+def qwen_embedding_counter(variant: str = "0.6b") -> TokenCounter:
+    """Load a pinned embedding vocabulary offline, including the saved EOS policy."""
+    asset, digest = (
+        (
+            "qwen3-embedding-0.6b.json.gz",
+            "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+        )
+        if variant == "0.6b"
+        else (
+            "qwen3-embedding-4b-8b.json.gz",
+            "83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d",
+        )
+    )
+    content = gzip.decompress(files("oam").joinpath("tokenizer_assets", asset).read_bytes())
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("bundled Qwen embedding tokenizer digest mismatch")
+    return _asset_counter(content, True)
 
 
 def resolve_counter(

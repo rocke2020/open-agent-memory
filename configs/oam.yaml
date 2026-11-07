@@ -389,14 +389,21 @@ models:
     # Reasoning setting for query decomposition; null disables this role.
     planner: null
   embedding:
+    # auto selects the model profile; scalar presets are openai (8192) and qwen (32768).
+    # A tokenizer object selects a local counter; null retains the general counter.
+    tokenizer: auto
+    # Input auto follows a scalar preset first, otherwise the recognized model ID.
+    # Request auto always follows the model ID, independently of the scalar preset.
+    # Strict positive integers override each bound.
+    # Oversized individual payloads trim with a warning; whole-batch bounds reject before HTTP.
+    # Unknown request bounds and explicit null do not add a local bound.
+    # auto: OpenAI 8192; Qwen3 32768; Tencent KinFRA text 32768; unknown model 8192.
+    max_input_tokens: auto
+    # auto: OpenAI 300000; all other models have no additional local request-token cap.
+    max_request_tokens: auto
+    # auto: OpenAI 2048; Tencent KinFRA text 128; all others have no additional local item cap.
+    max_request_items: auto
     # Optional query-only encoder instruction, including syntax and trailing separator.
-    # Source sizing and final embedding inputs use this override, or the general counter.
-    # A counter is only model-matched when verified against the selected deployment.
-    tokenizer: null
-    max_input_tokens: null
-    max_request_tokens: null
-    max_request_items: null
-    # Document embeddings and the complete original query remain unchanged.
     query_prefix: ""
     # Embedding wire protocol; only OpenAI-compatible embeddings is supported.
     protocol: openai_compatible

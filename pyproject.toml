@@ -53,6 +53,7 @@ include = ["oam*"]
 oam = [
     "web/*.html", "web/*.css", "web/*.js", "web/*.svg",
     "profiles/*.txt", "indexing/*.txt", "resources/*.txt", "api/*.txt", "models/*.txt",
+    "tokenizer_assets/*.json.gz",
 ]
 
 [tool.setuptools.data-files]

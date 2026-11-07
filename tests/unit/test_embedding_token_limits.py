@@ -69,7 +69,6 @@ def test_selected_ingestion_counter_preserves_offsets_and_legacy_metadata(tmp_pa
 @pytest.mark.parametrize(
     "setting,texts",
     [
-        ("max_input_tokens: 2", ("hello world", "a b c d")),
         ("max_request_tokens: 3", ("hello world", "hello world")),
         ("max_request_items: 1", ("a", "b")),
     ],

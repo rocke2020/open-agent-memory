@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import (
@@ -352,10 +352,10 @@ class ModelBinding(FrozenModel):
 
 class EmbeddingModelBinding(ModelBinding):
     query_prefix: str = ""
-    tokenizer: TokenizerConfig | None = None
-    max_input_tokens: PositiveInt | None = None
-    max_request_tokens: PositiveInt | None = None
-    max_request_items: PositiveInt | None = None
+    tokenizer: TokenizerConfig | Literal["auto", "openai", "qwen"] | None = "auto"
+    max_input_tokens: Annotated[int, Field(strict=True, gt=0)] | Literal["auto"] | None = "auto"
+    max_request_tokens: Annotated[int, Field(strict=True, gt=0)] | Literal["auto"] | None = "auto"
+    max_request_items: Annotated[int, Field(strict=True, gt=0)] | Literal["auto"] | None = "auto"
 
 
 ReasoningEffort = Literal["none", "low", "high", "max"]

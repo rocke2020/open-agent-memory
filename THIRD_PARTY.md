@@ -21,4 +21,11 @@ The locked runtime graph includes MIT, BSD, Apache-2.0, MPL-2.0, LGPL-3.0-only, 
 
 ## Models and Data
 
-No model, credential, private report, company trace, or benchmark dataset is bundled by default. Operators are responsible for approving configured model endpoints and their data-handling terms. Public conformance fixtures use invented data only.
+OAM bundles two compressed official Qwen3-Embedding tokenizer assets from the Qwen Team under Apache-2.0, with the license in `third_party_licenses/qwen-tokenizer-Apache-2.0.txt`. These contain tokenizer vocabulary and processing configuration, not model weights. The distributed gzip files preserve the exact upstream JSON bytes; SHA-256 below identifies decompressed content. Both use the upstream EOS postprocessor with special tokens enabled; saved truncation and padding are disabled at load time.
+
+| Asset | Pinned upstream source | Decompressed SHA-256 |
+|---|---|---|
+| `qwen3-embedding-0.6b.json.gz` | [Qwen3-Embedding-0.6B tokenizer.json](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/blob/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3/tokenizer.json) | `def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a` |
+| `qwen3-embedding-4b-8b.json.gz` | [Qwen3-Embedding-4B tokenizer.json](https://huggingface.co/Qwen/Qwen3-Embedding-4B/blob/5cf2132abc99cad020ac570b19d031efec650f2b/tokenizer.json); identical bytes in [8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B/blob/1d8ad4ca9b3dd8059ad90a75d4983776a23d44af/tokenizer.json) | `83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d` |
+
+The 0.6B vocabulary additionally registers `<tool_response>`, `</tool_response>`, `<think>` and `</think>` as ordinary added tokens; the 4B/8B asset omits them. No model weights, credential, private report, company trace, or benchmark dataset is bundled by default. Operators are responsible for approving configured model endpoints and their data-handling terms. Public conformance fixtures use invented data only.
