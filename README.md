@@ -1,20 +1,39 @@
 # Open Agent Memory
 
+English (canonical) | [简体中文](README_CN.md) | [日本語](README_JA.md)
+
 ## What Is Open Agent Memory?
 
 Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for AI agents. It turns eligible conversations into source-backed facts and Insights, keeps documents as separate Resources, and retrieves both with citations. An explicitly refreshed User Profile helps agents carry useful personal context across sessions.
+
+“Open” means the complete memory system: indexing, retrieval, Profiles, user controls and native multi-node operation are available in the Apache-2.0 core for developers to inspect, run, modify and improve.
 
 Integrate through the HTTP API or the OpenClaw and DeepSeek Harness plugins. The bundled Memory Inspector lets users browse memory, follow its sources, search Resources and manage what is retained.
 
 ## Why Open Agent Memory?
 
+- **Fully open source, with native multi-node deployment.** Run stateless API replicas and durable workers across nodes over shared PostgreSQL/pgvector. Coordination, recovery and deployment code are part of the Apache-2.0 core.
 - **Recall with evidence.** Retrieve facts and Insights together with supporting original passages and citations, so the agent can reason from the source.
 - **Search conversations and documents together.** HTML, PDF and image Resources remain separate from learned personal memory while sharing one retrieval path.
 - **Personalize when you choose.** Build a stored User Profile from eligible memory and explicit Profile Data on request; unchanged inputs reuse it without generation.
 - **Inspect and control memory.** Browse sources in the Inspector, remove an individual Memory Unit or Insight, and manage document Resources through the same authorized API.
-- **Self-host with PostgreSQL.** Run API and worker replicas over shared PostgreSQL/pgvector storage and configure your own model endpoints.
+- **Control your data and models.** Self-host your memory in PostgreSQL/pgvector and configure your own model endpoints.
 
 See the [acceptance requirements](docs/acceptance.md), [release evidence](docs/release-evidence.md) and [published release](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.1) for verified behavior, deployment limits and artifacts.
+
+## Get Started
+
+Clone the repository and pull the published v0.0.1 image for Linux AMD64 or ARM64:
+
+```bash
+git clone https://github.com/rocke2020/open-agent-memory.git
+cd open-agent-memory
+docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
+```
+
+Follow the [Docker Compose guide](deploy/README.md) to configure PostgreSQL and your model endpoints, initialize OAM and open the Memory Inspector. Set `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.1` in `deploy/.env` to use the published image.
+
+Integrate through the [HTTP API](docs/api.md), or install the [OpenClaw](integrations/openclaw/README.md#npm-installation) or [DeepSeek Harness](integrations/dsh/README.md) plugin. Start with the [copyable retain → readiness → recall example](docs/quickstart.md) to store a conversation, wait for indexing and inspect the returned source citations.
 
 ## Performance & Accuracy
 
