@@ -8,12 +8,22 @@ Set `OAM_DSH_URL`, `OAM_DSH_USER_ID` and `OAM_DSH_API_KEY` in the DSH process en
 
 Run `npm test` for local HTTP-boundary tests. A live integration requires a separate completed turn, OAM operation readiness, and cited recall in a fresh DSH session; installation or local tests do not prove that path.
 
-## Release archive installation
+## npm installation
 
-Download `rocke2020-oam-openclaw-0.0.1.tgz`, `rocke2020-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release and run `shasum -a 256 -c SHA256SUMS` in that directory. No npm account or registry publication is required. DSH may need network access for its own profile dependencies.
+The v0.0.1 release publishes `@rocke-dong/oam-dsh` on the public npm registry. After publication, add the versioned package to the owner-only profile:
 
 ```bash
-dsh plugin --profile headless add /absolute/path/rocke2020-oam-dsh-0.0.1.tgz
+dsh plugin --profile headless add @rocke-dong/oam-dsh@0.0.1
 ```
 
-Select the owner-only profile you intend to use, supply the three environment variables above to that DSH process, and restart the profile. Keep the archive available because the profile's package manager may reference its local path. Use `dsh plugin --profile headless remove @rocke2020/oam-dsh` to remove it. The package contains the plugin entrypoint and profile patch; it does not include or start OAM.
+No npm login is required for users installing the public package. Supply the OAM environment variables above, then restart or reload that profile. If an earlier local `@rocke2020/oam-dsh` package is installed, remove that package through the same profile's plugin manager before adding the renamed package. Source and archive checks are separate from verification of the actual published package.
+
+## Release archive installation
+
+Download `rocke-dong-oam-openclaw-0.0.1.tgz`, `rocke-dong-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release and run `shasum -a 256 -c SHA256SUMS` in that directory. No npm account or registry publication is required. DSH may need network access for its own profile dependencies.
+
+```bash
+dsh plugin --profile headless add /absolute/path/rocke-dong-oam-dsh-0.0.1.tgz
+```
+
+Select the owner-only profile you intend to use, supply the three environment variables above to that DSH process, and restart the profile. Keep the archive available because the profile's package manager may reference its local path. Use `dsh plugin --profile headless remove @rocke-dong/oam-dsh` to remove it. The package contains the plugin entrypoint and profile patch; it does not include or start OAM.

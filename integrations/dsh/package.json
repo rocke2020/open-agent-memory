@@ -1,7 +1,6 @@
 {
-  "name": "@rocke2020/oam-dsh",
+  "name": "@rocke-dong/oam-dsh",
   "version": "0.0.1",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./index.mjs",
@@ -21,5 +20,9 @@
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }

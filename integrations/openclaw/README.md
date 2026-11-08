@@ -4,12 +4,23 @@
 
 This plugin connects one OAM user to owner-authorized local WebChat sessions of one selected OpenClaw agent and explicitly approved direct conversations for that agent. `targetAgentId` defaults to `main`; it is separate from OAM's `userId`. OAM must already be running in `api_key` mode with a user-scoped key. The plugin adds fast automatic recall, capture of a completed keyed human turn, and the `memory_search` and `memory_remove` tools.
 
-## Release archive installation
+## npm installation
 
-Download `rocke2020-oam-openclaw-0.0.1.tgz`, `rocke2020-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release. Verify the checksums in that download directory with `shasum -a 256 -c SHA256SUMS`. No npm account or registry publication is required. The host may still need network access for its own dependencies.
+The v0.0.1 release publishes `@rocke-dong/oam-openclaw` on the public npm registry. After publication, install the versioned package with OpenClaw and configure the existing OAM user:
 
 ```bash
-openclaw plugins install ./rocke2020-oam-openclaw-0.0.1.tgz --force --accept-capabilities
+openclaw plugins install npm:@rocke-dong/oam-openclaw@0.0.1 --force --accept-capabilities
+node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
+```
+
+The install command reports the plugin directory. No npm login is required for users installing the public package. Source and archive checks are separate from verification of the actual published package.
+
+## Release archive installation
+
+Download `rocke-dong-oam-openclaw-0.0.1.tgz`, `rocke-dong-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release. Verify the checksums in that download directory with `shasum -a 256 -c SHA256SUMS`. No npm account or registry publication is required. The host may still need network access for its own dependencies.
+
+```bash
+openclaw plugins install ./rocke-dong-oam-openclaw-0.0.1.tgz --force --accept-capabilities
 node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
 ```
 

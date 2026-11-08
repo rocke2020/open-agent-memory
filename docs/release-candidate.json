@@ -770,16 +770,30 @@
   },
   "plugins": [
     {
-      "name": "@rocke2020/oam-dsh",
+      "name": "@rocke-dong/oam-openclaw",
       "version": "0.0.1",
-      "sha256": "aa25f1341d8d30b0ecaacb0bcb4a2870e3e6f5a57d9544546fae00580a455d1e",
+      "filename": "rocke-dong-oam-openclaw-0.0.1.tgz",
+      "sha256": "813af6c2f6abcdddaaaf8c6f8e3a808c92080f9c029c389d18a962144cdd6914",
+      "integrity": "sha512-OnTt65BtG4oqiIQH5cYHYPlJPz/HQqLQmFrHY/7VkBRVtE6HXs62zjrb2LbTyY+g7nejlW2QNFwYj8v5okvB4g==",
+      "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org/"
+      },
+      "publish_dry_run": true,
       "runtime_matches_checkout": true,
       "no_runtime_npm_dependencies": true
     },
     {
-      "name": "@rocke2020/oam-openclaw",
+      "name": "@rocke-dong/oam-dsh",
       "version": "0.0.1",
-      "sha256": "188c7a39b4a384320a6a102657fb3606ed644d0938162b7264942c233f4d9225",
+      "filename": "rocke-dong-oam-dsh-0.0.1.tgz",
+      "sha256": "b97b08e622d606ffb22d96a167e796d7a90d96377b6a68df0d90825ff0ee41c7",
+      "integrity": "sha512-N29USXF+/CbReY+ZJIU2wnQ/+vXv8FEpSRrl36geaX7RWtoc7upGvIRTG5/t45Luh5j+FI5S2OEsI5qrq5bT7Q==",
+      "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org/"
+      },
+      "publish_dry_run": true,
       "runtime_matches_checkout": true,
       "no_runtime_npm_dependencies": true
     }
@@ -792,7 +806,7 @@
     "Some host exclusion cases are deterministic module/HTTP tests, not every real transport or scheduler physically exercised.",
     "Initial conservative generation reservations hit a source budget, and the original gateway settings produced transient502s; failed artifacts are retained and bounded fixture/corrected gateway checks passed.",
     "An overlapping Chrome test run was stopped; browser checks were then serialized and33 cases passed.",
-    "Remote CI execution, registry publication/pulls, public downloads and repository visibility change were not performed.",
+    "Remote CI execution, image registry publication/pulls, GitHub Release archive downloads and repository visibility change were not performed. Public npm downloads and native installations are verified separately in npm_publication.",
     "Total monetary cost and reviewer token usage are unavailable."
   ],
   "preparation_baseline": {
@@ -877,7 +891,23 @@
         "runtime_files": 139,
         "runtime_distributions": 53
       }
-    }
+    },
+    "plugins": [
+      {
+        "name": "@rocke2020/oam-dsh",
+        "version": "0.0.1",
+        "sha256": "aa25f1341d8d30b0ecaacb0bcb4a2870e3e6f5a57d9544546fae00580a455d1e",
+        "runtime_matches_checkout": true,
+        "no_runtime_npm_dependencies": true
+      },
+      {
+        "name": "@rocke2020/oam-openclaw",
+        "version": "0.0.1",
+        "sha256": "188c7a39b4a384320a6a102657fb3606ed644d0938162b7264942c233f4d9225",
+        "runtime_matches_checkout": true,
+        "no_runtime_npm_dependencies": true
+      }
+    ]
   },
   "verified_at": "2026-11-08T02:00:47.669233+00:00",
   "tests": {
@@ -898,5 +928,86 @@
     "repairs": "delayed deletion refresh preserves newer Profile Data draft; candidate credential temporary files are private before writing",
     "new_provider_calls": 0,
     "dsh_install": "fresh native local-archive installation into an isolated headless profile; package manager consumes the exact archive"
+  },
+  "npm_preparation": {
+    "verified_at": "2026-11-08T07:44:23.639224+00:00",
+    "source_base_revision": "7246ec52a876d3659f2f2629169a8da8aeb45cbe",
+    "scope": "@rocke-dong",
+    "publisher": "rocke-dong",
+    "version": "0.0.1",
+    "registry": "https://registry.npmjs.org/",
+    "access": "public",
+    "plugin_tests": {
+      "openclaw_passed": 60,
+      "dsh_passed": 11
+    },
+    "openclaw_native": {
+      "archive_install": true,
+      "setup_and_runtime_inspection": true,
+      "plugin_id": "oam-openclaw"
+    },
+    "dsh_native": {
+      "archive_install": true,
+      "composed_bundle_and_module_import": true,
+      "plugin_id": "oam-memory"
+    },
+    "generation_probes": 0,
+    "runtime_implementation_unchanged": true,
+    "publication": "completed; see npm_publication",
+    "public_npm_installation": "verified in isolated native host profiles; see npm_publication"
+  },
+  "npm_publication": {
+    "verified_at": "2026-11-08T08:14:14.527786+00:00",
+    "publisher": "rocke-dong",
+    "registry": "https://registry.npmjs.org/",
+    "access": "public",
+    "source_base_revision": "7246ec52a876d3659f2f2629169a8da8aeb45cbe",
+    "source_state": "reviewed worktree package metadata; archive hashes identify the published bytes",
+    "packages": [
+      {
+        "name": "@rocke-dong/oam-openclaw",
+        "version": "0.0.1",
+        "sha256": "813af6c2f6abcdddaaaf8c6f8e3a808c92080f9c029c389d18a962144cdd6914",
+        "integrity": "sha512-OnTt65BtG4oqiIQH5cYHYPlJPz/HQqLQmFrHY/7VkBRVtE6HXs62zjrb2LbTyY+g7nejlW2QNFwYj8v5okvB4g==",
+        "tarball": "https://registry.npmjs.org/@rocke-dong/oam-openclaw/-/oam-openclaw-0.0.1.tgz",
+        "npm_url": "https://www.npmjs.com/package/@rocke-dong/oam-openclaw/v/0.0.1",
+        "public_anonymous_download": true,
+        "download_matches_reviewed_bytes": true,
+        "native_installation": {
+          "public_npm_install": true,
+          "installed_bytes_match": true,
+          "setup_and_runtime_inspection": true,
+          "plugin_id": "oam-openclaw",
+          "host_version": "2026.11.1",
+          "generation_probes": 0
+        }
+      },
+      {
+        "name": "@rocke-dong/oam-dsh",
+        "version": "0.0.1",
+        "sha256": "b97b08e622d606ffb22d96a167e796d7a90d96377b6a68df0d90825ff0ee41c7",
+        "integrity": "sha512-N29USXF+/CbReY+ZJIU2wnQ/+vXv8FEpSRrl36geaX7RWtoc7upGvIRTG5/t45Luh5j+FI5S2OEsI5qrq5bT7Q==",
+        "tarball": "https://registry.npmjs.org/@rocke-dong/oam-dsh/-/oam-dsh-0.0.1.tgz",
+        "npm_url": "https://www.npmjs.com/package/@rocke-dong/oam-dsh/v/0.0.1",
+        "public_anonymous_download": true,
+        "download_matches_reviewed_bytes": true,
+        "native_installation": {
+          "public_npm_install": true,
+          "installed_bytes_match": true,
+          "composed_bundle_and_module_import": true,
+          "plugin_id": "oam-memory",
+          "host_version": "0.2.2-rc.1",
+          "host_revision": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+          "generation_probes": 0
+        }
+      }
+    ],
+    "account_packages_page": "https://www.npmjs.com/settings/rocke-dong/packages",
+    "account_page_versions": [
+      "0.0.1",
+      "0.0.1"
+    ],
+    "new_generation_calls": 0,
+    "public_image_capture_readiness_recall": "unverified; requires public OAM image publication"
   }
 }

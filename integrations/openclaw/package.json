@@ -1,7 +1,6 @@
 {
-  "name": "@rocke2020/oam-openclaw",
+  "name": "@rocke-dong/oam-openclaw",
   "version": "0.0.1",
-  "private": true,
   "description": "Open Agent Memory plugin for OpenClaw",
   "type": "module",
   "scripts": {
@@ -36,5 +35,9 @@
   "devDependencies": {
     "esbuild": "0.27.7"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }
