@@ -1,10 +1,28 @@
 # Open Agent Memory
 
-## Overview
+## What Is Open Agent Memory?
 
-Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for agent developers. It preserves eligible interaction evidence, derives source-backed memory, keeps HTML/PDF/image Resources separate, retrieves both origins together with citations, and builds the read-only User Profile only when explicitly requested.
+Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for AI agents. It turns eligible conversations into source-backed facts and Insights, keeps documents as separate Resources, and retrieves both with citations. An explicitly refreshed User Profile helps agents carry useful personal context across sessions.
 
-OAM v0.0.1 implements source-backed learned memory and Insights, on-demand Profiles, separate Resources, exact Memory Unit and Insight removal, and the bundled Memory Inspector. The [acceptance requirements](docs/acceptance.md) and [release evidence](docs/release-evidence.md) distinguish tested product behavior, local deployment simulation and remaining publication checks. Recorded LME-500 and BEAM-10M results come from frozen development snapshots: they are historical evidence, not fresh tests of this candidate or matched indexing/retrieval comparisons.
+Integrate through the HTTP API or the OpenClaw and DeepSeek Harness plugins. The bundled Memory Inspector lets users browse memory, follow its sources, search Resources and manage what is retained.
+
+## Why Open Agent Memory?
+
+- **Recall with evidence.** Retrieve facts and Insights together with supporting original passages and citations, so the agent can reason from the source.
+- **Search conversations and documents together.** HTML, PDF and image Resources remain separate from learned personal memory while sharing one retrieval path.
+- **Personalize when you choose.** Build a stored User Profile from eligible memory and explicit Profile Data on request; unchanged inputs reuse it without generation.
+- **Inspect and control memory.** Browse sources in the Inspector, remove an individual Memory Unit or Insight, and manage document Resources through the same authorized API.
+- **Self-host with PostgreSQL.** Run API and worker replicas over shared PostgreSQL/pgvector storage and configure your own model endpoints.
+
+See the [acceptance requirements](docs/acceptance.md), [release evidence](docs/release-evidence.md) and [published release](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.1) for verified behavior, deployment limits and artifacts.
+
+## Performance & Accuracy
+
+**OAM achieved 94.0% accuracy (470/500) on LongMemEval S (LME-500)** using `deepseek-v4.1-flash` for extraction, answering and judging, reflecting everyday agent workloads. Fast recall supplied **12.4K tokens of answer context on average**. The result includes the recorded single-retry policy. See the [LME-500 results and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500).
+
+For large-volume memory workloads, we use [BEAM-10M](https://github.com/mohammadtavakoli78/BEAM), the benchmark's 10-million-token conversation scale. Our [evaluation](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m) uses **10 full, untruncated conversation histories, each exceeding 10 million tokens**, with **200 questions** to test recall quality and retrieval performance over long histories.
+
+These results come from recorded v0.0.1 development snapshots. The linked reports provide the evaluated revisions, settings, retry policy and complete answer contexts.
 
 ## Product Model
 
@@ -69,6 +87,10 @@ The default `worker.embedded_enabled: true` requires the API, queue and worker-c
 v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/normal joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and normal are the supported recall modes. The Python SDK, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
 
 The [Docker/Compose guide](deploy/README.md) uses one non-root API/worker image, bundled Inspector assets and PostgreSQL/pgvector. The replica example simulates two APIs and two workers locally; it does not establish physical multi-host resilience. [OpenClaw](integrations/openclaw/README.md) and [DSH](integrations/dsh/README.md) use versioned plugin tarballs, without requiring an npm publishing account. Public release and image availability are separate from local candidate verification.
+
+## Acknowledgments
+
+We thank the contributors to [Hindsight](https://github.com/vectorize-io/hindsight), [OpenViking](https://github.com/volcengine/OpenViking), [Mem0](https://github.com/mem0ai/mem0), [MemOS](https://github.com/MemTensor/MemOS) and [TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) for their open-source work, which informed OAM. See the [full acknowledgments](ACKNOWLEDGMENTS.md) and [third-party notices](THIRD_PARTY.md) for project, benchmark and license credits.
 
 ## License
 
