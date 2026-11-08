@@ -11,6 +11,7 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
+from psycopg.types.json import Jsonb
 from test_postgres_repositories import command
 
 from oam.auth.credentials import AuthenticatedPrincipal, AuthorizedUser
@@ -21,6 +22,7 @@ from oam.db.sources import IdempotencyConflict, SourceRepository
 from oam.indexing.identity import index_generation
 from oam.indexing.store import IndexStore
 from oam.operations.repository import OperationIdempotencyConflict, OperationRepository
+from oam.profiles.inputs import load_profile_inputs
 from oam.profiles.service import ProfileService, profile_identity
 from oam.workers.claims import claim_one
 
@@ -240,11 +242,19 @@ def test_profile_refresh_reuses_work_and_obeys_queue_cap(queue_database):
     assert pending(dsn) == 1
     assert service.refresh(authority) == receipt
     current = service.get(authority, 1000)
+    generation = command().generation_id
     with psycopg.connect(dsn) as connection:
+        inputs = load_profile_inputs(
+            connection,
+            authority,
+            generation,
+            insights_enabled=config.index.insights_enabled,
+            include_manifest=True,
+        )
         connection.execute(
             "INSERT INTO profiles(tenant_id,user_id,profile_id,profile_revision,sections,content,"
-            "input_identity,policy_epoch,generation_id,visible_from) "
-            "VALUES ('t','u','user',1,'{}',%s,%s,%s,%s,1)",
+            "input_identity,policy_epoch,generation_id,input_manifest,visible_from) "
+            "VALUES ('t','u','user',1,'{}',%s,%s,%s,%s,%s,1)",
             (
                 "## Main content\n\nNo supported details yet.\n\n"
                 "## References\n\nNo references yet.",
@@ -257,7 +267,8 @@ def test_profile_refresh_reuses_work_and_obeys_queue_cap(queue_database):
                     config.profile.max_memory_tokens,
                 ),
                 current["policy_epoch"],
-                index_generation(config, {}),
+                generation,
+                Jsonb(inputs.manifest),
             ),
         )
     unchanged = service.refresh(authority)

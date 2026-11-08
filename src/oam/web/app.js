@@ -29,7 +29,7 @@
 
   const setText = (node, value) => bind(node, "textContent", value);
   const setAttribute = (node, attribute, value) => bind(node, attribute, value);
-  const viewLabel = (view, title = false) => msg(title ? { resources: "Resources", profiles: "User Profile", memories: "Memories", insights: "Insights", retrieve: "Retrieved evidence", entities: "Entities", "request-logs": "Request Logs" }[view] : view);
+  const viewLabel = (view, title = false) => msg(title || view === "profile-data" ? { resources: "Resources", "profile-data": "Profile Data", profiles: "User Profile", memories: "Memories", insights: "Insights", retrieve: "Retrieved evidence", entities: "Entities", "request-logs": "Request Logs" }[view] : view);
   const enumValues = new Set(["fact", "insight", "memory", "basic", "preferences", "patterns", "projects", "relationships", "experiences", "general_insights", "chat", "interaction", "evidence", "resource", "pending", "processing", "succeeded", "partial", "failed", "cancelled", "ready", "missing", "blocked", "unavailable", "complete", "completed", "not_required", "fast", "mid", "deep", "normal", "user", "assistant", "system", "developer", "tool"]);
   const enumLabel = (value) => enumValues.has(value) ? msg(value) : value;
 
@@ -262,7 +262,8 @@
     setText(byId("list-summary"), "");
     byId("load-more").hidden = true;
     setText(byId("list-title"), viewLabel(view, true));
-    byId("new-resource").hidden = view !== "resources";
+    byId("new-resource").hidden = !["resources", "profile-data"].includes(view);
+    setText(byId("new-resource"), msg(view === "profile-data" ? "Add Profile Data" : "Add Resource"));
     byId("entity-search-form").hidden = view !== "entities";
     byId("log-filter-form").hidden = view !== "request-logs";
     byId("log-note").hidden = true;
@@ -484,7 +485,7 @@
 
   async function loadList(append, updateDetail = true) {
     const view = state.view;
-    if (!["memories", "insights", "resources", "entities", "request-logs"].includes(view)) return;
+    if (!["memories", "insights", "resources", "profile-data", "entities", "request-logs"].includes(view)) return;
     const generation = state.generation;
     const requestId = ++state.listRequest;
     const detailRequest = state.detailRequest;
@@ -526,7 +527,7 @@
   }
 
   function itemKey(item) {
-    return item.resource_id ? `resource:${item.resource_id}`
+    return item.profile_data_id ? `profile-data:${item.profile_data_id}` : item.resource_id ? `resource:${item.resource_id}`
       : item.kind === "insight" ? `insight:${item.insight_id}` : `memory:${item.memory_id || item.unit_id}`;
   }
 
@@ -545,22 +546,23 @@
       return;
     }
     for (const item of state.items) {
-      const id = state.view === "resources" ? item.resource_id
+      const resource = ["resources", "profile-data"].includes(state.view);
+      const id = resource ? item.profile_data_id || item.resource_id
         : item.kind === "insight" ? item.insight_id : item.memory_id || item.unit_id;
-      const kind = state.view === "resources" ? msg("Resource")
+      const kind = resource ? msg(state.view === "profile-data" ? "Profile Data" : "Resource")
         : item.kind === "insight" && item.subtype ? msg("{kind} · {subtype}", { kind: enumLabel(item.kind), subtype: enumLabel(item.subtype) }) : enumLabel(item.kind);
       const row = element("li");
-      const control = button(state.view === "resources" ? id : String(item.text || id), () => openItem(item), "list-item");
-      if (state.view !== "resources") control.replaceChildren(element("span", item.text || id, "item-title"));
+      const control = button(resource ? id : String(item.text || id), () => openItem(item), "list-item");
+      if (!resource) control.replaceChildren(element("span", item.text || id, "item-title"));
       control.dataset.unitId = item.unit_id || id;
       control.setAttribute("aria-current", String(itemKey(item) === state.selectedItemKey));
-      control.append(element("small", state.view === "resources" ? msg("{kind} · {media} · version {version}", { kind, media: item.media_type, version: item.active_version }) : msg("{kind} · {id}", { kind, id })));
+      control.append(element("small", resource ? msg("{kind} · {media} · version {version}", { kind, media: item.media_type, version: item.active_version }) : msg("{kind} · {id}", { kind, id })));
       row.append(control);
       list.append(row);
     }
     byId("load-more").hidden = !state.nextAfter;
     setText(byId("list-summary"), msg(data.total == null ? "{count} shown{support}" : "{count} of {total} shown{support}", { count: state.items.length, total: data.total, support: state.view === "insights" ? msg(" · supported by memories") : "" }));
-    if (!append && updateDetail && ["memories", "insights", "resources"].includes(state.view)) {
+    if (!append && updateDetail && ["memories", "insights", "resources", "profile-data"].includes(state.view)) {
       if (!state.items.length) {
         state.detailRequest += 1;
         state.selectedItemKey = null;
@@ -784,7 +786,7 @@
     const view = state.view;
     byId("detail").replaceChildren(element("p", msg("Loading details…")));
     try {
-      if (state.view === "resources") {
+      if (["resources", "profile-data"].includes(state.view)) {
         const view = state.view;
         const detail = await json(route(resourcePath(item)));
         if (current(generation) && state.view === view && requestId === state.detailRequest) showResource(detail);
@@ -1158,26 +1160,35 @@
     } catch (error) { if (currentDetail(generation, view, requestId)) showError(error); }
   }
 
-  const resourcePath = (item) => `resources/${encodeURIComponent(item.resource_id)}`;
+  const resourceId = (item) => item.profile_data_id || item.resource_id;
+  const resourcePath = (item) => `${item.profile_data_id ? "profile-data" : "resources"}/${encodeURIComponent(resourceId(item))}`;
 
   function showResource(item) {
     const detail = byId("detail");
     detail.replaceChildren(
-      element("span", msg("Resource"), "badge"),
-      element("h3", item.resource_id),
+      element("span", msg(item.profile_data_id ? "Profile Data" : "Resource"), "badge"),
+      element("h3", resourceId(item)),
       labelValue(msg("Media type"), item.media_type),
       labelValue(msg("Active version"), item.active_version),
       labelValue(msg("Original bytes"), item.byte_length),
       labelValue("SHA-256", item.sha256),
       labelValue(msg("Index operation"), item.operation_status ? enumLabel(item.operation_status) : msg("Pending")),
     );
-    detail.append(labelValue(msg("Abstract"), enumLabel(item.abstract_status)));
+    if (item.profile_data_id) {
+      detail.append(labelValue(msg("Subtype"), item.subtype), element("h4", msg("Exact Profile fields")));
+      for (const value of item.mapped_fields || []) {
+        detail.append(labelValue(value.key, JSON.stringify(value.value)));
+        if (value.qualifier) detail.append(labelValue(msg("Qualifier"), value.qualifier));
+      }
+      if (!item.mapped_fields?.length) detail.append(element("p", msg("No current mapped fields. Check the operation status.")));
+      detail.append(element("p", msg("Profile Data changes require an explicit User Profile refresh."), "form-note"));
+    } else detail.append(labelValue(msg("Abstract"), enumLabel(item.abstract_status)));
     if (item.abstract) detail.append(element("p", item.abstract, "source-text"));
     const actions = element("div", undefined, "actions");
     actions.append(button(msg("Inspect original"), () => inspectOriginal(item)));
     actions.append(button(msg("Download original"), () => downloadOriginal(item)));
     actions.append(button(msg("Revise"), () => showResourceForm(item)));
-    actions.append(button(msg("Delete Resource"), () => deleteSource(item.resource_id, "resources")));
+    actions.append(button(msg(item.profile_data_id ? "Delete Profile Data" : "Delete Resource"), () => deleteSource(resourceId(item), item.profile_data_id ? "profile-data" : "resources")));
     if (item.operation_id) actions.append(button(msg("Operation status"), () => showOperation(item.operation_id)));
     detail.append(actions);
     if (item.passages?.length) {
@@ -1194,6 +1205,8 @@
 
   async function inspectOriginal(item) {
     const generation = state.generation;
+    const view = state.view;
+    const requestId = state.detailRequest;
     try {
       if (!item.media_type.startsWith("text/") && item.media_type !== "application/json") {
         status(msg("This original is binary. Use Download original to inspect it in a local viewer."));
@@ -1201,19 +1214,21 @@
       }
       const response = await request(route(`${resourcePath(item)}/original`));
       const text = await response.text();
-      if (!current(generation)) return;
+      if (!currentDetail(generation, view, requestId)) return;
       const preview = element("pre", text, "original-preview");
       byId("detail").append(element("h4", msg("Original source text")), preview);
       status(msg("Original rendered as text. Source markup was not executed."));
-    } catch (error) { if (current(generation)) showError(error); }
+    } catch (error) { if (currentDetail(generation, view, requestId)) showError(error); }
   }
 
   async function downloadOriginal(item) {
     const generation = state.generation;
+    const view = state.view;
+    const requestId = state.detailRequest;
     try {
       const response = await request(route(`${resourcePath(item)}/original`));
       const blob = await response.blob();
-      if (!current(generation)) return;
+      if (!currentDetail(generation, view, requestId)) return;
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -1221,7 +1236,7 @@
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       status(msg("Original download started."));
-    } catch (error) { if (current(generation)) showError(error); }
+    } catch (error) { if (currentDetail(generation, view, requestId)) showError(error); }
   }
 
   function field(title, control) {
@@ -1231,11 +1246,20 @@
     return label;
   }
 
-  function showResourceForm(existing = null) {
-    state.detailRequest += 1;
+  async function showResourceForm(existing = null) {
+    const requestId = ++state.detailRequest;
+    const generation = state.generation;
+    const view = state.view;
+    const profileData = view === "profile-data";
+    let original = {};
+    if (profileData && existing) {
+      try { original = await json(route(`${resourcePath(existing)}/original`)); }
+      catch (error) { if (currentDetail(generation, view, requestId)) showError(error); return; }
+      if (!currentDetail(generation, view, requestId)) return;
+    }
     const detail = byId("detail");
     const form = element("form", undefined, "resource-form");
-    const id = element("input"); id.required = true; id.value = existing ? existing.resource_id : ""; id.readOnly = !!existing;
+    const id = element("input"); id.required = true; id.value = existing ? resourceId(existing) : ""; id.readOnly = !!existing;
     const evidenceInputs = element("div", undefined, "resource-inputs");
     const method = element("select");
     for (const value of ["text", "url", "file"]) {
@@ -1255,6 +1279,21 @@
     const fileField = field(msg("Original file"), file);
     evidenceInputs.append(field(msg("Input"), method), textField, urlField, mediaField, fileField);
 
+    const structured = element("div"); structured.hidden = !profileData;
+    const subtype = element("select");
+    for (const value of ["basic-profile/v1", "preferences/v1"]) {
+      const option = element("option", value); option.value = value; subtype.append(option);
+    }
+    subtype.value = original.subtype || "basic-profile/v1";
+    const values = element("textarea"); values.rows = 7;
+    values.value = JSON.stringify(original.content || { date_of_birth: "1990-05-10" }, null, 2);
+    const revision = element("input"); revision.value = original.source_revision || "";
+    const asOf = element("input"); asOf.value = original.as_of || "";
+    structured.append(field(msg("Subtype"), subtype), field(msg("Structured values (JSON)"), values),
+      element("p", msg('Examples: basic-profile/v1 {"date_of_birth":"1990-05-10"}; preferences/v1 {"example_language":"English","domain":"coding"}.'), "form-note"),
+      field(msg("Source revision"), revision), field(msg("As of"), asOf),
+      element("p", msg("Optional As of uses a timezone-aware ISO timestamp. Profile Data changes require an explicit User Profile refresh."), "form-note"));
+    evidenceInputs.hidden = profileData;
     const update = () => {
       textField.hidden = method.value !== "text";
       urlField.hidden = method.value !== "url";
@@ -1264,11 +1303,11 @@
     method.addEventListener("change", update);
     form.addEventListener("input", () => { state.draftKey = null; });
     form.append(
-      element("h3", existing ? msg("Revise {id} (expected version {version})", { id: existing.resource_id, version: existing.active_version }) : msg("Add Resource")),
-      field(msg("Resource ID"), id), evidenceInputs,
+      element("h3", existing ? msg("Revise {id} (expected version {version})", { id: resourceId(existing), version: existing.active_version }) : msg(profileData ? "Add Profile Data" : "Add Resource")),
+      field(msg(profileData ? "Profile Data ID" : "Resource ID"), id), profileData ? structured : evidenceInputs,
     );
     update();
-    const submit = element("button", existing ? msg("Create immutable revision") : msg("Create Resource"));
+    const submit = element("button", existing ? msg("Create immutable revision") : msg(profileData ? "Create Profile Data" : "Create Resource"));
     submit.type = "submit";
     form.append(submit);
     form.addEventListener("submit", async (event) => {
@@ -1283,7 +1322,15 @@
       let body;
       const metadata = { input_type: "document", document_id: id.value.trim(), update_mode: "replace" };
       if (existing) metadata.user_id = state.user;
-      if (method.value === "file") {
+      if (profileData) {
+        let content;
+        try { content = JSON.parse(values.value); }
+        catch (_) { status(msg("Enter a JSON object for the structured values."), true); return; }
+        if (!content || typeof content !== "object" || Array.isArray(content)) { status(msg("Enter a JSON object for the structured values."), true); return; }
+        headers["Content-Type"] = "application/json";
+        body = JSON.stringify({ profile_data_id: id.value.trim(), subtype: subtype.value, content,
+          source_revision: revision.value.trim() || null, as_of: asOf.value.trim() || null });
+      } else if (method.value === "file") {
         if (!file.files.length) { status(msg("Select an original file."), true); return; }
         body = new FormData();
         body.append("metadata", JSON.stringify(metadata));
@@ -1295,7 +1342,7 @@
         headers["Content-Type"] = "application/json";
         body = JSON.stringify({ ...metadata, text: text.value });
       }
-      const path = existing ? route(resourcePath(existing)) : route("resources");
+      const path = existing ? route(resourcePath(existing)) : route(profileData ? "profile-data" : "resources");
       const verb = existing ? "PUT" : "POST";
       try {
         const receipt = await json(path, { method: verb, headers, body });
@@ -1325,10 +1372,10 @@
   async function showOperation(operationId) {
     const generation = state.generation;
     const view = state.view;
-    const requestId = view === "profiles" ? ++state.profileRequest : null;
+    const requestId = view === "profiles" ? ++state.profileRequest : ++state.detailRequest;
     try {
       const operation = await json(route(`operations/${encodeURIComponent(operationId)}`));
-      if (!current(generation) || state.view !== view || (requestId !== null && requestId !== state.profileRequest)) return;
+      if (!current(generation) || state.view !== view || (view === "profiles" ? requestId !== state.profileRequest : requestId !== state.detailRequest)) return;
       byId("detail").replaceChildren(
         element("h3", msg("Operation {id}", { id: operationId })),
         labelValue(msg("Status"), enumLabel(operation.status)),
@@ -1340,35 +1387,37 @@
       }
       status(msg("Operation {status}.", { status: enumLabel(operation.status) }));
     } catch (error) {
-      if (current(generation) && state.view === view && (requestId === null || requestId === state.profileRequest)) showError(error);
+      if (current(generation) && state.view === view && (view === "profiles" ? requestId === state.profileRequest : requestId === state.detailRequest)) showError(error);
     }
   }
 
   async function deleteSource(sourceId, collection) {
-    const type = collection ? msg("Resource") : msg("chat source");
+    const type = collection === "profile-data" ? msg("Profile Data") : collection ? msg("Resource") : msg("chat source");
     const target = msg("{type} {id}", { type, id: sourceId });
-    if (!window.confirm(translate(msg("Delete {target}? All versions and dependent passages, memories, Insights, and User Profile fields become unavailable immediately. Cleanup is tracked separately.", { target })))) return;
+    const prompt = collection === "profile-data" ? "Delete {target}? All versions and dependent User Profile fields become unavailable immediately. Cleanup is tracked separately."
+      : collection === "resources" ? "Delete {target}? All versions and dependent Evidence become unavailable immediately. Cleanup is tracked separately."
+      : "Delete {target}? All versions and dependent passages, memories, Insights, and User Profile fields become unavailable immediately. Cleanup is tracked separately.";
+    if (!window.confirm(translate(msg(prompt, { target })))) return;
     const generation = state.generation;
+    const view = state.view;
+    const requestId = state.detailRequest;
     try {
       const endpoint = `${collection || "evidence"}/${encodeURIComponent(sourceId)}`;
       const receipt = await json(route(endpoint), { method: "DELETE" });
-      if (!current(generation)) return;
+      if (!currentDetail(generation, view, requestId)) return;
       const deletionGeneration = ++state.generation;
       state.items = [];
       state.nextAfter = null;
       byId("item-list").replaceChildren();
       byId("load-more").hidden = true;
       showReceipt(receipt.cleanup_operation_id, receipt);
+      const receiptRequest = state.detailRequest;
       status(msg("{target} excluded. Cleanup operation {id} is {status}.", { target, id: receipt.cleanup_operation_id, status: enumLabel(receipt.cleanup_status) }));
       try {
         await loadList(false, false);
       } catch (error) {
-        if (current(deletionGeneration)) status(msg("{target} excluded; list refresh failed: {error}", { target, error: errorMessage(error) }), true);
+        if (currentDetail(deletionGeneration, view, receiptRequest)) status(msg("{target} excluded; list refresh failed: {error}", { target, error: errorMessage(error) }), true);
         return;
-      }
-      if (current(deletionGeneration)) {
-        showReceipt(receipt.cleanup_operation_id, receipt);
-        status(msg("{target} excluded. Cleanup operation {id} is {status}.", { target, id: receipt.cleanup_operation_id, status: enumLabel(receipt.cleanup_status) }));
       }
     } catch (error) { if (current(generation)) showError(error); }
   }

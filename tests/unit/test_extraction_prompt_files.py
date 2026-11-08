@@ -4,7 +4,6 @@ import json
 import shutil
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
 import pytest
@@ -49,7 +48,8 @@ def test_fresh_process_uses_prompt_files_for_all_extraction_variants(tmp_path):
             "-I",
             "-S",
             "-c",
-            "import json,sys; from pathlib import Path; sys.path[:0]=sys.argv[1:3]; "
+            "import json,sys; from pathlib import Path; "
+            "sys.path[:0]=[sys.argv[1],*json.loads(sys.argv[2])]; "
             "from oam.config import load_config; "
             "from oam.indexing.extraction import extraction_system; "
             "from oam.indexing.grouping import group_system; "
@@ -67,7 +67,7 @@ def test_fresh_process_uses_prompt_files_for_all_extraction_variants(tmp_path):
             "config=causal(config); disabled=causal(disabled); enabled=causal(enabled); "
             "print(json.dumps(result+variants()))",
             str(tmp_path),
-            sysconfig.get_path("purelib"),
+            json.dumps([path for path in sys.path if "site-packages" in path]),
             str(tmp_path / "configs/oam.yaml"),
         ],
         check=False,

@@ -18,6 +18,7 @@ from test_memory_removal import (
     USER,
     _client,
     _content,
+    _operation_count,
 )
 from test_memory_removal import removal_database as removal_database
 
@@ -92,6 +93,7 @@ async def test_memory_offset_pages_cover_each_layer_without_duplicates(removal_d
 
 async def test_typed_memory_details_and_stored_profile_are_readable(removal_database):
     database = removal_database
+    operations_before = _operation_count(database)
     async with _client(database.headers) as client:
         for memory_type, identity, kind, text in (
             ("basic", REMOVED_MEMORY, "fact", f"Synthetic claim {REMOVED_MEMORY}."),
@@ -111,7 +113,9 @@ async def test_typed_memory_details_and_stored_profile_are_readable(removal_data
         assert profile.status_code == 200, profile.text
         assert profile.json()["content"] == PROFILE_TEXT
         with _content(database.dsn, database.tenant) as connection:
-            assert connection.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+            assert connection.execute("SELECT count(*) FROM operations").fetchone() == (
+                operations_before,
+            )
 
 
 async def test_memory_read_logs_correlate_outcome_without_content(removal_database, caplog):
@@ -141,6 +145,7 @@ async def test_memory_read_logs_correlate_outcome_without_content(removal_databa
 
 async def test_legacy_profile_keeps_eligible_l1_references_without_generation(removal_database):
     database = removal_database
+    operations_before = _operation_count(database)
     sections = {
         "main": [
             {
@@ -169,7 +174,9 @@ async def test_legacy_profile_keeps_eligible_l1_references_without_generation(re
         assert profile["generation_calls"] == 0
         with _content(database.dsn, database.tenant) as connection:
             assert connection.execute("SELECT content FROM profiles").fetchone() == (None,)
-            assert connection.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+            assert connection.execute("SELECT count(*) FROM operations").fetchone() == (
+                operations_before,
+            )
         exported = await client.post(f"/v1/users/{USER}/exports")
         assert exported.status_code == 202, exported.text
         export_id = exported.json()["export_id"]

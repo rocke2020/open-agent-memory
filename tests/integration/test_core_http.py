@@ -14,6 +14,7 @@ from uuid import uuid4
 import httpx
 import psycopg
 import pytest
+import tiktoken
 from api_test_app import create_api_only_app as create_app
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
@@ -47,7 +48,7 @@ async def use_created_user_key(client: httpx.AsyncClient, user_id: str) -> httpx
 
 
 @pytest.fixture
-def core_database(monkeypatch):
+def core_database(monkeypatch, synthetic_model_environment):
     dsn = os.environ.get("OAM_TEST_POSTGRES_DSN")
     if not dsn or os.environ.get("OAM_TEST_POSTGRES_ISOLATED") != "1":
         pytest.skip("requires an explicitly isolated PostgreSQL database")
@@ -71,16 +72,6 @@ def core_database(monkeypatch):
             (tenant, digest_secret(secret)),
         )
     monkeypatch.setenv("OAM_API_DSN", make_conninfo(dsn, options="-c role=oam_api"))
-    # These tests inject models; the canonical bindings only identify their index generation.
-    for name, value in {
-        "VLM_MODEL": "synthetic-vlm",
-        "VLM_BASE_URL": "https://unused.example.test/v1",
-        "VLM_API_KEY": "synthetic",
-        "OAM_EMBEDDING_MODEL": "synthetic-embedding",
-        "OAM_EMBEDDING_URL": "https://unused.example.test/v1",
-        "OAM_EMBEDDING_KEY": "synthetic",
-    }.items():
-        monkeypatch.setenv(name, value)
     return dsn, tenant, {"Authorization": f"Bearer {secret}"}
 
 
@@ -491,7 +482,6 @@ async def test_structured_native_pdf_late_detail_reaches_fast_and_normal_context
     from oam.contracts.resources import ResourceMediaType
     from oam.resources.originals import OriginalDescriptor
     from oam.resources.pdf import parse_pdf
-    from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
     from oam.workers.index_source import process_one
 
     dsn, tenant, headers = core_database
@@ -585,8 +575,12 @@ async def test_structured_native_pdf_late_detail_reaches_fast_and_normal_context
             assert recalled.status_code == 200, recalled.text
             payload = recalled.json()
             assert target in payload["context"]
-            assert payload["tokenizer"] == ESTIMATOR
-            assert payload["context_tokens"] == estimated_tokens(estimate_units(payload["context"]))
+            assert payload["tokenizer"] == "o200k_base"
+            assert payload["context_tokens"] == len(
+                tiktoken.get_encoding("o200k_base").encode(
+                    payload["context"], disallowed_special=()
+                )
+            )
             assert payload["context_tokens"] <= getattr(config.search, mode).context_max_tokens
             selected = next(item for item in payload["items"] if target in item["text"])
             citation = selected["citations"][0]
@@ -1004,7 +998,9 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
         )
         assert operation.json()["readiness"]["source_searchable"] is True
         assert operation.json()["stage_state"]["parse_coverage"] == "partial"
-        assert operation.json()["usage"]["total_tokens"] == (23 if failure_kind == "invalid" else 0)
+        assert operation.json()["usage"]["total_tokens"] == (
+            23 if failure_kind == "invalid" else None
+        )
         assert operation.json()["usage"]["coverage"] == (
             "complete" if failure_kind == "invalid" else "partial"
         )
@@ -1015,17 +1011,17 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
             "(SELECT work_unit_id FROM work_units WHERE tenant_id=%s)",
             (core_database[1],),
         ).fetchone()
-        assert attempt[:2] == (
-            "failed" if failure_kind == "invalid" else "unknown_external_outcome",
-            "vision:pdf:page:0002",
-        )
-        if failure_kind == "invalid":
-            assert attempt[2] == "vision:pdf:page:0002"
+        assert attempt == ("failed", "vision:pdf:page:0002", "vision:pdf:page:0002")
+        work = connection.execute(
+            "SELECT status,attempts_remaining FROM work_units WHERE tenant_id=%s "
+            "AND operation_id=%s AND stage='index_source'",
+            (core_database[1], uploaded.json()["operation_id"]),
+        ).fetchone()
+        assert work == ("failed_terminal" if failure_kind == "invalid" else "queued", 2)
 
 
 async def test_chat_and_html_report_share_one_cited_recall_budget(core_database):
     from oam.config import load_config
-    from oam.tokens import ESTIMATOR, estimate_units, estimated_tokens
     from oam.workers.index_source import process_one
 
     dsn, tenant, headers = core_database
@@ -1119,8 +1115,12 @@ async def test_chat_and_html_report_share_one_cited_recall_budget(core_database)
             )
             assert "Lin prefers brief explanations" in payload["context"]
             assert "Glucose 92 mg/dL" in payload["context"]
-            assert payload["tokenizer"] == ESTIMATOR
-            assert payload["context_tokens"] == estimated_tokens(estimate_units(payload["context"]))
+            assert payload["tokenizer"] == "o200k_base"
+            assert payload["context_tokens"] == len(
+                tiktoken.get_encoding("o200k_base").encode(
+                    payload["context"], disallowed_special=()
+                )
+            )
             assert payload["context_tokens"] <= getattr(config.search, mode).context_max_tokens
             assert payload["diagnostics"]["generative_calls"] == 0
         assert models.generation_calls == generation_calls

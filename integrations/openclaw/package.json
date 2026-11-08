@@ -10,19 +10,31 @@
     "setup": "node setup.mjs",
     "prepack": "npm run build"
   },
-  "bin": { "oam-openclaw-setup": "./setup.mjs" },
+  "bin": {
+    "oam-openclaw-setup": "./setup.mjs"
+  },
   "files": [
     "setup.mjs",
     "index.ts",
     "cron.ts",
     "dist/index.js",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "openclaw": {
-    "extensions": ["./index.ts"],
-    "compat": { "pluginApi": ">=2026.9.6" },
-    "install": { "minHostVersion": ">=2026.9.6" }
+    "extensions": [
+      "./index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.9.6"
+    },
+    "install": {
+      "minHostVersion": ">=2026.9.6"
+    }
   },
-  "devDependencies": { "esbuild": "0.27.7" }
+  "devDependencies": {
+    "esbuild": "0.27.7"
+  },
+  "license": "Apache-2.0"
 }

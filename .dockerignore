@@ -1,0 +1,16 @@
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!THIRD_PARTY.md
+!third_party_licenses/
+!third_party_licenses/**
+!src/
+!src/**
+!migrations/
+!migrations/*.sql
+!configs/
+!configs/oam.yaml
+**/__pycache__/**
+**/*.pyc

@@ -409,7 +409,7 @@ async def test_profile_coverage_keeps_failed_repair_until_its_own_recovery_compl
             "INSERT INTO insight_support VALUES (%s,%s,%s,2,%s,1)",
             (database.tenant, USER, INSIGHT, OTHER_MEMORIES[1]),
         )
-    parameters = (database.tenant, USER)
+    parameters = (database.tenant, USER, True, True)
     async with _client(database.headers) as client:
         first = await client.delete(f"/v1/users/{USER}/memories/{REMOVED_MEMORY}")
         operation_id = first.json()["operation_id"]

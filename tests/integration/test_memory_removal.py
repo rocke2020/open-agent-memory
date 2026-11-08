@@ -93,11 +93,37 @@ def _seed(dsn, tenant, generation, user_id=USER, prefix=""):
             "'2026-10-01T00:00:00Z',true,'active')",
             (*key, evidence_id, source_id),
         )
+        principal_id = connection.execute(
+            "SELECT principal_id FROM grants WHERE tenant_id=%s AND user_id=%s "
+            "ORDER BY principal_id LIMIT 1",
+            key,
+        ).fetchone()[0]
+        operation_id = f"seed-index:{source_id}"
+        connection.execute(
+            "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,source_id,"
+            "source_version,accepted_seq,kind,schema_version,status,plan_sealed,stage_state) "
+            "VALUES (%s,%s,%s,%s,%s,1,1,'index_interaction',1,'succeeded',true,"
+            '\'{"memory_ready":true,"links_ready":true,"insights_ready":true}\')',
+            (*key, operation_id, principal_id, source_id),
+        )
+        connection.execute(
+            "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,"
+            "input_digest,generation_id,status,attempts_remaining) "
+            "VALUES (%s,%s,%s,%s,'index_source',%s,%s,'succeeded',0)",
+            (*key, f"seed-work:{source_id}", operation_id, digest, generation),
+        )
         connection.execute(
             "INSERT INTO passages(tenant_id,user_id,passage_id,evidence_id,parse_revision,"
             "locator,normalized_text,generation_id,visible_from) "
             "VALUES (%s,%s,%s,%s,1,'{}','Synthetic learned preferences.',%s,1)",
             (*key, passage_id, evidence_id, generation),
+        )
+        connection.execute(
+            "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
+            "source_version,evidence_id,passage_id,generation_id,content_text,locator,"
+            "embedding,lexical_text) VALUES (%s,%s,%s,'passage','memory',%s,1,%s,%s,%s,"
+            "'Synthetic learned preferences.','{}',%s::vector,'Synthetic learned preferences.')",
+            (*key, passage_id, source_id, evidence_id, passage_id, generation, VECTOR),
         )
         for memory in (REMOVED_MEMORY, SURVIVING_MEMORY, *OTHER_MEMORIES):
             memory_id = prefix + memory
@@ -231,6 +257,11 @@ async def _items(client):
     response = await client.get(f"/v1/users/{USER}/memories")
     assert response.status_code == 200, response.text
     return {item["unit_id"] for item in response.json()["items"]}
+
+
+def _operation_count(database):
+    with _content(database.dsn, database.tenant) as connection:
+        return connection.execute("SELECT count(*) FROM operations").fetchone()[0]
 
 
 async def test_l1_removal_immediately_excludes_selected_and_dependents(removal_database):
@@ -372,6 +403,7 @@ async def test_invalid_or_unauthorized_removal_is_404_without_mutation(
     removal_database, kind, target, credential
 ):
     database = removal_database
+    operations_before = _operation_count(database)
     if credential == "no_permission":
         with psycopg.connect(database.dsn) as connection:
             connection.execute(
@@ -388,7 +420,9 @@ async def test_invalid_or_unauthorized_removal_is_404_without_mutation(
     async with _client(headers) as client:
         response = await client.delete(f"/v1/users/{USER}/{kind}/{target}")
     with _content(database.dsn, database.tenant) as connection:
-        assert connection.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM operations").fetchone() == (
+            operations_before,
+        )
         assert connection.execute("SELECT policy_epoch FROM users").fetchone() == (0,)
         assert connection.execute(
             "SELECT count(*) FROM memories WHERE lifecycle_state='active'"

@@ -18,7 +18,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def isolated_auth_database():
+def isolated_auth_database(synthetic_model_environment):
     dsn = os.environ.get("OAM_TEST_POSTGRES_DSN")
     if not dsn or os.environ.get("OAM_TEST_POSTGRES_ISOLATED") != "1":
         pytest.skip("requires an explicitly isolated PostgreSQL test database")

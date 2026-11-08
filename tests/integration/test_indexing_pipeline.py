@@ -172,7 +172,7 @@ def test_local_embedding_rejection_finishes_attempt_without_dispatch(pipeline_st
     dsn, store = pipeline_store
     binding = store.config.models.embedding
     assert binding is not None
-    limited_binding = binding.model_copy(update={"max_input_tokens": 1})
+    limited_binding = binding.model_copy(update={"max_input_tokens": None, "max_request_tokens": 1})
     models_config = store.config.models.model_copy(update={"embedding": limited_binding})
     config = store.config.model_copy(update={"models": models_config})
 
@@ -206,4 +206,4 @@ def test_local_embedding_rejection_finishes_attempt_without_dispatch(pipeline_st
         ).fetchone()
     assert attempt == ("failed", True)
     assert work == ("failed_terminal",)
-    assert operation == ("partial_failed", "embedding per-input token limit exceeded")
+    assert operation == ("partial_failed", "embedding request token limit exceeded")

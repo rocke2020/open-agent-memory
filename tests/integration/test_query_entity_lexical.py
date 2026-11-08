@@ -68,8 +68,12 @@ def test_insight_candidate_pushdown_preserves_fact_backed_entity_names(
         (text, text),
     )
     connection.execute("UPDATE insights SET synthesis_text=%s WHERE insight_id='insight'", (text,))
-    current = InsightLookup(connection, authority, config, deadline=time.monotonic() + 10)
-    original = UnfilteredLookup(connection, authority, config, deadline=time.monotonic() + 10)
+    current = InsightLookup(
+        connection, authority, config, generation_id="generation", deadline=time.monotonic() + 10
+    )
+    original = UnfilteredLookup(
+        connection, authority, config, generation_id="generation", deadline=time.monotonic() + 10
+    )
     names = current._query_entity_names(query)
     assert names == original._query_entity_names(query)
     assert names

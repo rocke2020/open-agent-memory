@@ -94,7 +94,11 @@ async function main() {
   if (existing.hooks?.allowConversationAccess === undefined) {
     batch.push({ path: `${entry}.hooks.allowConversationAccess`, value: true });
   }
-  batch.push({ path: `${entry}.enabled`, value: true }, { path: 'plugins.slots.memory', value: 'oam-openclaw' });
+  batch.push(
+    { path: `${entry}.enabled`, value: true },
+    { path: 'plugins.slots.memory', value: 'oam-openclaw' },
+    { path: 'plugins.entries.memory-core.enabled', value: false },
+  );
   const update = ['config', 'set', '--batch-json', JSON.stringify(batch)];
   openclaw([...update, '--dry-run']);
   openclaw(update);

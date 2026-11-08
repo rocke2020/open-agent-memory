@@ -1,0 +1,5 @@
+# Operator selection; omitted behavior comes from the packaged configs/oam.yaml.
+auth:
+  mode: api_key
+worker:
+  embedded_enabled: false

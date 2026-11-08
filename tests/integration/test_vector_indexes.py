@@ -148,7 +148,7 @@ def test_dense_uses_ann_and_keeps_foreign_rows_out(ann_database, mode):
             deadline=time.monotonic() + 30,
             request=SearchRequest(query="synthetic query", recall_level=mode),
         )
-        rows = repo.dense([1.0, *([0.0] * 7)], 5)
+        rows = repo.dense([1.0, *([0.0] * (config.index.embedding_dimensions - 1))], 5)
         assert len(rows) == 5
         assert rows[0]["unit_id"] == "fact-000"
         assert all(row["unit_id"].startswith("fact-") for row in rows)
@@ -198,7 +198,7 @@ def test_semantic_proposals_keep_k_while_publisher_enforces_remaining_capacity(a
 
 
 def test_dedicated_cli_reuses_vectors_and_is_idempotent(ann_database, tmp_path, capsys):
-    dsn, authority, _ = ann_database
+    dsn, authority, runtime_config = ann_database
     config = tmp_path / "dedicated.yaml"
     config.write_text("database:\n  vector_index_mode: large\n")
     args = [
@@ -229,7 +229,10 @@ def test_dedicated_cli_reuses_vectors_and_is_idempotent(ann_database, tmp_path, 
         repo = PlanRepository(
             connection, authority, load_config(config).config, deadline=time.monotonic() + 30
         )
-        assert len(repo.dense([1.0, *([0.0] * 7)], 5)) == 5
+        assert (
+            len(repo.dense([1.0, *([0.0] * (runtime_config.index.embedding_dimensions - 1))], 5))
+            == 5
+        )
         assert index in index_names(repo.plan)
     with psycopg.connect(dsn) as connection:
         connection.execute("SET LOCAL ROLE oam_content")
@@ -239,7 +242,10 @@ def test_dedicated_cli_reuses_vectors_and_is_idempotent(ann_database, tmp_path, 
             load_config(ROOT / "configs/oam.yaml").config,
             deadline=time.monotonic() + 30,
         )
-        assert len(shared.dense([1.0, *([0.0] * 7)], 5)) == 5
+        assert (
+            len(shared.dense([1.0, *([0.0] * (runtime_config.index.embedding_dimensions - 1))], 5))
+            == 5
+        )
         assert "search_units_embedding" in index_names(shared.plan)
         assert index not in index_names(shared.plan)
 
@@ -281,7 +287,9 @@ def test_additional_vector_discovery_uses_scoped_ann(ann_database, consumer):
             connection, authority, config, deadline=time.monotonic() + 30, request=request
         )
         if consumer == "temporal":
-            rows = repo.temporal_candidates([1.0, *([0.0] * 7)], 5)
+            rows = repo.temporal_candidates(
+                [1.0, *([0.0] * (config.index.embedding_dimensions - 1))], 5
+            )
             assert len(rows) == 5
         else:
             row = repo.related_user_fact(["fact-000"])
@@ -331,7 +339,10 @@ def test_reference_lookup_merges_bounded_ann_probes(ann_database, mode):
             connection,
             authority,
             config,
-            [[1.0, *([0.0] * 7)], [1.0, 0.39, *([0.0] * 6)]],
+            [
+                [1.0, *([0.0] * (config.index.embedding_dimensions - 1))],
+                [1.0, 0.39, *([0.0] * (config.index.embedding_dimensions - 2))],
+            ],
         )
         assert len(rows) == config.extraction.reference_max_facts
         assert "fact-039" in rows and "fact-001" in rows
@@ -408,6 +419,7 @@ def test_maintenance_cli_graceful_shutdown_releases_ownership(ann_database, tmp_
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": str(ROOT / "src"),
             "OAM_MIGRATION_DSN": dsn,
+            **({"PGPASSWORD": os.environ["PGPASSWORD"]} if os.environ.get("PGPASSWORD") else {}),
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

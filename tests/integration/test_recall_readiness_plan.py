@@ -48,15 +48,13 @@ def test_readiness_does_not_repeat_operation_lookup_for_each_source():
             "SELECT count(*) FROM sources WHERE tenant_id=%s AND user_id=%s",
             (tenant, user),
         ).fetchone()[0]
-        operations = connection.execute(
-            "SELECT count(DISTINCT o.operation_id) FROM operations o "
+        work_units = connection.execute(
+            "SELECT count(*) FROM operations o "
             "JOIN work_units w USING (tenant_id,user_id,operation_id) "
-            "JOIN users u USING (tenant_id,user_id) "
-            "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind<>'consolidate' "
-            "AND w.generation_id=u.index_generation_id",
+            "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind<>'consolidate'",
             (tenant, user),
         ).fetchone()[0]
-        if min(sources, operations) < 3:
+        if min(sources, work_units) < 3:
             pytest.skip("scope needs multiple sources and operations to expose repeated lookups")
         query, parameters = captured[0]
         plan = connection.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters).fetchone()[
@@ -74,10 +72,13 @@ def test_readiness_does_not_repeat_operation_lookup_for_each_source():
         operation_rows = sum(
             node.get("Actual Rows", 0) * node.get("Actual Loops", 1) for node in nodes
         )
-        assert operation_loops <= operations and operation_rows <= operations, (
+        # Readiness examines all source receipts in the user namespace, including
+        # cleanup work outside the active indexing generation. A receipt may own
+        # multiple work units; one lookup per unit is linear, per-source repetition is not.
+        assert operation_loops <= work_units and operation_rows <= work_units, (
             "readiness repeats operation lookups across current operations",
             operation_loops,
             operation_rows,
             sources,
-            operations,
+            work_units,
         )

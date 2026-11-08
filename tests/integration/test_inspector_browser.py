@@ -111,6 +111,7 @@ def test_browser_reads_insights_connections_and_retrieval_from_public_api(
                     response = recalled.value
                     assert response.status == 200, response.text()
                     result = response.json()
+                    (tmp_path / "recall-result.json").write_text(json.dumps(result, indent=2))
                     assert any(
                         item.get("memory_id") == SURVIVING_MEMORY for item in result["items"]
                     )
@@ -129,6 +130,57 @@ def test_browser_reads_insights_connections_and_retrieval_from_public_api(
                     (tmp_path / "retrieval.json").write_text(
                         json.dumps(result, indent=2), encoding="utf-8"
                     )
+                    page.get_by_role("button", name="Profile Data", exact=True).click()
+                    page.get_by_role("button", name="Add Profile Data", exact=True).click()
+                    page.get_by_label("Profile Data ID", exact=True).fill("browser-profile")
+                    content = {
+                        "date_of_birth": "1990-05-10",
+                        "interests": ["<img src=x onerror=alert(1)>"],
+                    }
+                    page.get_by_label("Structured values (JSON)", exact=True).fill(
+                        json.dumps(content)
+                    )
+                    page.get_by_label("Source revision", exact=True).fill("owner-v1")
+                    page.get_by_label("As of", exact=True).fill("2026-11-01T00:00:00Z")
+                    with page.expect_response("**/profile-data") as created:
+                        page.get_by_role("button", name="Create Profile Data", exact=True).click()
+                    assert created.value.status == 202
+                    assert created.value.request.post_data_json["content"] == content
+                    page.locator("#item-list .list-item").filter(has_text="browser-profile").click()
+                    detail.get_by_text("basic-profile/v1", exact=True).wait_for()
+                    detail.get_by_role("button", name="Inspect original", exact=True).click()
+                    detail.locator(".original-preview").wait_for()
+                    assert "owner-v1" in detail.locator(".original-preview").inner_text()
+                    assert detail.locator("img").count() == 0
+                    detail.get_by_role("button", name="Revise", exact=True).click()
+                    values = page.get_by_label("Structured values (JSON)", exact=True)
+                    assert json.loads(values.input_value()) == content
+                    assert (
+                        page.get_by_label("Source revision", exact=True).input_value() == "owner-v1"
+                    )
+                    assert (
+                        page.get_by_label("As of", exact=True).input_value()
+                        == "2026-11-01T00:00:00Z"
+                    )
+                    values.fill(json.dumps({"date_of_birth": "1991-06-11"}))
+                    with page.expect_response("**/profile-data/browser-profile") as revised:
+                        page.get_by_role(
+                            "button", name="Create immutable revision", exact=True
+                        ).click()
+                    assert revised.value.status == 202
+                    assert revised.value.request.headers["if-match"] == "1"
+                    page.locator("#item-list .list-item").filter(has_text="browser-profile").click()
+                    detail.get_by_role("button", name="Inspect original", exact=True).click()
+                    detail.locator(".original-preview").wait_for()
+                    assert "1991-06-11" in detail.locator(".original-preview").inner_text()
+                    page.once("dialog", lambda dialog: dialog.accept())
+                    with page.expect_response("**/profile-data/browser-profile") as removed:
+                        detail.get_by_role("button", name="Delete Profile Data", exact=True).click()
+                    assert removed.value.status == 202
+                    assert removed.value.json()["excluded_versions"] == [1, 2]
+                    page.locator("#item-list .list-item").filter(
+                        has_text="browser-profile"
+                    ).wait_for(state="hidden")
                     assert errors == []
                     page.get_by_role("button", name="Sign out", exact=True).click()
                     assert page.locator("#credential").input_value() == ""

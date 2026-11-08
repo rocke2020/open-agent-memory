@@ -4,7 +4,6 @@ import json
 import shutil
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
 
@@ -26,13 +25,13 @@ def test_fresh_process_uses_insight_abstract_and_profile_prompt_files(tmp_path):
             "-I",
             "-S",
             "-c",
-            "import json,sys; sys.path[:0]=sys.argv[1:]; "
+            "import json,sys; sys.path[:0]=[sys.argv[1],*json.loads(sys.argv[2])]; "
             "from oam.indexing.extraction import INSIGHT_SYSTEM; "
             "from oam.workers.index_source import ABSTRACT_SYSTEM; "
             "from oam.profiles.prompt import PROFILE_SYSTEM; "
             "print(json.dumps([INSIGHT_SYSTEM,ABSTRACT_SYSTEM,PROFILE_SYSTEM]))",
             str(tmp_path),
-            sysconfig.get_path("purelib"),
+            json.dumps([path for path in sys.path if "site-packages" in path]),
         ],
         check=False,
         capture_output=True,

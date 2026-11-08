@@ -24,7 +24,7 @@ class QuietHandler(SimpleHTTPRequestHandler):
 
 
 @pytest.mark.parametrize("revise", [False, True])
-@pytest.mark.parametrize("destination", ["selection", "memories", "resources"])
+@pytest.mark.parametrize("destination", ["selection", "memories", "resources", "profile-data"])
 def test_resource_receipt_preserves_newer_browse_intent(tmp_path, revise, destination):
     try:
         with urlopen("http://127.0.0.1:9222/json/version", timeout=5) as response:
@@ -67,6 +67,8 @@ def test_resource_receipt_preserves_newer_browse_intent(tmp_path, revise, destin
             data = {"items": [memory] if hold_lists else [], "next_after": None}
         elif path.endswith("/resources"):
             data = {"items": resources, "next_after": None}
+        elif path.endswith("/profile-data"):
+            data = {"items": [], "next_after": None}
         elif path.endswith("/memories/memory-one"):
             data = memory
         else:
@@ -143,10 +145,80 @@ def test_resource_receipt_preserves_newer_browse_intent(tmp_path, revise, destin
                     "selection": "Content for second.",
                     "memories": "Memory content.",
                     "resources": "Content for first.",
+                    "profile-data": "No current Profile Data are available.",
                 }[destination]
                 detail.get_by_text(expected, exact=True).wait_for()
                 assert (
                     detail.get_by_role("heading", name="Durable operation", exact=True).count() == 0
+                )
+            finally:
+                context.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_delete_list_refresh_preserves_new_profile_data_draft(tmp_path):
+    try:
+        with urlopen("http://127.0.0.1:9222/json/version", timeout=5) as response:
+            websocket = json.load(response)["webSocketDebuggerUrl"]
+    except OSError:
+        pytest.skip("Existing debug Chrome is unavailable")
+    (tmp_path / "ui").symlink_to(WEB, target_is_directory=True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(tmp_path)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    pending = []
+    deleted = False
+    resource = {"resource_id": "first", "media_type": "text/html", "active_version": 1}
+
+    def respond(route):
+        nonlocal deleted
+        path = urlparse(route.request.url).path
+        if route.request.method == "DELETE":
+            deleted = True
+            data = {"cleanup_operation_id": "delete-op", "cleanup_status": "queued"}
+        elif path.endswith("/resources"):
+            if deleted:
+                pending.append(route)
+                return
+            data = {"items": [resource]}
+        elif path.endswith("/resources/first"):
+            data = resource
+        else:
+            data = {"items": []}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
+
+    try:
+        with playwright.sync_playwright() as api:
+            browser = api.chromium.connect_over_cdp(websocket)
+            context = browser.new_context(locale="en-US")
+            page = context.new_page()
+            page.set_default_timeout(3000)
+            page.route("**/v1/**", respond)
+            try:
+                page.goto(f"http://127.0.0.1:{server.server_port}/ui/")
+                page.locator("#user").fill("alice")
+                page.locator("#connect-form button").click()
+                page.locator('[data-view="resources"]').click()
+                page.locator("#item-list .list-item").first.click()
+                page.once("dialog", lambda dialog: dialog.accept())
+                with page.expect_request("**/resources"):
+                    page.get_by_role("button", name="Delete Resource", exact=True).click()
+                page.locator('[data-view="profile-data"]').click()
+                page.get_by_role("button", name="Add Profile Data", exact=True).click()
+                draft = page.get_by_label("Profile Data ID", exact=True)
+                draft.fill("unsaved-owner-input")
+                with page.expect_response("**/resources") as refreshed:
+                    pending.pop().fulfill(
+                        status=200, content_type="application/json", body='{"items":[]}'
+                    )
+                refreshed.value.finished()
+                page.evaluate("() => new Promise(resolve => setTimeout(resolve, 0))")
+                assert draft.input_value() == "unsaved-owner-input"
+                assert (
+                    page.get_by_role("heading", name="Durable operation", exact=True).count() == 0
                 )
             finally:
                 context.close()
@@ -358,7 +430,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert header.bounding_box()["height"] <= 72
                 assert header.locator("#scope-label").inner_text() == "default / alice"
                 assert (
-                    navigation.get_by_role("button", name="Profile Data", exact=True).count() == 0
+                    navigation.get_by_role("button", name="Profile Data", exact=True).count() == 1
                 )
                 assert page.get_by_role("button", name="Create export", exact=True).count() == 0
                 detail = page.locator("#detail")

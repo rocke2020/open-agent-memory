@@ -30,6 +30,7 @@ if (args[0] === 'config' && args[1] === 'get') console.log(JSON.stringify({confi
     assert.equal(invoked[2][2], '--batch-json');
     assert.deepEqual(batch.find(({ path }) => path.endsWith('.apiKey'))?.ref, { source: 'env', provider: 'default', id: 'OAM_USER_API_KEY' });
     assert.equal(batch.find(({ path }) => path === 'plugins.slots.memory')?.value, 'oam-openclaw');
+    assert.equal(batch.find(({ path }) => path === 'plugins.entries.memory-core.enabled')?.value, false);
     assert.equal(batch.find(({ path }) => path.endsWith('.allowLocalMainAgent'))?.value, true);
     assert.equal(batch.find(({ path }) => path.endsWith('.targetAgentId'))?.value, 'research');
     assert.equal(batch.find(({ path }) => path.endsWith('.allowedDirectConversations')), undefined);
