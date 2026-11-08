@@ -1,7 +1,14 @@
 {
   "name": "@rocke-dong/oam-openclaw",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Open Agent Memory plugin for OpenClaw",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rocke2020/open-agent-memory.git",
+    "directory": "integrations/openclaw"
+  },
+  "homepage": "https://github.com/rocke2020/open-agent-memory/tree/main/integrations/openclaw",
+  "keywords": ["agent-memory", "openclaw", "memory", "self-hosted", "postgresql"],
   "type": "module",
   "scripts": {
     "build": "esbuild index.ts --bundle --format=esm --platform=node --target=node22 --outfile=dist/index.js",
@@ -27,6 +34,9 @@
     ],
     "compat": {
       "pluginApi": ">=2026.9.6"
+    },
+    "build": {
+      "openclawVersion": "2026.11.1"
     },
     "install": {
       "minHostVersion": ">=2026.9.6"

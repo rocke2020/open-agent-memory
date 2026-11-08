@@ -6,18 +6,18 @@ This plugin connects one OAM user to owner-authorized local WebChat sessions of 
 
 ## npm installation
 
-The v0.0.1 release publishes `@rocke-dong/oam-openclaw` on the public npm registry. After publication, install the versioned package with OpenClaw and configure the existing OAM user:
+Install the versioned `@rocke-dong/oam-openclaw` package from the public npm registry with OpenClaw and configure the existing OAM user:
 
 ```bash
-openclaw plugins install npm:@rocke-dong/oam-openclaw@0.0.1 --force --accept-capabilities
+openclaw plugins install npm:@rocke-dong/oam-openclaw@0.0.2 --force --accept-capabilities
 node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
 ```
 
 The install command reports the plugin directory. No npm login is required for users installing the public package. Source and archive checks are separate from verification of the actual published package.
 
-## Release archive installation
+## v0.0.1 release archive installation
 
-Download `rocke-dong-oam-openclaw-0.0.1.tgz`, `rocke-dong-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release. Verify the checksums in that download directory with `shasum -a 256 -c SHA256SUMS`. No npm account or registry publication is required. The host may still need network access for its own dependencies.
+Prefer npm version 0.0.2 for the response-reading and evidence-boundary fixes. The original v0.0.1 archives remain available for reproducibility. Download `rocke-dong-oam-openclaw-0.0.1.tgz`, `rocke-dong-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release. Verify the checksums in that download directory with `shasum -a 256 -c SHA256SUMS`. No npm account or registry publication is required. The host may still need network access for its own dependencies.
 
 ```bash
 openclaw plugins install ./rocke-dong-oam-openclaw-0.0.1.tgz --force --accept-capabilities
@@ -61,6 +61,10 @@ For each recurring job, a host-reported run status (`ok`, `error`, or `skipped`)
 Each request has a stable content-derived idempotency key and validates its OAM acceptance receipt. Reconciliation stops when its host snapshot is cancelled. There is no local queue or automatic retry. Capture and skip logs identify the job and outcome without credentials or content. Acceptance does not prove indexing or recall readiness. Enabling capture does not grant cron sessions access to personal recall or removal tools, and it does not delete previously stored reports.
 
 Set `maxContextTokens` to the service’s largest recall context limit when the agent can accommodate it; the default is 1024 and the maximum is 32768. The plugin checks the complete returned `context_tokens` against its `maxContextTokens` host limit. Citations, metadata and required originals can take a valid server result above that limit; automatic recall then omits the result and explicit search reports an error instead of injecting oversized context.
+
+## Response and evidence boundaries
+
+The plugin limits decoded JSON responses to 1,048,576 JavaScript characters while reading the response stream, with a separate byte ceiling of four times that size. Oversized, rejected and cancelled responses close their readers. Recall evidence escapes `&`, `<` and `>` before entering the shared untrusted-memory wrapper used by automatic recall and explicit search. This prevents recalled text from closing that wrapper; it does not make a language model immune to instructions inside evidence.
 
 ## Memory removal
 
