@@ -4,6 +4,8 @@
 
 Candidate preparation ends with locally verified images, both plugin archives and checksums, source identity, evidence, and a human review. Publication is a separate explicit action. v0.0.1 requires public npm packages for both the OpenClaw and DSH plugins, alongside versioned GitHub Release archives. Installing public packages or release archives needs no npm account; the maintainer needs npm publishing access.
 
+Plugin packages can be versioned and published independently. For the OpenClaw response-boundary fix, merge the package source into `main` and publish `@rocke-dong/oam-openclaw@0.0.2`; keep the OAM Python/CLI version, product tag, server image and DSH package at `0.0.1`. Do not move the existing `v0.0.1` tag or create a product `v0.0.2` release. The full-product procedure below remains the historical v0.0.1 procedure; package-only publication uses the changed package's own version and reviewed archive.
+
 ## 1. Review the candidate
 
 Read [release evidence](release-evidence.md), [acceptance](acceptance.md), [deployment](../deploy/README.md), and [third-party notices](../THIRD_PARTY.md). Check the recorded source/configuration hashes and local image IDs against the artifacts being reviewed. A local image ID is not a published registry digest. Review the source changes, the self-contained indexing/recall design and required acknowledgments before making the repository public.

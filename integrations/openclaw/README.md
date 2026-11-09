@@ -6,7 +6,7 @@ This plugin connects one OAM user to owner-authorized local WebChat sessions of 
 
 ## npm installation
 
-Install the versioned `@rocke-dong/oam-openclaw` package from the public npm registry with OpenClaw and configure the existing OAM user:
+After `@rocke-dong/oam-openclaw@0.0.2` is published, install the versioned package from the public npm registry with OpenClaw and configure the existing OAM user:
 
 ```bash
 openclaw plugins install npm:@rocke-dong/oam-openclaw@0.0.2 --force --accept-capabilities
@@ -17,7 +17,7 @@ The install command reports the plugin directory. No npm login is required for u
 
 ## v0.0.1 release archive installation
 
-Prefer npm version 0.0.2 for the response-reading and evidence-boundary fixes. The original v0.0.1 archives remain available for reproducibility. Download `rocke-dong-oam-openclaw-0.0.1.tgz`, `rocke-dong-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release. Verify the checksums in that download directory with `shasum -a 256 -c SHA256SUMS`. No npm account or registry publication is required. The host may still need network access for its own dependencies.
+The v0.0.1 archives remain available for reproducibility. Download `rocke-dong-oam-openclaw-0.0.1.tgz`, `rocke-dong-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release. Verify the checksums in that download directory with `shasum -a 256 -c SHA256SUMS`. No npm account or registry publication is required. The host may still need network access for its own dependencies.
 
 ```bash
 openclaw plugins install ./rocke-dong-oam-openclaw-0.0.1.tgz --force --accept-capabilities
