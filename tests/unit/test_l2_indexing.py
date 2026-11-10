@@ -65,7 +65,7 @@ def test_l2_capacity_keeps_captured_legacy_generation_and_checkpoint(monkeypatch
             SimpleNamespace(config=selected, generation_id="legacy"), facts, ("a", "b"), (), []
         )
         assert input_digest(inputs).hex() == (
-            "1ee6e49dc7e3abed2e8a68c3a8bd691c02e5469c0bd88c13b4a010ff8f297959"
+            "6fe70e819d798fb30f0061562595263fc1e0ee47ef1451c9be41352035c079b7"
         )
 
 

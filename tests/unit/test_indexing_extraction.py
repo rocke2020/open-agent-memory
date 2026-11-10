@@ -824,6 +824,7 @@ def test_insight_requires_two_distinct_known_supports_and_keeps_provenance_priva
     with extraction_models(
         {
             "outcome": "insight",
+            "title": "Supported subject",
             "subtype": subtype,
             "type": "json_object",
             "text": "Walking before breakfast occurred twice.",
@@ -916,6 +917,7 @@ def test_insight_preserves_optional_retrieval_text_without_replacing_claims(
 
     reply = {
         "outcome": "insight",
+        "title": "Supported subject",
         "subtype": "projects",
         "text": "The user requested help repairing the cello's open seam but has not attempted it.",
         "support_ids": ["repair-request", "repair-status"],
@@ -938,6 +940,24 @@ def test_insight_preserves_optional_retrieval_text_without_replacing_claims(
     assert result.support_ids == ("repair-request", "repair-status")
     assert result.outcome == "insight"
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("title", [None, "", " \t", "x" * 121])
+def test_insight_rejects_missing_blank_or_overlong_title(instrument_insight_inputs, title):
+    from oam.indexing.extraction import synthesize_insight
+
+    reply = {
+        "outcome": "insight",
+        "subtype": "projects",
+        "text": "The user requested cello repair help but has not attempted it.",
+        "support_ids": ["repair-request", "repair-status"],
+    }
+    if title is not None:
+        reply["title"] = title
+    with extraction_models(reply) as (models, config), pytest.raises(ExtractionError):
+        synthesize_insight(
+            models, facts=instrument_insight_inputs, config=config, timeout_seconds=1
+        )
 
 
 @pytest.mark.parametrize(
@@ -969,18 +989,21 @@ def test_insight_rejects_blank_retrieval_text_or_label_without_insight(
     [
         {
             "outcome": "insight",
+            "title": "Supported subject",
             "subtype": "general_insights",
             "text": "A claim",
             "support_ids": ["f1", "invented"],
         },
         {
             "outcome": "insight",
+            "title": "Supported subject",
             "subtype": "general_insights",
             "text": "A claim",
             "support_ids": ["f1", "f1"],
         },
         {
             "outcome": "insight",
+            "title": "Supported subject",
             "subtype": "general_insights",
             "text": " ",
             "support_ids": ["f1", "f2"],
@@ -1078,6 +1101,7 @@ def test_insight_rejects_missing_or_unsupported_subtype(change):
     )
     reply = {
         "outcome": "insight",
+        "title": "Supported subject",
         "text": "A supported synthesis.",
         "support_ids": ["f1", "f2"],
         **change,

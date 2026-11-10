@@ -132,7 +132,8 @@ def _lookup_targets(store, connection, seeds, *, deadline=None):
         connection,
         f"WITH eligible AS ({ELIGIBLE_UNITS}) "
         "SELECT u.insight_id AS id,u.insight_revision AS revision,u.content_text AS text,"
-        "u.locator->>'retrieval_text' AS retrieval_text,i.subtype,u.embedding::text AS vector,"
+        "u.locator->>'retrieval_text' AS retrieval_text,u.locator->>'title' AS title,"
+        "i.subtype,u.embedding::text AS vector,"
         "(SELECT jsonb_agg(jsonb_build_object('id',sp.memory_id,'revision',sp.support_revision) "
         "ORDER BY sp.memory_id) FROM insight_support sp WHERE "
         "(sp.tenant_id,sp.user_id,sp.insight_id,sp.insight_revision)="
@@ -626,6 +627,7 @@ def _publish_group(store, connection, *, facts, seeds, targets, prepared, digest
                 "support_ids": sorted(support_ids),
                 "seed_ids": list(action.seed_ids),
                 "retrieval_text": action.retrieval_text,
+                "title": action.title,
             },
             insight_id=identifier,
             insight_revision=revision,

@@ -452,6 +452,7 @@ class RepairModels:
             else json.dumps(
                 {
                     "outcome": "insight",
+                    "title": "Supported subject",
                     "text": "Regenerated eligible synthesis.",
                     "support_ids": [fact["id"] for fact in facts],
                     "subtype": "general_insights",

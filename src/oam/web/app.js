@@ -33,6 +33,11 @@
   const enumValues = new Set(["fact", "insight", "memory", "basic", "preferences", "patterns", "projects", "relationships", "experiences", "general_insights", "chat", "interaction", "evidence", "resource", "pending", "processing", "succeeded", "partial", "failed", "cancelled", "ready", "missing", "blocked", "unavailable", "complete", "completed", "not_required", "fast", "mid", "deep", "normal", "user", "assistant", "system", "developer", "tool"]);
   const enumLabel = (value) => enumValues.has(value) ? msg(value) : value;
 
+  function insightTitle(item) {
+    const title = item.kind === "insight" ? item.title || item.locator?.title || item.locator?.retrieval_text : null;
+    return typeof title === "string" ? title.trim() : "";
+  }
+
   function errorMessage(error) {
     const code = error.message || "Unknown";
     if (error instanceof TypeError) return msg("Unable to reach the service. Check the connection and try again.");
@@ -552,11 +557,12 @@
       const kind = resource ? msg(state.view === "profile-data" ? "Profile Data" : "Resource")
         : item.kind === "insight" && item.subtype ? msg("{kind} · {subtype}", { kind: enumLabel(item.kind), subtype: enumLabel(item.subtype) }) : enumLabel(item.kind);
       const row = element("li");
-      const control = button(resource ? id : String(item.text || id), () => openItem(item), "list-item");
-      if (!resource) control.replaceChildren(element("span", item.text || id, "item-title"));
+      const title = resource ? id : insightTitle(item) || item.text || id;
+      const control = button(title, () => openItem(item), "list-item");
+      if (!resource) control.replaceChildren(element("span", title, "item-title"));
       control.dataset.unitId = item.unit_id || id;
       control.setAttribute("aria-current", String(itemKey(item) === state.selectedItemKey));
-      control.append(element("small", resource ? msg("{kind} · {media} · version {version}", { kind, media: item.media_type, version: item.active_version }) : msg("{kind} · {id}", { kind, id })));
+      control.append(element("small", resource ? msg("{kind} · {media} · version {version}", { kind, media: item.media_type, version: item.active_version }) : item.kind === "insight" ? kind : msg("{kind} · {id}", { kind, id })));
       row.append(control);
       list.append(row);
     }
@@ -1032,7 +1038,7 @@
     else sourceMessages.append(element("p", msg("No source messages available.")));
     detail.replaceChildren(
       element("span", item.kind === "insight" ? msg("Insight") : msg("Memory"), "badge"),
-      element("h3", targetId),
+      element("h3", insightTitle(item) || targetId),
       element("h4", item.kind === "insight" ? msg("Insight") : msg("Extracted fact")),
       element("p", item.text, "source-text"),
       memoryConnections(item),

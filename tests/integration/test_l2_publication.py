@@ -28,6 +28,7 @@ class CorroboratingModels(PolicyModels):
         if "seed_ids" not in envelope:
             body = {
                 "outcome": "insight",
+                "title": "Production Atlas rollback",
                 "text": text,
                 "subtype": "projects",
                 "retrieval_text": "Production Atlas rollback",
@@ -41,6 +42,7 @@ class CorroboratingModels(PolicyModels):
                         "action": "KEEP_TEXT" if target else "CREATE",
                         "target_id": target["id"] if target else None,
                         "text": None if target else text,
+                        "title": None if target else "Production Atlas rollback",
                         "retrieval_text": None if target else "Production Atlas rollback",
                         "subtype": None if target else "projects",
                         "support_ids": seeds,
@@ -416,6 +418,7 @@ class MultiActionModels(CorroboratingModels):
                             "action": "CREATE",
                             "target_id": None,
                             "text": f"Supported synthesis {slot}.",
+                            "title": f"Project facet {slot}",
                             "retrieval_text": f"Project facet {slot}",
                             "subtype": "projects",
                             "support_ids": seeds[slot : slot + 2],

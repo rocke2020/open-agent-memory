@@ -53,6 +53,9 @@ class PolicyModels(SyntheticIndexModels):
                         "action": "UPDATE" if target and not distinct else "CREATE",
                         "target_id": target["id"] if target and not distinct else None,
                         "text": text,
+                        "title": "Research Atlas rollback"
+                        if distinct
+                        else "Production Atlas rollback",
                         "retrieval_text": "Research Atlas rollback"
                         if distinct
                         else "Production Atlas rollback",
@@ -73,6 +76,7 @@ class PolicyModels(SyntheticIndexModels):
                 "outcome": "insight",
                 "subtype": "projects",
                 "text": text,
+                "title": "Research Atlas rollback" if distinct else "Production Atlas rollback",
                 "support_ids": [fact["id"] for fact in facts],
             }
         return ModelResult(content=json.dumps(output), usage=Usage())
@@ -166,6 +170,11 @@ async def test_two_increments_keep_identity_support_and_current_fast_normal_cont
                 (tenant, original_id),
             ).fetchone()[0]
             assert supports == 3
+        assert models.groups[1]["targets"][0]["title"] == "Production Atlas rollback"
+        inspected = await client.get(f"/v1/users/scope/memories/{original_id}?memory_type=insight")
+        assert inspected.json()["title"] == "Production Atlas rollback"
+        listed = await client.get("/v1/users/scope/memories?memory_type=insight")
+        assert listed.json()["items"][0]["title"] == "Production Atlas rollback"
         for mode in ("fast", "normal"):
             recalled = await client.post(
                 "/v1/recall",

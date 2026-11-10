@@ -41,6 +41,8 @@ def test_insights_entities_and_memory_connections(tmp_path):
         "insight_revision": 2,
         "subtype": "projects",
         "text": "Alice is building Atlas.",
+        "title": "Atlas 项目进展",
+        "locator": {"title": "Atlas 项目进展", "retrieval_text": "Atlas project latest progress"},
         "supports": [{"memory_id": "one"}],
     }
     detail = {
@@ -153,9 +155,39 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 page.get_by_role("button", name="Insights", exact=True).click()
                 page.locator("#item-list .list-item").wait_for()
                 assert page.locator("#item-list .list-item").count() == 1
+                assert page.locator("#item-list .item-title").inner_text() == "Atlas 项目进展"
+                assert "insight-one" not in page.locator("#item-list").inner_text()
                 page.locator("#item-list .list-item").click()
+                page.locator("#detail").get_by_role(
+                    "heading", name="Atlas 项目进展", exact=True
+                ).wait_for()
                 page.locator("#detail").get_by_text(
                     "Alice is building Atlas.", exact=True
+                ).wait_for()
+                assert page.locator("#detail").get_by_text("insight-one", exact=True).is_visible()
+                for locator in ({}, {"retrieval_text": None}, {"retrieval_text": "   "}):
+                    insight.pop("title", None)
+                    insight["locator"] = locator
+                    page.locator("#refresh-list").click()
+                    page.locator("#item-list .item-title").get_by_text(
+                        "Alice is building Atlas.", exact=True
+                    ).wait_for()
+                    page.locator("#item-list .list-item").click()
+                    page.locator("#detail").get_by_role(
+                        "heading", name="insight-one", exact=True
+                    ).wait_for()
+                insight["title"] = "Atlas 项目进展"
+                insight["locator"] = {
+                    "title": "Atlas 项目进展",
+                    "retrieval_text": "Atlas project latest progress",
+                }
+                page.locator("#refresh-list").click()
+                page.locator("#item-list .item-title").get_by_text(
+                    "Atlas 项目进展", exact=True
+                ).wait_for()
+                page.locator("#item-list .list-item").click()
+                page.locator("#detail").get_by_role(
+                    "heading", name="Atlas 项目进展", exact=True
                 ).wait_for()
                 page.get_by_role("button", name="Open supporting memory one", exact=True).click()
                 entities = page.get_by_role("region", name="Entities in this memory", exact=True)
@@ -281,7 +313,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 ).wait_for()
                 page.locator("#item-list .list-item").nth(1).click()
                 page.locator("#detail").get_by_role(
-                    "heading", name="insight-one", exact=True
+                    "heading", name="Atlas 项目进展", exact=True
                 ).wait_for()
                 assert page.locator("#detail .source-text").inner_text() == insight["text"]
                 assert (

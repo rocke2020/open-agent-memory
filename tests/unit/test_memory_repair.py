@@ -200,7 +200,8 @@ def test_repair_publishes_next_revision_under_same_insight_id():
         def generate(self, role, **kwargs):
             assert role == "insights"
             return ModelResult(
-                content='{"outcome":"insight","text":"Updated synthesis.",'
+                content='{"outcome":"insight","title":"Supported subject",'
+                '"text":"Updated synthesis.",'
                 '"support_ids":["fact-a","fact-b"],"subtype":"general_insights"}',
                 usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2, coverage="complete"),
             )
@@ -248,6 +249,7 @@ def test_repair_embeds_current_purpose_but_publishes_full_supported_text(retriev
                 content=json.dumps(
                     {
                         "outcome": "insight",
+                        "title": "Violin restoration",
                         "text": text,
                         "retrieval_text": retrieval_text,
                         "support_ids": ["fact-a", "fact-b"],
@@ -267,6 +269,7 @@ def test_repair_embeds_current_purpose_but_publishes_full_supported_text(retriev
     assert store.units[0]["text"] == text
     assert store.units[0]["locator"]["support_ids"] == ["fact-a", "fact-b"]
     assert store.units[0]["locator"]["retrieval_text"] == retrieval_text
+    assert store.units[0]["locator"]["title"] == "Violin restoration"
     assert store.units[0]["vector"] == [0.25] * 1024
     emitted = capsys.readouterr().out
     assert emitted
@@ -331,6 +334,7 @@ def test_repair_refuses_partial_support_after_input_packing(monkeypatch):
         def generate(self, role, **kwargs):
             return InsightResult(
                 outcome="insight",
+                title="Partial subject",
                 text="partial",
                 usage=Usage(),
                 support_ids=["fact-a", "fact-b"],
@@ -365,6 +369,7 @@ def test_superseded_repair_continues_with_other_insights(monkeypatch, outcome):
         "oam.governance.repair.synthesize_insight",
         lambda *a, **kw: InsightResult(
             outcome=outcome,
+            title="Updated subject" if outcome == "insight" else None,
             text="Updated." if outcome == "insight" else None,
             support_ids=["fact-a", "fact-b"] if outcome == "insight" else [],
             subtype="general_insights" if outcome == "insight" else None,

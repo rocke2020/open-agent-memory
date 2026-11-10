@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
 from oam.config import OAMConfig
+from oam.contracts.memory import insight_title
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.db.entity_eligibility import (
@@ -337,7 +338,7 @@ class ExportRepository:
             cursor.execute(
                 f"WITH eligible AS NOT MATERIALIZED ({ELIGIBLE_UNITS}) "
                 "SELECT i.insight_id,i.revision,i.synthesis_text,i.subtype,i.recipe_id,"
-                "i.generation_id FROM eligible u JOIN insights i ON "
+                "i.generation_id,u.locator FROM eligible u JOIN insights i ON "
                 "(i.tenant_id,i.user_id,i.insight_id,i.revision)="
                 "(u.tenant_id,u.user_id,u.insight_id,u.insight_revision) "
                 "WHERE u.kind='insight' ORDER BY i.insight_id,i.revision"
@@ -350,6 +351,7 @@ class ExportRepository:
                         "insight_id": row["insight_id"],
                         "revision": row["revision"],
                         "text": row["synthesis_text"],
+                        "title": insight_title(row["locator"], row["synthesis_text"]),
                         "subtype": row["subtype"],
                         "recipe_id": row["recipe_id"],
                         "generation_id": row["generation_id"],
