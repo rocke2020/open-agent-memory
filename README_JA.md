@@ -10,7 +10,7 @@ Open Agent Memory（OAM）は、Apache-2.0 ライセンスで提供される、A
 
 「Open」はメモリシステム全体を意味します。インデックス作成、検索、プロファイル、ユーザーによる制御、ネイティブなマルチノード運用まで Apache-2.0 のコアに含まれ、開発者はシステム全体を確認、実行、変更、改善できます。
 
-HTTP API、または OpenClaw と DeepSeek Harness のプラグインで接続できます。同梱の Memory Inspector では、メモリの閲覧、出典の確認、文書リソースの検索、保持する内容の管理ができます。
+HTTP API、[ローカル MCP サーバー](integrations/mcp/README.md)、または OpenClaw と DeepSeek Harness のプラグインで接続できます。同梱の Memory Inspector では、メモリの閲覧、出典の確認、文書リソースの検索、保持する内容の管理ができます。
 
 ## Open Agent Memory を選ぶ理由
 
@@ -35,7 +35,9 @@ docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
 
 [Docker Compose ガイド](deploy/README.md)に従って PostgreSQL とモデルのエンドポイントを設定し、OAM を初期化して Memory Inspector を開きます。公開イメージを使うには、`deploy/.env` に `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.1` を設定してください。
 
-[HTTP API](docs/api.md)で接続するか、[OpenClaw](integrations/openclaw/README.md#npm-installation) または [DeepSeek Harness](integrations/dsh/README.md) のプラグインをインストールします。[コピーして実行できる保存 → 準備完了の確認 → 検索の例](docs/quickstart.md)で会話を保存し、インデックス作成を待って、返された出典を確認してください。
+[HTTP API](docs/api.md)や[ローカル MCP サーバー](integrations/mcp/README.md)で接続するか、[OpenClaw](integrations/openclaw/README.md#npm-installation) または [DeepSeek Harness](integrations/dsh/README.md) のプラグインをインストールします。[コピーして実行できる保存 → 準備完了の確認 → 検索の例](docs/quickstart.md)で会話を保存し、インデックス作成を待って、返された出典を確認してください。
+
+MCP 接続には Node.js 22 以上、稼働中の OAM インスタンス、そのユーザー用の API キーが必要です。MCP クライアントがローカルでアダプターを起動して stdio で通信し、アダプターが利用者の OAM インスタンスに接続します。インストールとクライアント設定は [MCP 接続ガイド](integrations/mcp/README.md)を参照してください。
 
 ## パフォーマンスと精度
 

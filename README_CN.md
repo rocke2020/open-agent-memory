@@ -10,7 +10,7 @@ Open Agent Memory（OAM）是采用 Apache-2.0 许可证、支持自托管的 AI
 
 “Open”意味着完整的记忆系统：索引、检索、用户画像、用户控制以及原生多节点运行能力都包含在 Apache-2.0 开源核心中，开发者可以检查、运行、修改和改进整个系统。
 
-通过 HTTP API，或 OpenClaw 与 DeepSeek Harness 插件接入。内置的 Memory Inspector 可让用户浏览记忆、追溯来源、搜索文档资源，并管理保留的内容。
+通过 HTTP API、[本地 MCP 服务](integrations/mcp/README.md)，或 OpenClaw 与 DeepSeek Harness 插件接入。内置的 Memory Inspector 可让用户浏览记忆、追溯来源、搜索文档资源，并管理保留的内容。
 
 ## 为什么选择 Open Agent Memory？
 
@@ -35,7 +35,9 @@ docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
 
 按照 [Docker Compose 指南](deploy/README.md)配置 PostgreSQL 和模型端点，初始化 OAM 并打开 Memory Inspector。在 `deploy/.env` 中设置 `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.1`，即可使用已发布镜像。
 
-通过 [HTTP API](docs/api.md)接入，或安装 [OpenClaw](integrations/openclaw/README.md#npm-installation) 或 [DeepSeek Harness](integrations/dsh/README.md) 插件。先运行[可复制的写入 → 等待就绪 → 召回示例](docs/quickstart.md)，保存会话、等待索引完成并检查返回的来源引用。
+通过 [HTTP API](docs/api.md)、[本地 MCP 服务](integrations/mcp/README.md)接入，或安装 [OpenClaw](integrations/openclaw/README.md#npm-installation) 或 [DeepSeek Harness](integrations/dsh/README.md) 插件。先运行[可复制的写入 → 等待就绪 → 召回示例](docs/quickstart.md)，保存会话、等待索引完成并检查返回的来源引用。
+
+MCP 接入需要 Node.js 22 或更高版本、已部署的 OAM 实例，以及对应用户的 API 密钥。MCP 客户端在本机启动适配器，通过 stdio 通信；适配器再连接你的 OAM 实例。安装和客户端配置见 [MCP 接入指南](integrations/mcp/README.md)。
 
 ## 性能与准确率
 
