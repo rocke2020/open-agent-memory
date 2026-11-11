@@ -8,7 +8,7 @@ Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for AI agents
 
 “Open” means the complete memory system: indexing, retrieval, Profiles, user controls and native multi-node operation are available in the Apache-2.0 core for developers to inspect, run, modify and improve.
 
-Integrate through the HTTP API or the OpenClaw and DeepSeek Harness plugins. The bundled Memory Inspector lets users browse memory, follow its sources, search Resources and manage what is retained.
+Integrate through the HTTP API, the local [MCP server](integrations/mcp/README.md), or the OpenClaw and DeepSeek Harness plugins. The bundled Memory Inspector lets users browse memory, follow its sources, search Resources and manage what is retained.
 
 ## Why Open Agent Memory?
 
@@ -105,7 +105,7 @@ The default `worker.embedded_enabled: true` requires the API, queue and worker-c
 
 v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/normal joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and normal are the supported recall modes. The Python SDK, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
 
-The [Docker/Compose guide](deploy/README.md) uses one non-root API/worker image, bundled Inspector assets and PostgreSQL/pgvector. The replica example simulates two APIs and two workers locally; it does not establish physical multi-host resilience. [OpenClaw](integrations/openclaw/README.md) and [DSH](integrations/dsh/README.md) use versioned plugin tarballs, without requiring an npm publishing account. Public release and image availability are separate from local candidate verification.
+The [Docker/Compose guide](deploy/README.md) uses one non-root API/worker image, bundled Inspector assets and PostgreSQL/pgvector. The replica example simulates two APIs and two workers locally; it does not establish physical multi-host resilience. [OpenClaw](integrations/openclaw/README.md) and [DSH](integrations/dsh/README.md) install from npm, with OpenClaw also available on ClawHub and versioned plugin tarballs retained for reproducibility. Public release and image availability are separate from local candidate verification.
 
 ## Acknowledgments
 

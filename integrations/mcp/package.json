@@ -1,0 +1,40 @@
+{
+  "name": "@rocke-dong/oam-mcp",
+  "version": "0.0.1",
+  "description": "Open Agent Memory MCP server for AI agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rocke2020/open-agent-memory.git",
+    "directory": "integrations/mcp"
+  },
+  "homepage": "https://github.com/rocke2020/open-agent-memory/tree/main/integrations/mcp",
+  "keywords": ["agent-memory", "mcp", "model-context-protocol", "self-hosted", "postgresql"],
+  "type": "module",
+  "bin": {
+    "oam-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY.md"
+  ],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --outfile=dist/index.js --banner:js='#!/usr/bin/env node'",
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "esbuild": "0.28.2",
+    "zod": "4.6.7"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

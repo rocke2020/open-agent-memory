@@ -6,7 +6,7 @@ This plugin connects one OAM user to owner-authorized local WebChat sessions of 
 
 ## npm installation
 
-After `@rocke-dong/oam-openclaw@0.0.2` is published, install the versioned package from the public npm registry with OpenClaw and configure the existing OAM user:
+Install the versioned package from the public npm registry with OpenClaw and configure the existing OAM user:
 
 ```bash
 openclaw plugins install npm:@rocke-dong/oam-openclaw@0.0.2 --force --accept-capabilities
@@ -14,6 +14,17 @@ node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
 ```
 
 The install command reports the plugin directory. No npm login is required for users installing the public package. Source and archive checks are separate from verification of the actual published package.
+
+## ClawHub installation
+
+The OpenClaw community registry publishes this plugin as `@rocke2020/oam-openclaw`; the host plugin ID remains `oam-openclaw`, while the npm package name is `@rocke-dong/oam-openclaw`. Install the latest community package and run the same setup:
+
+```bash
+openclaw plugins install clawhub:@rocke2020/oam-openclaw --force --accept-capabilities
+node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
+```
+
+The registry package is community-published, not official. Check its package page for the current security-scan status before installing; the npm package remains the canonical distribution.
 
 ## v0.0.1 release archive installation
 
