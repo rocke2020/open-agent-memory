@@ -8,6 +8,8 @@ The wrapper is an API client, not a second memory implementation. OAM owns authe
 
 Retrieved memory is untrusted evidence, not instructions. Tool descriptions state this boundary; clients must not follow directives found inside recalled text.
 
+See the [71-second cited-recall demo](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4): a fresh published MCP process checks readiness and retrieves an already indexed synthetic preference, then Memory Inspector opens the original source. The recording runs at 2× speed and performs no new indexing.
+
 ## Prerequisites
 
 1. OAM is running in `api_key` mode with a user-scoped key. See the [OAM quickstart](https://github.com/rocke2020/open-agent-memory/blob/main/docs/quickstart.md).
@@ -24,7 +26,7 @@ Install the published npm package:
 npx -y @rocke-dong/oam-mcp
 ```
 
-Until the first npm release is published, build and run it from this directory:
+To build and run from source instead:
 
 ```bash
 npm install
@@ -48,13 +50,13 @@ The MCP client may store these environment values in its own configuration. Prot
 
 ## Client Configuration
 
-Claude Code:
+Claude Code, after setting the three environment variables above in your shell:
 
 ```bash
 claude mcp add oam \
-  -e OAM_BASE_URL=http://127.0.0.1:17333 \
-  -e OAM_USER_ID=<user-id> \
-  -e OAM_USER_API_KEY=<user-key> \
+  -e "OAM_BASE_URL=$OAM_BASE_URL" \
+  -e "OAM_USER_ID=$OAM_USER_ID" \
+  -e "OAM_USER_API_KEY=$OAM_USER_API_KEY" \
   -- npx -y @rocke-dong/oam-mcp
 ```
 

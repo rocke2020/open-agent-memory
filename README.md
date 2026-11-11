@@ -2,6 +2,32 @@
 
 English (canonical) | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
+[First cited recall](docs/quickstart.md) · [MCP setup](integrations/mcp/README.md) · [Benchmark results and reproduction](docs/benchmarks.md)
+
+[![Watch OAM recall preferences with source citations](docs/assets/cited-recall-demo.gif)](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4)
+
+[Watch the 71-second demo](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4): an existing synthetic memory, readiness and recall from a fresh MCP process, then the original source in Memory Inspector. The recording runs at 2× speed and reuses the completed index.
+
+Connect an existing OAM deployment to your MCP client with Node.js 22+:
+
+```json
+{
+  "mcpServers": {
+    "oam": {
+      "command": "npx",
+      "args": ["-y", "@rocke-dong/oam-mcp@0.0.1"],
+      "env": {
+        "OAM_BASE_URL": "http://127.0.0.1:17333",
+        "OAM_USER_ID": "your-user-id",
+        "OAM_USER_API_KEY": "your-user-key"
+      }
+    }
+  }
+}
+```
+
+Use your own user-scoped key and keep the client configuration private. [Set up OAM first](deploy/README.md), then follow the [Claude Code and Cursor instructions](integrations/mcp/README.md#client-configuration).
+
 ## What Is Open Agent Memory?
 
 Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for AI agents. It turns eligible conversations into source-backed facts and Insights, keeps documents as separate Resources, and retrieves both with citations. An explicitly refreshed User Profile helps agents carry useful personal context across sessions.
@@ -33,15 +59,17 @@ docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
 
 Follow the [Docker Compose guide](deploy/README.md) to configure PostgreSQL and your model endpoints, initialize OAM and open the Memory Inspector. Set `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.1` in `deploy/.env` to use the published image.
 
-Integrate through the [HTTP API](docs/api.md), or install the [OpenClaw](integrations/openclaw/README.md#npm-installation) or [DeepSeek Harness](integrations/dsh/README.md) plugin. Start with the [copyable retain → readiness → recall example](docs/quickstart.md) to store a conversation, wait for indexing and inspect the returned source citations.
+Integrate through the [HTTP API](docs/api.md), the [MCP server](integrations/mcp/README.md), or the [OpenClaw](integrations/openclaw/README.md#npm-installation) or [DeepSeek Harness](integrations/dsh/README.md) plugin. Start with the [copyable retain → readiness → recall example](docs/quickstart.md) to store a conversation, wait for indexing and inspect the returned source citations.
 
 ## Performance & Accuracy
 
 **OAM achieved 94.0% accuracy (470/500) on LongMemEval S (LME-500)** using `deepseek-v4.1-flash` for extraction, answering and judging, reflecting everyday agent workloads. Fast recall supplied **12.4K tokens of answer context on average**. The result includes the recorded single-retry policy. See the [LME-500 results and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500).
 
-For large-volume memory workloads, we use [BEAM-10M](https://github.com/mohammadtavakoli78/BEAM), the benchmark's 10-million-token conversation scale. Our [evaluation](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m) uses **10 full, untruncated conversation histories, each exceeding 10 million tokens**, with **200 questions** to test recall quality and retrieval performance over long histories.
+For large-volume memory workloads, OAM reached a **61.56% mean rubric score on BEAM-10M** with DeepSeek Flash (saved answer/judge binding `deepseek-flash`). Our [evaluation](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m) uses **10 full, untruncated conversation histories, each exceeding 10 million tokens**, with **200 questions** to test recall quality and retrieval performance over long histories.
 
-These results come from recorded v0.0.1 development snapshots. The linked reports provide the evaluated revisions, settings, retry policy and complete answer contexts.
+We chose DeepSeek Flash to control evaluation costs and show memory performance with an everyday agent model, rather than optimize the headline with a top model. These are the completed v0.0.1 development results. Scores reflect retrieval, the answer model and the judging policy together; complex tasks also depend on the model's reasoning. They do not establish a ranking against other systems or measure the gains from a stronger answer model. The linked reports provide the evaluated revisions, settings, retry policy and complete answer contexts.
+
+See the [standalone benchmark page](docs/benchmarks.md) for both result tables, model settings, configuration identities and commands to reproduce the published measurements.
 
 ## Product Model
 

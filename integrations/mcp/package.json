@@ -1,7 +1,8 @@
 {
   "name": "@rocke-dong/oam-mcp",
   "version": "0.0.1",
-  "description": "Open Agent Memory MCP server for AI agents",
+  "mcpName": "io.github.rocke2020/oam",
+  "description": "Self-hosted OAM memory with cited recall over your existing deployment",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rocke2020/open-agent-memory.git",
