@@ -135,6 +135,19 @@ v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/normal joi
 
 The [Docker/Compose guide](deploy/README.md) uses one non-root API/worker image, bundled Inspector assets and PostgreSQL/pgvector. The replica example simulates two APIs and two workers locally; it does not establish physical multi-host resilience. [OpenClaw](integrations/openclaw/README.md) and [DSH](integrations/dsh/README.md) install from npm, with OpenClaw also available on ClawHub and versioned plugin tarballs retained for reproducibility. Public release and image availability are separate from local candidate verification.
 
+## Roadmap
+
+v0.0.1 is released. The following product releases are planned; scope may change with validated user feedback, and no release dates are committed.
+
+| Release | Planned work |
+|---|---|
+| v0.0.2 | Add a user-listing API, with contract, authorization rules and acceptance criteria pending design completion. Include the implemented tokenizer optimization: native token counting by default, embedding-aware source sizing and admission, and complete rendered recall-context counting. |
+| v0.1.0 | Improve general retrieval quality and rerun retrieval, answering and judging against the existing completed LME-500 and BEAM-10M indexes, without repeating ingestion, extraction or indexing. The LME-500 target is at least 473/500 (94.6%); the published v0.0.1 result remains 470/500 (94.0%). |
+
+The OpenClaw plugin's already-published 0.0.2 is an independently versioned package release; product v0.0.2 is still planned. Further work includes smoother onboarding, reducing unnecessary indexing and answer-context tokens, evaluating keyword-ranking approaches, and defining shared Resource ownership and OIDC/LDAP support. These are proposed improvements, not delivered capabilities.
+
+Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1). The current release's supported behavior and limits remain documented above and in the [release evidence](docs/release-evidence.md).
+
 ## Acknowledgments
 
 We thank the contributors to [Hindsight](https://github.com/vectorize-io/hindsight), [OpenViking](https://github.com/volcengine/OpenViking), [Mem0](https://github.com/mem0ai/mem0), [MemOS](https://github.com/MemTensor/MemOS) and [TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) for their open-source work, which informed OAM. See the [full acknowledgments](ACKNOWLEDGMENTS.md) and [third-party notices](THIRD_PARTY.md) for project, benchmark and license credits.
