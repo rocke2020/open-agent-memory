@@ -1,0 +1,41 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rocke2020/oam",
+  "title": "Open Agent Memory",
+  "description": "Self-hosted OAM memory with cited recall over your existing deployment",
+  "repository": {
+    "url": "https://github.com/rocke2020/open-agent-memory",
+    "source": "github",
+    "subfolder": "integrations/mcp"
+  },
+  "version": "0.0.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@rocke-dong/oam-mcp",
+      "version": "0.0.1",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "OAM_BASE_URL",
+          "description": "URL of your existing OAM deployment, for example http://127.0.0.1:17333",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "OAM_USER_ID",
+          "description": "Your authorized OAM user ID",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "OAM_USER_API_KEY",
+          "description": "User-scoped API key for your OAM deployment",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

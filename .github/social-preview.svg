@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+<title id="title">Open Agent Memory</title>
+<desc id="description">Self-hosted memory for AI agents. Recall with citations. Inspect the source. Keep control.</desc>
+<rect width="1280" height="640" fill="#123443"/>
+<g transform="translate(80 64) scale(1.5)"><rect width="64" height="64" rx="16" fill="#123443"/>
+  <path d="M47.7 22.3A19 19 0 1 0 51 32" fill="none" stroke="#80E2D6" stroke-width="5.5" stroke-linecap="round"/>
+  <path d="M23 39V26l9 9 9-9v13" fill="none" stroke="#F3CF86" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="51" cy="32" r="3.25" fill="#F3CF86"/>
+</g>
+<g font-family="Arial, Helvetica, sans-serif">
+<text x="200" y="124" font-size="42" font-weight="700" fill="#F4F8F8">Open Agent Memory</text>
+<text x="80" y="272" font-size="66" font-weight="700" fill="#F4F8F8">Memory your agent can cite.</text>
+<text x="80" y="350" font-size="32" fill="#BEE9E5">Keep the evidence. Inspect the source.</text>
+<text x="80" y="402" font-size="32" fill="#BEE9E5">Conversations · Documents · User Profiles</text>
+<rect x="80" y="466" width="232" height="48" rx="24" fill="#214B59"/>
+<text x="196" y="498" font-size="22" fill="#80E2D6" text-anchor="middle">Self-hosted</text>
+<rect x="330" y="466" width="232" height="48" rx="24" fill="#214B59"/>
+<text x="446" y="498" font-size="22" fill="#80E2D6" text-anchor="middle">Apache-2.0</text>
+<rect x="580" y="466" width="260" height="48" rx="24" fill="#214B59"/>
+<text x="710" y="498" font-size="22" fill="#80E2D6" text-anchor="middle">HTTP + local MCP</text>
+<text x="80" y="590" font-size="22" fill="#F3CF86">github.com/rocke2020/open-agent-memory</text>
+</g>
+</svg>
