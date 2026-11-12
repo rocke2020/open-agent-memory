@@ -222,6 +222,7 @@ def repair_insights(store, models) -> bool:
                     "support_ids": list(result.support_ids),
                     "repair": True,
                     "retrieval_text": result.retrieval_text,
+                    "title": result.title,
                 },
                 insight_id=insight_id,
                 insight_revision=revision,

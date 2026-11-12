@@ -5,6 +5,7 @@ import logging
 
 import pytest
 from psycopg.types.json import Jsonb
+from test_core_http import ROOT
 from test_core_http import core_database as core_database
 from test_memory_removal import (
     DEPENDENT_INSIGHT,
@@ -22,6 +23,69 @@ from test_memory_removal import (
 from test_memory_removal import removal_database as removal_database
 
 pytestmark = pytest.mark.integration
+
+
+async def test_insight_title_upgrade_preserves_content_and_reaches_inspection_and_export(
+    removal_database,
+):
+    database = removal_database
+    label = "Atlas project " * 20
+    with _content(database.dsn, database.tenant) as connection:
+        connection.execute(
+            "UPDATE search_units SET locator=%s WHERE insight_id=%s AND insight_revision=2",
+            (Jsonb({"retrieval_text": label}), INSIGHT),
+        )
+        connection.execute(
+            "UPDATE search_units SET locator=%s WHERE insight_id=%s",
+            (
+                Jsonb({"title": "Stable subject", "retrieval_text": "Different search label"}),
+                INDEPENDENT_INSIGHT,
+            ),
+        )
+        before = connection.execute(
+            "SELECT unit_id,content_text,embedding::text FROM search_units ORDER BY unit_id"
+        ).fetchall()
+        migration = (ROOT / "migrations/0036_insight_titles.sql").read_text()
+        connection.execute(migration)
+        connection.execute(migration)
+        assert (
+            connection.execute(
+                "SELECT unit_id,content_text,embedding::text FROM search_units ORDER BY unit_id"
+            ).fetchall()
+            == before
+        )
+        titles = dict(
+            connection.execute(
+                "SELECT u.insight_id,u.locator->>'title' FROM search_units u JOIN insights i "
+                "ON (u.tenant_id,u.user_id,u.insight_id,u.insight_revision)="
+                "(i.tenant_id,i.user_id,i.insight_id,i.revision) "
+                "WHERE u.kind='insight' AND i.visible_to IS NULL"
+            ).fetchall()
+        )
+        assert titles[INSIGHT] == label[:120]
+        assert titles[INDEPENDENT_INSIGHT] == "Stable subject"
+        assert connection.execute(
+            "SELECT locator->>'title' FROM search_units WHERE insight_id=%s AND insight_revision=1",
+            (INSIGHT,),
+        ).fetchone() == (None,)
+    async with _client(database.headers) as client:
+        listed = await client.get(f"/v1/users/{USER}/memories?memory_type=insight")
+        assert all(item["title"].strip() for item in listed.json()["items"])
+        detail = await client.get(f"/v1/users/{USER}/memories/{INSIGHT}?memory_type=insight")
+        assert detail.json()["title"] == label[:120]
+        receipt = await client.post(f"/v1/users/{USER}/exports")
+        assert receipt.status_code == 202, receipt.text
+        export_path = f"/v1/users/{USER}/exports/{receipt.json()['export_id']}"
+        manifest = (await client.get(export_path)).json()
+        records = []
+        for part in manifest["parts"]:
+            response = await client.get(f"{export_path}/records/{part['index']}")
+            records.extend(json.loads(line) for line in response.text.splitlines())
+        exported = {
+            item["insight_id"]: item["title"] for item in records if item["kind"] == "insight"
+        }
+        assert exported[INSIGHT] == label[:120]
+        assert exported[INDEPENDENT_INSIGHT] == "Stable subject"
 
 
 async def test_memory_offset_pages_cover_each_layer_without_duplicates(removal_database):

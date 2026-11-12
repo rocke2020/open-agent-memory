@@ -22,6 +22,7 @@ def inputs():
         "id": "policy",
         "revision": 1,
         "text": "Approval is required.",
+        "title": "Deployment approval",
         "retrieval_text": "Deployment approval",
         "subtype": "projects",
         "supports": [{"id": "old", "revision": 1}, {"id": "prior", "revision": 1}],
@@ -44,6 +45,7 @@ def update(**changes):
         "action": "UPDATE",
         "target_id": "policy",
         "text": "Approval is required; the approval rule changed.",
+        "title": "Deployment approval",
         "retrieval_text": "Deployment approval",
         "subtype": "projects",
         "support_ids": ["new"],
@@ -76,6 +78,7 @@ def test_incremental_update_accepts_one_new_fact_and_uses_dedicated_completion_b
     )
     result = synthesize(model, config)
     assert result.actions[0].target_id == "policy"
+    assert result.actions[0].title == "Deployment approval"
     assert result.actions[0].support_ids == ("new",)
     assert result.actions[0].expected_revision == 1
     role, request = model.requests[0]
@@ -102,6 +105,21 @@ def test_incremental_update_accepts_one_new_fact_and_uses_dedicated_completion_b
 def test_incremental_rejects_lost_duplicate_stale_or_unsupported_actions(actions):
     with pytest.raises(extraction.ExtractionError):
         synthesize(Reply(actions))
+
+
+@pytest.mark.parametrize("title", [None, "", " \t", "x" * 121])
+def test_incremental_update_rejects_missing_title(title):
+    action = update(title=title)
+    if title is None:
+        action.pop("title")
+    with pytest.raises(extraction.ExtractionError):
+        synthesize(Reply([action]))
+
+
+def test_incremental_update_can_retitle_the_same_insight():
+    result = synthesize(Reply([update(title="Production deployment approval")]))
+    assert result.actions[0].title == "Production deployment approval"
+    assert result.actions[0].target_id == "policy"
 
 
 def test_keep_text_with_retained_support_normalizes_to_no_change():
@@ -135,6 +153,7 @@ def test_no_insight_accepts_absent_inapplicable_fields():
             [
                 update(
                     action="NO_INSIGHT",
+                    title=None,
                     target_id=None,
                     text=None,
                     retrieval_text=None,
@@ -224,6 +243,7 @@ def test_create_and_no_insight_can_account_for_different_seeds_in_one_group():
             update(action="CREATE", target_id=None, support_ids=["new", "old"]),
             update(
                 action="NO_INSIGHT",
+                title=None,
                 target_id=None,
                 text=None,
                 retrieval_text=None,
@@ -293,6 +313,7 @@ def test_model_projection_excludes_private_state_and_omits_absent_values():
         "targets": [
             {
                 "id": "policy",
+                "title": "Deployment approval",
                 "text": "Approval is required.",
                 "retrieval_text": "Deployment approval",
             }
@@ -312,6 +333,7 @@ def test_target_labels_survive_without_redundancy_classification(label):
     supplied = json.loads(model.requests[0][1]["user"])["targets"][0]
     assert supplied == {
         "id": "policy",
+        "title": "Deployment approval",
         "text": "Approval is required.",
         **({"retrieval_text": label} if label else {}),
     }
@@ -319,7 +341,7 @@ def test_target_labels_survive_without_redundancy_classification(label):
 
 def test_keep_text_adds_support_and_binds_exact_captured_claim_and_revision():
     facts, target = inputs()
-    target.update(revision=7, text="  Exact stored claim.  ")
+    target.update(revision=7, text="  Exact stored claim.  ", title="  Deployment approval  ")
     result = extraction.consolidate_insights(
         Reply(
             [
@@ -339,6 +361,7 @@ def test_keep_text_adds_support_and_binds_exact_captured_claim_and_revision():
     )
     action = result.actions[0]
     assert (action.action, action.expected_revision) == ("UPDATE", 7)
+    assert action.title == "  Deployment approval  "
     assert (action.text, action.retrieval_text, action.subtype) == (
         "  Exact stored claim.  ",
         "Deployment approval",
@@ -410,6 +433,7 @@ def test_label_budget_matches_dispatch_and_ignores_private_source_metadata():
         "targets": [
             {
                 "id": "policy",
+                "title": "Deployment approval",
                 "text": "Approval is required.",
                 "retrieval_text": "Deployment approval",
             }

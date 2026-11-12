@@ -1349,12 +1349,14 @@ async def test_worker_publishes_positive_l2_with_l0_support_and_excludes_ineligi
 
 def insight_reply(envelope, result):
     """Model double for ordinary actions and the separate complete-support repair call."""
+    result = {**result, "title": result.get("title", "Supported subject")}
     if "seed_ids" not in envelope:
         return result
     return {
         "actions": [
             {
                 "action": "CREATE",
+                "title": result["title"],
                 "target_id": None,
                 "text": result["text"],
                 "retrieval_text": result.get("retrieval_text"),

@@ -39,6 +39,7 @@ Return exactly {"actions":[...]} with these fields on each action; omit inapplic
 action: "UPDATE", "CREATE", "KEEP_TEXT", or "NO_INSIGHT";
 target_id: supplied target ID for UPDATE/KEEP_TEXT, otherwise absent;
 text: complete replacement synthesis for UPDATE/CREATE, otherwise null;
+title: concise human-readable subject title for UPDATE/CREATE, otherwise absent;
 retrieval_text: short source-supported subject/project/purpose label for UPDATE/CREATE, otherwise null;
 subtype: one descriptive label for UPDATE/CREATE, otherwise null;
 support_ids: distinct supplied fact IDs for UPDATE/CREATE/KEEP_TEXT, otherwise absent;
@@ -49,3 +50,9 @@ The descriptive subtype is preferences, patterns, projects, relationships, exper
  general_insights. Subtype never limits identity or candidate matching. Use general_insights when
 no specialized label fits. Full text retains names, technical details, values, units, conditions,
 status and dates; retrieval_text is a short search view, never a replacement for supported content.
+
+Every Insight needs a title of at most 120 characters. Name the enduring subject, project,
+relationship or preference in a short readable phrase. Copy the existing title exactly on UPDATE
+unless the supplied evidence changes or clarifies the subject itself. A new occurrence, delivery,
+question, timestamp or temporary status normally changes the body, not the title. Include dates
+only when they identify the subject itself. KEEP_TEXT preserves the stored title automatically.

@@ -20,10 +20,10 @@ event newer. Preserve supported changes, stops and unresolved conflicts without 
 When the subject is the individual user, call that person "the user"; do not use
 they/them/their for the user or infer gender. Preserve references to other people or groups.
 Do not infer a preference from one action or invent missing facts. Do not output reasoning.
-Return exactly one JSON object with outcome, text, support_ids and subtype. A useful synthesis
+Return exactly one JSON object with outcome, title, text, support_ids and subtype. A useful synthesis
 uses outcome='insight', nonempty text and at least two distinct supplied fact IDs in support_ids.
 Every asserted part must be supported by those facts. If there is no supported synthesis,
-return outcome='no_insight', text=null, support_ids=[] and subtype=null.
+return outcome='no_insight', title=null, text=null, support_ids=[] and subtype=null.
 For an Insight, choose exactly one subtype describing its main supported claim:
 preferences: a qualified choice across related facts, not one action;
 patterns: repeated behavior across distinct occurrences or a comparable dated trend;
@@ -39,3 +39,7 @@ an explicit project when provided by the supporting facts. Keep method, measurem
 and status details in the full text; do not invent identity, purpose or relationships.
 For no_insight, retrieval_text must be null. This label is not a replacement for the
 full supported Insight text.
+
+Every Insight needs a concise human-readable title of at most 120 characters naming its enduring
+subject, project, relationship or preference. Keep occurrence dates, delivery histories and temporary
+status in the body unless they identify the subject itself.

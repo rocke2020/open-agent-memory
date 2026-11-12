@@ -25,6 +25,7 @@ from pydantic import (
 
 from oam.config import OAMConfig
 from oam.contracts.evidence import MessageRole, TemporalAnnotation
+from oam.contracts.memory import MAX_INSIGHT_TITLE_CHARS, insight_title
 from oam.indexing.chunker import TextChunk, split_chunk_for_output_retry
 from oam.indexing.entity_names import entity_name_key
 from oam.models.runtime import ModelOutputTooLongError, RuntimeModels, Usage
@@ -32,6 +33,9 @@ from oam.quotes import unique_quote
 from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimate_units, estimated_tokens
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+InsightTitle = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_INSIGHT_TITLE_CHARS)
+]
 Offset = Annotated[StrictInt, Field(ge=0)]
 InsightSubtype = Literal[
     "preferences", "patterns", "projects", "relationships", "experiences", "general_insights"
@@ -183,6 +187,7 @@ class InsightInput(FrozenProjection):
 
 class InsightResult(FrozenProjection):
     text: NonBlank | None
+    title: InsightTitle | None = None
     retrieval_text: NonBlank | None = None
     support_ids: tuple[NonBlank, ...]
     outcome: Literal["insight", "no_insight"]
@@ -199,6 +204,8 @@ class InsightResult(FrozenProjection):
             raise ValueError("only a supported Insight has a subtype")
         if self.outcome == "no_insight" and self.retrieval_text is not None:
             raise ValueError("only a supported Insight has retrieval text")
+        if (self.outcome == "insight") != (self.title is not None):
+            raise ValueError("every supported Insight requires a title")
         return self
 
 
@@ -208,6 +215,7 @@ class InsightDecision(FrozenProjection):
     action: Literal["UPDATE", "CREATE", "KEEP_TEXT", "NO_INSIGHT"]
     target_id: NonBlank | None = None
     text: NonBlank | None = None
+    title: InsightTitle | None = None
     retrieval_text: NonBlank | None = None
     subtype: InsightSubtype | None = None
     support_ids: tuple[NonBlank, ...] = ()
@@ -222,10 +230,21 @@ class InsightAction(FrozenProjection):
     expected_revision: Annotated[StrictInt, Field(ge=1)] | None = None
     # Captured text and labels must survive support-only updates byte for byte.
     text: str | None = None
+    title: str | None = None
     retrieval_text: str | None = None
     subtype: InsightSubtype | None = None
     support_ids: tuple[NonBlank, ...] = ()
     seed_ids: tuple[NonBlank, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_title(self) -> InsightAction:
+        if self.action in {"CREATE", "UPDATE"} and (
+            not isinstance(self.title, str)
+            or not self.title.strip()
+            or len(self.title) > MAX_INSIGHT_TITLE_CHARS
+        ):
+            raise ValueError("every published Insight requires a concise title")
+        return self
 
 
 class InsightDecisions(FrozenProjection):
@@ -261,6 +280,7 @@ def consolidation_envelope(facts, seeds, targets) -> dict:
             {
                 "id": target["id"],
                 "text": target["text"],
+                "title": insight_title(target, target["text"]),
                 **(
                     {"retrieval_text": target["retrieval_text"]}
                     if target.get("retrieval_text")
@@ -337,11 +357,12 @@ def consolidate_insights(
         ):
             invalid("Insight requires a complete claim and at least two known supports")
         if action.action in {"CREATE", "UPDATE"}:
-            if not action.text or action.subtype is None:
-                invalid("Insight requires a complete claim and descriptive subtype")
+            if not action.text or not action.title or action.subtype is None:
+                invalid("Insight requires a complete claim, title and descriptive subtype")
         else:
             if (
                 action.text is not None
+                or action.title is not None
                 or action.retrieval_text is not None
                 or action.subtype is not None
                 or (action.action == "NO_INSIGHT" and support)
@@ -354,6 +375,7 @@ def consolidate_insights(
             if values["action"] == "UPDATE":
                 values.update(
                     text=target["text"],
+                    title=insight_title(target, target["text"]),
                     retrieval_text=target.get("retrieval_text"),
                     subtype=target["subtype"],
                 )
@@ -423,6 +445,7 @@ def synthesize_insight(
             {
                 **{key: body[key] for key in required},
                 "retrieval_text": body.get("retrieval_text"),
+                "title": body.get("title"),
                 "usage": usage,
             }
         )

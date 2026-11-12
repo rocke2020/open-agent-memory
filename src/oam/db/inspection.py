@@ -15,6 +15,7 @@ from oam.contracts.memory import (
     MEMORY_TYPE_BY_KIND,
     MemoryKind,
     MemoryType,
+    insight_title,
 )
 from oam.db.context import bind_user
 from oam.db.eligibility import ELIGIBLE_UNITS
@@ -356,6 +357,8 @@ class SourceInspector:
             items = records[:page_size]
             for item in items:
                 item["memory_type"] = MEMORY_TYPE_BY_KIND[item["kind"]]
+                if item["kind"] == "insight":
+                    item["title"] = insight_title(item["locator"], item["text"])
             has_more = len(records) > page_size
             self._check_policy(connection, authority, epoch)
             return {
@@ -390,6 +393,8 @@ class SourceInspector:
                 )
                 row = cursor.fetchone()
             if row is not None:
+                if kind == "insight":
+                    row["title"] = insight_title(row["locator"], row["text"])
                 row.update(memory_connections(connection, row))
             self._check_policy(connection, authority, epoch)
             return (
