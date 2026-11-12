@@ -568,6 +568,87 @@ def test_oversized_optional_context_never_rejects_or_truncates_required_support(
     assert oversized is False
 
 
+def sparse_service(rows, ranked_ids, config):
+    class SparseRepository(SourceRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": node, "strict_match": False} for node in ranked_ids][:limit]
+
+        def source_user_passage_ids(self, *args):
+            pytest.fail("sparse user originals must not authorize further source discovery")
+
+    class SparseService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield SparseRepository(request, self.rows, self.graph_paths)
+
+    return SparseService(rows, config=config)
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("chunks", [True, False])
+@pytest.mark.parametrize("locator_role", ["user", "assistant", None])
+def test_direct_lexical_user_original_needs_no_dense_fact_witness(mode, chunks, locator_role):
+    user, reply = original("user", 4), original("reply", 5, "assistant")
+    user["text"] = "I finished a pottery workshop on June 3."
+    if locator_role is not None:
+        user["locator"] = {**user["citations"][0], "role": locator_role}
+    reply["locator"] = reply["citations"][0]
+    claim = fact("claim", user)
+    values = CONFIG.model_dump(mode="json")
+    values["search"][mode].update(
+        partial_match_gate="user_fact_exchange", adjacent_user_context=False
+    )
+    config = type(CONFIG).model_validate(values)
+    result = sparse_service([user, reply, claim], ["user", "reply", "claim"], config).search(
+        object(),
+        SearchRequest(
+            query="Which workshops did I finish?", recall_level=mode, include={"chunks": chunks}
+        ),
+    )
+
+    assert [item["unit_id"] for item in result["items"]] == (
+        ["user"] if locator_role == "user" and chunks else []
+    )
+    if locator_role == "user" and chunks:
+        assert result["items"][0]["text"] == user["text"]
+        assert result["items"][0]["citations"] == user["citations"]
+        assert user["text"] in result["context"]
+    assert result["diagnostics"]["generative_calls"] == 0
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("ranked_ids", [("first", "second"), ("second", "first")])
+@pytest.mark.parametrize("limit", ["none", "channel", "fusion", "results", "tokens"])
+def test_sparse_user_originals_keep_relevance_order_and_all_limits(mode, ranked_ids, limit):
+    first, second, neighbor = original("first", 0), original("second", 2), original("neighbor", 4)
+    first["text"] = "I finished a ceramics workshop in June."
+    second["text"] = "My laptop runs Fedora and has 32 GB of RAM."
+    for row in (first, second, neighbor):
+        row["locator"] = row["citations"][0]
+    values = CONFIG.model_dump(mode="json")
+    tier = values["search"][mode]
+    tier.update(partial_match_gate="user_fact_exchange", adjacent_user_context=False)
+    if limit == "channel":
+        tier["channel_candidates"] = 1
+    elif limit == "fusion":
+        tier.update(fused_candidates=1, max_results=1, rerank_candidates=None)
+    elif limit == "results":
+        tier["max_results"] = 1
+    elif limit == "tokens":
+        leading = first if ranked_ids[0] == "first" else second
+        tier["context_max_tokens"] = context_token_count(render_context([leading]))
+    config = type(CONFIG).model_validate(values)
+    result = sparse_service([first, second, neighbor], ranked_ids, config).search(
+        object(), SearchRequest(query="Recall my past updates", recall_level=mode)
+    )
+
+    expected = list(ranked_ids) if limit == "none" else [ranked_ids[0]]
+    assert [item["unit_id"] for item in result["items"]] == expected
+    assert result["context_tokens"] <= tier["context_max_tokens"]
+    assert all("excerpt" not in item for item in result["items"])
+    assert result["diagnostics"]["generative_calls"] == 0
+
+
 def test_configured_gate_reaches_the_actual_fast_context():
     support = original("support", 4)
     root = fact("root", support)

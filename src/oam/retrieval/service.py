@@ -1060,6 +1060,15 @@ class RecallService:
                     if row["kind"] == "passage"
                 },
             )
+            # Direct user originals need no second retrieval of a derived fact.
+            # Keep this exemption local: it cannot authorize source expansion.
+            allowed_ids.update(
+                node
+                for node, row in hydrated_passages.items()
+                if node in arms.get("lexical", ())
+                and row["origin"] == "memory"
+                and row.get("locator", {}).get("role") == "user"
+            )
             # Source-local recovery admits user originals without creating witnesses.
             allowed_ids.update(recovered_user_ids)
             gate_omissions = list(

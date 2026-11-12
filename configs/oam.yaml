@@ -129,8 +129,8 @@ search:
   # graph: off skips entity/alias expansion, light uses identities, full adds
   # semantic neighbors. causal_graph independently enables outgoing causal
   # links, including within temporal retrieval. Quote "off" in YAML.
-  # user_fact_exchange keeps direct dense and strict lexical hits; other memory
-  # matches need a dense user fact in their user/immediate-assistant exchange.
+  # user_fact_exchange keeps direct dense, strict lexical and lexical user-original
+  # hits; other memory matches need a dense user fact in their exchange.
   # Partial assistant replies use only the first source_seed_results dense hits
   # for both a user fact and its exact cited original; user roots and optional
   # user context keep their existing scope. whole_query uses one OR FTS ranking;
