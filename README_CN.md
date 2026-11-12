@@ -2,7 +2,7 @@
 
 [English（权威版本）](README.md) | 简体中文 | [日本語](README_JA.md)
 
-Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。它将符合学习条件的会话转化为有来源支撑的事实与洞察（Insights），将文档作为独立资源（Resources）保存，并在检索两者时返回来源引用。显式刷新的用户画像（User Profile）帮助 Agent 在不同会话之间保留有用的个人上下文。
+Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。它将符合长期记忆的会话转化为有来源支撑的事实与洞察（Insights），将文档作为独立资源（Resources）保存，并在检索两者时返回来源引用。显式刷新的用户画像（User Profile）帮助 Agent 在不同会话之间保留有用的个人上下文。
 
 ## 性能与准确率
 
@@ -85,7 +85,7 @@ docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
 ## 产品模型
 
 - **L0 来源证据：** 保留符合条件的会话，包括角色、时间、来源标识和学习资格。
-- **L1 学习记忆：** 从符合学习条件的交互中抽取、与来源关联的事实、偏好、经历、事件和约束。
+- **L1 学习记忆：** 从符合长期记忆的交互中抽取、与来源关联的事实、偏好、经历、事件和约束。
 - **L2 洞察（Insights）：** 对相关且符合条件的 L1 记录进行综合并持久化，通过支持链追溯至 L0；每条洞察具有一个描述性子类型：`preferences`、`patterns`、`projects`、`relationships`、`experiences` 或 `general_insights`，子类型不影响排名。
 - **L3 用户画像（User Profile）：** 根据画像数据和符合条件的学习记忆构建、显式刷新且只读的单一文档；输入不变时直接复用，生成模型调用次数为零。
 - **画像数据（Profile Data）：** 明确提供的结构化基本信息或偏好，映射为精确的用户画像输入，不参与普通召回。

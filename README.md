@@ -2,7 +2,7 @@
 
 English (canonical) | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
-Open Agent Memory (OAM) is a fully open source memory engine for AI agents. It turns eligible conversations into source-backed facts and Insights, keeps documents as separate Resources, and retrieves both with citations. An explicitly refreshed User Profile helps agents carry useful personal context across sessions.
+Open Agent Memory (OAM) is a fully open source memory engine for AI agents. It turns conversations eligible for long-term memory into source-backed facts and Insights, keeps documents as separate Resources, and retrieves both with citations. An explicitly refreshed User Profile helps agents carry useful personal context across sessions.
 
 ## Performance & Accuracy
 
@@ -85,7 +85,7 @@ Integrate through the [HTTP API](docs/api.md), the [MCP server](integrations/mcp
 ## Product Model
 
 - **L0 Source evidence:** retained eligible conversations with roles, times, source identities, and learning eligibility.
-- **L1 Learned memory:** source-linked facts, preferences, experiences, events, and constraints extracted from eligible interactions.
+- **L1 Learned memory:** source-linked facts, preferences, experiences, events, and constraints extracted from interactions eligible for long-term memory.
 - **L2 Insights:** persisted synthesis over related eligible L1 records with transitive L0 support and one descriptive subtype: `preferences`, `patterns`, `projects`, `relationships`, `experiences` or `general_insights`; subtype does not alter ranking.
 - **L3 User Profile:** one explicitly refreshed, read-only document built from Profile Data and eligible Learned Memory; unchanged inputs reuse it with zero generation calls.
 - **Profile Data:** explicitly supplied structured basic information or preferences, mapped to exact User Profile inputs and excluded from ordinary recall.
