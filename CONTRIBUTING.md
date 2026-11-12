@@ -22,3 +22,4 @@ Use isolated synthetic fixtures. Do not read private `.env`, call paid providers
 - Schema changes use versioned migrations and preserve non-bypass RLS.
 - Cross-cutting worker/retry/publication changes update `docs/architecture.md` and failure tests.
 - Generated memories and Profiles remain read-only; source/Resource lifecycle is separate from later targeted fact controls.
+- Product version bumps require versioned release notes and a completed review of every documentation file; follow [the release documentation gate](docs/releasing.md#1-review-release-notes-and-documentation).

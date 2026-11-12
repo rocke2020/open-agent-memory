@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -49,11 +52,31 @@ def test_cli_entrypoint_loads_dotenv_without_overriding_process_environment(
     assert cli.os.environ["OAM_DOTENV_ONLY"] == "loaded"
 
 
-def test_version_command_reports_the_product_release(capsys) -> None:
-    exit_code = main(["--version"])
+def test_version_command_reports_installed_package_metadata(tmp_path) -> None:
+    metadata = tmp_path / "open_agent_memory-9.8.7.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: open-agent-memory\nVersion: 9.8.7\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from oam.cli import main; raise SystemExit(main(['--version']))",
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((str(tmp_path), str(REPOSITORY_ROOT / "src"))),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
-    assert exit_code == 0
-    assert capsys.readouterr().out.strip() == "open-agent-memory 0.0.1"
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "open-agent-memory 9.8.7"
 
 
 def test_validate_export_command_checks_downloaded_members(tmp_path, capsys) -> None:

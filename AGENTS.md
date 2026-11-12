@@ -39,6 +39,7 @@ The release must preserve L0 source evidence, derive source-backed L1 memory, ge
 - Preserve prior eligible content on failed refresh; never publish from an expired lease, stale fence, superseded source, deleted source, changed generation, or cancelled operation.
 - Default tests use deterministic local fakes and isolated ephemeral databases. Never read private `.env`, call paid providers, delete real data, or run destructive container cleanup.
 - Keep documentation self-contained and current. README is for public users; agent-only policy belongs here.
+- Before a product version bump is ready for release, follow `docs/releasing.md`: compare all documentation with code changes since the previous product tag, update affected documents and translations, write the version's user-visible release notes, and pass `tools/check_release_docs.py`. Review meaning against source; the checker enforces coverage and freshness, not prose accuracy.
 
 ## Default Verification
 
