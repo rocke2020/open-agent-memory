@@ -2,6 +2,8 @@
 
 ## Overview
 
+This is preserved historical v0.0.1 candidate evidence. See the [v0.0.2 release record](releases/0.0.2.md) for the current product changes and verification scope.
+
 The November 8, 2026 candidate is prepared for human review. Local application, security, packaging and integration checks are complete. Both plugins are now published on npm at `0.0.1`, with anonymous downloads and fresh native installations verified. Source visibility, container-image publication, remote CI execution and GitHub Release downloads remain unverified. See [candidate identities and measurements](release-candidate.json) and [publication instructions](releasing.md).
 
 The initial preparation snapshot was based on `32f97cca5c5c1fd2546ed0364d2279063afc81b6`, with runtime/build fingerprint `fdf17b14b455fea0aefa887165f724f5236ab0ff81c9a44cd894c5fb0919ceb1`; that preparation run made no commit or push. Its source archive, sanitized evidence and broader matrix below remain preserved under that identity. A subsequent surgical review repaired a stale Inspector deletion refresh and private temporary-file creation. The JSON manifest retains the initial results under `preparation_baseline` and identifies the repaired candidate with fingerprint `bc7518fc1418dfa0656e80b5e31ae9af949fb808656fcb4c75c3d34db9a50c2d`, current image IDs. Its current plugin entries identify the approved `@rocke-dong` packages and archives; the earlier package identities/checksums are preserved under `preparation_baseline.plugins`.

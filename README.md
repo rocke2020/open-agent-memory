@@ -66,19 +66,19 @@ Integrate through the HTTP API, the local [MCP server](integrations/mcp/README.m
 - **Inspect and control memory.** Browse sources in the Inspector, remove an individual Memory Unit or Insight, and manage document Resources through the same authorized API.
 - **Control your data and models.** Self-host your memory in PostgreSQL/pgvector and configure your own model endpoints.
 
-See the [acceptance requirements](docs/acceptance.md), [release evidence](docs/release-evidence.md) and [published release](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.1) for verified behavior, deployment limits and artifacts.
+See the [acceptance requirements](docs/acceptance.md), [release notes and verification](docs/releases/0.0.2.md) and [published release](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.2) for verified behavior, deployment limits and artifacts.
 
 ## Get Started
 
-Clone the repository and pull the published v0.0.1 image for Linux AMD64 or ARM64:
+Clone the repository and pull the published v0.0.2 image for Linux AMD64 or ARM64:
 
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory.git
 cd open-agent-memory
-docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
+docker pull ghcr.io/rocke2020/open-agent-memory:0.0.2
 ```
 
-Follow the [Docker Compose guide](deploy/README.md) to configure PostgreSQL and your model endpoints, initialize OAM and open the Memory Inspector. Set `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.1` in `deploy/.env` to use the published image.
+Follow the [Docker Compose guide](deploy/README.md) to configure PostgreSQL and your model endpoints, initialize OAM and open the Memory Inspector. Set `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.2` in `deploy/.env` to use the published image.
 
 Integrate through the [HTTP API](docs/api.md), the [MCP server](integrations/mcp/README.md), or the [OpenClaw](integrations/openclaw/README.md#npm-installation) or [DeepSeek Harness](integrations/dsh/README.md) plugin. Start with the [copyable retain → readiness → recall example](docs/quickstart.md) to store a conversation, wait for indexing and inspect the returned source citations.
 
@@ -114,7 +114,7 @@ explicit User Profile refresh -> unchanged: zero calls
                          -> changed: durable operation -> L3
 ```
 
-See [architecture](docs/architecture.md), [HTTP API](docs/api.md), [configuration guide](configs/README.md), [operations](docs/operations.md), the [Memory web UI guide](docs/memory-web-ui.md), [acceptance](docs/acceptance.md), and the current [Steps 1–4 foundation evidence](docs/foundation-evidence.md).
+See [architecture](docs/architecture.md), [HTTP API](docs/api.md), [configuration guide](configs/README.md), [operations](docs/operations.md), the [Memory web UI guide](docs/memory-web-ui.md), [acceptance](docs/acceptance.md), and the historical [Steps 1–4 foundation evidence](docs/foundation-evidence.md).
 
 ## Development Setup
 
@@ -142,22 +142,21 @@ The default `worker.embedded_enabled: true` requires the API, queue and worker-c
 
 ## Release Boundary
 
-v0.0.1 requires all L0–L3 layers, separate Resource ingestion, fast/normal joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and normal are the supported recall modes. The Python SDK, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
+v0.0.2 includes all L0–L3 layers, separate Resource ingestion, fast/normal joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and normal are the supported recall modes. The Python SDK, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
 
 The [Docker/Compose guide](deploy/README.md) uses one non-root API/worker image, bundled Inspector assets and PostgreSQL/pgvector. The replica example simulates two APIs and two workers locally; it does not establish physical multi-host resilience. [OpenClaw](integrations/openclaw/README.md) and [DSH](integrations/dsh/README.md) install from npm, with OpenClaw also available on ClawHub and versioned plugin tarballs retained for reproducibility. Public release and image availability are separate from local candidate verification.
 
 ## Roadmap
 
-v0.0.1 is released. The following product releases are planned; scope may change with validated user feedback, and no release dates are committed.
+v0.0.2 adds administrator user listing, stable Insight titles, direct user-original recall eligibility and the MCP integration. See the [release notes](docs/releases/0.0.2.md) for changes and upgrade steps. The following work is planned; scope may change with validated user feedback, and no release dates are committed.
 
 | Release | Planned work |
 |---|---|
-| v0.0.2 | Add a user-listing API, with contract, authorization rules and acceptance criteria pending design completion. Include the implemented tokenizer optimization: native token counting by default, embedding-aware source sizing and admission, and complete rendered recall-context counting. |
 | v0.1.0 | Improve general retrieval quality and rerun retrieval, answering and judging against the existing completed LME-500 and BEAM-10M indexes, without repeating ingestion, extraction or indexing. The LME-500 target is at least 473/500 (94.6%); the published v0.0.1 result remains 470/500 (94.0%). |
 
-The OpenClaw plugin's already-published 0.0.2 is an independently versioned package release; product v0.0.2 is still planned. Further work includes smoother onboarding, reducing unnecessary indexing and answer-context tokens, evaluating keyword-ranking approaches, and defining shared Resource ownership and OIDC/LDAP support. These are proposed improvements, not delivered capabilities.
+The OpenClaw plugin remains independently versioned at 0.0.2; MCP and DSH remain at 0.0.1. The tokenizer optimization already shipped in the v0.0.1 source tag and is retained without reindexing. Further work includes smoother onboarding, reducing unnecessary indexing and answer-context tokens, evaluating keyword-ranking approaches, and defining shared Resource ownership and OIDC/LDAP support. These are proposed improvements, not delivered capabilities.
 
-Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1). The current release's supported behavior and limits remain documented above and in the [release evidence](docs/release-evidence.md).
+Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1). The current release's supported behavior and limits remain documented above and in the [release notes and verification](docs/releases/0.0.2.md).
 
 ## Acknowledgments
 

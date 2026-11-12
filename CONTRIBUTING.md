@@ -21,5 +21,5 @@ Use isolated synthetic fixtures. Do not read private `.env`, call paid providers
 - Configuration changes have one owner in `configs/oam.yaml` and tests proving precedence and fresh-process behavior.
 - Schema changes use versioned migrations and preserve non-bypass RLS.
 - Cross-cutting worker/retry/publication changes update `docs/architecture.md` and failure tests.
-- Generated memories and Profiles remain read-only; source/Resource lifecycle is separate from later targeted fact controls.
+- Generated memories and Profiles are not directly editable; exact typed memory/Insight removal and source/Resource lifecycle use their public API contracts.
 - Product version bumps require versioned release notes and a completed review of every documentation file; follow [the release documentation gate](docs/releasing.md#1-review-release-notes-and-documentation).

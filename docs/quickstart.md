@@ -6,7 +6,7 @@ This example stores one conversation, waits for its learned memory and links to 
 
 ## 1. Prepare your connection
 
-Start OAM with generation and embedding models and a running worker using the [Docker Compose guide](../deploy/README.md). You need Bash, `curl`, `jq`, and an existing OAM user with its user-scoped API key. Create the user through the Memory Inspector or `POST /v1/users` as described in the [administration API](api.md#2-administration). The administrator/root key cannot replace the user's key on personal content routes in `api_key` mode.
+Start OAM with generation and embedding models and a running worker using the [Docker Compose guide](../deploy/README.md). You need Bash, `curl`, `jq`, and an existing OAM user with its user-scoped API key. Have an administrator create the user with `POST /v1/users` and securely hand over the returned user key, as described in the [administration API](api.md#2-administration). Memory Inspector connects to an existing user. The administrator/root key cannot replace the user's key on personal content routes in `api_key` mode.
 
 Set the connection variables in Bash. Read the user key without echoing it or placing it in shell history:
 

@@ -10,7 +10,7 @@ x-model-environment: &models
   OAM_CONFIG: /etc/oam/operator.yaml
 
 x-application: &application
-  image: ${OAM_IMAGE:-ghcr.io/rocke2020/open-agent-memory:0.0.1}
+  image: ${OAM_IMAGE:-ghcr.io/rocke2020/open-agent-memory:0.0.2}
   init: true
   stop_grace_period: 90s
   volumes:

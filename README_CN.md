@@ -21,19 +21,19 @@ Open Agent Memory（OAM）是采用 Apache-2.0 许可证、支持自托管的 AI
 - **检查和控制记忆。** 在 Inspector 中浏览来源，删除单条记忆单元或洞察，并通过同一套经过授权的 API 管理文档资源。
 - **掌控数据和模型。** 将记忆自托管于 PostgreSQL/pgvector，并配置自己的模型端点。
 
-已验证的行为、部署限制和交付物见[验收要求](docs/acceptance.md)、[发布证据](docs/release-evidence.md)和[已发布版本](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.1)。
+已验证的行为、部署限制和交付物见[验收要求](docs/acceptance.md)、[版本变更与验证](docs/releases/0.0.2.md)和[已发布版本](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.2)。
 
 ## 快速开始
 
-克隆仓库并拉取适用于 Linux AMD64 或 ARM64 的 v0.0.1 已发布镜像：
+克隆仓库并拉取适用于 Linux AMD64 或 ARM64 的 v0.0.2 已发布镜像：
 
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory.git
 cd open-agent-memory
-docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
+docker pull ghcr.io/rocke2020/open-agent-memory:0.0.2
 ```
 
-按照 [Docker Compose 指南](deploy/README.md)配置 PostgreSQL 和模型端点，初始化 OAM 并打开 Memory Inspector。在 `deploy/.env` 中设置 `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.1`，即可使用已发布镜像。
+按照 [Docker Compose 指南](deploy/README.md)配置 PostgreSQL 和模型端点，初始化 OAM 并打开 Memory Inspector。在 `deploy/.env` 中设置 `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.2`，即可使用已发布镜像。
 
 通过 [HTTP API](docs/api.md)、[本地 MCP 服务](integrations/mcp/README.md)接入，或安装 [OpenClaw](integrations/openclaw/README.md#npm-installation) 或 [DeepSeek Harness](integrations/dsh/README.md) 插件。先运行[可复制的写入 → 等待就绪 → 召回示例](docs/quickstart.md)，保存会话、等待索引完成并检查返回的来源引用。
 
@@ -79,7 +79,7 @@ explicit User Profile refresh -> unchanged: zero calls
                          -> changed: durable operation -> L3
 ```
 
-详见[架构](docs/architecture.md)、[HTTP API](docs/api.md)、[配置指南](configs/README.md)、[运维](docs/operations.md)、[Memory Web UI 指南](docs/memory-web-ui.md)、[验收](docs/acceptance.md)以及当前的[步骤 1–4 基础证据](docs/foundation-evidence.md)。
+详见[架构](docs/architecture.md)、[HTTP API](docs/api.md)、[配置指南](configs/README.md)、[运维](docs/operations.md)、[Memory Web UI 指南](docs/memory-web-ui.md)、[验收](docs/acceptance.md)以及历史[步骤 1–4 基础证据](docs/foundation-evidence.md)。
 
 ## 开发环境
 
@@ -107,7 +107,9 @@ uv run oam api --config configs/oam.yaml --host 127.0.0.1
 
 ## 发布范围
 
-v0.0.1 要求包含全部 L0–L3 层、独立的文档资源摄入、fast/normal 统一召回、来源生命周期、解释与差异比较及已记录结果的重放、可移植导出、Memory Inspector、多 API/多 Worker 恢复、一致性验收证据以及公开的多架构镜像。支持的召回模式为 fast 和 normal。Python SDK、供应商导入器、完整的用户画像工作台、托管服务、数据库高可用和多地域运行属于后续工作。
+v0.0.2 新增管理员用户列表、稳定的洞察标题、原始用户证据的直接召回支持及 MCP 接入。升级前先运行迁移 0036 和 0037；无需仅为标题和活动时间回填而重新索引。详见[版本变更与验证](docs/releases/0.0.2.md)。MCP、OpenClaw 和 DSH 插件分别保持其独立版本。
+
+v0.0.2 包含全部 L0–L3 层、独立的文档资源摄入、fast/normal 统一召回、来源生命周期、解释与差异比较及已记录结果的重放、可移植导出、Memory Inspector、多 API/多 Worker 恢复、一致性验收证据以及公开的多架构镜像。支持的召回模式为 fast 和 normal。Python SDK、供应商导入器、完整的用户画像工作台、托管服务、数据库高可用和多地域运行属于后续工作。
 
 [Docker/Compose 指南](deploy/README.md)使用一个非 root 的 API/Worker 镜像，包含 Inspector 静态资源，并使用 PostgreSQL/pgvector。副本示例在本地模拟两个 API 和两个 Worker，并不证明跨物理主机的故障恢复能力。[OpenClaw](integrations/openclaw/README.md) 和 [DSH](integrations/dsh/README.md) 使用带版本的插件归档包，安装者无需 npm 发布账号。公开版本与镜像的可用性，和本地候选版验证是不同的验收事项。
 

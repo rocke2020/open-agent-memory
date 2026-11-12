@@ -36,7 +36,7 @@ For URL Evidence, run one isolated deterministic HTML, PDF and image URL through
 
 ## 4. Step 7 User Profile Gate
 
-Step 7 implements L3 user Profiles on the evaluated core: stored `main`, `preferences`, and `experiences`, eligible L0/L1/L2 and explicit Profile Data inputs, dirty-but-not-automatically-generated behavior, read-only `GET`, asynchronous changed-input refresh, and unchanged `200` reuse with zero generation calls. Verify User Profile exclusion of report-derived content and preservation of still-eligible prior fields after failed refresh.
+Step 7 implements L3 user Profiles on the evaluated core: one stored content document with separate References, eligible L0/L1/L2 and explicit Profile Data inputs, dirty-but-not-automatically-generated behavior, read-only `GET`, asynchronous changed-input refresh, and unchanged `200` reuse with zero generation calls. Verify User Profile exclusion of report-derived content and preservation of the still-eligible prior document after failed refresh. Legacy field-based revisions remain a read-compatibility path, not the current storage contract.
 
 The agent-integration scenario starts with host-run fast recall before the agent invocation. During the ReAct loop, the agent can request any of fast or normal again. The HTTP contract must preserve the chosen mode and never perform an automatic escalation or impose a fixed sequence.
 
@@ -63,3 +63,9 @@ Require succeeded source operations and phase-one readiness for every history, e
 LLM probes expecting visible content allow at least 1,024 output tokens and reject length termination, empty/malformed content, and reasoning-only output. Embeddings must be finite and dimensionally consistent. Browser/static presence, health, nonempty output, schema compatibility, and passing legacy tests prove only their named boundaries.
 
 Default tests use deterministic fakes and isolated ephemeral databases. Necessary provider probes follow standing authorization and usage accounting; destructive database actions require exact-target authorization. Recovery simulation may stop/restart task-owned local processes without touching persistent personal data. The user owns manual final content review and the repository's private-to-public change. Local readiness and npm login do not authorize image/package publication or release-triggering pushes; public-artifact checks occur only after an explicitly authorized release and must not be claimed from local candidate checks.
+
+## 8. v0.0.2 changed-surface checks
+
+Verify administrator user listing against an isolated migrated database: tenant isolation, active-user filtering, inclusive accepted-input activity timestamps, exact filtered totals, offset bounds and validation/authentication failures. Confirm new accepted interaction, Resource and Profile Data revisions advance the watermark, while replay, reads and generated refreshes do not. Adoption-scale latency and query-cost bounds remain unmeasured; the page-size ceiling is not a performance guarantee.
+
+Verify nonblank Insight titles, the 120-character bound, CREATE/UPDATE validation, KEEP_TEXT preservation, removal repair, migration/read fallback, export and Inspector display. A directly retrieved lexical user original remains recall-eligible without a separately retrieved fact and creates no witness or expansion authority; relevance, provenance and context budgets still apply. These checks do not imply new benchmark scores or rerun historical evaluations.

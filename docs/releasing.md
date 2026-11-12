@@ -2,9 +2,9 @@
 
 ## Overview
 
-Candidate preparation ends with locally verified images, both plugin archives and checksums, source identity, evidence, and a human review. Publication is a separate explicit action. v0.0.1 requires public npm packages for both the OpenClaw and DSH plugins, alongside versioned GitHub Release archives. Installing public packages or release archives needs no npm account; the maintainer needs npm publishing access.
+Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release is 0.0.2. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
 
-Plugin packages can be versioned and published independently. For the OpenClaw response-boundary fix, merge the package source into `main` and publish `@rocke-dong/oam-openclaw@0.0.2`; keep the OAM Python/CLI version, product tag, server image and DSH package at `0.0.1`. Do not move the existing `v0.0.1` tag or create a product `v0.0.2` release. The full-product procedure below remains the historical v0.0.1 procedure; package-only publication uses the changed package's own version and reviewed archive.
+Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DSH 0.0.1. Reuse their existing published archives when their package code is unchanged; do not republish an existing npm version or advance package versions solely because the product version changes. Preserve earlier product tags, images and release records.
 
 ## 1. Review release notes and documentation
 
@@ -35,11 +35,9 @@ The checker rejects missing release notes, pending or omitted document reviews, 
 
 CI checks product version changes on pull requests, `main`, product tags and manual runs. Candidate builds run the same gate before building images. At an exact product tag after the historical `v0.0.1` release, automatic checks use the previous release as the baseline and require a completed review and matching tag. Between tags, unchanged product versions skip the release requirement. The coding agent or releaser owns semantic review: passing this structural check does not certify documentation accuracy. Existing releases do not require retrospective records; plugin-only releases retain their independent versioning and release notes. Local checks cannot prevent a maintainer from manually publishing outside this procedure; keep the **Release documentation / review** status required in repository branch and tag protections where supported.
 
-## 2. Review the candidate
+## 2. Verify the current source and upgrade
 
-Read [release evidence](release-evidence.md), [acceptance](acceptance.md), [deployment](../deploy/README.md), and [third-party notices](../THIRD_PARTY.md). Check the recorded source/configuration hashes and local image IDs against the artifacts being reviewed. A local image ID is not a published registry digest. Review the source changes, the self-contained indexing/recall design and required acknowledgments before making the repository public.
-
-Build and validate the product and both plugins from the reviewed source:
+Run the repository checks and every integration package's tests:
 
 ```bash
 uv sync --locked
@@ -49,57 +47,55 @@ uv run ruff format --check .
 uv run mypy src tests
 npm --prefix integrations/openclaw ci
 npm --prefix integrations/openclaw test
+npm --prefix integrations/mcp ci
+npm --prefix integrations/mcp test
 npm --prefix integrations/dsh test
 ```
 
-Default pytest can skip integration/browser checks when their explicit isolated infrastructure is absent. Compare those skips with the candidate's enabled integration evidence; a default green run alone does not certify the release. The opt-in public HTTP probe and its synthetic configuration are documented in the deployment guide.
+Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.0.2, exercise user-list authentication, tenant filtering, accepted-input timestamps and migration 0037, plus Insight-title migration 0036 and its inspection/export/Inspector consumers. Apply all migrations before starting updated API/worker processes. These backfills preserve originals and do not require reindexing or model calls solely to populate titles and activity metadata.
 
-## 3. Prepare plugin assets
+Use a task-owned PostgreSQL/pgvector instance and synthetic users for release checks. Never select persistent personal/evaluation databases. Keep historical benchmark evidence unchanged; a release smoke test is not a fresh LME-500 or BEAM-10M evaluation. [Acceptance](acceptance.md) and the version's release record define the measured scope and outstanding limits.
 
-Use a separate output directory and keep both packages at version `0.0.1`: `@rocke-dong/oam-openclaw` and `@rocke-dong/oam-dsh`. The publisher uses the `rocke-dong` npm account. Both package manifests declare public access and the official npm registry through `publishConfig`; they permit publishing. Authenticate the intended publisher before release, and keep credentials outside package contents.
+## 3. Prepare artifacts
 
-Create `dist/plugins` at the repository root. From `integrations/openclaw`, then from `integrations/dsh`, run:
-
-```bash
-npm pack --offline --pack-destination ../../dist/plugins
-```
-
-OpenClaw's pack step builds its bundled entrypoint using the installed development tool. Verify each archive's name, version, license, entrypoint and runtime bytes, then create `SHA256SUMS` with `shasum -a 256 *.tgz` in the output directory. Install using the [OpenClaw](../integrations/openclaw/README.md) and [DSH](../integrations/dsh/README.md) native local-package instructions. Local packages have no runtime npm dependencies; the hosts may still need network access for their own dependencies.
-
-Run publish dry-runs for both exact reviewed archives from the repository root. The package manifests select the official registry and public access. A dry-run does not upload the package and does not prove final registry write authorization.
+Build the Python distribution and both supported container architectures from the verified source:
 
 ```bash
-npm whoami --registry=https://registry.npmjs.org/
-npm publish --dry-run ./dist/plugins/rocke-dong-oam-openclaw-0.0.1.tgz
-npm publish --dry-run ./dist/plugins/rocke-dong-oam-dsh-0.0.1.tgz
+uv build
+mkdir -p dist/plugins
+docker buildx build --platform linux/arm64 --load -t oam:0.0.2-arm64 .
+docker buildx build --platform linux/amd64 --load -t oam:0.0.2-amd64 .
 ```
 
-## 4. Publish only after human review
-
-The maintainer chooses the final commit/tag and personally changes repository visibility. Keep publication commands out of automatic candidate checks. The manual candidate workflow only builds an OCI artifact; it does not publish images or packages.
-
-After the user confirms the final release, publish both exact reviewed plugin archives at version `0.0.1`. The account's configured publishing authentication still applies.
+For unchanged, already-published integrations, download the exact registry archives and compare their runtime contents with the reviewed source:
 
 ```bash
-npm publish ./dist/plugins/rocke-dong-oam-openclaw-0.0.1.tgz
-npm publish ./dist/plugins/rocke-dong-oam-dsh-0.0.1.tgz
+npm pack @rocke-dong/oam-openclaw@0.0.2 --pack-destination dist/plugins
+npm pack @rocke-dong/oam-mcp@0.0.1 --pack-destination dist/plugins
+npm pack @rocke-dong/oam-dsh@0.0.1 --pack-destination dist/plugins
 ```
 
-A maintainer with registry authority can build and publish the reviewed source:
+Record source commit, archive checksums, native versus emulated checks and immutable image identities. A local image ID does not prove a published registry digest. Verify installed Python/CLI metadata, packaged configuration/migrations and Inspector assets. Against an isolated candidate image, exercise authorized API input, readiness and cited recall, the changed user-list/title surfaces, and the relevant native integration paths. Bound any provider calls and retain actual usage and failures separately from deterministic tests.
+
+The opt-in `tests/release/verify_candidate.py` command uses the bounded synthetic overlay documented in [deployment](../deploy/README.md#trusted-gateway-boundary). Configure its isolated endpoint, root key and private output directory explicitly. Never place credentials, raw model responses or private user content in public artifacts.
+
+## 4. Publish the verified product
+
+After committing the verified source, create the new annotated product tag at that exact commit and run the documentation gate against the previous product release. Do not move an existing tag. Create a source archive from the new tag and checksums for the reviewed distribution, source and plugin archives. Attach those artifacts and sanitized verification evidence to the GitHub Release, using the release record's Changes section as its notes.
+
+Publish the multi-architecture image from that same source:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rocke2020/open-agent-memory:0.0.1 \
-  -t ghcr.io/rocke2020/open-agent-memory:v0.0.1 \
+  -t ghcr.io/rocke2020/open-agent-memory:0.0.2 \
+  -t ghcr.io/rocke2020/open-agent-memory:v0.0.2 \
   -t ghcr.io/rocke2020/open-agent-memory:0.0 \
   -t ghcr.io/rocke2020/open-agent-memory:0 \
   -t ghcr.io/rocke2020/open-agent-memory:latest --push .
 ```
 
-Record the resulting registry digest and verify that all five tags resolve to that reviewed manifest. Attach both versioned plugin archives, `SHA256SUMS`, sanitized candidate evidence and the final source/configuration identity to the GitHub Release. Preserve dependency notices and add the reviewed public acknowledgments. Container and package publication do not follow automatically from changing source visibility.
+Verify that the version tags and moving aliases resolve to the published reviewed manifest. Existing npm versions are reused rather than published again. GitHub source/image publication and any separate package publication have distinct results and must be reported separately.
 
-## 5. Check downloaded artifacts
+## 5. Check public downloads
 
-After publication, verify that `@rocke-dong/oam-openclaw` and `@rocke-dong/oam-dsh` expose version `0.0.1` on the official registry. Compare each downloaded registry tarball's integrity with its reviewed archive, then install by versioned package name through each host's native package manager in fresh isolated profiles and repeat completed capture, readiness and cited recall. Record package names, versions, registry integrity, host versions and the OAM image identity. npm login, a dry-run or local archive tests do not complete this public-package gate.
-
-After publication, pull the published image by its registry digest and verify startup, migrations, readiness, authorized retain/index/recall, Profile reuse and Inspector assets. Download both plugin archives and checksums from the release, verify them, install into fresh isolated host profiles, and repeat completed capture plus cited recall in a fresh session. Record host versions and receipts. These public-download and registry-pull checks are unverified until the actual artifacts exist; local candidate checks do not substitute for them.
+Pull the published image by digest anonymously on both supported architectures, then verify startup, migrations, authorized reads/writes, cited recall and Inspector assets using an isolated deployment. Download the GitHub source/distribution/plugin archives and checksums without credentials; compare them with the reviewed bytes. Verify the source archive against the tagged tree and integration archives against their published versions. Preserve still-unrun native host or recovery checks as explicit limitations; neither a successful upload nor a local build proves public-download acceptance.

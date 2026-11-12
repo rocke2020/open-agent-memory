@@ -21,19 +21,19 @@ HTTP API、[ローカル MCP サーバー](integrations/mcp/README.md)、また�
 - **メモリの確認と制御。** Inspector で出典を閲覧し、個別の Memory Unit や Insight を削除できます。文書リソースも、同じ認可済み API で管理できます。
 - **データとモデルを自分で管理。** メモリを PostgreSQL/pgvector 上にセルフホストし、利用するモデルのエンドポイントを設定できます。
 
-検証済みの動作、デプロイの制約、配布物については、[受け入れ要件](docs/acceptance.md)、[リリースの検証記録](docs/release-evidence.md)、[公開リリース](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.1)を参照してください。
+検証済みの動作、デプロイの制約、配布物については、[受け入れ要件](docs/acceptance.md)、[変更点と検証記録](docs/releases/0.0.2.md)、[公開リリース](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.2)を参照してください。
 
 ## クイックスタート
 
-リポジトリをクローンし、Linux AMD64 または ARM64 向けの公開済み v0.0.1 イメージを取得します。
+リポジトリをクローンし、Linux AMD64 または ARM64 向けの公開済み v0.0.2 イメージを取得します。
 
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory.git
 cd open-agent-memory
-docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
+docker pull ghcr.io/rocke2020/open-agent-memory:0.0.2
 ```
 
-[Docker Compose ガイド](deploy/README.md)に従って PostgreSQL とモデルのエンドポイントを設定し、OAM を初期化して Memory Inspector を開きます。公開イメージを使うには、`deploy/.env` に `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.1` を設定してください。
+[Docker Compose ガイド](deploy/README.md)に従って PostgreSQL とモデルのエンドポイントを設定し、OAM を初期化して Memory Inspector を開きます。公開イメージを使うには、`deploy/.env` に `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.2` を設定してください。
 
 [HTTP API](docs/api.md)や[ローカル MCP サーバー](integrations/mcp/README.md)で接続するか、[OpenClaw](integrations/openclaw/README.md#npm-installation) または [DeepSeek Harness](integrations/dsh/README.md) のプラグインをインストールします。[コピーして実行できる保存 → 準備完了の確認 → 検索の例](docs/quickstart.md)で会話を保存し、インデックス作成を待って、返された出典を確認してください。
 
@@ -79,7 +79,7 @@ explicit User Profile refresh -> unchanged: zero calls
                          -> changed: durable operation -> L3
 ```
 
-[アーキテクチャ](docs/architecture.md)、[HTTP API](docs/api.md)、[設定ガイド](configs/README.md)、[運用](docs/operations.md)、[Memory Web UI ガイド](docs/memory-web-ui.md)、[受け入れ要件](docs/acceptance.md)、現在の[手順 1–4 の基盤検証記録](docs/foundation-evidence.md)を参照してください。
+[アーキテクチャ](docs/architecture.md)、[HTTP API](docs/api.md)、[設定ガイド](configs/README.md)、[運用](docs/operations.md)、[Memory Web UI ガイド](docs/memory-web-ui.md)、[受け入れ要件](docs/acceptance.md)、過去の[手順 1–4 の基盤検証記録](docs/foundation-evidence.md)を参照してください。
 
 ## 開発環境
 
@@ -107,7 +107,9 @@ uv run oam api --config configs/oam.yaml --host 127.0.0.1
 
 ## リリースの範囲
 
-v0.0.1 には、L0–L3 の全レイヤー、独立した Resources の取り込み、fast/normal による統合検索、出典のライフサイクル、説明・差分・記録済み結果の再生、可搬性のあるエクスポート、Memory Inspector、複数 API・複数ワーカーの復旧、適合性の検証記録、公開されたマルチアーキテクチャイメージが必要です。サポートする検索モードは fast と normal です。Python SDK、他プロバイダーからのインポーター、完全な User Profile Studio、ホスティングサービス、データベースの高可用性、マルチリージョン運用は今後の対象です。
+v0.0.2 では、管理者向けユーザー一覧、安定した Insight タイトル、ユーザー原文の直接検索、および MCP 接続を追加しました。アップグレード前にマイグレーション 0036 と 0037 を適用してください。タイトルと活動時刻のバックフィルだけを理由とする再インデックスは不要です。[変更点と検証記録](docs/releases/0.0.2.md)を参照してください。MCP、OpenClaw、DSH のパッケージバージョンは独立して管理します。
+
+v0.0.2 には、L0–L3 の全レイヤー、独立した Resources の取り込み、fast/normal による統合検索、出典のライフサイクル、説明・差分・記録済み結果の再生、可搬性のあるエクスポート、Memory Inspector、複数 API・複数ワーカーの復旧、適合性の検証記録、公開されたマルチアーキテクチャイメージが含まれます。サポートする検索モードは fast と normal です。Python SDK、他プロバイダーからのインポーター、完全な User Profile Studio、ホスティングサービス、データベースの高可用性、マルチリージョン運用は今後の対象です。
 
 [Docker/Compose ガイド](deploy/README.md)は、Inspector のアセットを同梱した単一の非 root API/ワーカーイメージと PostgreSQL/pgvector を使用します。レプリカの例はローカルで 2 つの API と 2 つのワーカーをシミュレートするもので、物理的に異なるホスト間の耐障害性を立証するものではありません。[OpenClaw](integrations/openclaw/README.md) と [DSH](integrations/dsh/README.md) はバージョン付きプラグインアーカイブを使用し、インストールするユーザーに npm の公開用アカウントは不要です。公開リリースとイメージの利用可能性は、ローカルの候補版の検証とは別の確認事項です。
 

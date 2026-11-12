@@ -79,7 +79,9 @@ class TopicModels(SyntheticIndexModels):
                 }
                 if not target:
                     action.update(
-                        text=" ".join(fact["text"] for fact in topic_facts), subtype="projects"
+                        text=" ".join(fact["text"] for fact in topic_facts),
+                        title=f"{topic} project records",
+                        subtype="projects",
                     )
                 actions.append(action)
             return ModelResult(

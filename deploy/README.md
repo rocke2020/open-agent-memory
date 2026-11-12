@@ -9,11 +9,11 @@ OAM uses one non-root image for the API, Memory Inspector, worker and operator c
 Use the published multi-architecture image from the repository root:
 
 ```bash
-docker pull ghcr.io/rocke2020/open-agent-memory:0.0.1
+docker pull ghcr.io/rocke2020/open-agent-memory:0.0.2
 cp deploy/.env.example deploy/.env
 ```
 
-The example selects that release image through `OAM_IMAGE`. To build from source instead, run `docker build -t oam:0.0.1-candidate .` and set `OAM_IMAGE=oam:0.0.1-candidate` in `deploy/.env`.
+The example selects that release image through `OAM_IMAGE`. To build from source instead, run `docker build -t oam:0.0.2-candidate .` and set `OAM_IMAGE=oam:0.0.2-candidate` in `deploy/.env`.
 
 Fill `deploy/.env` with independent random hexadecimal database passwords, a random root API key, and the configured generation/embedding endpoint, credential and model triplets. Generate each secret separately, for example with `openssl rand -hex 24`. Hexadecimal passwords avoid URI-escaping ambiguity in the example DSNs. The file is ignored by Git; keep it private. The root key manages users and cannot directly access their personal memory. Runtime services receive separate non-superuser API, queue and content credentials, not the database administrator password.
 
@@ -33,7 +33,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api wo
 
 Migration uses operator authority and initializes the root credential. The role script creates the three runtime logins only when absent and grants the corresponding roles created by migrations. Repeating it does not rotate existing passwords; coordinate any intentional rotation with all replicas. Preflight makes real configured-provider requests; startup/readiness alone do not prove provider capability. Named PostgreSQL storage survives application restarts. The one-off command containers are retained for inspection.
 
-Open `http://127.0.0.1:17333/ui/`. Create a user with the root key, then connect using that user's key, as described in [operations](../docs/operations.md). Run the [retain → readiness → recall example](../docs/quickstart.md) to check your first cited memory. Change `OAM_HTTP_PORT` before starting if the port is occupied.
+Open `http://127.0.0.1:17333/ui/`. Use an administrator/root key to create a user through `POST /v1/users`, then connect the Inspector using the returned user key; see [administration](../docs/api.md#2-administration) and [operations](../docs/operations.md). Run the [retain → readiness → recall example](../docs/quickstart.md) to check your first cited memory. Change `OAM_HTTP_PORT` before starting if the port is occupied.
 
 ## 3. Simulate replicas
 
@@ -52,8 +52,8 @@ Keep at least one healthy API and worker available during rolling replacement. S
 The Dockerfile pins its multi-architecture Python base by digest. Update that digest deliberately and rerun both architecture checks when changing the base. On a Mac with Docker emulation enabled:
 
 ```bash
-docker buildx build --platform linux/arm64 --load -t oam:0.0.1-arm64 .
-docker buildx build --platform linux/amd64 --load -t oam:0.0.1-amd64 .
+docker buildx build --platform linux/arm64 --load -t oam:0.0.2-arm64 .
+docker buildx build --platform linux/amd64 --load -t oam:0.0.2-amd64 .
 ```
 
 Record which checks ran natively or under emulation. The manual candidate workflow exports an OCI archive without publishing it. A local image ID, an OCI manifest digest and a published registry digest are different identities; record the one actually tested. Candidate evidence and the opt-in public HTTP probe are described in [release evidence](../docs/release-evidence.md). Source visibility, release uploads, registry publication and release-triggering pushes remain manual release actions after content review.

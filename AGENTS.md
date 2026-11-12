@@ -5,7 +5,7 @@ Always reply only in English.
 
 ## Current Mission
 
-Build, verify, and release Open Agent Memory v0.0.1. This repository is the self-contained product implementation and the post-handoff source of truth for public contracts, runtime code, tests, deployment assets, and release evidence.
+Maintain, verify, and release Open Agent Memory v0.0.2. This repository is the self-contained product implementation and the post-handoff source of truth for public contracts, runtime code, tests, deployment assets, and release evidence.
 
 The release must preserve L0 source evidence, derive source-backed L1 memory, generate and retrieve supported L2 Insights, build L3 Profiles only on explicit refresh, keep HTML/PDF/image Evidence Resources separate from Learned Memory, retrieve both origins together, and run with multiple stateless API and durable worker replicas over PostgreSQL/pgvector.
 
@@ -23,7 +23,7 @@ The release must preserve L0 source evidence, derive source-backed L1 memory, ge
 
 ## Product Boundaries
 
-- The HTTP/OpenAPI contract is the only required v0.0.1 client surface. Do not add a Python SDK without a later demand-backed decision.
+- The HTTP/OpenAPI contract is the only required v0.0.2 client surface. Do not add a Python SDK without a later demand-backed decision.
 - The product must not import a benchmark, legacy supplier spike, or external planning checkout as a runtime dependency.
 - Ordinary search is non-generative. The caller owns final reasoning and answers.
 - Evidence Resources never become L1/L2/L3 inputs. Explicit Profile Resources are the only Resource path into exact Profile fields.
