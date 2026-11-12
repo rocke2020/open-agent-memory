@@ -405,12 +405,16 @@ class SourceRepository:
             cursor.execute(
                 "UPDATE users SET accepted_seq = %s, "
                 "index_generation_id = COALESCE(index_generation_id, %s), "
-                "policy_epoch = policy_epoch + %s "
+                "policy_epoch = policy_epoch + %s, "
+                "last_write_at = CASE WHEN %s IN ('interaction','evidence_resource',"
+                "'profile_resource') THEN GREATEST(last_write_at, clock_timestamp()) "
+                "ELSE last_write_at END "
                 "WHERE tenant_id = %s AND user_id = %s",
                 (
                     accepted_seq,
                     command.generation_id,
                     int(command.expected_active_version is not None),
+                    command.input_role,
                     authority.tenant_id,
                     authority.user_id,
                 ),

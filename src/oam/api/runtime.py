@@ -51,6 +51,7 @@ from oam.contracts.retain import (
     RetainURLDocument,
 )
 from oam.contracts.search import SearchManyRequest, SearchRequest
+from oam.contracts.users import UserListResponse
 from oam.db.context import bind_user
 from oam.db.inspection import MemoryNotFound, SourceInspector
 from oam.db.migrations import load_migrations
@@ -77,6 +78,15 @@ class AuthorizationFailed(PermissionError):
 
 class APIRuntime(Protocol):
     def authenticate(self, actor: RequestActor) -> None: ...
+
+    def list_users(
+        self,
+        actor: str,
+        *,
+        limit: int,
+        offset: int,
+        last_write_at_gte: datetime | None,
+    ) -> UserListResponse: ...
 
     def preflight_revision(
         self,
@@ -671,6 +681,28 @@ class DatabaseRuntime:
         except UniqueViolation as exc:
             raise ValueError("user_id already exists") from exc
         return {"user_id": user_id, "credential_id": credential_id, "secret": issued.secret}
+
+    def list_users(
+        self,
+        actor: str,
+        *,
+        limit: int,
+        offset: int,
+        last_write_at_gte: datetime | None,
+    ) -> UserListResponse:
+        try:
+            with self.pool.connection() as connection:
+                row = connection.execute(
+                    "SELECT oam_list_users(%s,%s,%s,%s)",
+                    (digest_secret(actor), limit, offset, last_write_at_gte),
+                ).fetchone()
+        except InvalidAuthorizationSpecification as exc:
+            raise AuthenticationFailed from exc
+        except InsufficientPrivilege as exc:
+            raise AuthorizationFailed from exc
+        if row is None:
+            raise RuntimeError("user listing returned no result")
+        return UserListResponse.model_validate(row[0] | {"limit": limit, "offset": offset})
 
     def retain(
         self,

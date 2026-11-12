@@ -122,6 +122,160 @@ async def test_root_creates_user_key_but_cannot_read_personal_operations(core_da
         ).status_code == 404
 
 
+async def test_user_listing_filters_by_inclusive_last_write_and_paginates(core_database):
+    dsn, tenant, root_headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=root_headers
+        ) as client,
+    ):
+        for user_id in ("alice", "bob", "carol"):
+            created = await client.post("/v1/users", json={"user_id": user_id})
+            assert created.status_code == 201, created.text
+        with psycopg.connect(dsn) as connection:
+            connection.execute(
+                "UPDATE users SET last_write_at = CASE user_id "
+                "WHEN 'alice' THEN '2026-11-10T00:00:00Z'::timestamptz "
+                "WHEN 'bob' THEN '2026-11-11T00:00:00Z'::timestamptz "
+                "ELSE NULL END WHERE tenant_id = %s",
+                (tenant,),
+            )
+            connection.execute(
+                "INSERT INTO tenants(tenant_id,state) VALUES ('foreign-users','active')"
+            )
+            connection.execute(
+                "INSERT INTO users(tenant_id,user_id,subject,namespace,lifetime,last_write_at) "
+                "VALUES ('foreign-users','z-user','z-user','personal','persistent',"
+                "'2026-11-12T00:00:00Z')"
+            )
+
+        first = await client.get(
+            "/v1/users",
+            params={"last_write_at_gte": "2026-11-10T00:00:00Z", "limit": 1, "offset": 0},
+        )
+        assert first.status_code == 200, first.text
+        assert first.json() == {
+            "items": [{"user_id": "alice", "last_write_at": "2026-11-10T00:00:00Z"}],
+            "total": 2,
+            "limit": 1,
+            "offset": 0,
+        }
+        second = await client.get(
+            "/v1/users",
+            params={"last_write_at_gte": "2026-11-10T08:00:00+08:00", "limit": 1, "offset": 1},
+        )
+        assert second.status_code == 200, second.text
+        assert second.json() == {
+            "items": [{"user_id": "bob", "last_write_at": "2026-11-11T00:00:00Z"}],
+            "total": 2,
+            "limit": 1,
+            "offset": 1,
+        }
+        empty = await client.get(
+            "/v1/users",
+            params={"last_write_at_gte": "2026-11-10T00:00:00Z", "offset": 9},
+        )
+        assert empty.status_code == 200, empty.text
+        assert empty.json() == {"items": [], "total": 2, "limit": 100, "offset": 9}
+        large_offset = await client.get("/v1/users", params={"offset": 2**31})
+        assert large_offset.status_code == 200, large_offset.text
+        assert large_offset.json() == {"items": [], "total": 3, "limit": 100, "offset": 2**31}
+        unfiltered = await client.get("/v1/users", params={"limit": 10})
+        assert unfiltered.status_code == 200, unfiltered.text
+        assert [item["user_id"] for item in unfiltered.json()["items"]] == ["alice", "bob", "carol"]
+        assert [item["last_write_at"] for item in unfiltered.json()["items"]] == [
+            "2026-11-10T00:00:00Z",
+            "2026-11-11T00:00:00Z",
+            None,
+        ]
+
+
+async def test_user_listing_requires_root_admin_and_valid_query(core_database):
+    _, _, root_headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        assert (await client.get("/v1/users")).status_code == 401
+        created = await client.post("/v1/users", json={"user_id": "alice"}, headers=root_headers)
+        assert created.status_code == 201, created.text
+        user_headers = {"Authorization": f"Bearer {created.json()['secret']}"}
+        assert (await client.get("/v1/users", headers=user_headers)).status_code == 403
+        assert (await client.get("/v1/users?limit=10001", headers=root_headers)).status_code == 422
+        assert (await client.get("/v1/users?offset=-1", headers=root_headers)).status_code == 422
+        assert (
+            await client.get("/v1/users", params={"offset": 2**63}, headers=root_headers)
+        ).status_code == 422
+        assert (
+            await client.get(
+                "/v1/users?last_write_at_gte=2026-11-10T00%3A00%3A00",
+                headers=root_headers,
+            )
+        ).status_code == 422
+        assert (
+            await client.get("/v1/users?last_write_at_gte=not-a-time", headers=root_headers)
+        ).status_code == 422
+
+
+async def test_accepted_input_advances_user_last_write_and_idempotent_replay_does_not(
+    core_database,
+):
+    dsn, tenant, root_headers = core_database
+    app = create_app(ROOT / "configs/oam.yaml")
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=root_headers
+        ) as client,
+    ):
+        created = await client.post("/v1/users", json={"user_id": "alice"})
+        assert created.status_code == 201, created.text
+        alice_headers = {"Authorization": f"Bearer {created.json()['secret']}"}
+        before = await client.get("/v1/users")
+        assert before.status_code == 200, before.text
+        assert before.json()["items"] == [{"user_id": "alice", "last_write_at": None}]
+        payload = {
+            "user_id": "alice",
+            "input_type": "interaction",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "I prefer concise answers.",
+                    "event_time": "2026-11-12T08:30:00Z",
+                    "learning_eligible": True,
+                }
+            ],
+        }
+        retained = await client.post(
+            "/v1/retain", json=payload, headers={**alice_headers, "Idempotency-Key": "stable-input"}
+        )
+        assert retained.status_code == 202, retained.text
+        accepted = await client.get(
+            "/v1/users", params={"last_write_at_gte": "2000-01-01T00:00:00Z"}
+        )
+        assert accepted.status_code == 200, accepted.text
+        first_time = accepted.json()["items"][0]["last_write_at"]
+        assert first_time is not None
+        replay = await client.post(
+            "/v1/retain", json=payload, headers={**alice_headers, "Idempotency-Key": "stable-input"}
+        )
+        assert replay.status_code == 202, replay.text
+        after_replay = await client.get(
+            "/v1/users", params={"last_write_at_gte": "2000-01-01T00:00:00Z"}
+        )
+        assert after_replay.status_code == 200, after_replay.text
+        assert after_replay.json()["items"][0]["last_write_at"] == first_time
+        with psycopg.connect(dsn) as connection:
+            assert connection.execute(
+                "SELECT last_write_at IS NOT NULL FROM users "
+                "WHERE tenant_id=%s AND user_id='alice'",
+                (tenant,),
+            ).fetchone() == (True,)
+
+
 async def test_public_accept_commits_exact_mixed_eligibility_input_and_reuses_receipt(
     core_database,
 ):

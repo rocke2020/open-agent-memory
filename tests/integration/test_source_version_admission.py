@@ -84,6 +84,52 @@ def test_new_source_cannot_skip_version_one(source_database):
     )
 
 
+@pytest.mark.parametrize(
+    "role,resource_type",
+    [("interaction", None), ("evidence_resource", "evidence"), ("profile_resource", "profile")],
+)
+def test_public_input_watermark_preserves_replay_rollback_and_monotonicity(
+    source_database, role, resource_type
+):
+    connection, authority = source_database
+    repository = SourceRepository()
+
+    def watermark():
+        return connection.execute(
+            "SELECT last_write_at FROM users WHERE tenant_id=%s AND user_id=%s",
+            (authority.tenant_id, authority.user_id),
+        ).fetchone()[0]
+
+    first = command(input_role=role, resource_type=resource_type)
+    assert watermark() is None
+    with connection.transaction(force_rollback=True):
+        repository.accept(connection, authority, first)
+        assert watermark() is not None
+    assert watermark() is None
+    repository.accept(connection, authority, first)
+    accepted = watermark()
+    assert accepted is not None
+    assert repository.accept(connection, authority, first).reused
+    assert watermark() == accepted
+    repository.accept(
+        connection,
+        authority,
+        command(2, input_role=role, resource_type=resource_type, expected_active_version=1),
+    )
+    assert watermark() > accepted
+    connection.execute(
+        "UPDATE users SET last_write_at='2099-01-01T00:00:00Z' WHERE tenant_id=%s AND user_id=%s",
+        (authority.tenant_id, authority.user_id),
+    )
+    future = watermark()
+    repository.accept(
+        connection,
+        authority,
+        command(3, input_role=role, resource_type=resource_type, expected_active_version=2),
+    )
+    assert watermark() == future
+
+
 def test_source_replacement_requires_cas_and_preserves_original_bytes(source_database):
     connection, authority = source_database
     repository = SourceRepository()
