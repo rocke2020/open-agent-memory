@@ -2,7 +2,7 @@
 
 English (canonical) | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
-Open Agent Memory (OAM) is an Apache-2.0 self-hosted memory engine for AI agents. It turns eligible conversations into source-backed facts and Insights, keeps documents as separate Resources, and retrieves both with citations. An explicitly refreshed User Profile helps agents carry useful personal context across sessions.
+Open Agent Memory (OAM) is a fully open source memory engine for AI agents. It turns eligible conversations into source-backed facts and Insights, keeps documents as separate Resources, and retrieves both with citations. An explicitly refreshed User Profile helps agents carry useful personal context across sessions.
 
 ## Performance & Accuracy
 
@@ -53,13 +53,13 @@ Use your own user-scoped key and keep the client configuration private. [Set up 
 
 ## What Is Open Agent Memory?
 
-“Open” means the complete memory system: indexing, retrieval, Profiles, user controls and native multi-node operation are available in the Apache-2.0 core for developers to inspect, run, modify and improve.
+“Open” means the complete memory system: indexing, retrieval, Profiles, user controls and native multi-node operation are available for developers to inspect, run, modify and improve.
 
 Integrate through the HTTP API, the local [MCP server](integrations/mcp/README.md), or the OpenClaw and DeepSeek Harness plugins. The bundled Memory Inspector lets users browse memory, follow its sources, search Resources and manage what is retained.
 
 ## Why Open Agent Memory?
 
-- **Fully open source, with native multi-node deployment.** Run stateless API replicas and durable workers across nodes over shared PostgreSQL/pgvector. Coordination, recovery and deployment code are part of the Apache-2.0 core.
+- **Fully open source, with native multi-node deployment.** Run stateless API replicas and durable workers across nodes over shared PostgreSQL/pgvector. Coordination, recovery and deployment code are included.
 - **Recall with evidence.** Retrieve facts and Insights together with supporting original passages and citations, so the agent can reason from the source.
 - **Search conversations and documents together.** HTML, PDF and image Resources remain separate from learned personal memory while sharing one retrieval path.
 - **Personalize when you choose.** Build a stored User Profile from eligible memory and explicit Profile Data on request; unchanged inputs reuse it without generation.
@@ -162,7 +162,3 @@ Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020
 ## Acknowledgments
 
 We thank the contributors to [Hindsight](https://github.com/vectorize-io/hindsight), [OpenViking](https://github.com/volcengine/OpenViking), [Mem0](https://github.com/mem0ai/mem0), [MemOS](https://github.com/MemTensor/MemOS), [TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) and [gbrain](https://github.com/garrytan/gbrain) for their open-source work, which informed OAM. We also thank the authors and contributors of [LongMemEval](https://github.com/xiaowu0162/LongMemEval) and [BEAM](https://github.com/mohammadtavakoli78/BEAM) for the benchmarks used in our evaluations. See the [full acknowledgments](ACKNOWLEDGMENTS.md) and [third-party notices](THIRD_PARTY.md) for project, benchmark and license credits.
-
-## License
-
-Apache License 2.0. See [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md).
