@@ -469,6 +469,23 @@ class RepairModels:
 
 
 def _run_repair(database, models):
+    with _content(database.dsn, database.tenant) as connection:
+        principal_id = connection.execute("SELECT principal_id FROM grants LIMIT 1").fetchone()[0]
+        generation = connection.execute("SELECT index_generation_id FROM users").fetchone()[0]
+        connection.execute(
+            "INSERT INTO operations(tenant_id,user_id,operation_id,principal_id,source_id,"
+            "source_version,kind,schema_version,status) "
+            "VALUES (%s,%s,'fixture-index',%s,%s,1,'index_interaction',1,'succeeded') "
+            "ON CONFLICT DO NOTHING",
+            (database.tenant, USER, principal_id, SOURCE),
+        )
+        connection.execute(
+            "INSERT INTO work_units(tenant_id,user_id,work_unit_id,operation_id,stage,"
+            "input_digest,generation_id,status,attempts_remaining) "
+            "VALUES (%s,%s,'fixture-index','fixture-index','index_source',%s,%s,'succeeded',0) "
+            "ON CONFLICT DO NOTHING",
+            (database.tenant, USER, bytes(32), generation),
+        )
     return process_one(
         load_config(ROOT / "configs/oam.yaml").config,
         make_conninfo(database.dsn, options="-c role=oam_queue"),

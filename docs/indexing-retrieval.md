@@ -4,7 +4,7 @@
 
 OAM preserves eligible interaction originals, learns individually supported records, consolidates supported Insights, and returns cited context to a caller that owns the final answer. Documents remain a separate Evidence pool. PostgreSQL stores originals, projections, policy, operations and worker ownership; stateless APIs and durable workers share that authority.
 
-This document is the product design authority for indexing and recall. Runtime contracts remain in [API](api.md), operator settings in [configuration](../configs/README.md), and verification boundaries in [acceptance](acceptance.md).
+This document describes the release design for indexing and recall. Runtime contracts remain in [API](api.md), operator settings in [configuration](../configs/README.md), and verification boundaries in [acceptance](acceptance.md).
 
 ## 1. Representations and ownership
 
@@ -37,7 +37,7 @@ Indexing selects learning-eligible messages, preserves L0 passages, chunks deter
 
 Completed groups are embedded and published incrementally with memberships, directed relations and time evidence. Temporal and semantic link work settles under the same eligibility and publication rules. Progress and partial coverage remain explicit; a failed later stage does not justify relabeling an earlier ready stage as complete end-to-end.
 
-Generation-token reservations bound extraction and Insight work before dispatch. Input, output, reasoning and failed/retry usage belong to generation accounting; embedding usage is recorded separately. Output ceilings are reservations, not a promise that every call consumes its ceiling. Budgets and stage readiness cannot be inferred from call count alone.
+When the optional per-source generation budget is configured, reservations bound extraction and Insight work before dispatch; the default configuration leaves that guard disabled. Input, output, reasoning and failed/retry usage belong to generation accounting; embedding usage is recorded separately. Output ceilings contribute to reservations, not a promise that every call consumes its ceiling. Budgets and stage readiness cannot be inferred from call count alone.
 
 Source: [source worker](../src/oam/workers/index_source.py), [indexing](../src/oam/indexing/), [configuration](../configs/oam.yaml).
 
