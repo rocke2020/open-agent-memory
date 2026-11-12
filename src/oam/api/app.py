@@ -79,8 +79,8 @@ from oam.contracts.users import (
     USER_LIST_DEFAULT_LIMIT,
     USER_LIST_MAX_LIMIT,
     USER_LIST_MAX_OFFSET,
+    LastWriteFilter,
     UserListResponse,
-    parse_last_write_at_gte,
 )
 from oam.db.inspection import MemoryNotFound, SourcePolicyChanged
 from oam.db.queue_admission import QueueAdmissionFull
@@ -596,29 +596,21 @@ def _register_reserved_routes(
         "/v1/users",
         tags=["Administration"],
         response_model=UserListResponse,
-        responses={422: {"description": "Invalid query parameters"}},
     )
     def list_users(
         request: Request,
         limit: int = Query(default=USER_LIST_DEFAULT_LIMIT, ge=1, le=USER_LIST_MAX_LIMIT),
         offset: int = Query(default=0, ge=0, le=USER_LIST_MAX_OFFSET),
-        last_write_at_gte: str | None = Query(default=None),
+        last_write_at_gte: LastWriteFilter = None,
     ) -> UserListResponse:
-        try:
-            timestamp = parse_last_write_at_gte(last_write_at_gte)
-            return _credential_call(
-                lambda: _require_runtime(runtime).list_users(
-                    request.state.actor,
-                    limit=limit,
-                    offset=offset,
-                    last_write_at_gte=timestamp,
-                )
+        return _credential_call(
+            lambda: _require_runtime(runtime).list_users(
+                request.state.actor,
+                limit=limit,
+                offset=offset,
+                last_write_at_gte=last_write_at_gte,
             )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail={"code": "InvalidRequest", "message": str(exc)},
-            ) from exc
+        )
 
     @app.put(
         "/v1/users/{user_id}/grants/{principal_id}",

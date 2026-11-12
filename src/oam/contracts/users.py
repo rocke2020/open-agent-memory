@@ -2,8 +2,9 @@
 
 import re
 from datetime import UTC, datetime
+from typing import Annotated
 
-from pydantic import AwareDatetime, Field, field_serializer
+from pydantic import AwareDatetime, BeforeValidator, Field, field_serializer
 
 from oam.contracts.operations import FrozenContract
 
@@ -26,6 +27,9 @@ def parse_last_write_at_gte(value: str | None) -> datetime | None:
         return parsed.astimezone(UTC)
     except (ValueError, OverflowError) as exc:
         raise ValueError("last_write_at_gte must be an RFC 3339 timestamp") from exc
+
+
+LastWriteFilter = Annotated[AwareDatetime | None, BeforeValidator(parse_last_write_at_gte)]
 
 
 class UserListItem(FrozenContract):

@@ -35,6 +35,41 @@ async def test_user_list_route_rejects_missing_admin_and_invalid_queries():
     assert high_limit.status_code == 422
 
 
+async def test_user_list_validation_errors_match_openapi_for_all_query_parameters():
+    class Runtime:
+        def list_users(self, *args, **kwargs):
+            raise AssertionError("invalid query reached runtime")
+
+    app = create_app(ROOT / "configs/oam.yaml", runtime=Runtime())
+    schema = app.openapi()
+    route = schema["paths"]["/v1/users"]["get"]
+    assert route["responses"]["422"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/HTTPValidationError"
+    }
+    timestamp = next(p for p in route["parameters"] if p["name"] == "last_write_at_gte")
+    assert {"type": "string", "format": "date-time"} in timestamp["schema"]["anyOf"]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": "Bearer synthetic"},
+    ) as client:
+        for name, value in (
+            ("limit", "0"),
+            ("limit", "10001"),
+            ("offset", "-1"),
+            ("offset", str(2**63)),
+            ("last_write_at_gte", "not-a-time"),
+            ("last_write_at_gte", "2026-11-12T08:30:00"),
+            ("last_write_at_gte", "2026-11-12T08:30:00+08:60"),
+        ):
+            response = await client.get("/v1/users", params={name: value})
+            assert response.status_code == 422, response.text
+            errors = response.json()["detail"]
+            assert isinstance(errors, list) and errors
+            assert errors[0]["loc"] == ["query", name]
+            assert errors[0]["type"] and errors[0]["msg"]
+
+
 def test_user_list_runtime_uses_admin_sql_and_decodes_page():
     result = {
         "items": [{"user_id": "alice", "last_write_at": None}],

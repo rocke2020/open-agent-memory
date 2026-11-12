@@ -23,6 +23,8 @@ Mode selection belongs to `auth.mode` in the operator configuration. When it is 
 
 Results use bytewise ascending `user_id` order. Users without accepted input have a null timestamp and match only unfiltered requests. The page and total share one database snapshot, including when the offset returns an empty page; separate page requests observe current state, so concurrent changes can cause skips or repeats. Offset supports non-negative PostgreSQL signed 64-bit integers, up to 9,223,372,036,854,775,807. A valid user credential receives `403`; missing or invalid administrator credentials receive `401`. Trusted mode still requires an administrator key, and dev mode returns `503`. Invalid timestamps or pagination bounds return `422`.
 
+All invalid user-list query parameters use the OpenAPI `HTTPValidationError` response: `detail` is an array whose entries identify the query parameter in `loc` and provide `msg` and `type`. The timestamp parameter is documented with `format: date-time` and requires an explicit UTC offset.
+
 Credential administration issues additional opaque credentials, lists credential metadata, and revokes credentials. Issuance returns each secret once; stored records contain only the SHA-256 digest and immutable tenant/principal binding.
 
 Direct root-key denial is not secrecy from the root operator: an operator who issues and receives a user key can authenticate with that user key.
