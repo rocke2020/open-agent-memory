@@ -23,6 +23,8 @@ Fill `deploy/.env` with independent random hexadecimal database passwords, a ran
 
 `deploy/oam.yaml` selects keyed authentication and dedicated workers; all omitted behavior comes from packaged `configs/oam.yaml`. To use another operator file, change the read-only mount while preserving the same file for all roles. A model endpoint on this Mac must use a container-reachable address such as `host.docker.internal`, rather than container loopback. The model endpoint still needs to accept requests from Docker's network.
 
+On a source-built image with Jev support, opt in with `models.decision.enabled: true` in operator YAML and set `DECISION_MODEL`, `DECISION_BASE_URL` and `DECISION_API_KEY` in `deploy/.env`. Compose passes these settings to the API and worker. [Decision model setup](../docs/operations.md#optional-decision-model)
+
 ## 2. Initialize and start
 
 Run these commands from the repository root:

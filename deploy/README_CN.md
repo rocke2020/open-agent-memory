@@ -23,6 +23,8 @@ cp deploy/.env.example deploy/.env
 
 `deploy/oam.yaml` 选择 API 密钥认证和独立工作进程，省略的行为设置从镜像中的 `configs/oam.yaml` 继承。若需其他运维配置，可更改只读挂载，确保各进程角色读到同一份文件。Mac 宿主机上的模型端点应通过容器可访问的地址提供服务，例如 `host.docker.internal`，并允许来自 Docker 网络的请求。
 
+使用支持 Jev 的源码构建镜像时，可在运维 YAML 中设置 `models.decision.enabled: true`，并在 `deploy/.env` 中填入 `DECISION_MODEL`、`DECISION_BASE_URL` 和 `DECISION_API_KEY`。Compose 会将这些变量传给 API 和工作进程。 [决策模型配置（英文）](../docs/operations.md#optional-decision-model)
+
 ## 2. 初始化和启动
 
 在仓库根目录运行以下命令。

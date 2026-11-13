@@ -8,6 +8,8 @@ OAM preserves eligible interaction originals, learns individually supported reco
 
 This document describes indexing and recall in v0.2.1. Runtime contracts remain in [API](api.md), operator settings in [configuration](../configs/README.md), and verification boundaries in [acceptance](acceptance.md).
 
+Post-v0.2.1 development adds an optional [decision-model client](../src/oam/models/decision.py) for typed Jev/System One judgments through the shared [runtime](../src/oam/models/runtime.py), [binding resolver](../src/oam/models/bindings.py) and [preflight](../src/oam/models/preflight.py). Its activation, routing and failure behavior are documented in [operations](operations.md#optional-decision-model). Generation still owns semantic decisions and prose in the source → L1 → L2 and explicit Profile-refresh flows. L2 support-only shortcuts and Profile impact gates remain proposed consumers subject to existing publication and budget rules.
+
 ## 1. Representations and ownership
 
 | Representation | Meaning | Authority |

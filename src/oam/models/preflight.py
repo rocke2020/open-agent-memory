@@ -15,6 +15,7 @@ from oam.models.bindings import (
     ResolvedModelBinding,
     resolve_model_binding,
 )
+from oam.models.decision import DecisionResult
 
 MIN_GENERATIVE_PROBE_OUTPUT_TOKENS = 1_024
 _EMBEDDING_PROBE_TEXTS = (
@@ -52,6 +53,8 @@ class RerankProbeOutput:
 
 
 class CapabilityProbeClient(Protocol):
+    def probe_decision(self, binding: ResolvedModelBinding) -> DecisionResult: ...
+
     def probe_chat(
         self, binding: ResolvedModelBinding, *, max_output_tokens: int
     ) -> ChatProbeOutput: ...
@@ -146,6 +149,8 @@ def run_model_preflight(
 
     by_role = {result.role: result for result in results}
     runnable = all(by_role[role].status is PreflightStatus.PASSED for role in required)
+    if by_role["decision"].status is PreflightStatus.FAILED:
+        runnable = False
     return ModelPreflightReport(runnable=runnable, roles=tuple(results))
 
 
@@ -154,6 +159,17 @@ def _probe(
     capability: ModelCapability,
     client: CapabilityProbeClient,
 ) -> str:
+    if capability is ModelCapability.DECISION:
+        response = client.probe_decision(binding)
+        if (
+            response.answers["color"].choice != "red"
+            or (response.answers["positive"].noul or 0) <= 0.5
+            or (response.answers["negative"].noul or 0) >= 0.5
+            or response.answers["level"].score is None
+            or abs(response.answers["level"].score - 1) > 0.5
+        ):
+            raise ValueError("decision probe failed: known judgments were incorrect")
+        return "choice, positive/negative probability and score judgments validated"
     if capability is ModelCapability.TEXT:
         response = client.probe_chat(
             binding,

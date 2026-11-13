@@ -12,6 +12,13 @@ from PIL import Image
 
 from oam.config import EmbeddingModelBinding, OAMConfig, TokenizerConfig
 from oam.models.bindings import ResolvedModelBinding
+from oam.models.decision import (
+    DecisionQuestion,
+    DecisionResult,
+    decision_path,
+    decision_request,
+    parse_decision_response,
+)
 from oam.models.embedding_inputs import configured_embedding_admission, embedding_admission
 from oam.models.preflight import (
     ChatProbeOutput,
@@ -84,6 +91,34 @@ class OpenAICompatibleProbeClient:
             binding, "", _CHAT_PROBE_PROMPT, max_output_tokens
         )
         return self._probe_generation(binding, path, headers, payload)
+
+    def probe_decision(self, binding: ResolvedModelBinding) -> DecisionResult:
+        questions = {
+            "color": DecisionQuestion(
+                type="choice",
+                instructions="Choose the color explicitly stated for the left block.",
+                criteria={"red": "The left block is red.", "blue": "The left block is blue."},
+            ),
+            "positive": DecisionQuestion(type="noul", instructions="Is the left block red?"),
+            "negative": DecisionQuestion(type="noul", instructions="Is the left block blue?"),
+            "level": DecisionQuestion(
+                type="score",
+                instructions="How many of the two blocks are red?",
+                criteria=["Zero blocks are red.", "One block is red.", "Two blocks are red."],
+            ),
+        }
+        payload = decision_request(
+            binding.model, "The left block is red. The right block is blue.", questions
+        )
+        result = parse_decision_response(
+            self._post(binding, decision_path(binding.endpoint), payload), questions
+        )
+        logger.info(
+            "model_preflight role=decision model=%s usage=%s",
+            binding.model,
+            result.usage.model_dump(),
+        )
+        return result
 
     def probe_embeddings(
         self, binding: ResolvedModelBinding, texts: tuple[str, ...]

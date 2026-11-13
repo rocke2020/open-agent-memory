@@ -23,6 +23,7 @@ Open Agent Memory (OAM) stores your conversations and documents, learns supporte
 
 - [Indexing and retrieval](indexing-retrieval.md) explains original evidence, learned memory, Insights and the recall pipeline.
 - [Personal and custom Profiles](profiles.md) explains stored Profiles, automatic refresh and transient generation.
+- [Decision model](decision-model.md) describes the optional client, proposed consumers and measured comparisons.
 - [Evaluation results](benchmarks.md) explains the measured accuracy and context usage, with pinned results and reproduction details.
 
 ## 4. Deploy and operate

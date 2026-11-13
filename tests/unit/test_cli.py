@@ -21,7 +21,7 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 @pytest.fixture(autouse=True)
 def unconfigured_model_environment(monkeypatch):
     models = load_config(REPOSITORY_ROOT / "configs/oam.yaml").config.models
-    for binding in (models.vlm, models.embedding, models.reranker):
+    for binding in (models.vlm, models.embedding, models.reranker, models.decision):
         if binding is None:
             continue
         for name in (binding.model_env, binding.endpoint_env, binding.api_key_env):
