@@ -89,8 +89,8 @@ search:
   normal_arm_weights:
     lexical: 1.0
     dense: 1.0
-    # Entity, semantic, and causal neighbors are indirect evidence.
-    # A 0.1 vote supports direct matches without letting graph noise lead the ranking.
+    # Enabled entity_semantic_graph and causal_graph paths automatically feed one combined graph arm.
+    # This weight applies once to that arm during normal-mode rank fusion.
     graph: 0.1
     temporal: 1.0
   # Only sufficiently similar dense fact hits become graph expansion seeds.
@@ -126,9 +126,12 @@ search:
   # source_seed_results caps fact/original seeds and recovered user originals.
   # max_results caps each learned-text and original-text pool independently.
   # The combined response can contain up to twice this many items.
-  # graph: off skips entity/alias expansion, light uses identities, full adds
-  # semantic neighbors. causal_graph independently enables outgoing causal
-  # links, including within temporal retrieval. Quote "off" in YAML.
+  # entity_semantic_graph selects entity and semantic graph expansion per mode:
+  # "off": no entity or semantic graph expansion. Quote "off" in YAML.
+  # light: entity graph expansion through shared entity IDs (including aliases).
+  # full: entity graph expansion plus stored semantic-link expansion.
+  # causal_graph independently enables outgoing effect-to-cause traversal, including within temporal retrieval, even when entity_semantic_graph is "off".
+  # Direct dense semantic search and lexical entity-name matching remain independent.
   # user_fact_exchange keeps direct dense, strict lexical and lexical user-original
   # hits; other memory matches need a dense user fact in their exchange.
   # Partial assistant replies use only the first source_seed_results dense hits
@@ -139,7 +142,7 @@ search:
   # Use the previous user's tail / next user's head; cited originals stay complete.
   fast:
     context_max_tokens: 18000
-    graph: "off"
+    entity_semantic_graph: "off"
     causal_graph: false
     lexical_ranking: whole_query
     partial_match_gate: user_fact_exchange
@@ -152,7 +155,7 @@ search:
     max_results: 96
   normal:
     context_max_tokens: 32768
-    graph: light
+    entity_semantic_graph: light
     causal_graph: false
     lexical_ranking: per_term
     partial_match_gate: "off"

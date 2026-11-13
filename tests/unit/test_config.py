@@ -38,10 +38,12 @@ def test_recall_causal_switch_is_independent_of_entity_graph_mode(mode):
 
     values = yaml.safe_load((REPOSITORY_ROOT / "configs/oam.yaml").read_text())["search"][mode]
     disabled = SearchTier.model_validate(values)
-    enabled = SearchTier.model_validate({**values, "causal_graph": True, "graph": "off"})
+    enabled = SearchTier.model_validate(
+        {**values, "causal_graph": True, "entity_semantic_graph": "off"}
+    )
     assert disabled.causal_graph is False
     assert enabled.causal_graph is True
-    assert enabled.graph == "off"
+    assert enabled.entity_semantic_graph == "off"
 
 
 def test_fts_rank_weights_reject_values_outside_postgres_range() -> None:

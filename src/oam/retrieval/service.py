@@ -143,7 +143,7 @@ class RecallService:
         trace_id = f"trace_{uuid4().hex}"
         mode = request.recall_level.value
         tier = getattr(self.config.search, mode)
-        graph = tier.graph
+        graph = tier.entity_semantic_graph
         causal_graph = tier.causal_graph
         if mode == "fast" and request.fast_graph is not None:
             graph = "light" if request.fast_graph else "off"

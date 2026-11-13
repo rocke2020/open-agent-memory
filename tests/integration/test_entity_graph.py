@@ -387,7 +387,7 @@ def test_entity_and_semantic_paths_survive_text_only_budget(recall_database, tmp
             return None
 
     path = tmp_path / "oam.yaml"
-    path.write_text("search:\n  normal:\n    graph: full\n")
+    path.write_text("search:\n  normal:\n    entity_semantic_graph: full\n")
     service = recall_service(connection, load_config(path).config, vector, SemanticTargetRepository)
 
     result = service.search(

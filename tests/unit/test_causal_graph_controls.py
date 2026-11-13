@@ -20,7 +20,8 @@ from oam.retrieval.service import RecallService
 def configuration(tmp_path, mode, graph, causal):
     path = tmp_path / "independent.yaml"
     path.write_text(
-        f'search:\n  {mode}:\n    graph: "{graph}"\n    causal_graph: {str(causal).lower()}\n'
+        f'search:\n  {mode}:\n    entity_semantic_graph: "{graph}"\n'
+        f"    causal_graph: {str(causal).lower()}\n"
     )
     return load_config(path).config
 
@@ -87,6 +88,7 @@ def test_independent_controls_reach_the_actual_answer_context(tmp_path, mode, gr
     if causal:
         expected.add("cause")
     assert {item["unit_id"] for item in result["items"]} == expected
+    assert result["diagnostics"]["graph"] == graph
     assert result["diagnostics"]["causal_graph"] is causal
     assert ("graph" in result["diagnostics"]["executed_arms"]) is (graph != "off" or causal)
 
@@ -186,7 +188,9 @@ def test_disabled_graph_branches_are_absent_from_sql(tmp_path, entities, causal)
 
 def selected_config(mode, causal):
     config = load_config(default_config_path()).config
-    tier = getattr(config.search, mode).model_copy(update={"graph": "off", "causal_graph": causal})
+    tier = getattr(config.search, mode).model_copy(
+        update={"entity_semantic_graph": "off", "causal_graph": causal}
+    )
     return config.model_copy(update={"search": config.search.model_copy(update={mode: tier})})
 
 

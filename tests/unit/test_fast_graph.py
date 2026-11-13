@@ -84,7 +84,7 @@ def test_fast_graph_uses_yaml_default_unless_request_overrides(
     tmp_path: Path, configured, override, expected
 ):
     path = tmp_path / "oam.yaml"
-    path.write_text(f'search:\n  fast:\n    graph: "{configured}"\n')
+    path.write_text(f'search:\n  fast:\n    entity_semantic_graph: "{configured}"\n')
     service = CausalService(config=load_config(path).config)
     options = {} if override is None else {"fast_graph": override}
     result = service.search(
@@ -118,7 +118,7 @@ def test_batch_and_planner_inherit_mode_graph_config(
 
     path = tmp_path / "oam.yaml"
     path.write_text(
-        f'search:\n  {mode}:\n    graph: "{graph}"\n'
+        f'search:\n  {mode}:\n    entity_semantic_graph: "{graph}"\n'
         f"    causal_graph: {str(graph != 'off').lower()}\n"
     )
     config = load_config(path).config
@@ -186,8 +186,16 @@ def test_graph_config_rejects_invalid_selections(tmp_path: Path, mode, value):
     import yaml
 
     path = tmp_path / "oam.yaml"
-    path.write_text(yaml.safe_dump({"search": {mode: {"graph": value}}}))
+    path.write_text(yaml.safe_dump({"search": {mode: {"entity_semantic_graph": value}}}))
     with pytest.raises(ConfigurationError, match="graph"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_config_rejects_renamed_per_mode_graph_key(tmp_path: Path, mode):
+    path = tmp_path / "oam.yaml"
+    path.write_text(f'search:\n  {mode}:\n    graph: "off"\n')
+    with pytest.raises(ConfigurationError, match=rf"search\.{mode}\.graph"):
         load_config(path)
 
 
@@ -230,7 +238,7 @@ def test_mode_graph_config_controls_final_context(tmp_path: Path, caplog, mode, 
     caplog.set_level("INFO", logger="oam.retrieval.service")
     path = tmp_path / "oam.yaml"
     path.write_text(
-        f'search:\n  {mode}:\n    graph: "{graph}"\n'
+        f'search:\n  {mode}:\n    entity_semantic_graph: "{graph}"\n'
         f"    causal_graph: {str(graph != 'off').lower()}\n"
     )
     service = GraphService(config=load_config(path).config)
@@ -275,7 +283,7 @@ def test_canonical_graph_defaults_reach_final_context(mode):
 )
 def test_fast_request_boolean_overrides_configured_full_graph(tmp_path: Path, override, expected):
     path = tmp_path / "oam.yaml"
-    path.write_text("search:\n  fast:\n    graph: full\n    causal_graph: true\n")
+    path.write_text("search:\n  fast:\n    entity_semantic_graph: full\n    causal_graph: true\n")
     service = GraphService(config=load_config(path).config)
     result = service.search(
         AuthorizedUser("test", "tenant", "principal", "user", frozenset()),

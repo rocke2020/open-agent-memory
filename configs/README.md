@@ -1,5 +1,7 @@
 # OAM configuration
 
+[English](README.md) | [简体中文](README_CN.md)
+
 ## Overview
 
 [oam.yaml](oam.yaml) is the authoritative public behavior configuration. This guide explains how graph expansion, causal indexing and recall weights interact. See [operations](../docs/operations.md) for model bindings, environment variables and service startup.
@@ -17,15 +19,17 @@ A retrieval **arm** produces a ranked candidate list. Direct dense retrieval fin
 
 Basic direct dense semantic search is always enabled in both `fast` and `normal`, independently of the graph expansion settings. Semantic-link expansion is an optional additional retrieval step: it can recover useful indirect evidence, but a fact can resemble a seed without answering the original query and introduce nearby-topic noise.
 
-`search.fast.graph` and `search.normal.graph` select entity and semantic expansion independently for each recall mode:
+`search.fast.entity_semantic_graph` and `search.normal.entity_semantic_graph` select entity and semantic expansion independently for each recall mode:
 
-| `graph` value | Entity and alias expansion | Stored semantic-link expansion |
+| `entity_semantic_graph` value | Entity and alias expansion | Stored semantic-link expansion |
 |---|---|---|
 | `"off"` | Disabled | Disabled |
 | `light` | Enabled | Disabled |
 | `full` | Enabled | Enabled |
 
-Entity and semantic expansion are therefore configurable, rather than always required together. Quote `"off"` in YAML. Setting `graph: "off"` preserves direct dense retrieval, lexical retrieval and its configured entity-name boost, and temporal retrieval when a time window applies.
+Entity graph expansion finds other facts sharing a stored entity ID with a retrieved fact, including supported aliases of that entity. Rename the former per-mode `graph` key to `entity_semantic_graph` in operator overrides; the old key is rejected. This rename requires no reindexing.
+
+Entity and semantic expansion are therefore configurable, rather than always required together. Quote `"off"` in YAML. Setting `entity_semantic_graph: "off"` preserves direct dense retrieval, lexical retrieval and its configured entity-name boost, and temporal retrieval when a time window applies.
 
 The fast-only request field `fast_graph` can override the configured selection: `true` selects `light`, `false` selects `"off"`, and omission or null inherits the YAML value. It does not override causal traversal. See the [recall API](../docs/api.md#recall).
 
@@ -38,7 +42,7 @@ Causal links represent explicit effect-to-cause relationships, stored as `caused
 | Relationship | Similar meaning; no causal assertion. | A source explicitly states that an effect has a particular cause. |
 | Link creation | Embedding similarity between facts. | Model extraction and validation of source-supported `caused_by` fields. |
 | Traversal | Both directions, one hop from a seed fact. | Outgoing effect → cause, up to two hops. |
-| Recall control | Per-mode `graph: full`. | Per-mode `causal_graph: true`, independently of `graph`. |
+| Recall control | Per-mode `entity_semantic_graph: full`. | Per-mode `causal_graph: true`, independently of `entity_semantic_graph`. |
 
 For the source statement "I postponed moving because my rent increased," causal expansion can follow `postponed moving → rent increased`. Semantic expansion might connect the moving fact to another fact about looking for an apartment. The latter is related information, not an established cause. Chronology, co-mention and similarity alone cannot create a causal link.
 
@@ -52,7 +56,7 @@ The causal switches separate link creation from link consumption:
 
 Recall follows outgoing causal paths for up to two hops; `search.relation_hops` supports only `2`. The per-mode causal switch also controls causal edges used in temporal retrieval. Disabling it preserves ordinary temporal links and date handling.
 
-These switches are independent. `graph: "off"` with `causal_graph: true` enables causal-only graph expansion. Enabling causal indexing does not enable causal recall, and enabling causal recall does not create missing links. Recall can consume previously stored causal links even while causal indexing is disabled. Changing only recall switches requires no reindexing; changing the indexing switch changes the extraction recipe and does not retroactively populate old facts.
+These switches are independent. `entity_semantic_graph: "off"` with `causal_graph: true` enables causal-only graph expansion. Enabling causal indexing does not enable causal recall, and enabling causal recall does not create missing links. Recall can consume previously stored causal links even while causal indexing is disabled. Changing only recall switches requires no reindexing; changing the indexing switch changes the extraction recipe and does not retroactively populate old facts.
 
 With causal indexing disabled, extraction retains supported facts, entities, temporal annotations, explicit reasons in text and state updates, while discarding structured `caused_by` values.
 
@@ -68,7 +72,7 @@ Fast recall uses equal arm weights, including when graph expansion is enabled; i
 
 The selected LME-500 fast and BEAM-10M normal configurations keep semantic-link and causal expansion disabled. Their graph settings differ because normal retains entity and alias expansion:
 
-| Evaluated workload | Recall mode | `graph` | `causal_graph` | Graph expansion used |
+| Evaluated workload | Recall mode | `entity_semantic_graph` | `causal_graph` | Graph expansion used |
 |---|---|---|---|---|
 | LME-500 | `fast` | `"off"` | `false` | None. |
 | BEAM-10M | `normal` | `light` | `false` | Entity and alias only. |
@@ -102,7 +106,7 @@ The intended benefits are less irrelevant context and fewer unnecessary context 
 
 The checked-in defaults enable entity expansion only in normal recall:
 
-| Mode | `graph` | `causal_graph` | Enabled graph expansion |
+| Mode | `entity_semantic_graph` | `causal_graph` | Enabled graph expansion |
 |---|---|---|---|
 | `fast` | `"off"` | `false` | None, unless overridden by the request. |
 | `normal` | `light` | `false` | Entity and alias only. |
@@ -117,10 +121,10 @@ search:
   normal_arm_weights:
     graph: 0.1
   normal:
-    graph: light
+    entity_semantic_graph: light
     causal_graph: false
 ```
 
-Normal recall uses entity and alias expansion with a graph fusion weight of `0.1`. Semantic-link expansion, causal traversal and causal extraction are disabled. Basic direct dense semantic search is always enabled in both modes. To disable all graph expansion in either mode, set both its `graph: "off"` and `causal_graph: false`.
+Normal recall uses entity and alias expansion with a graph fusion weight of `0.1`. Semantic-link expansion, causal traversal and causal extraction are disabled. Basic direct dense semantic search is always enabled in both modes. To disable all graph expansion in either mode, set both its `entity_semantic_graph: "off"` and `causal_graph: false`.
 
-Recall diagnostics report `graph`, `causal_graph` and `executed_arms`; inspect them to distinguish a configured path from an arm that actually ran. Implementation references: [recall service](../src/oam/retrieval/service.py), [graph repository](../src/oam/retrieval/repository.py), [semantic-link construction](../src/oam/indexing/links.py), [extraction](../src/oam/indexing/extraction.py) and [configuration schema](../src/oam/config.py).
+Recall diagnostics report the selected `entity_semantic_graph` value as `graph`, alongside `causal_graph` and `executed_arms`; inspect them to distinguish a configured path from an arm that actually ran. Implementation references: [recall service](../src/oam/retrieval/service.py), [graph repository](../src/oam/retrieval/repository.py), [semantic-link construction](../src/oam/indexing/links.py), [extraction](../src/oam/indexing/extraction.py) and [configuration schema](../src/oam/config.py).

@@ -160,7 +160,7 @@ def test_configured_graph_selection_reaches_real_sql_context(
     history(connection, authority)
     path = tmp_path / "oam.yaml"
     path.write_text(
-        f'search:\n  {mode}:\n    graph: "{graph}"\n'
+        f'search:\n  {mode}:\n    entity_semantic_graph: "{graph}"\n'
         f"    causal_graph: {str(graph != 'off').lower()}\n    channel_candidates: 1\n"
     )
     config = load_config(path).config

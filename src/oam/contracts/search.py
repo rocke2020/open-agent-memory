@@ -59,8 +59,8 @@ class SearchOutputOptions(FrozenContract):
         default=None,
         strict=True,
         description=(
-            "Override fast graph selection: true selects light, false selects off. "
-            "Omitted or null inherits search.fast.graph from configuration."
+            "Override fast entity/semantic graph selection: true selects light, false selects off. "
+            "Omitted or null inherits search.fast.entity_semantic_graph from configuration."
         ),
     )
     _context_max_tokens: int | None = PrivateAttr(default=None)
