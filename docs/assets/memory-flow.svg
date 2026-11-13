@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
+  <title id="title">How OAM turns conversations and documents into cited context</title>
+  <desc id="desc">Eligible conversations keep their originals and produce learned facts and supported Insights. Documents remain separate searchable Resources. Both feed cited recall, which the host agent uses to answer. A stored User Profile is refreshed explicitly and read separately.</desc>
+  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8" fill="none" stroke="#53777d" stroke-width="1.5"/></marker></defs>
+  <rect width="1200" height="540" rx="20" fill="#f5f8f6"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="40" y="52" fill="#123443" font-size="30" font-weight="700">Two kinds of evidence. One cited recall.</text>
+    <g fill="#e1eeea" stroke="#b2cec7" stroke-width="1.5">
+      <rect x="40" y="94" width="230" height="90" rx="12"/>
+      <rect x="318" y="94" width="230" height="90" rx="12"/>
+      <rect x="596" y="94" width="230" height="90" rx="12"/>
+      <rect x="40" y="238" width="230" height="90" rx="12"/>
+      <rect x="318" y="238" width="508" height="90" rx="12"/>
+    </g>
+    <g fill="#123443" font-size="23" text-anchor="middle" font-weight="700">
+      <text x="155" y="129">Conversations</text><text x="433" y="129">Learned facts</text><text x="711" y="129">Insights</text>
+      <text x="155" y="273">Documents</text><text x="572" y="273">Searchable Resources</text>
+    </g>
+    <g fill="#527078" font-size="18" text-anchor="middle">
+      <text x="155" y="159">Eligible original messages</text><text x="433" y="159">Linked to their sources</text><text x="711" y="159">Supported synthesis</text>
+      <text x="155" y="303">Text · HTML · PDF · Images</text><text x="572" y="303">Originals + passages + abstracts</text>
+    </g>
+    <g stroke="#53777d" stroke-width="2" fill="none" marker-end="url(#arrow)">
+      <path d="M270 139h43"/><path d="M548 139h43"/><path d="M270 283h43"/>
+      <path d="M564 139v69h330"/>
+      <path d="M826 139h29q15 0 15 15v40h28"/><path d="M826 283h29q15 0 15-15v-46h28"/>
+    </g>
+    <rect x="900" y="152" width="260" height="112" rx="14" fill="#123443"/>
+    <text x="1030" y="195" text-anchor="middle" fill="#f4f8f8" font-size="27" font-weight="700">Cited recall</text>
+    <text x="1030" y="230" text-anchor="middle" fill="#80e2d6" font-size="20">Evidence for your agent</text>
+    <text x="40" y="371" fill="#527078" font-size="21">Documents stay separate from learned personal memory.</text>
+    <rect x="40" y="410" width="1120" height="90" rx="12" fill="#fff4d9"/>
+    <text x="64" y="445" fill="#123443" font-size="23" font-weight="700">User Profile: refresh when you choose.</text>
+    <text x="64" y="478" fill="#527078" font-size="20">Built from eligible memory and explicit Profile Data. Read separately; recall does not inject it.</text>
+  </g>
+</svg>

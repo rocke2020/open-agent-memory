@@ -2,58 +2,23 @@
 
 English (canonical) | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
-Open Agent Memory (OAM) is a fully open source memory engine for AI agents. It turns conversations eligible for long-term memory into source-backed facts and Insights, keeps documents as separate Resources, and retrieves both with citations. An explicitly refreshed User Profile helps agents carry useful personal context across sessions.
+**Fully open memory. Built together. Made for everyday agents.**
 
-## Performance & Accuracy
+Open Agent Memory (OAM) is a fully open source memory engine for AI agents. Remember preferences, find earlier decisions and retrieve supporting sources in a new session. OAM turns eligible conversations into facts and Insights, keeps documents as separate Resources, and builds a User Profile only when explicitly refreshed.
 
-We chose **DeepSeek Flash** to control evaluation costs and show memory performance with a model used for everyday agent work. The completed v0.0.1 development evaluations use **high-effort first answers and at most one eligible max-effort retry**, with high-effort judging, and cover **500 LongMemEval S questions** and **200 BEAM-10M questions**.
+**Built for the community:** the complete memory system is [Apache-2.0 licensed](LICENSE), so we can run it, inspect it, improve it and use it together. [Build with us](CONTRIBUTING.md) or [share your experience](https://github.com/rocke2020/open-agent-memory/discussions/1).
 
-### Recorded DeepSeek-based results
+**Strong results with DeepSeek Flash:** **94% on LME-500**; on BEAM-10M, **61.56% versus Hindsight’s 52.16% (+9.40 percentage points)** using the same exact DeepSeek Flash answer/judge model and policy. These historical L1 results include at most one eligible max-effort answer retry; the Hindsight arm replays saved contexts, and OAM uses 17.43% more answer context. [Results and comparison details](#performance--accuracy).
 
-| Evaluation | OAM | Hindsight with DeepSeek | Observed difference |
-|---|---|---|---|
-| [LME-500: answer accuracy](https://github.com/rocke2020/open-agent-memory-benchmark/tree/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/lme500) | **94% (470/500)** | 89.6% (448/500) | **+4.4 percentage points** |
-| [BEAM-10M: mean rubric score](https://github.com/rocke2020/open-agent-memory-benchmark/tree/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/beam10m) | **61.56%** | 52.16% (saved-context replay) | **+9.40 percentage points** |
+![Illustrative flow: retain a preference, start a new session, then recall it with source evidence](docs/assets/memory-across-sessions.svg)
 
-**LME comparison:** OAM used DeepSeek Flash with the high-first/max-retry policy above; the [full Hindsight reproduction](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde) used DeepSeek V4 Flash 0731 for extraction and judging and V4 Pro 0813 for answers. The model versions and answer-generation settings differ.
+Illustrative scenario, not measured model output. Your agent uses OAM's cited context to compose its answer.
 
-**BEAM comparison:** both arms used the same DeepSeek Flash answer/judge policy on the same 200 questions. Hindsight's saved contexts were replayed; its engine was not rerun. OAM used 17.43% more answer context. See the [comparison methodology and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/blob/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/beam10m/README.md).
-
-LME-500 used fast recall with **12.4K answer-context tokens on average**. BEAM-10M tested **10 complete, untruncated conversation histories**, with 20 questions per history. The linked reports record the model bindings used in each run.
-
-These historical development runs measure retrieval, answering and judging with L1 memory; L2 Insights, User Profiles and document Resources were not scored.
-
-See [benchmark results and reproduction](docs/benchmarks.md) for the evaluation methodology, model settings, context counters, evaluated revisions, limitations and every question's saved evidence.
-
-[First cited recall](docs/quickstart.md) · [MCP setup](integrations/mcp/README.md) · [Benchmark results and reproduction](docs/benchmarks.md)
-
-[![Watch OAM recall preferences with source citations](docs/assets/cited-recall-demo.gif)](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4)
-
-[Watch the 71-second demo](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4): an existing synthetic memory, readiness and recall from a fresh MCP process, then the original source in Memory Inspector. The recording runs at 2× speed and reuses the completed index.
-
-Connect an existing OAM deployment to your MCP client with Node.js 22+:
-
-```json
-{
-  "mcpServers": {
-    "oam": {
-      "command": "npx",
-      "args": ["-y", "@rocke-dong/oam-mcp@0.0.1"],
-      "env": {
-        "OAM_BASE_URL": "http://127.0.0.1:17333",
-        "OAM_USER_ID": "your-user-id",
-        "OAM_USER_API_KEY": "your-user-key"
-      }
-    }
-  }
-}
-```
-
-Use your own user-scoped key and keep the client configuration private. [Set up OAM first](deploy/README.md), then follow the [Claude Code and Cursor instructions](integrations/mcp/README.md#client-configuration).
+**[Get your first cited memory →](docs/start-here.md)** Deployment, a user key, retain → readiness → recall, and a fresh MCP session in one guide.
 
 ## What Is Open Agent Memory?
 
-“Open” means the complete memory system: indexing, retrieval, Profiles, user controls and native multi-node operation are available for developers to inspect, run, modify and improve.
+“Open” means the complete memory system: indexing, retrieval, Profiles, user controls and native multi-node operation are available for developers to inspect, run, modify and improve. The aim is a memory engine the community can build and use together. Contributions can be code, reproducible bug reports, documentation, examples or feedback from your own agent.
 
 Integrate through the HTTP API, the local [MCP server](integrations/mcp/README.md), or the OpenClaw and DeepSeek Harness plugins. The bundled Memory Inspector lets users browse memory, follow its sources, search Resources and manage what is retained.
 
@@ -70,17 +35,52 @@ See the [acceptance requirements](docs/acceptance.md), [release notes and verifi
 
 ## Get Started
 
-Clone the repository and pull the published v0.0.2 image for Linux AMD64 or ARM64:
+**[Start here: from a fresh deployment to your first cited recall](docs/start-here.md).** Configure PostgreSQL and your model endpoints, initialize OAM, create a user and verify the retained source before connecting your agent. The guide uses the published v0.0.2 image for Linux AMD64 or ARM64 and links to the [Docker Compose guide](deploy/README.md).
 
-```bash
-git clone https://github.com/rocke2020/open-agent-memory.git
-cd open-agent-memory
-docker pull ghcr.io/rocke2020/open-agent-memory:0.0.2
-```
+| Your agent or application | First prerequisite | Integration route |
+|---|---|---|
+| Custom application | [Complete Start here](docs/start-here.md) | [HTTP API](docs/api.md) and [copyable HTTP example](docs/quickstart.md) |
+| Claude Code or Cursor | [Complete Start here](docs/start-here.md) | [MCP server and client configuration](integrations/mcp/README.md#client-configuration), Node.js 22+ |
+| OpenClaw | [Complete Start here](docs/start-here.md) | [OpenClaw plugin](integrations/openclaw/README.md#npm-installation) |
+| DeepSeek Harness (DSH) | [Complete Start here](docs/start-here.md) | [DSH plugin](integrations/dsh/README.md) |
 
-Follow the [Docker Compose guide](deploy/README.md) to configure PostgreSQL and your model endpoints, initialize OAM and open the Memory Inspector. Set `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.0.2` in `deploy/.env` to use the published image.
+Use your own user-scoped key and keep client configuration private.
 
-Integrate through the [HTTP API](docs/api.md), the [MCP server](integrations/mcp/README.md), or the [OpenClaw](integrations/openclaw/README.md#npm-installation) or [DeepSeek Harness](integrations/dsh/README.md) plugin. Start with the [copyable retain → readiness → recall example](docs/quickstart.md) to store a conversation, wait for indexing and inspect the returned source citations.
+## Inspect the evidence
+
+![Annotated crop of the real Memory Inspector showing synthetic demonstration data](docs/assets/inspect-memory.png)
+
+Real Inspector UI with synthetic demonstration data; annotations highlight where to inspect memory and its source. This is a demonstration, not a benchmark result.
+
+<details>
+<summary>Watch the existing cited-recall demo</summary>
+
+[![Watch OAM recall preferences with source citations](docs/assets/cited-recall-demo.gif)](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4)
+
+[Watch the 71-second demo](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4): an existing synthetic memory, readiness and recall from a fresh MCP process, then the original source in Memory Inspector. The recording runs at 2× speed and reuses the completed index.
+
+</details>
+
+## Performance & Accuracy
+
+I need to control costs in both evaluation and daily use, so I chose **DeepSeek Flash**. I want OAM to provide useful memory in ordinary daily work, rather than optimize only for the highest benchmark score with the strongest model. The completed v0.0.1 development evaluations use **high-effort first answers and at most one eligible max-effort retry**, with high-effort judging, and cover **500 LongMemEval S questions** and **200 BEAM-10M questions**.
+
+### Recorded DeepSeek-based results
+
+| Evaluation | OAM | Hindsight with DeepSeek | Observed difference |
+|---|---|---|---|
+| [LME-500: answer accuracy](https://github.com/rocke2020/open-agent-memory-benchmark/tree/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/lme500) | **94% (470/500)** | 89.6% (448/500) | **+4.4 percentage points** |
+| [BEAM-10M: mean rubric score](https://github.com/rocke2020/open-agent-memory-benchmark/tree/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/beam10m) | **61.56%** | 52.16% (saved-context replay) | **+9.40 percentage points** |
+
+**LME comparison:** OAM used DeepSeek Flash with the high-first/max-retry policy above; the [full Hindsight reproduction](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde) used DeepSeek V4 Flash 0731 for extraction and judging and V4 Pro 0813 for answers. The model versions and answer-generation settings differ.
+
+**BEAM comparison: OAM outscored Hindsight’s saved-context replay by 9.40 percentage points.** Both arms used the same exact DeepSeek Flash answer/judge model and policy on the same 200 questions. Hindsight's saved contexts were replayed; its engine was not rerun. OAM used 17.43% more answer context. See the [comparison methodology and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/blob/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/beam10m/README.md).
+
+LME-500 used fast recall with **12.4K answer-context tokens on average**. BEAM-10M tested **10 complete, untruncated conversation histories**, with 20 questions per history. The linked reports record the model bindings used in each run.
+
+These historical development runs measure retrieval, answering and judging with L1 memory; L2 Insights, User Profiles and document Resources were not scored.
+
+See [benchmark results and reproduction](docs/benchmarks.md) for the evaluation methodology, model settings, context counters, evaluated revisions, limitations and every question's saved evidence.
 
 ## Product Model
 
@@ -99,20 +99,9 @@ Recall uses one limit on the complete rendered context: `search.fast.context_max
 
 OAM uses Python, FastAPI, explicit SQL through psycopg, and PostgreSQL with pgvector. API processes are stateless; PostgreSQL owns accepted originals, authorization, source lifecycle, operations, worker claims, leases, fences, and application-replica recovery. Each service uses one configured VLM through OpenAI Chat, OpenAI Responses or Anthropic Messages, with per-role reasoning effort and separate embedding and optional reranker models. There are no provider, model, endpoint, or credential defaults.
 
-```text
-trusted application -> user-authorized retain -> PostgreSQL receipt + immutable original
-                                      |
-                                      v
-                               durable workers
-                         interactions -> L0 -> L1 -> L2
-                         Resources -> passages + abstract
-                                      |
-                                      v
-                         joint fast/normal recall + citations
+![Conversations → facts → Insights; separate document Resources; cited recall and explicit Profile refresh](docs/assets/memory-flow.svg)
 
-explicit User Profile refresh -> unchanged: zero calls
-                         -> changed: durable operation -> L3
-```
+Conversations become source-backed facts and Insights; documents stay in a separate Resource path. Both feed cited fast/normal recall. User Profile refresh is explicit: unchanged inputs reuse the stored Profile with zero generation calls; changed inputs create a durable operation.
 
 See [architecture](docs/architecture.md), [HTTP API](docs/api.md), [configuration guide](configs/README.md), [operations](docs/operations.md), the [Memory web UI guide](docs/memory-web-ui.md), [acceptance](docs/acceptance.md), and the historical [Steps 1–4 foundation evidence](docs/foundation-evidence.md).
 

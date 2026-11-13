@@ -4,6 +4,8 @@
 
 This example stores one conversation, waits for its learned memory and links to become ready, then retrieves cited context through the public HTTP API. Recall returns evidence for your agent; your agent generates the final answer.
 
+New to OAM? Follow [Your first useful memory](start-here.md) for service setup, user creation, source inspection and a fresh agent session. This page owns the copyable HTTP example for an existing connection.
+
 ## 1. Prepare your connection
 
 Start OAM with generation and embedding models and a running worker using the [Docker Compose guide](../deploy/README.md). You need Bash, `curl`, `jq`, and an existing OAM user with its user-scoped API key. Have an administrator create the user with `POST /v1/users` and securely hand over the returned user key, as described in the [administration API](api.md#2-administration). Memory Inspector connects to an existing user. The administrator/root key cannot replace the user's key on personal content routes in `api_key` mode.

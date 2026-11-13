@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">A new session. The right memory. The original source.</title>
+  <desc id="desc">Illustrative workflow: retain a preference for vegetarian food and train travel, recall it in a fresh agent session, and inspect the original source. The host agent generates the answer.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 8 4 0 8" fill="none" stroke="#80e2d6" stroke-width="1.5"/></marker>
+  </defs>
+  <rect width="1200" height="620" rx="24" fill="#123443"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="48" y="56" fill="#80e2d6" font-size="17" font-weight="700" letter-spacing="2">OPEN AGENT MEMORY</text>
+    <text x="48" y="120" fill="#f4f8f8" font-size="46" font-weight="700">A new session. The right memory.</text>
+    <text x="48" y="162" fill="#c4dcdf" font-size="24">Carry useful context forward. Keep the source within reach.</text>
+    <rect x="48" y="204" width="344" height="300" rx="18" fill="#f5f8f6"/>
+    <rect x="428" y="204" width="344" height="300" rx="18" fill="#f5f8f6"/>
+    <rect x="808" y="204" width="344" height="300" rx="18" fill="#f5f8f6"/>
+    <path d="M398 354h22M778 354h22" fill="none" stroke="#80e2d6" stroke-width="2" marker-end="url(#arrow)"/>
+    <g fill="#527078" font-size="16" font-weight="700" letter-spacing="1.4">
+      <text x="72" y="242">01 / KEEP WHAT MATTERS</text>
+      <text x="452" y="242">02 / START A NEW SESSION</text>
+      <text x="832" y="242">03 / CHECK THE SOURCE</text>
+    </g>
+    <g fill="#123443" font-size="27" font-weight="700">
+      <text x="72" y="286">Tell your agent once.</text>
+      <text x="452" y="286">Bring context back.</text>
+      <text x="832" y="286">See why it remembers.</text>
+    </g>
+    <rect x="72" y="312" width="296" height="116" rx="12" fill="#e1eeea"/>
+    <text x="90" y="345" fill="#123443" font-size="23"><tspan x="90">“I prefer vegetarian</tspan><tspan x="90" dy="31">meals and travelling</tspan><tspan x="90" dy="31">by train.”</tspan></text>
+    <text x="72" y="470" fill="#527078" font-size="20">Retain → wait for indexing</text>
+    <text x="452" y="344" fill="#123443" font-size="23">“Plan a weekend away.”</text>
+    <rect x="452" y="370" width="296" height="58" rx="12" fill="#e1eeea"/>
+    <text x="470" y="407" fill="#123443" font-size="21" font-weight="700">Vegetarian meals · Trains</text>
+    <text x="452" y="470" fill="#527078" font-size="20">Recall → host uses evidence</text>
+    <rect x="832" y="312" width="296" height="116" rx="12" fill="#e1eeea"/>
+    <text x="850" y="345" fill="#123443" font-size="23"><tspan x="850">Original message</tspan><tspan x="850" dy="34" font-size="21">“I prefer vegetarian</tspan><tspan x="850" dy="29" font-size="21">meals and travelling…”</tspan></text>
+    <text x="832" y="470" fill="#527078" font-size="20">Citation → original passage</text>
+    <text x="48" y="552" fill="#f3cf86" font-size="24" font-weight="700">Fully open. Build it together. Use it every day.</text>
+    <text x="48" y="590" fill="#c4dcdf" font-size="17">Illustrative workflow. OAM retrieves evidence; your agent generates the answer.</text>
+  </g>
+</svg>

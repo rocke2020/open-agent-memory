@@ -4,6 +4,8 @@
 
 OAM uses one non-root image for the API, Memory Inspector, worker and operator commands, with PostgreSQL/pgvector as its only persistent service. The image installs the locked Python dependencies and packaged configuration/migrations. The default topology publishes the API only on loopback. The replica topology adds a local reverse proxy, two APIs and two workers over the same database. This is a local application-recovery simulation, not proof of physical multi-host or database resilience.
 
+For a first installation, [Your first useful memory](../docs/start-here.md) connects this deployment sequence to user-key creation, cited recall and a fresh agent session. This page covers deployment and operator details.
+
 ## 1. Prepare configuration
 
 Use the published multi-architecture image from the repository root:
