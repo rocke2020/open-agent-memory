@@ -91,6 +91,8 @@ search:
     dense: 1.0
     # Enabled entity_semantic_graph and causal_graph paths automatically feed one combined graph arm.
     # This weight applies once to that arm during normal-mode rank fusion.
+    # A low weight still boosts hits corroborated by other arms.
+    # 0.1 is a heuristic default, not a validated optimum.
     graph: 0.1
     temporal: 1.0
   # Only sufficiently similar dense fact hits become graph expansion seeds.
@@ -132,9 +134,10 @@ search:
   # full: entity graph expansion plus stored semantic-link expansion.
   # causal_graph independently enables outgoing effect-to-cause traversal, including within temporal retrieval, even when entity_semantic_graph is "off".
   # Direct dense semantic search and lexical entity-name matching remain independent.
-  # user_fact_exchange keeps direct dense, strict lexical and lexical user-original
-  # hits; other memory matches need a dense user fact in their exchange.
-  # Partial assistant replies use only the first source_seed_results dense hits
+  # user_fact_exchange keeps direct dense, strict lexical, lexical user originals,
+  # and the leading lexical memory original with a stored user/assistant role.
+  # Other memory matches need a dense user fact in their exchange.
+  # Indirect assistant replies use only the first source_seed_results dense hits
   # for both a user fact and its exact cited original; user roots and optional
   # user context keep their existing scope. whole_query uses one OR FTS ranking;
   # per_term retains term-list fusion. Neither ranking uses a scoring model.

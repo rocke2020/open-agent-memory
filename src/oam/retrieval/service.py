@@ -1060,14 +1060,25 @@ class RecallService:
                     if row["kind"] == "passage"
                 },
             )
-            # Direct user originals need no second retrieval of a derived fact.
+            # Preserve the lexical arm's leading original without a dense witness.
+            # Weaker assistant matches still need their local user-fact evidence.
+            lexical_original = next(
+                (
+                    node
+                    for node in arms.get("lexical", ())
+                    if (row := hydrated_passages.get(node)) is not None
+                    and row["origin"] == "memory"
+                    and row.get("locator", {}).get("role") in {"user", "assistant"}
+                ),
+                None,
+            )
             # Keep this exemption local: it cannot authorize source expansion.
             allowed_ids.update(
                 node
                 for node, row in hydrated_passages.items()
                 if node in arms.get("lexical", ())
                 and row["origin"] == "memory"
-                and row.get("locator", {}).get("role") == "user"
+                and (row.get("locator", {}).get("role") == "user" or node == lexical_original)
             )
             # Source-local recovery admits user originals without creating witnesses.
             allowed_ids.update(recovered_user_ids)
