@@ -327,6 +327,7 @@ class ModelCapability(StrEnum):
     VISION = "vision"
     EMBEDDINGS = "embeddings"
     RERANK = "rerank"
+    DECISION = "decision"
 
 
 class ModelBinding(FrozenModel):
@@ -358,6 +359,15 @@ class EmbeddingModelBinding(ModelBinding):
     max_request_items: Annotated[int, Field(strict=True, gt=0)] | Literal["auto"] | None = "auto"
 
 
+class DecisionModelBinding(FrozenModel):
+    enabled: StrictBool = False
+    protocol: Literal["system_one"] = "system_one"
+    model_env: str = Field(min_length=1)
+    endpoint_env: str = Field(min_length=1)
+    api_key_env: str = Field(min_length=1)
+    capabilities: frozenset[ModelCapability] = frozenset({ModelCapability.DECISION})
+
+
 ReasoningEffort = Literal["none", "low", "high", "max"]
 
 
@@ -377,6 +387,7 @@ ROLE_CAPABILITIES: dict[str, tuple[ModelCapability, ...]] = {
     "profile": (ModelCapability.TEXT,),
     "reranker": (ModelCapability.RERANK,),
     "planner": (ModelCapability.TEXT,),
+    "decision": (ModelCapability.DECISION,),
 }
 REQUIRED_MODEL_ROLES = frozenset({"extraction", "insights", "embedding", "abstract", "profile"})
 
@@ -386,6 +397,7 @@ class ModelsConfig(FrozenModel):
     reasoning_effort: ReasoningEfforts = Field(default_factory=ReasoningEfforts)
     embedding: EmbeddingModelBinding | None = None
     reranker: ModelBinding | None = None
+    decision: DecisionModelBinding | None = None
 
     @model_validator(mode="after")
     def validate_roles(self) -> ModelsConfig:
@@ -432,7 +444,9 @@ class ModelsConfig(FrozenModel):
     def required_unbound_roles(self) -> set[str]:
         return {role for role in REQUIRED_MODEL_ROLES if self.binding_for(role) is None}
 
-    def binding_for(self, role: str) -> ModelBinding | None:
+    def binding_for(self, role: str) -> ModelBinding | DecisionModelBinding | None:
+        if role == "decision":
+            return self.decision if self.decision is not None and self.decision.enabled else None
         if role in {"embedding", "reranker"}:
             return getattr(self, role)
         if role not in ReasoningEfforts.model_fields:

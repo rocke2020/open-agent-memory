@@ -16,7 +16,9 @@ def validate_model_environment(config: OAMConfig, environment: Mapping[str, str]
         raise ConfigurationError(f"missing required model roles: {', '.join(missing)}")
     roles = set(config.required_model_roles())
     roles.update(
-        role for role in ("reranker", "planner") if config.models.binding_for(role) is not None
+        role
+        for role in ("reranker", "planner", "decision")
+        if config.models.binding_for(role) is not None
     )
     for role in sorted(roles):
         try:

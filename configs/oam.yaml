@@ -360,6 +360,15 @@ backup:
   retention_days: 30
 
 models:
+  # Active only when enabled AND model_env contains a nonblank model identifier.
+  # This binding is independent of the VLM route; no automatic L2/Profile policy is enabled.
+  decision:
+    enabled: true
+    protocol: system_one
+    model_env: DECISION_MODEL
+    endpoint_env: DECISION_BASE_URL
+    api_key_env: DECISION_API_KEY
+    capabilities: [decision]
   # Every generative role uses this shared VLM binding.
   vlm:
     # Generative protocol: openai_chat, openai_responses or anthropic_messages.

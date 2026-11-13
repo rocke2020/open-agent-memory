@@ -9,7 +9,7 @@ import time
 from collections.abc import Mapping
 from contextlib import suppress
 from threading import BoundedSemaphore, Event
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import httpx
@@ -21,6 +21,9 @@ from oam.models.bindings import ResolvedModelBinding, resolve_model_binding
 from oam.models.embedding_inputs import configured_embedding_admission
 from oam.models.protocols import generation_request, normalize_generation
 from oam.tokens import resolve_counter
+
+if TYPE_CHECKING:
+    from oam.models.decision import DecisionQuestion, DecisionResult
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,44 @@ class RuntimeModels:
             - (config.provider.embedding_search_reserved if background else 0)
         )
         self._rerank_slots = BoundedSemaphore(config.provider.rerank_concurrency)
+
+    def decide(
+        self,
+        state: str,
+        questions: dict[str, DecisionQuestion],
+        *,
+        timeout_seconds: float,
+    ) -> DecisionResult:
+        from oam.models.decision import (
+            decision_path,
+            decision_request,
+            parse_decision_response,
+        )
+
+        binding = self._binding("decision", "decision")
+        payload = decision_request(binding.model, state, questions)
+        call_id = uuid4().hex
+        body = self._post(
+            binding, decision_path(binding.endpoint), payload, timeout_seconds, call_id=call_id
+        )
+        try:
+            result = parse_decision_response(body, questions)
+        except ModelOutputError as exc:
+            logger.info(
+                "model_result role=decision outcome=invalid model=%s call_id=%s usage=%s",
+                binding.model,
+                call_id,
+                exc.usage.model_dump() if exc.usage else None,
+            )
+            raise
+        logger.info(
+            "model_result role=decision outcome=success model=%s call_id=%s questions=%d usage=%s",
+            binding.model,
+            call_id,
+            len(questions),
+            result.usage.model_dump(),
+        )
+        return result
 
     def generate(
         self,

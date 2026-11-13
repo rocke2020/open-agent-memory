@@ -74,11 +74,13 @@ def resolve_model_binding(
     binding = models.binding_for(role)
     if binding is None:
         return None
-    alias = role if role in {"embedding", "reranker"} else "vlm"
-    model = binding.model
+    alias = role if role in {"embedding", "reranker", "decision"} else "vlm"
+    model = getattr(binding, "model", None)
     if binding.model_env is not None:
         model = environment.get(binding.model_env, "").strip()
         if not model:
+            if role == "decision":
+                return None
             raise ModelBindingResolutionError(
                 f"model role {role!r} requires environment variable {binding.model_env}"
             )
@@ -116,14 +118,16 @@ def resolve_model_binding(
         role=role,
         alias=alias,
         protocol=binding.protocol,
-        reasoning_split=binding.reasoning_split,
-        reasoning_mode=binding.reasoning_mode,
+        reasoning_split=getattr(binding, "reasoning_split", None),
+        reasoning_mode=getattr(binding, "reasoning_mode", "legacy_chat"),
         model=model,
         endpoint=endpoint,
         capabilities=binding.capabilities,
         credential_configured=api_key is not None,
         reasoning_effort=(
-            None if role in {"embedding", "reranker"} else getattr(models.reasoning_effort, role)
+            None
+            if role in {"embedding", "reranker", "decision"}
+            else getattr(models.reasoning_effort, role)
         ),
         _api_key=api_key,
     )

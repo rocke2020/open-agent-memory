@@ -62,6 +62,9 @@ class FakeProbeClient:
     rerank: RerankProbeOutput = RerankProbeOutput(scores=(0.1, 0.9))
     requested_output_tokens: list[int] = field(default_factory=list)
 
+    def probe_decision(self, binding: ResolvedModelBinding):
+        raise AssertionError("disabled decision role must not be probed")
+
     def probe_chat(
         self, binding: ResolvedModelBinding, *, max_output_tokens: int
     ) -> ChatProbeOutput:
