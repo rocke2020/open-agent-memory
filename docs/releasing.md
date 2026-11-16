@@ -2,7 +2,7 @@
 
 ## Overview
 
-Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The published product release is 0.0.2; the source target is 0.0.3. Its [release record](releases/0.0.3.md) distinguishes source verification from image/tag publication. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
+Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release is 0.0.3; its [release record](releases/0.0.3.md) records source verification and publication evidence. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
 
 Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DSH 0.0.1. Reuse their existing published archives when their package code is unchanged; do not republish an existing npm version or advance package versions solely because the product version changes. Preserve earlier product tags, images and release records.
 
@@ -63,8 +63,8 @@ Build the Python distribution and both supported container architectures from th
 ```bash
 uv build
 mkdir -p dist/plugins
-docker buildx build --platform linux/arm64 --load -t oam:0.0.2-arm64 .
-docker buildx build --platform linux/amd64 --load -t oam:0.0.2-amd64 .
+docker buildx build --platform linux/arm64 --load -t oam:0.0.3-arm64 .
+docker buildx build --platform linux/amd64 --load -t oam:0.0.3-amd64 .
 ```
 
 For unchanged, already-published integrations, download the exact registry archives and compare their runtime contents with the reviewed source:
@@ -87,8 +87,8 @@ Publish the multi-architecture image from that same source:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rocke2020/open-agent-memory:0.0.2 \
-  -t ghcr.io/rocke2020/open-agent-memory:v0.0.2 \
+  -t ghcr.io/rocke2020/open-agent-memory:0.0.3 \
+  -t ghcr.io/rocke2020/open-agent-memory:v0.0.3 \
   -t ghcr.io/rocke2020/open-agent-memory:0.0 \
   -t ghcr.io/rocke2020/open-agent-memory:0 \
   -t ghcr.io/rocke2020/open-agent-memory:latest --push .

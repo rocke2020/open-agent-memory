@@ -23,7 +23,7 @@ The release must preserve L0 source evidence, derive source-backed L1 memory, ge
 
 ## Product Boundaries
 
-- The HTTP/OpenAPI contract is the only required v0.0.2 client surface. Do not add a Python SDK without a later demand-backed decision.
+- The HTTP/OpenAPI contract is the only required v0.0.3 client surface. Do not add a Python SDK without a later demand-backed decision.
 - The product must not import a benchmark, legacy supplier spike, or external planning checkout as a runtime dependency.
 - Ordinary search is non-generative. The caller owns final reasoning and answers.
 - Evidence Resources never become L1/L2/L3 inputs. Explicit Profile Resources are the only Resource path into exact Profile fields.

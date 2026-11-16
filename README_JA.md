@@ -31,11 +31,11 @@ HTTP API、ローカルの [MCP サーバー](integrations/mcp/README.md)、ま�
 - **メモリの確認と制御。** Inspector で出典を閲覧し、個別の Memory Unit や Insight を削除できます。文書 Resources も、同じ認可済み API で管理できます。
 - **データとモデルを自分で管理。** メモリを PostgreSQL/pgvector 上にセルフホストし、利用するモデルのエンドポイントを設定できます。
 
-検証済みの動作、デプロイの制約、配布物については、[受け入れ要件](docs/acceptance.md)、[変更点と検証記録](docs/releases/0.0.2.md)、[公開リリース](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.2)を参照してください。
+検証済みの動作、デプロイの制約、配布物については、[受け入れ要件](docs/acceptance.md)、[変更点と検証記録](docs/releases/0.0.3.md)、[公開リリース](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.3)を参照してください。
 
 ## はじめに
 
-**[ここから開始：新規デプロイから最初の出典付き検索まで](docs/start-here.md)。** PostgreSQL とモデルのエンドポイントを設定し、OAM の初期化、ユーザーの作成、保存した原文の確認を済ませてからエージェントを接続します。ガイドでは Linux AMD64 または ARM64 向けの公開済み v0.0.2 イメージを使用し、[Docker Compose ガイド](deploy/README.md)に案内します。
+**[ここから開始：新規デプロイから最初の出典付き検索まで](docs/start-here.md)。** PostgreSQL とモデルのエンドポイントを設定し、OAM の初期化、ユーザーの作成、保存した原文の確認を済ませてからエージェントを接続します。ガイドでは Linux AMD64 または ARM64 向けの公開済み v0.0.3 イメージを使用し、[Docker Compose ガイド](deploy/README.md)に案内します。
 
 | エージェント・アプリケーション | 最初の前提手順 | 接続方法 |
 |---|---|---|
@@ -128,7 +128,7 @@ v0.0.3 は LME-500 の結果とエビデンスへのリンクを更新し、グ�
 
 v0.0.2 では、管理者向けユーザー一覧、安定した Insight タイトル、ユーザー原文の直接検索、および MCP 接続を追加しました。アップグレード前にマイグレーション 0036 と 0037 を適用してください。タイトルと活動時刻のバックフィルだけを理由とする再インデックスは不要です。[変更点と検証記録](docs/releases/0.0.2.md)を参照してください。MCP、OpenClaw、DSH のパッケージバージョンは独立して管理します。
 
-v0.0.2 には、L0–L3 の全レイヤー、独立した Resources の取り込み、fast/normal による統合検索、出典のライフサイクル、説明・差分・記録済み結果の再生、可搬性のあるエクスポート、Memory Inspector、複数 API・複数ワーカーの復旧、適合性の検証記録、公開されたマルチアーキテクチャイメージが含まれます。サポートする検索モードは fast と normal です。Python SDK、他プロバイダーからのインポーター、完全な User Profile Studio、ホスティングサービス、データベースの高可用性、マルチリージョン運用は今後の対象です。
+v0.0.3 には、L0–L3 の全レイヤー、独立した Resources の取り込み、fast/normal による統合検索、出典のライフサイクル、説明・差分・記録済み結果の再生、可搬性のあるエクスポート、Memory Inspector、複数 API・複数ワーカーの復旧、適合性の検証記録、公開されたマルチアーキテクチャイメージが含まれます。サポートする検索モードは fast と normal です。Python SDK、他プロバイダーからのインポーター、完全な User Profile Studio、ホスティングサービス、データベースの高可用性、マルチリージョン運用は今後の対象です。
 
 [Docker/Compose ガイド](deploy/README.md)は、Inspector のアセットを同梱した単一の非 root API/ワーカーイメージと PostgreSQL/pgvector を使用します。レプリカの例はローカルで 2 つの API と 2 つのワーカーをシミュレートするもので、物理的に異なるホスト間の耐障害性を立証するものではありません。[OpenClaw](integrations/openclaw/README.md) と [DSH](integrations/dsh/README.md) は npm からインストールします。OpenClaw は ClawHub でも利用でき、再現性のためにバージョン付きのプラグイン tarball も保持されています。公開リリースとイメージの利用可能性は、ローカルの候補版の検証とは別の確認事項です。
 
@@ -142,7 +142,7 @@ v0.0.2 では、管理者向けユーザー一覧、安定した Insight タイ�
 
 OpenClaw プラグインは独立したバージョン 0.0.2、MCP と DSH は 0.0.1 です。トークナイザー最適化は v0.0.1 のソースタグで提供済みであり、再インデックスは不要です。今後の作業には、導入体験の改善、不要なインデックス作成トークンと回答コンテキストトークンの削減、キーワード順位付け手法の評価、共有 Resource の所有権と OIDC/LDAP サポートの定義が含まれます。これらは提案されている改善であり、提供済みの機能ではありません。
 
-設定や検索に関するフィードバックは [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1) で共有してください。現行リリースでサポートされる動作と制約は、上記および[変更点と検証記録](docs/releases/0.0.2.md)に記載しています。
+設定や検索に関するフィードバックは [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1) で共有してください。現行リリースでサポートされる動作と制約は、上記および[変更点と検証記録](docs/releases/0.0.3.md)に記載しています。
 
 ## 謝辞
 

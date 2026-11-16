@@ -17,7 +17,7 @@ Clone the repository, pull the published Linux AMD64/ARM64 image, and create you
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory.git
 cd open-agent-memory
-docker pull ghcr.io/rocke2020/open-agent-memory:0.0.2
+docker pull ghcr.io/rocke2020/open-agent-memory:0.0.3
 cp deploy/.env.example deploy/.env
 ```
 

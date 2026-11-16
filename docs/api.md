@@ -2,7 +2,7 @@
 
 ## Overview
 
-HTTP/OpenAPI is the core v0.0.2 integration contract; MCP and host plugins are optional clients. The implemented authentication modes are `dev`, `api_key` and `trusted`; OIDC and LDAP are not available. In `api_key` mode, a user key binds the tenant and `user_id`, and an administrator key cannot select personal content. Retain accepts interactions, the Resource collection accepts documents and the Profile Data collection accepts structured user information, and recall returns cited context without generating an answer. No independent collection selector, browser-only policy or Python SDK is required. The core routes below have PostgreSQL-backed functional coverage; the [release record](releases/0.0.2.md) states the current verification scope and limitations.
+HTTP/OpenAPI is the core v0.0.3 integration contract; MCP and host plugins are optional clients. The implemented authentication modes are `dev`, `api_key` and `trusted`; OIDC and LDAP are not available. In `api_key` mode, a user key binds the tenant and `user_id`, and an administrator key cannot select personal content. Retain accepts interactions, the Resource collection accepts documents and the Profile Data collection accepts structured user information, and recall returns cited context without generating an answer. No independent collection selector, browser-only policy or Python SDK is required. The core routes below have PostgreSQL-backed functional coverage; the [release record](releases/0.0.3.md) states the current verification scope and limitations.
 
 ## 1. Global Routes
 

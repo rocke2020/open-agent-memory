@@ -31,11 +31,11 @@ Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。在新会�
 - **检查和控制记忆。** 在 Inspector 中浏览来源，删除单条记忆单元或洞察，并通过同一套经过授权的 API 管理文档资源。
 - **掌控数据和模型。** 将记忆自托管于 PostgreSQL/pgvector，并配置自己的模型端点。
 
-已验证的行为、部署限制和交付物见[验收要求](docs/acceptance.md)、[版本变更与验证](docs/releases/0.0.2.md)和[已发布版本](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.2)。
+已验证的行为、部署限制和交付物见[验收要求](docs/acceptance.md)、[版本变更与验证](docs/releases/0.0.3.md)和[已发布版本](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.3)。
 
 ## 快速开始
 
-**[从这里开始：从全新部署到首次带引用的召回](docs/start-here.md)。** 配置 PostgreSQL 和模型端点、初始化 OAM、创建用户，并在连接 Agent 前核对保存的原始来源。指南使用适用于 Linux AMD64 或 ARM64 的 v0.0.2 已发布镜像，并链接到 [Docker Compose 指南](deploy/README.md)。
+**[从这里开始：从全新部署到首次带引用的召回](docs/start-here.md)。** 配置 PostgreSQL 和模型端点、初始化 OAM、创建用户，并在连接 Agent 前核对保存的原始来源。指南使用适用于 Linux AMD64 或 ARM64 的 v0.0.3 已发布镜像，并链接到 [Docker Compose 指南](deploy/README.md)。
 
 | Agent 或应用 | 首先完成 | 接入方式 |
 |---|---|---|
@@ -128,7 +128,7 @@ v0.0.3 更新 LME-500 结果与证据链接，将图扩展配置重命名为 `en
 
 v0.0.2 新增管理员用户列表、稳定的洞察标题、原始用户证据的直接召回支持及 MCP 接入。升级前先运行迁移 0036 和 0037；无需仅为标题和活动时间回填而重新索引。详见[版本变更与验证](docs/releases/0.0.2.md)。MCP、OpenClaw 和 DSH 插件分别保持其独立版本。
 
-v0.0.2 包含全部 L0–L3 层、独立的文档资源摄入、fast/normal 统一召回、来源生命周期、解释与差异比较及已记录结果的重放、可移植导出、Memory Inspector、多 API/多 Worker 恢复、一致性验收证据以及公开的多架构镜像。支持的召回模式为 fast 和 normal。Python SDK、供应商导入器、完整的用户画像工作台、托管服务、数据库高可用和多地域运行属于后续工作。
+v0.0.3 包含全部 L0–L3 层、独立的文档资源摄入、fast/normal 统一召回、来源生命周期、解释与差异比较及已记录结果的重放、可移植导出、Memory Inspector、多 API/多 Worker 恢复、一致性验收证据以及公开的多架构镜像。支持的召回模式为 fast 和 normal。Python SDK、供应商导入器、完整的用户画像工作台、托管服务、数据库高可用和多地域运行属于后续工作。
 
 [Docker/Compose 指南](deploy/README.md)使用一个非 root 的 API/Worker 镜像，包含 Inspector 静态资源，并使用 PostgreSQL/pgvector。副本示例在本地模拟两个 API 和两个 Worker，并不证明跨物理主机的故障恢复能力。[OpenClaw](integrations/openclaw/README.md) 和 [DSH](integrations/dsh/README.md) 从 npm 安装，OpenClaw 也可通过 ClawHub 获取，并保留带版本的插件 tarball 以便复现。公开版本和镜像的可用性，与本地候选版验证是不同的事项。
 
@@ -142,7 +142,7 @@ v0.0.2 新增管理员用户列表、稳定的洞察标题、原始用户证据�
 
 OpenClaw 插件独立版本为 0.0.2；MCP 和 DSH 保持 0.0.1。Tokenizer 优化已随 v0.0.1 源码标签交付，保留已有索引，无需重新索引。后续工作还包括更顺畅的入门体验、减少不必要的索引和回答上下文 tokens、评估关键词排名方法，以及定义共享资源所有权和 OIDC/LDAP 支持。这些是拟议改进，尚未交付。
 
-欢迎在 [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1) 中分享设置与检索反馈。当前版本支持的行为和限制仍以上文及[版本变更与验证](docs/releases/0.0.2.md)为准。
+欢迎在 [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1) 中分享设置与检索反馈。当前版本支持的行为和限制仍以上文及[版本变更与验证](docs/releases/0.0.3.md)为准。
 
 ## 致谢
 
