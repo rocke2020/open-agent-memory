@@ -126,8 +126,6 @@ uv run oam api --config configs/oam.yaml --host 127.0.0.1
 
 v0.0.3 は LME-500 の結果とエビデンスへのリンクを更新し、グラフ展開の設定を `entity_semantic_graph` に改名し、公開セットアップ文書を改善します。検証と公開の状況は[リリース記録](docs/releases/0.0.3.md)を参照してください。各連携パッケージのバージョンは変更していません。
 
-v0.0.2 では、管理者向けユーザー一覧、安定した Insight タイトル、ユーザー原文の直接検索、および MCP 接続を追加しました。アップグレード前にマイグレーション 0036 と 0037 を適用してください。タイトルと活動時刻のバックフィルだけを理由とする再インデックスは不要です。[変更点と検証記録](docs/releases/0.0.2.md)を参照してください。MCP、OpenClaw、DSH のパッケージバージョンは独立して管理します。
-
 v0.0.3 には、L0–L3 の全レイヤー、独立した Resources の取り込み、fast/normal による統合検索、出典のライフサイクル、説明・差分・記録済み結果の再生、可搬性のあるエクスポート、Memory Inspector、複数 API・複数ワーカーの復旧、適合性の検証記録、公開されたマルチアーキテクチャイメージが含まれます。サポートする検索モードは fast と normal です。Python SDK、他プロバイダーからのインポーター、完全な User Profile Studio、ホスティングサービス、データベースの高可用性、マルチリージョン運用は今後の対象です。
 
 [Docker/Compose ガイド](deploy/README.md)は、Inspector のアセットを同梱した単一の非 root API/ワーカーイメージと PostgreSQL/pgvector を使用します。レプリカの例はローカルで 2 つの API と 2 つのワーカーをシミュレートするもので、物理的に異なるホスト間の耐障害性を立証するものではありません。[OpenClaw](integrations/openclaw/README.md) と [DSH](integrations/dsh/README.md) は npm からインストールします。OpenClaw は ClawHub でも利用でき、再現性のためにバージョン付きのプラグイン tarball も保持されています。公開リリースとイメージの利用可能性は、ローカルの候補版の検証とは別の確認事項です。

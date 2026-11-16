@@ -8,7 +8,7 @@ Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DS
 
 ## 1. Review release notes and documentation
 
-Every new product version in `pyproject.toml` requires a release record at `docs/releases/<version>.md`, one file per version. See the [initial release notes](releases/0.0.1.md). Its **Changes** section tells users what was added, changed or fixed, any compatibility or migration actions, and known limitations. Reuse this section as the GitHub Release notes. Keep historical release records unchanged; a version bump alone does not justify changing historical version references or independently versioned plugin packages.
+Every new product version in `pyproject.toml` requires a release record at `docs/releases/<version>.md`, one file per version. See the [initial release notes](releases/0.0.1.md). Its **Changes** and **Upgrade** sections tell users what was added, changed or fixed, any compatibility or migration actions, and known limitations. Reuse both sections as the GitHub Release notes. Keep historical release records unchanged; a version bump alone does not justify changing historical version references or independently versioned plugin packages.
 
 After setting the intended version, stage the intended new files so the scanner includes them, then generate a draft against the previous product tag. For example, when preparing `0.0.2` from `v0.0.1`:
 
@@ -81,7 +81,7 @@ The opt-in `tests/release/verify_candidate.py` command uses the bounded syntheti
 
 ## 4. Publish the verified product
 
-After committing the verified source, create the new annotated product tag at that exact commit and run the documentation gate against the previous product release. Do not move an existing tag. Create a source archive from the new tag and checksums for the reviewed distribution, source and plugin archives. Attach those artifacts and sanitized verification evidence to the GitHub Release, using the release record's Changes section as its notes.
+After committing the verified source, create the new annotated product tag at that exact commit and run the documentation gate against the previous product release. Do not move an existing tag. Create a source archive from the new tag and checksums for the reviewed distribution, source and plugin archives. Attach those artifacts and sanitized verification evidence to the GitHub Release, using the release record's Changes and Upgrade sections as its notes.
 
 Publish the multi-architecture image from that same source:
 

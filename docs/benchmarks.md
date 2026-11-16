@@ -4,7 +4,7 @@
 
 OAM reaches **93.2% (466/500)** on LongMemEval S with MiniMax M3.1 Flash native-adaptive answers and DeepSeek Flash high-effort judging. DeepSeek Flash max-effort answers reach **92.6% (463/500)** on the same 500 questions and byte-identical saved OAM contexts. These are recorded L1/fast-recall pipeline measurements; publishing OAM 0.0.3 does not make them fresh measurements of its release image.
 
-The [paired LME-500 evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500) contains the questions, full contexts, both answers and original judgments. The separate [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m) records a 61.56% mean rubric score with DeepSeek Flash over ten complete histories. OAMB is identified by its Git commit; OAM keeps its product version.
+The [paired LME-500 evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/lme500) contains the questions, full contexts, both answers and original judgments. The separate [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m) records a 61.56% mean rubric score with DeepSeek Flash over ten complete histories. The recorded evidence is pinned at OAMB commit `308eef998091ec05aa2657b637fc37222e029672`; OAM keeps its product version.
 
 ## 1. LongMemEval S: all 500 questions
 
@@ -45,7 +45,7 @@ The BEAM results summarize recorded selected answers with DeepSeek Flash judging
 
 BEAM assigns each question the mean of its rubric-item scores; its mean rubric score differs from its threshold pass rate. The retrieval timings come from 540 probes on histories 2–10, with none excluded. Complete comparable indexing-generation usage, full-campaign cost and indexing wall time are unavailable. The dataset revision is `9b2096193fe74e2837e4713e483351e19817773c`, with SHA-256 `c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8`. Recall is normal, using L1; L2 and Profile are excluded from scored contexts.
 
-The [BEAM manifest](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m/manifest.json) records per-history configuration, exact model bindings and available runtime revisions. Unknown inputs remain unknown. Context size, model settings and saved-context replay prevent attributing the score difference to the memory engine alone.
+The [BEAM manifest](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m/manifest.json) records per-history configuration, exact model bindings and available runtime revisions. Unknown inputs remain unknown. Context size, model settings and saved-context replay prevent attributing the score difference to the memory engine alone.
 
 ## 3. Inspect and recompute the saved results
 
@@ -54,7 +54,7 @@ The self-contained `report.html` files show full contexts and individual outcome
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory-benchmark.git
 cd open-agent-memory-benchmark
-git rev-parse HEAD  # Record the benchmark source revision.
+git checkout 308eef998091ec05aa2657b637fc37222e029672  # Reviewed evidence revision.
 uv sync --locked
 uv run pytest -q tests/test_published_oam_evidence.py tests/reporting/test_historical_report.py
 ```
