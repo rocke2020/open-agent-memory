@@ -67,7 +67,7 @@ OAM 面向日常 Agent 工作中的实用记忆。在**全部 500 道 LongMemEva
 
 LME 评测使用 L1 记忆和 fast 召回，**回答上下文平均 11,481.10 tokens**。该分数表示记录的评测流程在固定参考答案下的评判接受率，不是对 v0.0.3 镜像重新运行的测量。详见[基准结果与证据](docs/benchmarks.md)。
 
-**BEAM-10M：61.56%，高于 Hindsight 已保存上下文回放的 52.16%，相差 9.40 个百分点。** 这些已保存的测量覆盖 200 道题的选定回答和 DeepSeek Flash 评判，与当前 max 回答配置分开呈现。Hindsight 没有重新运行其引擎。OAM 使用的回答上下文多 17.43%。详见[比较方法与逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m/README.md)。
+**BEAM-10M：61.56%，高于 Hindsight 已保存上下文回放的 52.16%，相差 9.40 个百分点。** 这些已保存的测量覆盖 200 道题的选定回答和 DeepSeek Flash 评判，与当前 max 回答配置分开呈现。Hindsight 没有重新运行其引擎。OAM 使用的回答上下文多 17.43%。详见[比较方法与逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m/README.md)。
 
 BEAM-10M 测试了 **10 段完整、未截断的会话历史**，每段历史有 20 道问题。报告记录各次运行的模型绑定、被评估版本和限制。
 
@@ -145,3 +145,7 @@ OpenClaw 插件独立版本为 0.0.2；MCP 和 DSH 保持 0.0.1。Tokenizer 优�
 ## 致谢
 
 感谢 [Hindsight](https://github.com/vectorize-io/hindsight)、[OpenViking](https://github.com/volcengine/OpenViking)、[Mem0](https://github.com/mem0ai/mem0)、[MemOS](https://github.com/MemTensor/MemOS)、[TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) 和 [gbrain](https://github.com/garrytan/gbrain) 的贡献者。他们的开源工作为 OAM 提供了参考。也感谢 [LongMemEval](https://github.com/xiaowu0162/LongMemEval) 和 [BEAM](https://github.com/mohammadtavakoli78/BEAM) 的作者与贡献者，提供了我们评估所用的基准。项目、评测与许可证致谢详见[完整致谢](ACKNOWLEDGMENTS.md)和[第三方声明](THIRD_PARTY.md)。
+
+## 许可证
+
+Apache License 2.0。详见 [LICENSE](LICENSE) 和 [THIRD_PARTY.md](THIRD_PARTY.md)。

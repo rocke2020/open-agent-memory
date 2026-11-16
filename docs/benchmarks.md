@@ -59,4 +59,4 @@ uv sync --locked
 uv run pytest -q tests/test_published_oam_evidence.py tests/reporting/test_historical_report.py
 ```
 
-These commands validate saved measurements. For a new run against your deployment, follow the [native OAM workflow](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/docs/native-oam.md), choose the DeepSeek max or MiniMax native-adaptive LME profile, and record actual OAM revision, settings, usage and results. New model output can vary; a successful run is not proof of score parity. Provider and infrastructure costs depend on your configuration.
+These commands validate saved measurements. For a new run against your deployment, follow the [native OAM workflow](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/docs/native-oam.md), choose the DeepSeek max or MiniMax native-adaptive LME profile, and record actual OAM revision, settings, usage and results. New model output can vary; a successful run is not proof of score parity. Provider and infrastructure costs depend on your configuration.

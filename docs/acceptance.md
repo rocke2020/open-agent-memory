@@ -69,3 +69,7 @@ Default tests use deterministic fakes and isolated ephemeral databases. Necessar
 Verify administrator user listing against an isolated migrated database: tenant isolation, active-user filtering, inclusive accepted-input activity timestamps, exact filtered totals, offset bounds and validation/authentication failures. Confirm new accepted interaction, Resource and Profile Data revisions advance the watermark, while replay, reads and generated refreshes do not. Adoption-scale latency and query-cost bounds remain unmeasured; the page-size ceiling is not a performance guarantee.
 
 Verify nonblank Insight titles, the 120-character bound, CREATE/UPDATE validation, KEEP_TEXT preservation, removal repair, migration/read fallback, export and Inspector display. A directly retrieved lexical user original remains recall-eligible without a separately retrieved fact and creates no witness or expansion authority; relevance, provenance and context budgets still apply. These checks do not imply new benchmark scores or rerun historical evaluations.
+
+## 9. v0.0.3 changed-surface checks
+
+Verify strict configuration parsing for `search.fast.entity_semantic_graph` and `search.normal.entity_semantic_graph`: each accepts `off`, `light` or `full`; removed per-mode `graph` keys fail startup validation; the HTTP `fast_graph` request override and `graph` diagnostics key remain unchanged. This rename requires no database migration or reindexing. Existing deployment, authentication, indexing and recall acceptance boundaries remain in force.

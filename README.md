@@ -67,7 +67,7 @@ OAM is built for useful memory in everyday agent work. It reaches **93.2% (466/5
 
 The LME evaluation uses fast recall with L1 memory and **11,481.10 average answer-context tokens**. This is a fixed-reference judge acceptance score for the recorded pipeline, not a fresh measurement of the v0.0.3 image. See [benchmark results and evidence](docs/benchmarks.md).
 
-**BEAM-10M: 61.56% versus Hindsight’s saved-context replay at 52.16%, a difference of 9.40 percentage points.** These saved measurements cover 200 selected answers with DeepSeek Flash judging and are separate from the current max-effort answer profile. Hindsight's engine was not rerun. OAM used 17.43% more answer context. See the [comparison methodology and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m/README.md).
+**BEAM-10M: 61.56% versus Hindsight’s saved-context replay at 52.16%, a difference of 9.40 percentage points.** These saved measurements cover 200 selected answers with DeepSeek Flash judging and are separate from the current max-effort answer profile. Hindsight's engine was not rerun. OAM used 17.43% more answer context. See the [comparison methodology and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m/README.md).
 
 BEAM-10M tested **10 complete, untruncated conversation histories**, with 20 questions per history. The linked reports record each run's model bindings, evaluated revisions and limitations.
 
@@ -145,3 +145,7 @@ Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020
 ## Acknowledgments
 
 We thank the contributors to [Hindsight](https://github.com/vectorize-io/hindsight), [OpenViking](https://github.com/volcengine/OpenViking), [Mem0](https://github.com/mem0ai/mem0), [MemOS](https://github.com/MemTensor/MemOS), [TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) and [gbrain](https://github.com/garrytan/gbrain) for their open-source work, which informed OAM. We also thank the authors and contributors of [LongMemEval](https://github.com/xiaowu0162/LongMemEval) and [BEAM](https://github.com/mohammadtavakoli78/BEAM) for the benchmarks used in our evaluations. See the [full acknowledgments](ACKNOWLEDGMENTS.md) and [third-party notices](THIRD_PARTY.md) for project, benchmark and license credits.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md).

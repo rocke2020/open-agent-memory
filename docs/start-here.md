@@ -37,7 +37,7 @@ Stop at a failed command and resolve its error before continuing. Preflight chec
 
 ## 2. Create your personal collection
 
-OAM separates the administrator key from a user's key. The administrator creates a collection; the user key reads and writes its personal content. If someone else operates the service, ask them for your user ID and user key, then continue to step 3.
+OAM separates the administrator key from a user's key. The administrator creates a collection; the user key reads and writes its personal content. If someone else operates the service, ask them for the service URL, your user ID and user key, then follow [step 1 of the HTTP quickstart](quickstart.md#1-prepare-your-connection) to set `OAM_BASE_URL`, `OAM_USER_ID` and `OAM_USER_API_KEY`, and continue to step 3.
 
 For your own deployment, open Bash with `bash` and run this block. Enter the root key from your private `deploy/.env` when prompted; input is hidden. It creates one new demo user and keeps its returned secret in the current shell without printing it. Choose a different `OAM_USER_ID` if `oam-demo` already exists; creating the same user again is not a key-recovery operation.
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release is 0.0.3; its [release record](releases/0.0.3.md) records source verification and publication evidence. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
+Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release is 0.0.3; its [release record](releases/0.0.3.md) records source verification and defers publication evidence to the GitHub Release artifacts. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
 
 Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DSH 0.0.1. Reuse their existing published archives when their package code is unchanged; do not republish an existing npm version or advance package versions solely because the product version changes. Preserve earlier product tags, images and release records.
 
@@ -28,7 +28,7 @@ The scanner inventories every tracked Markdown, reStructuredText and AsciiDoc fi
 Run the checker before building or publishing the release:
 
 ```bash
-python tools/check_release_docs.py --base v0.0.1
+python tools/check_release_docs.py --base v0.0.2
 ```
 
 The checker rejects missing release notes, pending or omitted document reviews, an `updated` claim without a document change, and reviews made stale by changes to tracked file contents. The current release record is excluded from its own fingerprint so completing the notes does not invalidate the review. New files must be staged before drafting; removed documents leave the current inventory. The **Base** field records the previous product tag's commit; **Scope** fingerprints the reviewed tracked inputs. Missing Git history or tags fails the check; fetch full history and tags first. No models or external services are called, and the checker never edits files.
@@ -52,7 +52,7 @@ npm --prefix integrations/mcp test
 npm --prefix integrations/dsh test
 ```
 
-Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.0.2, exercise user-list authentication, tenant filtering, accepted-input timestamps and migration 0037, plus Insight-title migration 0036 and its inspection/export/Inspector consumers. Apply all migrations before starting updated API/worker processes. These backfills preserve originals and do not require reindexing or model calls solely to populate titles and activity metadata.
+Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.0.3, verify that `search.fast.entity_semantic_graph` and `search.normal.entity_semantic_graph` accept `off`, `light` or `full`, that removed per-mode `graph` keys are rejected before startup, and that the HTTP `fast_graph` override and `graph` diagnostics remain unchanged. No migration or reindexing is required solely for this rename; apply previously required migrations when upgrading from an older schema.
 
 Use a task-owned PostgreSQL/pgvector instance and synthetic users for release checks. Never select persistent personal/evaluation databases. Keep historical benchmark evidence unchanged; a release smoke test is not a fresh LME-500 or BEAM-10M evaluation. [Acceptance](acceptance.md) and the version's release record define the measured scope and outstanding limits.
 

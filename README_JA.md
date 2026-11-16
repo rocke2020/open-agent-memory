@@ -67,7 +67,7 @@ OAM は日常のエージェント作業で役立つメモリを目指してい�
 
 LME 評価では L1 メモリと fast 検索を使い、**回答コンテキストは平均 11,481.10 トークン**です。このスコアは記録済みの評価パイプラインにおける固定参照回答に基づく判定の受理率であり、v0.0.3 イメージを新たに測定した結果ではありません。[ベンチマーク結果とエビデンス](docs/benchmarks.md)を参照してください。
 
-**BEAM-10M：61.56%、Hindsight の保存済みコンテキストの再評価は 52.16% で、差は 9.40 ポイントです。** 200 問の保存された選択回答と DeepSeek Flash の判定による測定であり、現在の max 回答プロファイルと分けて示しています。Hindsight のエンジンは再実行していません。OAM の回答コンテキストは 17.43% 多くなりました。[比較方法と質問ごとのエビデンス](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m/README.md)を参照してください。
+**BEAM-10M：61.56%、Hindsight の保存済みコンテキストの再評価は 52.16% で、差は 9.40 ポイントです。** 200 問の保存された選択回答と DeepSeek Flash の判定による測定であり、現在の max 回答プロファイルと分けて示しています。Hindsight のエンジンは再実行していません。OAM の回答コンテキストは 17.43% 多くなりました。[比較方法と質問ごとのエビデンス](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m/README.md)を参照してください。
 
 BEAM-10M は、**切り詰めていない完全な会話履歴 10 件**を履歴ごとに 20 問で評価しました。レポートには各実行のモデル設定、評価対象のリビジョン、制約を記録しています。
 
@@ -145,3 +145,7 @@ OpenClaw プラグインは独立したバージョン 0.0.2、MCP と DSH は 0
 ## 謝辞
 
 OAM の開発に参考となったオープンソースの取り組みを提供してくださった、[Hindsight](https://github.com/vectorize-io/hindsight)、[OpenViking](https://github.com/volcengine/OpenViking)、[Mem0](https://github.com/mem0ai/mem0)、[MemOS](https://github.com/MemTensor/MemOS)、[TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory)、[gbrain](https://github.com/garrytan/gbrain) の貢献者の皆様に感謝します。また、評価に使用したベンチマークを提供してくださった [LongMemEval](https://github.com/xiaowu0162/LongMemEval) と [BEAM](https://github.com/mohammadtavakoli78/BEAM) の著者および貢献者の皆様にも感謝します。プロジェクト、ベンチマーク、ライセンスに関する謝辞は、[謝辞の全文](ACKNOWLEDGMENTS.md)と[サードパーティに関する表示](THIRD_PARTY.md)を参照してください。
+
+## ライセンス
+
+Apache License 2.0。[LICENSE](LICENSE) と [THIRD_PARTY.md](THIRD_PARTY.md) を参照してください。
