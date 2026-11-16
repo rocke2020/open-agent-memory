@@ -2,7 +2,7 @@
 
 ## Overview
 
-Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release is 0.0.2. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
+Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The published product release is 0.0.2; the source target is 0.0.3. Its [release record](releases/0.0.3.md) distinguishes source verification from image/tag publication. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
 
 Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DSH 0.0.1. Reuse their existing published archives when their package code is unchanged; do not republish an existing npm version or advance package versions solely because the product version changes. Preserve earlier product tags, images and release records.
 

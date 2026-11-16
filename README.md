@@ -8,7 +8,7 @@ Open Agent Memory (OAM) is a fully open source memory engine for AI agents. Reme
 
 **Built for the community:** the complete memory system is [Apache-2.0 licensed](LICENSE), so we can run it, inspect it, improve it and use it together. [Build with us](CONTRIBUTING.md) or [share your experience](https://github.com/rocke2020/open-agent-memory/discussions/1).
 
-**Strong results with DeepSeek Flash:** **94% on LME-500**; on BEAM-10M, **61.56% versus Hindsight’s 52.16% (+9.40 percentage points)** using the same exact DeepSeek Flash answer/judge model and policy. These historical L1 results include at most one eligible max-effort answer retry; the Hindsight arm replays saved contexts, and OAM uses 17.43% more answer context. [Results and comparison details](#performance--accuracy).
+**93.2% on LME-500** with MiniMax M3.1 Flash native-adaptive answers and DeepSeek Flash judging. On BEAM-10M, OAM scored **61.56% versus Hindsight’s 52.16% (+9.40 percentage points)** using recorded DeepSeek Flash settings. [Results and comparison details](#performance--accuracy).
 
 ![Illustrative flow: retain a preference, start a new session, then recall it with source evidence](docs/assets/memory-across-sessions.svg)
 
@@ -63,22 +63,15 @@ Real Inspector UI with synthetic demonstration data; annotations highlight where
 
 ## Performance & Accuracy
 
-I need to control costs in both evaluation and daily use, so I chose **DeepSeek Flash**. I want OAM to provide useful memory in ordinary daily work, rather than optimize only for the highest benchmark score with the strongest model. The completed v0.0.1 development evaluations use **high-effort first answers and at most one eligible max-effort retry**, with high-effort judging, and cover **500 LongMemEval S questions** and **200 BEAM-10M questions**.
+OAM is built for useful memory in everyday agent work. It reaches **93.2% (466/500)** on **all 500 LongMemEval S questions** with MiniMax M3.1 Flash native-adaptive answers and DeepSeek Flash high-effort judging.
 
-### Recorded DeepSeek-based results
+The LME evaluation uses fast recall with L1 memory and **11,481.10 average answer-context tokens**. This is a fixed-reference judge acceptance score for the recorded pipeline, not a fresh measurement of the v0.0.3 image. See [benchmark results and evidence](docs/benchmarks.md).
 
-| Evaluation | OAM | Hindsight with DeepSeek | Observed difference |
-|---|---|---|---|
-| [LME-500: answer accuracy](https://github.com/rocke2020/open-agent-memory-benchmark/tree/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/lme500) | **94% (470/500)** | 89.6% (448/500) | **+4.4 percentage points** |
-| [BEAM-10M: mean rubric score](https://github.com/rocke2020/open-agent-memory-benchmark/tree/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/beam10m) | **61.56%** | 52.16% (saved-context replay) | **+9.40 percentage points** |
+**BEAM-10M: 61.56% versus Hindsight’s saved-context replay at 52.16%, a difference of 9.40 percentage points.** These saved measurements cover 200 selected answers with DeepSeek Flash judging and are separate from the current max-effort answer profile. Hindsight's engine was not rerun. OAM used 17.43% more answer context. See the [comparison methodology and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m/README.md).
 
-**LME comparison:** OAM used DeepSeek Flash with the high-first/max-retry policy above; the [full Hindsight reproduction](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde) used DeepSeek V4 Flash 0731 for extraction and judging and V4 Pro 0813 for answers. The model versions and answer-generation settings differ.
+BEAM-10M tested **10 complete, untruncated conversation histories**, with 20 questions per history. The linked reports record each run's model bindings, evaluated revisions and limitations.
 
-**BEAM comparison: OAM outscored Hindsight’s saved-context replay by 9.40 percentage points.** Both arms used the same exact DeepSeek Flash answer/judge model and policy on the same 200 questions. Hindsight's saved contexts were replayed; its engine was not rerun. OAM used 17.43% more answer context. See the [comparison methodology and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/blob/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/beam10m/README.md).
-
-LME-500 used fast recall with **12.4K answer-context tokens on average**. BEAM-10M tested **10 complete, untruncated conversation histories**, with 20 questions per history. The linked reports record the model bindings used in each run.
-
-These historical development runs measure retrieval, answering and judging with L1 memory; L2 Insights, User Profiles and document Resources were not scored.
+These recorded evaluations measure retrieval, answering and judging with L1 memory; L2 Insights, User Profiles and document Resources were not scored.
 
 See [benchmark results and reproduction](docs/benchmarks.md) for the evaluation methodology, model settings, context counters, evaluated revisions, limitations and every question's saved evidence.
 
@@ -131,6 +124,8 @@ The default `worker.embedded_enabled: true` requires the API, queue and worker-c
 
 ## Release Boundary
 
+v0.0.3 updates the LME-500 results and evidence links, renames graph expansion configuration to `entity_semantic_graph`, and improves public setup documentation. See the [release record](docs/releases/0.0.3.md) for verification and publication status. Integration package versions are unchanged.
+
 v0.0.2 includes all L0–L3 layers, separate Resource ingestion, fast/normal joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and normal are the supported recall modes. The Python SDK, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
 
 The [Docker/Compose guide](deploy/README.md) uses one non-root API/worker image, bundled Inspector assets and PostgreSQL/pgvector. The replica example simulates two APIs and two workers locally; it does not establish physical multi-host resilience. [OpenClaw](integrations/openclaw/README.md) and [DSH](integrations/dsh/README.md) install from npm, with OpenClaw also available on ClawHub and versioned plugin tarballs retained for reproducibility. Public release and image availability are separate from local candidate verification.
@@ -141,7 +136,7 @@ v0.0.2 adds administrator user listing, stable Insight titles, direct user-origi
 
 | Release | Planned work |
 |---|---|
-| v0.1.0 | Improve general retrieval quality and rerun retrieval, answering and judging against the existing completed LME-500 and BEAM-10M indexes, without repeating ingestion, extraction or indexing. The LME-500 target is at least 473/500 (94.6%); the published v0.0.1 result remains 470/500 (94.0%). |
+| v0.1.0 | Improve general retrieval quality and rerun retrieval, answering and judging against the existing completed LME-500 and BEAM-10M indexes, without repeating ingestion, extraction or indexing. The LME-500 target is at least 473/500 (94.6%). |
 
 The OpenClaw plugin remains independently versioned at 0.0.2; MCP and DSH remain at 0.0.1. The tokenizer optimization already shipped in the v0.0.1 source tag and is retained without reindexing. Further work includes smoother onboarding, reducing unnecessary indexing and answer-context tokens, evaluating keyword-ranking approaches, and defining shared Resource ownership and OIDC/LDAP support. These are proposed improvements, not delivered capabilities.
 

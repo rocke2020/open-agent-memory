@@ -8,7 +8,7 @@ Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。在新会�
 
 **为社区而开放：**完整记忆系统采用 [Apache-2.0 许可证](LICENSE)，让大家可以一起运行、检查、改进和使用。[参与共建](CONTRIBUTING.md)，或[分享你的使用体验](https://github.com/rocke2020/open-agent-memory/discussions/1)。
 
-**DeepSeek Flash 上的实测表现：LME-500 达到 94%；BEAM-10M 为 61.56%，高于 Hindsight 的 52.16%（+9.40 个百分点）**，两组使用完全相同的 DeepSeek Flash 回答与评判模型及策略。这些历史 L1 结果包含符合条件时至多一次最大推理强度回答重试；Hindsight 组重放已保存的上下文，OAM 的回答上下文多 17.43%。[结果与比较详情](#性能与准确率)。
+**LME-500 达到 93.2%**：使用 MiniMax M3.1 Flash 原生 adaptive 回答和 DeepSeek Flash 评判。BEAM-10M 按已记录的 DeepSeek Flash 设置为 **61.56%，高于 Hindsight 的 52.16%（+9.40 个百分点）**。[结果与比较详情](#性能与准确率)。
 
 ![示意流程：保存偏好，开启新会话，再召回偏好及其来源证据](docs/assets/memory-across-sessions.svg)
 
@@ -63,24 +63,17 @@ Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。在新会�
 
 ## 性能与准确率
 
-我需要控制评估和日常使用的成本，因此选择了 **DeepSeek Flash**。我希望 OAM 能在普通的日常工作中提供有用的记忆，而不只是配上最强模型去追求最高的基准分数。已完成的 v0.0.1 开发评估采用**首次高推理强度回答、符合条件时至多进行一次最大推理强度重试**的策略，并使用高推理强度评判，覆盖 **500 道 LongMemEval S 问题**和 **200 道 BEAM-10M 问题**。
+OAM 面向日常 Agent 工作中的实用记忆。在**全部 500 道 LongMemEval S 问题**上，使用 MiniMax M3.1 Flash 原生 adaptive 回答和 DeepSeek Flash high 强度评判，达到 **93.2%（466/500）**。
 
-### 已记录的 DeepSeek 评估结果
+LME 评测使用 L1 记忆和 fast 召回，**回答上下文平均 11,481.10 tokens**。该分数表示记录的评测流程在固定参考答案下的评判接受率，不是对 v0.0.3 镜像重新运行的测量。详见[基准结果与证据](docs/benchmarks.md)。
 
-| 评估 | OAM | 使用 DeepSeek 的 Hindsight | 观察到的差异 |
-|---|---|---|---|
-| [LME-500：回答准确率](https://github.com/rocke2020/open-agent-memory-benchmark/tree/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/lme500) | **94%（470/500）** | 89.6%（448/500） | **+4.4 个百分点** |
-| [BEAM-10M：评分量表平均得分](https://github.com/rocke2020/open-agent-memory-benchmark/tree/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/beam10m) | **61.56%** | 52.16%（已保存上下文重放） | **+9.40 个百分点** |
+**BEAM-10M：61.56%，高于 Hindsight 已保存上下文回放的 52.16%，相差 9.40 个百分点。** 这些已保存的测量覆盖 200 道题的选定回答和 DeepSeek Flash 评判，与当前 max 回答配置分开呈现。Hindsight 没有重新运行其引擎。OAM 使用的回答上下文多 17.43%。详见[比较方法与逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m/README.md)。
 
-**LME 比较：** OAM 使用 DeepSeek Flash，并采用上述首次高推理强度回答、最大推理强度重试策略；[完整的 Hindsight 复现](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde)使用 DeepSeek V4 Flash 0731 进行抽取和评判，使用 V4 Pro 0813 生成回答。模型版本和回答生成设置存在差异。
+BEAM-10M 测试了 **10 段完整、未截断的会话历史**，每段历史有 20 道问题。报告记录各次运行的模型绑定、被评估版本和限制。
 
-**BEAM 比较：OAM 比 Hindsight 已保存上下文的重放结果高 9.40 个百分点。** 两组在相同的 200 道问题上采用完全相同的 DeepSeek Flash 回答与评判模型及策略。Hindsight 使用已保存的上下文重放，没有重新运行其引擎。OAM 使用的回答上下文多 17.43%。详见[比较方法与逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/blob/32bf1921f0db7c8f0008428b06b637c1f93ff385/eval_results/beam10m/README.md)。
+这些记录的评估使用 L1 记忆评估检索、回答和评判；L2 洞察、用户画像和文档资源未纳入评分。
 
-LME-500 使用 fast 召回，**回答上下文平均为 12.4K tokens**。BEAM-10M 测试了 **10 段完整、未截断的会话历史**，每段历史有 20 道问题。链接中的报告记录了每次运行使用的模型绑定。
-
-这些历史开发运行使用 L1 记忆评估检索、回答和评判；L2 洞察、用户画像和文档资源未纳入评分。
-
-评估方法、模型设置、上下文计数、被评估版本、限制以及每道问题保留的证据，详见[基准结果与复现](docs/benchmarks.md)。
+评估方法、模型设置、上下文计数、被评估版本、限制以及每道问题的证据，详见[基准结果与复现](docs/benchmarks.md)。
 
 ## 产品模型
 
@@ -131,6 +124,8 @@ uv run oam api --config configs/oam.yaml --host 127.0.0.1
 
 ## 发布范围
 
+v0.0.3 更新 LME-500 结果与证据链接，将图扩展配置重命名为 `entity_semantic_graph`，并完善公开入门文档。验证与发布状态见[版本记录](docs/releases/0.0.3.md)。各集成包版本保持不变。
+
 v0.0.2 新增管理员用户列表、稳定的洞察标题、原始用户证据的直接召回支持及 MCP 接入。升级前先运行迁移 0036 和 0037；无需仅为标题和活动时间回填而重新索引。详见[版本变更与验证](docs/releases/0.0.2.md)。MCP、OpenClaw 和 DSH 插件分别保持其独立版本。
 
 v0.0.2 包含全部 L0–L3 层、独立的文档资源摄入、fast/normal 统一召回、来源生命周期、解释与差异比较及已记录结果的重放、可移植导出、Memory Inspector、多 API/多 Worker 恢复、一致性验收证据以及公开的多架构镜像。支持的召回模式为 fast 和 normal。Python SDK、供应商导入器、完整的用户画像工作台、托管服务、数据库高可用和多地域运行属于后续工作。
@@ -143,7 +138,7 @@ v0.0.2 新增管理员用户列表、稳定的洞察标题、原始用户证据�
 
 | 版本 | 计划工作 |
 |---|---|
-| v0.1.0 | 改进通用检索质量，并基于现有已完成的 LME-500 和 BEAM-10M 索引重新运行检索、回答和评判，不重复摄入、抽取或索引。LME-500 的目标为至少 473/500（94.6%）；已发布的 v0.0.1 结果仍为 470/500（94.0%）。 |
+| v0.1.0 | 改进通用检索质量，并基于现有已完成的 LME-500 和 BEAM-10M 索引重新运行检索、回答和评判，不重复摄入、抽取或索引。LME-500 的目标为至少 473/500（94.6%）。 |
 
 OpenClaw 插件独立版本为 0.0.2；MCP 和 DSH 保持 0.0.1。Tokenizer 优化已随 v0.0.1 源码标签交付，保留已有索引，无需重新索引。后续工作还包括更顺畅的入门体验、减少不必要的索引和回答上下文 tokens、评估关键词排名方法，以及定义共享资源所有权和 OIDC/LDAP 支持。这些是拟议改进，尚未交付。
 

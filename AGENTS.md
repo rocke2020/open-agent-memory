@@ -5,7 +5,7 @@ Always reply only in English.
 
 ## Current Mission
 
-Maintain, verify, and release Open Agent Memory v0.0.2. This repository is the self-contained product implementation and the post-handoff source of truth for public contracts, runtime code, tests, deployment assets, and release evidence.
+Maintain, verify, and release Open Agent Memory v0.0.3. This repository is the self-contained product implementation and the post-handoff source of truth for public contracts, runtime code, tests, deployment assets, and release evidence.
 
 The release must preserve L0 source evidence, derive source-backed L1 memory, generate and retrieve supported L2 Insights, build L3 Profiles only on explicit refresh, keep HTML/PDF/image Evidence Resources separate from Learned Memory, retrieve both origins together, and run with multiple stateless API and durable worker replicas over PostgreSQL/pgvector.
 
