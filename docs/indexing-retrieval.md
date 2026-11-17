@@ -59,7 +59,7 @@ Evidence accepts declared text or supported HTML/PDF/image originals, preserves 
 
 Evidence joins ordinary retrieval without entering L1/L2/L3. Resource revisions use expected-version checks; deletion immediately excludes all versions and schedules storage cleanup. Profile Data have their own registered exact-field mapping and lifecycle.
 
-`GET /profile` reads stored content without generation. An explicit refresh either reuses unchanged eligible input identity with zero calls or creates a durable operation. A successful result contains supported content and References; failed refresh preserves prior eligible content. Source changes can invalidate saved support independently of refresh. Exact Profile Data values retain their own cited authority.
+`GET /profile` reads stored content without generation. An explicit refresh either reuses unchanged eligible input identity with zero calls or creates a durable operation. Create/Refresh Profile prepares unfinished interaction inputs first: it reuses active work, retries each failed original operation at most once through existing retry guards, and advances queued Insight work. The Profile job waits through initial indexing and any subsequently queued Insight stage before generating content; compatible completed checkpoints are reused. Exhausted retries and unresolved external outcomes require operator attention rather than an automatic retry loop. A successful result contains supported content and References; failed refresh preserves prior eligible content. Source changes can invalidate saved support independently of refresh. Exact Profile Data values retain their own cited authority.
 
 Source: [resources](../src/oam/resources/), [Profiles](../src/oam/profiles/).
 

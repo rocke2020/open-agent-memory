@@ -20,6 +20,7 @@ from oam.indexing.identity import index_generation
 from oam.operations.repository import OperationRepository
 from oam.profiles.document import render_stored_profile_fields
 from oam.profiles.inputs import ProfileInputs, load_profile_inputs
+from oam.profiles.preparation import InputsPreparationUnavailable, prepare_profile_dependencies
 from oam.profiles.prompt import PROFILE_SYSTEM
 from oam.profiles.resources import public_profile_data_support
 from oam.profiles.selection import PROFILE_PURPOSE
@@ -341,6 +342,7 @@ class ProfileService:
                     snapshot.get("input_manifest") or {}, inputs.manifest
                 )
                 and not inputs.waiting_source_ids
+                and not inputs.failed_source_ids
                 and not _has_pending_delta(snapshot)
                 and not (mode == "incremental" and not snapshot.get("input_manifest"))
             ):
@@ -384,33 +386,16 @@ class ProfileService:
                 connection.cursor(), authority, self.config.queue.max_pending_per_user
             )
             dependencies: list[str] = []
-            if inputs.waiting_source_ids:
-                rows = connection.execute(
-                    "SELECT o.source_id,w.work_unit_id FROM operations o JOIN work_units w "
-                    "USING(tenant_id,user_id,operation_id) JOIN sources s "
-                    "ON (s.tenant_id,s.user_id,s.source_id)="
-                    "(o.tenant_id,o.user_id,o.source_id) "
-                    "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='consolidate' "
-                    "AND o.source_id=ANY(%s) AND o.source_version=s.active_version "
-                    "AND s.status='active' AND o.status IN ('accepted','running') "
-                    "AND w.stage='consolidate' "
-                    "AND w.status IN ('queued','running','retry_wait') "
-                    "ORDER BY o.source_id,w.work_unit_id",
-                    (
-                        authority.tenant_id,
-                        authority.user_id,
-                        list(inputs.waiting_source_ids),
-                    ),
-                ).fetchall()
-                if {row[0] for row in rows} != set(inputs.waiting_source_ids):
-                    raise ProfileInputsNotReady("Profile inputs are still indexing")
-                dependencies = [row[1] for row in rows]
-                connection.execute(
-                    "UPDATE work_units SET available_at=clock_timestamp(),"
-                    "updated_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "
-                    "AND work_unit_id=ANY(%s) AND status IN ('queued','retry_wait') "
-                    "AND available_at>clock_timestamp()",
-                    (authority.tenant_id, authority.user_id, dependencies),
+            source_ids = inputs.waiting_source_ids + inputs.failed_source_ids
+            if source_ids:
+                try:
+                    dependencies = prepare_profile_dependencies(
+                        connection, authority, self.config, source_ids
+                    )
+                except InputsPreparationUnavailable as error:
+                    raise ProfileInputsNotReady(str(error)) from error
+                require_queue_capacity(
+                    connection.cursor(), authority, self.config.queue.max_pending_per_user
                 )
             operation_id = "op_profile_" + secrets.token_hex(12)
             work_id = "work_profile_" + secrets.token_hex(12)

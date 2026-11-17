@@ -79,6 +79,8 @@ def test_all_languages_preserve_live_content_and_selection(inspector_browser):
             data = {"items": [fact], "next_after": None}
         elif "/resources" in route.request.url:
             data = {"items": [], "next_after": None}
+        elif route.request.url.endswith("/profile?max_tokens=0"):
+            data = {"profile_revision": None, "updated_at": None}
         else:
             raise AssertionError(f"Unexpected request: {route.request.url}")
         route.fulfill(content_type="application/json", body=json.dumps(data))

@@ -27,6 +27,7 @@ from oam.profiles.delta import (
 )
 from oam.profiles.document import build_profile_document
 from oam.profiles.inputs import MAX_PROMPT_UNITS, load_profile_inputs
+from oam.profiles.preparation import prepare_profile_dependencies
 from oam.profiles.prompt import PROFILE_SYSTEM
 from oam.profiles.selection import PROFILE_PURPOSE, pack_profile_request, rank_profile_candidates
 from oam.profiles.service import profile_identity, profile_query_prefix
@@ -161,6 +162,38 @@ def process_profile_claim(
             requested_mode = "incremental" if requested_mode in {None, "auto"} else requested_mode
             if scope_identity is not None and scope_identity != inputs.scope_identity.hex():
                 raise StaleProfileWork("Profile source scope changed before generation")
+            source_ids = inputs.waiting_source_ids + inputs.failed_source_ids
+            if dependencies and source_ids:
+                next_dependencies = prepare_profile_dependencies(
+                    connection, authority, config, source_ids
+                )
+                connection.execute(
+                    "UPDATE work_units SET status='queued',dependency_ids=%s,"
+                    "owner_id=NULL,lease_expires_at=NULL,fence=fence+1,"
+                    "attempts_remaining=attempts_remaining+1,updated_at=clock_timestamp() "
+                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s "
+                    "AND owner_id=%s AND fence=%s AND status='running'",
+                    (next_dependencies, *key, claim.work_unit_id, worker_id, claim.fence),
+                )
+                connection.execute(
+                    "UPDATE attempts SET disposition='succeeded',"
+                    "response_ref='profile_inputs_prepared',finished_at=clock_timestamp() "
+                    "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s "
+                    "AND attempt_id=%s AND owner_id=%s AND fence=%s",
+                    (*key, claim.work_unit_id, claim.attempt_id, worker_id, claim.fence),
+                )
+                print(
+                    json.dumps(
+                        {
+                            "stage": "profile_inputs_waiting",
+                            "operation_id": claim.operation_id,
+                            "dependencies": len(next_dependencies),
+                            "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                        }
+                    ),
+                    flush=True,
+                )
+                return
             target_identity = profile_identity(
                 inputs.identity,
                 instruction,

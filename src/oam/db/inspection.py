@@ -109,21 +109,29 @@ class SourceInspector:
             epoch = self._admit(connection, authority)
             with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
-                    "SELECT s.source_id AS resource_id,s.resource_type,s.active_version,"
+                    "WITH available AS MATERIALIZED ("
+                    "SELECT s.tenant_id,s.user_id,s.source_id AS resource_id,"
+                    "s.resource_type,s.active_version,v.received_at,"
                     "v.media_type,v.byte_length,encode(v.content_sha256,'hex') AS sha256,"
-                    "o.operation_id,o.status AS operation_status,o.stage_state "
+                    "s.input_role "
                     "FROM sources s JOIN source_versions v ON "
                     "(v.tenant_id,v.user_id,v.source_id,v.source_version)="
                     "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
+                    "WHERE s.tenant_id=%s AND s.user_id=%s AND s.status='active' "
+                    "AND s.input_role=%s AND v.status='active'),"
+                    "page AS (SELECT * FROM available WHERE resource_id>%s "
+                    "ORDER BY resource_id LIMIT %s) "
+                    "SELECT totals.updated_at,p.resource_id,p.resource_type,p.active_version,"
+                    "p.media_type,p.byte_length,p.sha256,"
+                    "o.operation_id,o.status AS operation_status,o.stage_state "
+                    "FROM (SELECT max(received_at) AS updated_at FROM available) totals "
+                    "LEFT JOIN page p ON true "
                     "LEFT JOIN LATERAL (SELECT operation_id,status,stage_state FROM operations "
-                    "WHERE tenant_id=s.tenant_id AND user_id=s.user_id AND source_id=s.source_id "
-                    "AND source_version=s.active_version "
+                    "WHERE tenant_id=p.tenant_id AND user_id=p.user_id AND source_id=p.resource_id "
+                    "AND source_version=p.active_version "
                     "AND kind IN ('index_resource','index_profile_resource') "
                     "ORDER BY created_at DESC,operation_id DESC LIMIT 1) o ON true "
-                    "WHERE s.tenant_id=%s AND s.user_id=%s AND s.status='active' "
-                    "AND s.input_role=%s "
-                    "AND v.status='active' "
-                    "AND s.source_id>%s ORDER BY s.source_id LIMIT %s",
+                    "ORDER BY p.resource_id",
                     (
                         authority.tenant_id,
                         authority.user_id,
@@ -133,17 +141,23 @@ class SourceInspector:
                     ),
                 )
                 rows = cursor.fetchall()
+            records = [
+                {k: v for k, v in row.items() if k != "updated_at"}
+                for row in rows
+                if row["resource_id"] is not None
+            ]
             items = [
                 self._collection_row(self._resource_row(row), input_role)
-                for row in rows[:INSPECTION_PAGE_SIZE]
+                for row in records[:INSPECTION_PAGE_SIZE]
             ]
             self._check_policy(connection, authority, epoch)
             return {
                 "items": items,
+                "updated_at": rows[0]["updated_at"],
                 "next_after": items[-1][
                     "profile_data_id" if input_role == "profile_resource" else "resource_id"
                 ]
-                if len(rows) > INSPECTION_PAGE_SIZE
+                if len(records) > INSPECTION_PAGE_SIZE
                 else None,
                 "policy_epoch": epoch,
             }
@@ -344,7 +358,8 @@ class SourceInspector:
                     "ORDER BY created_at DESC,unit_id DESC LIMIT %s OFFSET %s),"
                     "selected AS (SELECT u.* FROM page JOIN search_units u "
                     "USING(tenant_id,user_id,unit_id)) "
-                    "SELECT totals.total,item.* FROM (SELECT count(*) AS total FROM filtered) "
+                    "SELECT totals.total,totals.updated_at,item.* FROM "
+                    "(SELECT count(*) AS total,max(created_at) AS updated_at FROM filtered) "
                     f"totals LEFT JOIN LATERAL ({_MEMORY_ITEMS}) item ON true "
                     "ORDER BY item.created_at DESC,item.unit_id DESC",
                     (kind, kind, cursor_time, cursor_time, after or "", page_size + 1, offset),
@@ -352,7 +367,9 @@ class SourceInspector:
                 rows = cursor.fetchall()
             total = rows[0]["total"]
             records = [
-                {k: v for k, v in row.items() if k != "total"} for row in rows if row["unit_id"]
+                {k: v for k, v in row.items() if k not in {"total", "updated_at"}}
+                for row in rows
+                if row["unit_id"]
             ]
             items = records[:page_size]
             for item in items:
@@ -364,6 +381,7 @@ class SourceInspector:
             return {
                 "items": items,
                 "total": total,
+                "updated_at": rows[0]["updated_at"],
                 "limit": page_size,
                 "offset": None if after else offset,
                 "next_offset": offset + page_size if has_more and not after else None,
