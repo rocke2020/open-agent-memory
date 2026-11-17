@@ -8,7 +8,7 @@ Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。在新会�
 
 **为社区而开放：**完整记忆系统采用 [Apache-2.0 许可证](LICENSE)，让大家可以一起运行、检查、改进和使用。[参与共建](CONTRIBUTING.md)，或[分享你的使用体验](https://github.com/rocke2020/open-agent-memory/discussions/1)。
 
-**LME-500 达到 93.2%**：使用 MiniMax M3.1 Flash 原生 adaptive 回答和 DeepSeek Flash 评判。BEAM-10M 按已记录的 DeepSeek Flash 设置为 **61.56%，高于 Hindsight 的 52.16%（+9.40 个百分点）**。[结果与比较详情](#性能与准确率)。
+**LME-500 达到 95.2%（476/500）**：使用 MiniMax M3.1 Flash 原生 adaptive 回答和评判，检索上下文上限为 18k。BEAM-10M 按已记录的 DeepSeek Flash 设置为 **61.56%，高于 Hindsight 的 52.16%（+9.40 个百分点）**。[结果与比较详情](#性能与准确率)。
 
 ![示意流程：保存偏好，开启新会话，再召回偏好及其来源证据](docs/assets/memory-across-sessions.svg)
 
@@ -63,9 +63,9 @@ Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。在新会�
 
 ## 性能与准确率
 
-OAM 面向日常 Agent 工作中的实用记忆。在**全部 500 道 LongMemEval S 问题**上，使用 MiniMax M3.1 Flash 原生 adaptive 回答和 DeepSeek Flash high 强度评判，达到 **93.2%（466/500）**。
+OAM 面向日常 Agent 工作中的实用记忆。在**全部 500 道 LongMemEval S 问题**上，使用 MiniMax M3.1 Flash 原生 adaptive 回答和评判，达到 **95.2%（476/500）**。Hindsight 的已记录结果为 **94.6%（473/500）**；两者的回答与评判模型不同，因此比较的是完整评测流程的记录结果。
 
-LME 评测使用 L1 记忆和 fast 召回，**回答上下文平均 11,481.10 tokens**。该分数表示记录的评测流程在固定参考答案下的评判接受率，不是对 v0.0.3 镜像重新运行的测量。详见[基准结果与证据](docs/benchmarks.md)。
+最新 LME 评测使用 L1 记忆和 normal 召回，**上下文上限为 18,000 tokens**，497 道实际评分问题的**已保存上下文平均为 11,373.58 tokens**。另有 3 道参考答案存在争议的问题继续按错误计入原有的 500 题分母。已保存格式化上下文比 Hindsight 记录小 **73.63%**，这一比较不代表模型供应商的计费 tokens。冻结的检索源码与当前 main 一致，未重新评测 v0.0.3 镜像。详见[基准结果与证据](docs/benchmarks.md)。
 
 **BEAM-10M：61.56%，高于 Hindsight 已保存上下文回放的 52.16%，相差 9.40 个百分点。** 这些已保存的测量覆盖 200 道题的选定回答和 DeepSeek Flash 评判，与当前 max 回答配置分开呈现。Hindsight 没有重新运行其引擎。OAM 使用的回答上下文多 17.43%。详见[比较方法与逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m/README.md)。
 
@@ -86,7 +86,7 @@ BEAM-10M 测试了 **10 段完整、未截断的会话历史**，每段历史有
 
 在 `api_key` 模式下，由凭据确定的租户与用户密钥绑定的 `user_id` 共同标识一个个人记忆集合。管理员通过 `POST /v1/users` 创建用户，并仅在创建时收到该用户的首个密钥；宿主应用使用用户密钥调用 `POST /v1/retain` 写入交互、调用 `POST /v1/users/{user_id}/resources` 写入文档原件、调用 `POST /v1/users/{user_id}/profile-data` 写入结构化用户输入，并调用 `POST /v1/recall` 召回。管理员密钥不能直接读写个人内容。本地 `dev` 模式允许不带密钥的请求，不提供隐私隔离保证；`trusted` 模式使用网关声明租户和用户身份的请求头，非本地请求需要根密钥。交互写入不要求调用方管理来源或消息 ID。文档使用稳定的 `document_id`，并显式选择 `replace` 或仅适用于文本的 `append`；修订版本由 OAM 分配。[HTTP API](docs/api.md) 说明了模式选择、JSON 和 multipart 示例、用户密钥轮换、重试键和操作就绪状态。
 
-召回对完整渲染后的上下文使用单一上限：`search.fast.context_max_tokens: 18000` 和 `search.normal.context_max_tokens: 32768`。默认包含原文片段；设置 `include.chunks: false` 会省略完整原文正文，但保留符合条件的学习文本、必需的支持事实和引用。学习证据与原文均按相关性接纳，包括没有抽取出事实的原文。完整证据组必须在预算内整体放入，不能截断；共享来源片段只计数一次。如果唯一符合条件的 L1 事实及其完整支持材料超出总上限，且此前尚未接纳排名更高的主结果，则仅返回这一证据组、停止继续填充，并报告超出量。洞察不适用这一例外。`context_tokens` 使用本地 `o200k_base` tokenizer 统计完整返回文本，包括引用和元数据。它不等于供应商用量；宿主应用应另行统计最终组合后的模型输入。
+召回对完整渲染后的上下文使用单一上限：`search.fast.context_max_tokens: 18000` 和 `search.normal.context_max_tokens: 24000`。默认包含原文片段；设置 `include.chunks: false` 会省略完整原文正文，但保留符合条件的学习文本、必需的支持事实和引用。学习证据与原文均按相关性接纳，包括没有抽取出事实的原文。完整证据组必须在预算内整体放入，不能截断；共享来源片段只计数一次。如果唯一符合条件的 L1 事实及其完整支持材料超出总上限，且此前尚未接纳排名更高的主结果，则仅返回这一证据组、停止继续填充，并报告超出量。洞察不适用这一例外。`context_tokens` 使用本地 `o200k_base` tokenizer 统计完整返回文本，包括引用和元数据。它不等于供应商用量；宿主应用应另行统计最终组合后的模型输入。
 
 ## 架构
 

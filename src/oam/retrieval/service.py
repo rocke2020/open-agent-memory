@@ -32,6 +32,7 @@ from oam.retrieval.context import (
     bundle_items,
     context_token_count,
     render_context,
+    represent_group,
     source_diverse_seed_order,
     source_window_excerpts,
     source_window_ids,
@@ -517,12 +518,18 @@ class RecallService:
         hydrated_passages = {row["unit_id"]: row for row in hydrated if row["kind"] == "passage"}
         context_limit = request.context_limit(self.config)
         chunks = request.include.chunks
+        fact_source_bodies = (
+            self.config.search.fast.fact_source_bodies if mode == "fast" and chunks else "required"
+        )
+        admission_source_bodies = (
+            "required" if fact_source_bodies == "assistant_deduplicated" else fact_source_bodies
+        )
         candidates = []
         for row in hydrated:
             item = {key: value for key, value in row.items() if key != "locator"}
             item["paths"] = paths.get(item["unit_id"], [])
             candidates.append(item)
-        seed_limit = min(tier.source_seed_results, tier.max_results)
+        seed_limit = tier.source_seed_results
         ranked_candidates = [item for item in candidates if item["unit_id"] != related_tail_id]
         discovery_seed_items = source_diverse_seed_order(ranked_candidates)[:seed_limit]
         seed_items = [
@@ -846,6 +853,29 @@ class RecallService:
                 )
                 recovery_source_count = len(discovery_source_keys)
             if discovery_source_keys:
+                excluded_originals = tuple(hydrated_passages)
+                if gate_active:
+                    # Fetched support for a late fact may never be admitted.
+                    # Only direct roots and this source's anchor support already
+                    # have their own intended position in context assembly.
+                    recovery_exclusions = {
+                        item["unit_id"] for item in ranked_candidates if item["kind"] == "passage"
+                    }
+                    anchor_ids = set(recovery_anchors.values())
+                    for item in candidates:
+                        if item["unit_id"] not in anchor_ids:
+                            continue
+                        for citation in item["citations"]:
+                            locator = by_citation.get(
+                                (
+                                    citation.get("source_id"),
+                                    citation.get("source_version"),
+                                    citation.get("passage_id"),
+                                )
+                            )
+                            if locator is not None:
+                                recovery_exclusions.add(locator["unit_id"])
+                    excluded_originals = tuple(sorted(recovery_exclusions))
                 originals = (
                     stage(
                         "source_user_originals",
@@ -854,17 +884,32 @@ class RecallService:
                             discovery_source_keys,
                             vector,
                             seed_limit,
-                            tuple(hydrated_passages),
+                            excluded_originals,
                         ),
                     )
                     or []
                 )
                 if originals:
                     original_ids = tuple(dict.fromkeys(row["unit_id"] for row in originals))
+                    if gate_active:
+                        missing_ids = [
+                            node for node in original_ids if node not in hydrated_passages
+                        ]
+                        if missing_ids:
+                            hydrated_passages.update(
+                                (row["unit_id"], row) for row in read("hydrate", missing_ids)
+                            )
+                        original_rows = [
+                            hydrated_passages[node]
+                            for node in original_ids
+                            if node in hydrated_passages
+                        ]
+                    else:
+                        original_rows = read("hydrate", original_ids)
                     recovered = []
-                    for row in read("hydrate", original_ids):
+                    for row in original_rows:
                         item = {key: value for key, value in row.items() if key != "locator"}
-                        item["paths"] = paths.get(item["unit_id"], [])
+                        item["paths"] = paths.get(item["unit_id"], item.get("paths", []))
                         recovered.append(item)
                         if gate_active and item["kind"] == "passage" and item["origin"] == "memory":
                             for citation in item["citations"]:
@@ -874,7 +919,12 @@ class RecallService:
                                     recovered_user_context.setdefault(owner, []).append(item)
                                     recovered_user_ids.add(item["unit_id"])
                                     break
-                    candidates = [*candidates, *recovered]
+                    existing_ids = (
+                        {item["unit_id"] for item in candidates} if gate_active else set()
+                    )
+                    candidates.extend(
+                        item for item in recovered if item["unit_id"] not in existing_ids
+                    )
         original_detail_set = set(original_detail_ids)
         evidence_groups = []
         passages_by_id = {item["unit_id"]: item for item in source_passages}
@@ -1060,14 +1110,25 @@ class RecallService:
                     if row["kind"] == "passage"
                 },
             )
-            # Direct user originals need no second retrieval of a derived fact.
+            # Preserve the lexical arm's leading original without a dense witness.
+            # Weaker assistant matches still need their local user-fact evidence.
+            lexical_original = next(
+                (
+                    node
+                    for node in arms.get("lexical", ())
+                    if (row := hydrated_passages.get(node)) is not None
+                    and row["origin"] == "memory"
+                    and row.get("locator", {}).get("role") in {"user", "assistant"}
+                ),
+                None,
+            )
             # Keep this exemption local: it cannot authorize source expansion.
             allowed_ids.update(
                 node
                 for node, row in hydrated_passages.items()
                 if node in arms.get("lexical", ())
                 and row["origin"] == "memory"
-                and row.get("locator", {}).get("role") == "user"
+                and (row.get("locator", {}).get("role") == "user" or node == lexical_original)
             )
             # Source-local recovery admits user originals without creating witnesses.
             allowed_ids.update(recovered_user_ids)
@@ -1122,6 +1183,141 @@ class RecallService:
         if tier.partial_match_gate != "off" or tier.adjacent_user_context:
             timing["local_context_selection"] = (time.monotonic() - selection_started) * 1000
             executed.append("local_context_selection")
+        if admission_source_bodies != "required":
+            source_passages = []
+            optional_context = {}
+        fast_rerank = {
+            "status": "disabled",
+            "applied": False,
+            "root_cap": None,
+            "candidates": 0,
+            "documents": 0,
+            "scored": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "min_score": None,
+            "omitted_ids": [],
+            "omission_reasons": {},
+            "optional_omissions": [],
+        }
+        rerank_omissions = {}
+        if mode == "fast" and self.config.models.reranker is not None and tier.rerank_candidates:
+            groups = {group[0]["unit_id"]: group for group in evidence_groups}
+            roots = {}
+            for item in (*packing_candidates, *source_passages):
+                if (chunks or item["kind"] not in ORIGINAL_KINDS) and (
+                    item["kind"] in ORIGINAL_KINDS or item["unit_id"] in groups
+                ):
+                    roots.setdefault(item["unit_id"], item)
+            capped = list(roots)[: tier.rerank_candidates]
+            floor = self.config.search.fast.rerank_min_score
+            root_texts = {
+                node: render_context(
+                    represent_group(
+                        groups.get(node, [roots[node]]), fact_source_bodies=admission_source_bodies
+                    )
+                )
+                for node in capped
+            }
+            fact_texts = {
+                node: render_context([roots[node]])
+                for node in capped
+                if roots[node]["kind"] == "fact"
+            }
+            optional_texts = {
+                node: [(item, render_context([item])) for item in optional_context.get(node, [])]
+                for node in capped
+            }
+            documents = tuple(
+                dict.fromkeys(
+                    [
+                        *root_texts.values(),
+                        *fact_texts.values(),
+                        *(text for entries in optional_texts.values() for _, text in entries),
+                    ]
+                )
+            )
+            fast_rerank.update(
+                status="empty",
+                root_cap=tier.rerank_candidates,
+                candidates=len(roots),
+                documents=len(documents),
+                min_score=floor,
+                fact_score_method="min_group_unit",
+            )
+            if documents:
+                # No transaction may span external scoring. All subsequent reads are fresh.
+                sql_phase.close()
+                shared_repository = None
+                sql_phase_ready = False
+
+                def score_fast():
+                    scored = self.models.rerank(
+                        request.query, documents, timeout_seconds=_remaining(deadline)
+                    )
+                    return scored, dict(zip(documents, scored.scores, strict=True))
+
+                scoring = stage("rerank", score_fast)
+                # External I/O can outlive source-generation or policy changes.
+                index_state = read("user_state")
+                if index_state["index_generation_id"] != initial_index_state["index_generation_id"]:
+                    raise RecallUnavailable("user generation changed during recall")
+                if index_state["parse_partial"] and not request.allow_partial:
+                    raise RecallUnavailable("PDF parse became incomplete during recall")
+                if index_state["policy_epoch"] != initial_index_state["policy_epoch"]:
+                    raise RecallUnavailable("source policy changed during recall")
+                if scoring is None:
+                    fast_rerank["status"] = "degraded"
+                else:
+                    scored, text_scores = scoring
+                    usage["rerank"] = scored.usage.model_dump(mode="json")
+                    rerank_scores = {
+                        node: min(text_scores[text], text_scores[fact_texts[node]])
+                        if node in fact_texts
+                        else text_scores[text]
+                        for node, text in root_texts.items()
+                    }
+                    kept = [
+                        node for node in capped if floor is None or rerank_scores[node] >= floor
+                    ]
+                    kept.sort(key=lambda node: -rerank_scores[node])
+                    rerank_omissions = {
+                        node: "rerank_root_cap" if node not in root_texts else "rerank_score_floor"
+                        for node in roots
+                        if node not in kept
+                    }
+                    packing_candidates = [roots[node] for node in kept]
+                    source_passages = []
+                    evidence_groups = [groups[node] for node in kept if node in groups]
+                    optional_context = {
+                        node: [
+                            item
+                            for item, text in sorted(
+                                optional_texts[node], key=lambda entry: -text_scores[entry[1]]
+                            )
+                            if floor is None or text_scores[text] >= floor
+                        ]
+                        for node in kept
+                    }
+                    fast_rerank.update(
+                        status="applied",
+                        applied=True,
+                        scored=len(capped),
+                        accepted=len(kept),
+                        rejected=len(roots) - len(kept),
+                        omitted_ids=list(rerank_omissions),
+                        omission_reasons=rerank_omissions,
+                        optional_omissions=[
+                            {
+                                "owner_unit_id": node,
+                                "unit_id": item["unit_id"],
+                                "reason": "rerank_score_floor",
+                            }
+                            for node in kept
+                            for item, text in optional_texts[node]
+                            if floor is not None and text_scores[text] < floor
+                        ],
+                    )
         packing_started = time.monotonic()
         items, budget_omissions, admitted_roots, oversized_single_fact = assemble_context(
             packing_candidates,
@@ -1131,6 +1327,7 @@ class RecallService:
             max_results=tier.max_results,
             evidence_groups=evidence_groups,
             optional_context=optional_context,
+            fact_source_bodies=admission_source_bodies,
         )
         timing["context_packing"] = (time.monotonic() - packing_started) * 1000
         selected_insights = [
@@ -1151,7 +1348,8 @@ class RecallService:
             identity = diagnostic["unit_id"]
             if identity not in selected_ids:
                 diagnostic.update(
-                    status="budget_omitted", reason="complete_group_exceeds_hard_limit"
+                    status="rerank_omitted" if identity in rerank_omissions else "budget_omitted",
+                    reason=rerank_omissions.get(identity, "complete_group_exceeds_hard_limit"),
                 )
                 continue
             old = next(item for item in primary_insights if item["unit_id"] == identity)
@@ -1176,17 +1374,30 @@ class RecallService:
                 for path in item["paths"]
                 if path.get("arm") != "l2_source" or path["insight_id"] in retained_identities
             ]
-        items = bundle_items(admitted_roots)
+        items = bundle_items(admitted_roots, fact_source_bodies=admission_source_bodies)
         context = render_context(items)
         context_tokens = context_token_count(context)
         while context_tokens > context_limit and admitted_roots and not oversized_single_fact:
             removed = admitted_roots.pop()
             budget_omissions.append(removed[0]["unit_id"])
-            items = bundle_items(admitted_roots)
+            items = bundle_items(admitted_roots, fact_source_bodies=admission_source_bodies)
             context = render_context(items)
             context_tokens = context_token_count(context)
+        assistant_deduplicated_fact_ids = []
+        if fact_source_bodies == "assistant_deduplicated":
+            projection_started = time.monotonic()
+            required_ids = {item["unit_id"] for item in items}
+            items = bundle_items(admitted_roots, fact_source_bodies=fact_source_bodies)
+            context = render_context(items)
+            context_tokens = context_token_count(context)
+            projected_ids = {item["unit_id"] for item in items}
+            assistant_deduplicated_fact_ids = sorted(required_ids - projected_ids)
+            timing["context_packing"] += (time.monotonic() - projection_started) * 1000
         selected_ids = {item["unit_id"] for item in items}
         omitted_by_gate = [node for node in gate_omissions if node not in selected_ids]
+        omitted_by_rerank = {
+            node: reason for node, reason in rerank_omissions.items() if node not in selected_ids
+        }
         for diagnostic in l2_diagnostics:
             if diagnostic["status"] == "included" and diagnostic["unit_id"] not in selected_ids:
                 diagnostic.update(
@@ -1198,6 +1409,27 @@ class RecallService:
             "oversized_single_fact": oversized_single_fact,
             "overrun_tokens": max(0, context_tokens - context_limit),
             "include_chunks": chunks,
+            **(
+                {"fact_source_bodies": fact_source_bodies}
+                if fact_source_bodies != "required"
+                else {}
+            ),
+            **(
+                {
+                    "source_deduplicated_fact_ids": [
+                        item["unit_id"]
+                        for item in bundle_items(admitted_roots)
+                        if item["kind"] == "fact" and item["unit_id"] not in selected_ids
+                    ]
+                }
+                if fact_source_bodies == "ranked_deduplicated"
+                else {}
+            ),
+            **(
+                {"assistant_deduplicated_fact_ids": assistant_deduplicated_fact_ids}
+                if fact_source_bodies == "assistant_deduplicated"
+                else {}
+            ),
             "learned_count": sum(item["kind"] not in ORIGINAL_KINDS for item in items),
             "original_count": sum(item["kind"] in ORIGINAL_KINDS for item in items),
             "omitted_ids": list(
@@ -1207,6 +1439,7 @@ class RecallService:
                         *source_omissions,
                         *sorted(support_limit_omissions),
                         *omitted_by_gate,
+                        *omitted_by_rerank,
                     ]
                 )
             ),
@@ -1215,6 +1448,7 @@ class RecallService:
                 **dict.fromkeys(source_omissions, "missing_or_invalid_source_support"),
                 **dict.fromkeys(sorted(support_limit_omissions), "support_expansion_limit"),
                 **dict.fromkeys(omitted_by_gate, "partial_match_without_local_witness"),
+                **omitted_by_rerank,
                 **{
                     entry["unit_id"]: entry["reason"] for entry in l2_diagnostics if entry["reason"]
                 },
@@ -1228,6 +1462,7 @@ class RecallService:
             "context_tokens": context_tokens,
             "tokenizer": CONTEXT_TOKENIZER,
             "diagnostics": {
+                **({"rerank": fast_rerank} if mode == "fast" else {}),
                 "recall_level": mode,
                 "graph": graph,
                 "causal_graph": causal_graph,

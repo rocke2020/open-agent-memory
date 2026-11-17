@@ -507,7 +507,13 @@ class RecallRepository:
             getattr(self.config.search, request.recall_level.value).lexical_ranking == "whole_query"
         )
         if whole_query:
-            parameters["normalization"] = LEXICAL_WHOLE_QUERY_NORMALIZATION
+            parameters["normalization"] = (
+                LEXICAL_DOCUMENT_LENGTH_NORMALIZATION
+                if self.request is not None
+                and request.recall_level.value == "normal"
+                and not fallback
+                else LEXICAL_WHOLE_QUERY_NORMALIZATION
+            )
         candidate, primary, full, term_queries = _rank_queries(terms, parameters)
         if fallback:
             candidate = primary = full = _tsquery(candidates, "&&", parameters, "fallback")
@@ -857,7 +863,8 @@ class RecallRepository:
         return self._execute(
             "WITH eligible AS NOT MATERIALIZED ("
             + ELIGIBLE_PASSAGE_UNITS
-            + ") SELECT u.unit_id FROM search_units u WHERE "
+            + "), source_candidates AS MATERIALIZED ("
+            "SELECT u.unit_id,u.embedding FROM search_units u WHERE "
             + owner_scope()
             + "AND u.kind='passage' "
             "AND u.origin='memory' AND u.locator->>'role'='user' "
@@ -866,8 +873,9 @@ class RecallRepository:
             "AND NOT (u.unit_id=ANY(%(excluded_ids)s::text[])) "
             "AND (SELECT true FROM eligible qualified WHERE "
             "(qualified.tenant_id,qualified.user_id,qualified.unit_id)="
-            "(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
-            "ORDER BY u.embedding <=> %(vector)s::vector LIMIT %(limit)s",
+            "(u.tenant_id,u.user_id,u.unit_id)) IS TRUE) "
+            "SELECT u.unit_id FROM source_candidates u "
+            "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id LIMIT %(limit)s",
             {
                 "source_ids": [key[0] for key in source_keys],
                 "source_versions": [key[1] for key in source_keys],
