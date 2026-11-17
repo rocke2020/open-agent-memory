@@ -316,7 +316,7 @@ class EmbeddingOnly:
         return SimpleNamespace(vectors=((0.1,),), usage=Usage(coverage="complete"))
 
 
-def test_fast_never_calls_a_configured_reranker():
+def test_fast_binding_alone_does_not_call_a_reranker():
     values = CONFIG.model_dump(mode="json")
     values["models"]["reranker"] = {
         "protocol": "openai_compatible",
@@ -324,7 +324,6 @@ def test_fast_never_calls_a_configured_reranker():
         "endpoint_env": "UNUSED_SCORER_ENDPOINT",
         "capabilities": ["rerank"],
     }
-    values["search"]["fast"]["rerank_candidates"] = 48
     config = type(CONFIG).model_validate(values)
 
     class NoScoring(EmbeddingOnly):

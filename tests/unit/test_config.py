@@ -34,11 +34,12 @@ def test_index_causal_extraction_switch_is_owned_by_canonical_yaml():
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_recall_causal_switch_is_independent_of_entity_graph_mode(mode):
-    from oam.config import SearchTier
+    from oam.config import FastSearchTier, SearchTier
 
     values = yaml.safe_load((REPOSITORY_ROOT / "configs/oam.yaml").read_text())["search"][mode]
-    disabled = SearchTier.model_validate(values)
-    enabled = SearchTier.model_validate(
+    tier_type = FastSearchTier if mode == "fast" else SearchTier
+    disabled = tier_type.model_validate(values)
+    enabled = tier_type.model_validate(
         {**values, "causal_graph": True, "entity_semantic_graph": "off"}
     )
     assert disabled.causal_graph is False
@@ -230,7 +231,7 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
         config.search.normal.max_results,
     ) == (64, 154, 36, 154)
     assert config.search.fast.context_max_tokens == 18000
-    assert config.search.normal.context_max_tokens == 32768
+    assert config.search.normal.context_max_tokens == 24000
     assert "context" not in type(config).model_fields
     assert "recall" not in type(config.chunk).model_fields
     assert config.profile.max_response_tokens == 18000

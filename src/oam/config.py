@@ -13,6 +13,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    FiniteFloat,
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
@@ -120,6 +121,13 @@ class SearchTier(FrozenModel):
         return self
 
 
+class FastSearchTier(SearchTier):
+    rerank_min_score: FiniteFloat | None = None
+    fact_source_bodies: Literal[
+        "required", "ranked", "ranked_deduplicated", "assistant_deduplicated"
+    ] = "required"
+
+
 class NormalArmWeights(FrozenModel):
     lexical: PositiveFloat
     dense: PositiveFloat
@@ -149,7 +157,7 @@ class SearchConfig(FrozenModel):
     temporal_semantic_floor: float = Field(ge=0, le=1)
     ann_iterative_scan: Literal["strict_order"]
     ann_scan_max_tuples: PositiveInt
-    fast: SearchTier
+    fast: FastSearchTier
     normal: SearchTier
 
     @field_validator("fts_rank_weights")
@@ -469,6 +477,17 @@ class OAMConfig(FrozenModel):
     export: ExportConfig
     backup: BackupConfig
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+
+    @model_validator(mode="after")
+    def validate_fast_rerank(self) -> OAMConfig:
+        if self.search.fast.rerank_min_score is not None and (
+            self.models.reranker is None or self.search.fast.rerank_candidates is None
+        ):
+            raise ValueError(
+                "search.fast.rerank_min_score requires models.reranker and "
+                "search.fast.rerank_candidates"
+            )
+        return self
 
     def for_insight_source_batch(self) -> OAMConfig:
         """Apply source-batch packing limits without changing L1 or target lookup limits."""

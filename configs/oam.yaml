@@ -124,8 +124,10 @@ search:
   # Upper bound on tuples visited by iterative ANN scans.
   ann_scan_max_tuples: 20000
   # Per mode: channel_candidates caps each arm; fused_candidates caps rank fusion.
-  # rerank_candidates caps optional normal-mode reranking; fast never calls a reranker.
+  # rerank_candidates plus models.reranker opts into non-generative scoring.
+  # Fast scores complete eligible roots late; normal retains early row scoring.
   # source_seed_results caps fact/original seeds and recovered user originals.
+  # It also bounds dense reply witnesses independently of max_results.
   # max_results caps each learned-text and original-text pool independently.
   # The combined response can contain up to twice this many items.
   # entity_semantic_graph selects entity and semantic graph expansion per mode:
@@ -154,10 +156,15 @@ search:
     channel_candidates: 64
     fused_candidates: 128
     rerank_candidates: null
+    # Optional provider-specific floor; null reorders without score filtering.
+    # A finite floor requires both rerank_candidates and models.reranker.
+    rerank_min_score: null
+    # ranked keeps fact citations; full source bodies compete as standalone roots.
+    fact_source_bodies: required
     source_seed_results: 36
     max_results: 96
   normal:
-    context_max_tokens: 32768
+    context_max_tokens: 24000
     entity_semantic_graph: light
     causal_graph: false
     lexical_ranking: per_term
@@ -421,5 +428,6 @@ models:
     api_key_env: OAM_EMBEDDING_KEY
     # Declared capabilities; embedding roles require embeddings.
     capabilities: [embeddings]
-  # null disables the optional reranking stage; a binding enables it for normal search.
+  # null disables scoring; a binding enables normal scoring and fast scoring
+  # only when search.fast.rerank_candidates is also configured.
   reranker: null

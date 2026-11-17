@@ -138,8 +138,8 @@ def test_bilingual_fts_keeps_partial_candidates_and_ranks_primary_and_modifiers(
     assert [row["unit_id"] for row in repository.lexical("apples orchard", 3)] == ["c_english"]
 
 
-def add_user_passage(connection, authority, node_id, text, mentioned_at):
-    add_fact(connection, authority, node_id, text)
+def add_user_passage(connection, authority, node_id, text, mentioned_at, *, direction=1.0):
+    add_fact(connection, authority, node_id, text, direction=direction)
     connection.execute(
         "INSERT INTO search_units(tenant_id,user_id,unit_id,kind,origin,source_id,"
         "source_version,evidence_id,passage_id,generation_id,content_text,locator,"
@@ -187,6 +187,48 @@ def test_source_user_originals_filter_role_revision_and_eligibility_before_limit
     ]
     assert repository.source_user_passage_ids((("z_user", 2),), vector, 1, ()) == []
     assert repository.source_user_passage_ids(keys, vector, 1, ("z_user_passage",)) == []
+
+
+def test_source_user_originals_rank_selected_sources_when_global_ann_is_exhausted(
+    recall_database,
+):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    for index in range(128):
+        add_user_passage(
+            connection,
+            authority,
+            f"unselected_{index:03d}",
+            "A closer unrelated source.",
+            None,
+            direction=0.99 - index / 1024,
+        )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={"search": config.search.model_copy(update={"ann_scan_max_tuples": 1})}
+    )
+    dimensions = config.index.embedding_dimensions
+    for identifier, direction in (("selected_a", 0.8), ("selected_b", 0.6), ("selected_c", 0.4)):
+        add_user_passage(
+            connection,
+            authority,
+            identifier,
+            "A selected source original.",
+            None,
+            direction=direction,
+        )
+    for table in ("search_units", "passages", "evidence", "sources", "source_versions"):
+        connection.execute(f"ANALYZE {table}")
+    connection.execute("SET LOCAL ROLE oam_api")
+    connection.execute("SET LOCAL hnsw.ef_search=1")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 10)
+    vector = [1.0] + [0.0] * (dimensions - 1)
+    source_keys = (("selected_c", 1), ("selected_a", 1), ("selected_b", 1))
+
+    assert [
+        row["unit_id"] for row in repository.source_user_passage_ids(source_keys, vector, 2, ())
+    ] == ["selected_a_passage", "selected_b_passage"]
 
 
 def test_direct_retrieval_filters_ineligible_rows_before_its_limit(recall_database):

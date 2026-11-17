@@ -164,7 +164,7 @@ def test_batch_resolves_mode_default_before_splitting() -> None:
         SearchManyRequest(queries=["one", "two"]),
         search_one,
     )
-    assert calls == [(16384, True), (16384, True)]
+    assert calls == [(12000, True), (12000, True)]
 
 
 def test_invalid_later_batch_query_dispatches_nothing() -> None:
@@ -455,9 +455,9 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
     assert len({deadline for _, deadline, _ in searched}) == 1
     assert all(basis.value == "event" for _, _, basis in searched)
     assert budgets == {
-        "Lin city and response style": (10923, False),
-        "Lin city": (10923, False),
-        "Lin response style": (10922, False),
+        "Lin city and response style": (8000, False),
+        "Lin city": (8000, False),
+        "Lin response style": (8000, False),
     }
     assert result["planner"]["status"] == "used"
     assert result["planner"]["calls"] == 1

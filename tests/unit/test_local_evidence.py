@@ -1,5 +1,6 @@
 """Local evidence selection preserves independent hits and complete support."""
 
+from collections import Counter
 from contextlib import contextmanager
 from copy import deepcopy
 
@@ -904,3 +905,122 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
     assert result["context_tokens"] <= getattr(CONFIG.search, mode).context_max_tokens
     assert result["diagnostics"]["local_context"]["window_originals"] == 0
     assert result["diagnostics"]["local_context"]["selected_recovered_user_originals"] == 1
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_late_companion_support_remains_recoverable_when_its_bundle_does_not_fit(cached):
+    support = original("support", 8)
+    anchor = fact("anchor", support)
+    earlier, bridge = original("earlier", 0), original("bridge", 6)
+    earlier["text"] = "I prefer hands-on practice and already teach this subject."
+    late = fact("late", earlier)
+    late["text"] = "A large lower-ranked learned record. " * 1000
+    bulky = original("bulky", 0, "assistant")
+    bulky["citations"][0]["source_id"] = "other_source"
+    bulky["text"] = "An independently retrieved discussion. " * 100
+
+    class RecoveryRepository(SourceRepository):
+        def dense(self, vector, limit):
+            return [
+                {"unit_id": "anchor", "kind": "fact", "score": 0.9},
+                {
+                    "unit_id": "bulky",
+                    "kind": "passage",
+                    "score": 0.8,
+                    "source_id": "other_source",
+                    "source_version": 1,
+                    "passage_id": "bulky",
+                },
+            ]
+
+        def lexical(self, query, limit):
+            return [{"unit_id": "late", "strict_match": True}] if cached else []
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            if ("conversation", 1) in source_keys and "earlier" not in excluded_ids:
+                return [{"unit_id": "earlier"}][:limit]
+            return []
+
+    class RecoveryService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RecoveryRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    cap = context_token_count(render_context([anchor, support, bulky]))
+    values["search"]["fast"].update(
+        partial_match_gate="user_fact_exchange",
+        adjacent_user_context=False,
+        context_max_tokens=cap,
+    )
+    result = RecoveryService(
+        [anchor, support, earlier, bridge, bulky, late],
+        config=type(CONFIG).model_validate(values),
+    ).search(
+        object(), SearchRequest(query="What learning activities suit me?", recall_level="fast")
+    )
+
+    selected = {row["unit_id"]: row for row in result["items"]}
+    assert set(selected) == {"anchor", "support", "earlier"}
+    assert selected["earlier"]["text"] == earlier["text"]
+    assert selected["earlier"]["citations"] == earlier["citations"]
+    assert earlier["text"] in result["context"]
+    assert result["context_tokens"] <= cap
+
+
+@pytest.mark.parametrize("gate", ["off", "user_fact_exchange"])
+def test_recovery_shares_one_ranked_cap_and_reuses_cached_originals(gate):
+    support, earlier = original("support", 8), original("earlier", 0)
+    anchor, companion = fact("anchor", support), fact("companion", earlier)
+    bridge, direct = original("bridge", 6), original("direct", 1000)
+    extras = [original(f"extra-{index:02}", 100 + 2 * index) for index in range(40)]
+    hydration_ids, queries = [], []
+
+    class RecoveryRepository(SourceRepository):
+        def dense(self, vector, limit):
+            return [{"unit_id": "anchor", "kind": "fact", "score": 0.9}]
+
+        def lexical(self, query, limit):
+            return [
+                {"unit_id": "companion", "strict_match": True},
+                {"unit_id": "direct", "strict_match": True},
+            ]
+
+        def hydrate(self, unit_ids):
+            hydration_ids.extend(unit_ids)
+            return super().hydrate(unit_ids)
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            queries.append((source_keys, limit, set(excluded_ids)))
+            ranked = ["support", "direct", "earlier", *[row["unit_id"] for row in extras]]
+            return [{"unit_id": node} for node in ranked if node not in excluded_ids][:limit]
+
+    class RecoveryService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RecoveryRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    values["search"]["fast"].update(
+        partial_match_gate=gate,
+        adjacent_user_context=False,
+        source_seed_results=36,
+        context_max_tokens=18000,
+    )
+    result = RecoveryService(
+        [anchor, companion, support, earlier, bridge, direct, *extras],
+        config=type(CONFIG).model_validate(values),
+    ).search(object(), SearchRequest(query="Remember my activities", recall_level="fast"))
+
+    assert len(queries) == 1
+    sources, limit, excluded = queries[0]
+    assert sources == (("conversation", 1),)
+    assert limit == 36
+    assert {"support", "direct"} <= excluded
+    assert ("earlier" in excluded) is (gate == "off")
+    selected = [row["unit_id"] for row in result["items"]]
+    assert selected.count("earlier") == 1
+    assert "extra-34" in selected
+    assert "extra-37" not in selected
+    assert max(Counter(hydration_ids).values()) == 1
+    assert result["context_tokens"] <= 18000
