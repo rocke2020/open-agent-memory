@@ -114,6 +114,10 @@ class OperationRepository:
             cursor = connection.cursor()
             bind_user(cursor, authority)
             cursor.execute(
+                "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s FOR UPDATE",
+                (authority.tenant_id, authority.user_id),
+            )
+            cursor.execute(
                 f"UPDATE operations SET status = 'cancelled', "  # noqa: S608
                 "cancellation_revision = cancellation_revision + 1, "
                 "updated_at = clock_timestamp() "
@@ -133,6 +137,49 @@ class OperationRepository:
                 "AND status IN ('queued', 'running', 'retry_wait')",
                 (authority.tenant_id, authority.user_id, operation_id),
             )
+            if row[1] == "consolidate" and (row[11] or {}).get("l2_batch_id"):
+                batch_id = row[11]["l2_batch_id"]
+                cursor.execute(
+                    "WITH stopped AS (UPDATE l2_batch_members SET status='failed',"
+                    "error='BatchCancelled' WHERE tenant_id=%s AND user_id=%s "
+                    "AND batch_id=%s AND status='pending' "
+                    "RETURNING tenant_id,user_id,source_operation_id) "
+                    "UPDATE operations o SET stage_state=o.stage_state||"
+                    '\'{"insights_ready":false,"consolidation_status":"failed",'
+                    '"consolidation_error":"BatchCancelled"}\'::jsonb,'
+                    "updated_at=clock_timestamp() FROM stopped s WHERE "
+                    "(o.tenant_id,o.user_id,o.operation_id)="
+                    "(s.tenant_id,s.user_id,s.source_operation_id)",
+                    (authority.tenant_id, authority.user_id, batch_id),
+                )
+                cursor.execute(
+                    "UPDATE operations SET stage_state=stage_state||jsonb_build_object("
+                    "'insights_ready',false,'error','BatchCancelled','l2_member_counts',"
+                    "(SELECT jsonb_build_object('pending',count(*) FILTER(WHERE status='pending'),"
+                    "'succeeded',count(*) FILTER(WHERE status='succeeded'),"
+                    "'excluded',count(*) FILTER(WHERE status='excluded'),"
+                    "'failed',count(*) FILTER(WHERE status='failed')) FROM l2_batch_members "
+                    "WHERE tenant_id=%s AND user_id=%s AND batch_id=%s)) "
+                    "||jsonb_build_object('failed_sources',(SELECT COALESCE(jsonb_agg("
+                    "jsonb_build_object('source_id',source_id,'source_version',source_version,"
+                    "'error',error) ORDER BY source_id,source_version),'[]'::jsonb) "
+                    "FROM l2_batch_members WHERE tenant_id=%s AND user_id=%s AND batch_id=%s "
+                    "AND status='failed')) "
+                    "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s "
+                    f"RETURNING {_FIELDS}",
+                    (
+                        authority.tenant_id,
+                        authority.user_id,
+                        batch_id,
+                        authority.tenant_id,
+                        authority.user_id,
+                        batch_id,
+                        authority.tenant_id,
+                        authority.user_id,
+                        operation_id,
+                    ),
+                )
+                row = cursor.fetchone()
             return self._record(row)
 
     def retry(
@@ -155,14 +202,14 @@ class OperationRepository:
         with connection.transaction():  # type: ignore[attr-defined]
             cursor = connection.cursor()
             bind_user(cursor, authority)
-            if max_pending_per_user is not None:
-                cursor.execute(
-                    "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s "
-                    "AND state='active' FOR UPDATE",
-                    (authority.tenant_id, authority.user_id),
-                )
-                if cursor.fetchone() is None:
-                    raise PermissionError("user is unavailable")
+            # Batch member recovery and admission share the user's scheduling lock.
+            cursor.execute(
+                "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s "
+                "AND state='active' FOR UPDATE",
+                (authority.tenant_id, authority.user_id),
+            )
+            if cursor.fetchone() is None:
+                raise PermissionError("user is unavailable")
             cursor.execute(
                 f"SELECT {_FIELDS} FROM operations "  # noqa: S608
                 "WHERE tenant_id = %s AND user_id = %s AND operation_id = %s FOR UPDATE",
@@ -196,6 +243,18 @@ class OperationRepository:
                 return self._record(existing_retry)
             if max_pending_per_user is not None and original_row[1] != "cleanup_source":
                 require_queue_capacity(cursor, authority, max_pending_per_user)
+            batch_id = (original_row[11] or {}).get("l2_batch_id")
+            if batch_id:
+                cursor.execute(
+                    "SELECT 1 FROM operations o JOIN work_units w "
+                    "USING(tenant_id,user_id,operation_id) WHERE o.tenant_id=%s "
+                    "AND o.user_id=%s AND o.stage_state->>'l2_batch_id'=%s "
+                    "AND o.status IN ('accepted','running') "
+                    "AND w.status IN ('queued','running','retry_wait') LIMIT 1",
+                    (authority.tenant_id, authority.user_id, batch_id),
+                )
+                if cursor.fetchone() is not None:
+                    raise OperationNotRetryable("batch already has unfinished work")
             cursor.execute(
                 "SELECT count(*) FROM work_units WHERE tenant_id = %s AND user_id = %s "
                 "AND operation_id = %s AND status IN ('failed_terminal', 'cancelled') "
@@ -208,10 +267,12 @@ class OperationRepository:
             cursor.execute(
                 "SELECT 1 FROM attempts a "
                 "JOIN work_units w USING(tenant_id,user_id,work_unit_id) "
-                "WHERE w.tenant_id=%s AND w.user_id=%s AND w.operation_id=%s "
+                "JOIN operations o USING(tenant_id,user_id,operation_id) "
+                "WHERE w.tenant_id=%s AND w.user_id=%s "
+                "AND (w.operation_id=%s OR o.stage_state->>'l2_batch_id'=%s) "
                 "AND w.status IN ('failed_terminal','cancelled') "
                 "AND a.disposition='unknown_external_outcome' LIMIT 1",
-                (authority.tenant_id, authority.user_id, original_operation_id),
+                (authority.tenant_id, authority.user_id, original_operation_id, batch_id),
             )
             if cursor.fetchone() is not None:
                 raise RetryRequiresReconciliation(original_operation_id)
@@ -219,9 +280,14 @@ class OperationRepository:
                 f"INSERT INTO operations "  # noqa: S608
                 "(tenant_id, user_id, operation_id, principal_id, source_id, source_version, "
                 "accepted_seq, kind, schema_version, status, dedup_key, request_hash, "
-                "plan_sealed, retry_of_operation_id) "
+                "plan_sealed, retry_of_operation_id, stage_state) "
                 "SELECT tenant_id, user_id, %s, %s, source_id, source_version, accepted_seq, "
-                "kind, schema_version, 'accepted', %s, %s, true, operation_id "
+                "kind, schema_version, 'accepted', %s, %s, true, operation_id, "
+                "CASE WHEN kind='consolidate' AND stage_state->>'l2_batch_id' IS NOT NULL "
+                "THEN (SELECT root.stage_state FROM operations root WHERE "
+                "(root.tenant_id,root.user_id,root.operation_id)="
+                "(operations.tenant_id,operations.user_id,operations.stage_state->>'l2_batch_id')) "
+                "ELSE '{}'::jsonb END "
                 "FROM operations WHERE tenant_id = %s AND user_id = %s AND operation_id = %s "
                 f"RETURNING {_FIELDS}",
                 (
@@ -254,6 +320,23 @@ class OperationRepository:
                     original_operation_id,
                 ),
             )
+            if batch_id:
+                cursor.execute(
+                    "WITH reopened AS (UPDATE l2_batch_members SET status='pending',error=NULL "
+                    "WHERE tenant_id=%s AND user_id=%s AND batch_id=%s AND status='failed' "
+                    "RETURNING tenant_id,user_id,source_operation_id) "
+                    "UPDATE operations o SET stage_state=o.stage_state||"
+                    '\'{"insights_ready":false,"consolidation_status":"pending"}\'::jsonb,'
+                    "updated_at=clock_timestamp() FROM reopened r WHERE "
+                    "(o.tenant_id,o.user_id,o.operation_id)="
+                    "(r.tenant_id,r.user_id,r.source_operation_id)",
+                    (authority.tenant_id, authority.user_id, batch_id),
+                )
+                if max_pending_per_user is not None:
+                    cursor.execute(PENDING_ROOTS_SQL, (authority.tenant_id, authority.user_id))
+                    after = cursor.fetchone()
+                    if after is None or int(after[0]) > max_pending_per_user:
+                        raise QueueAdmissionFull("user queue capacity is full")
             return self._record(retry_row)
 
     def recover_removal(

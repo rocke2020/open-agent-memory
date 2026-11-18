@@ -1655,7 +1655,8 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
         )
         with psycopg.connect(dsn) as connection:
             connection.execute(
-                "UPDATE work_units SET available_at=clock_timestamp() WHERE stage='consolidate'"
+                "UPDATE work_units SET available_at=clock_timestamp() "
+                "WHERE stage IN ('consolidate','consolidate_batch')"
             )
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-l2")
         report = await client.post(
@@ -1926,7 +1927,7 @@ async def test_profile_refresh_and_recall_remain_independent(core_database, tmp_
         with psycopg.connect(dsn) as connection:
             connection.execute(
                 "UPDATE work_units SET available_at=clock_timestamp() "
-                "WHERE stage='consolidate' AND status='queued'"
+                "WHERE stage IN ('consolidate','consolidate_batch') AND status='queued'"
             )
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="more-l2")
         after_l2 = await client.get("/v1/users/scope/profile")
@@ -2356,7 +2357,8 @@ async def test_new_interaction_gets_a_new_profile_refresh_while_one_is_active(
         )
         with psycopg.connect(dsn) as connection:
             connection.execute(
-                "UPDATE work_units SET available_at=clock_timestamp() WHERE stage='consolidate'"
+                "UPDATE work_units SET available_at=clock_timestamp() "
+                "WHERE stage IN ('consolidate','consolidate_batch')"
             )
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="original-l2")
         first = await client.post("/v1/users/scope/profile/refresh", json={})
@@ -2479,7 +2481,7 @@ async def test_waiting_profile_refresh_does_not_absorb_a_new_processed_source(co
         with psycopg.connect(dsn) as connection:
             connection.execute(
                 "UPDATE work_units SET available_at=clock_timestamp() "
-                "WHERE stage='consolidate' AND status='queued'"
+                "WHERE stage IN ('consolidate','consolidate_batch') AND status='queued'"
             )
         assert process_one(config, queue_dsn, content_dsn, models=models, worker_id="insight-b")
         with psycopg.connect(dsn) as connection:

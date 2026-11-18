@@ -74,7 +74,7 @@ def test_consolidation_rejects_changed_related_source_policy():
 
 @pytest.mark.parametrize("delay_hours", [2, 0.5])
 def test_consolidation_schedule_uses_configured_hours(tmp_path, delay_hours):
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
 
     from oam.config import load_config
 
@@ -82,8 +82,16 @@ def test_consolidation_schedule_uses_configured_hours(tmp_path, delay_hours):
 
     class Connection(GuardConnection):
         def execute(self, query, parameters=()):
-            if query.startswith("SELECT COALESCE(min(created_at)"):
+            if query == "SELECT clock_timestamp()":
                 return SimpleNamespace(fetchone=lambda: (datetime(2026, 10, 18, tzinfo=UTC),))
+            if query.startswith(
+                (
+                    "SELECT batch_id FROM l2_batch_members",
+                    "SELECT 1 FROM operations",
+                    "SELECT o.operation_id FROM operations o JOIN work_units",
+                )
+            ):
+                return SimpleNamespace(fetchone=lambda: None)
             if query.startswith("INSERT INTO work_units"):
                 scheduled.append((query, parameters))
             return super().execute(query, parameters)
@@ -101,8 +109,7 @@ def test_consolidation_schedule_uses_configured_hours(tmp_path, delay_hours):
 
     assert len(scheduled) == 1
     query, parameters = scheduled[0]
-    assert "clock_timestamp()+(%s*interval '1 hour')" in query
-    assert parameters[6] == delay_hours
+    assert parameters[6] == datetime(2026, 10, 18, tzinfo=UTC) + timedelta(hours=delay_hours)
 
 
 def test_index_store_pool_checkout_is_bounded_by_pool_timeout():
@@ -460,7 +467,10 @@ def test_local_terminal_failure_finishes_attempt_only_without_unknown_sibling(un
     store.summarize_usage = lambda connection: None
     store.fail(EmbeddingInputLimitError("embedding per-input token limit exceeded"))
 
-    assert statements[0][1][0] is False
+    work_update = next(
+        params for query, params in statements if query.startswith("UPDATE work_units")
+    )
+    assert work_update[0] is False
     attempt_updates = [query for query, _ in statements if query.startswith("UPDATE attempts SET")]
     assert bool(attempt_updates) is not bool(unsettled)
     if attempt_updates:
@@ -499,7 +509,8 @@ def test_uncached_success_cannot_be_settled_by_a_sibling_timeout(case):
         store._model_stage_failures = {}
         store._uncached_model_stages = {"insight:uncached"}
     store.fail(timeout)
-    assert queries[0][1][0] is False
+    work_update = next(params for query, params in queries if query.startswith("UPDATE work_units"))
+    assert work_update[0] is False
     assert not any(sql.startswith("UPDATE attempts") for sql, _ in queries)
 
 

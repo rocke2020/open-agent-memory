@@ -61,6 +61,18 @@ PENDING_PROFILE_INPUTS_SQL = """
 SELECT DISTINCT s.source_id,s.active_version AS source_version,
   CASE
     WHEN EXISTS (
+      SELECT 1 FROM l2_batch_members bm JOIN users bu USING(tenant_id,user_id)
+      WHERE (bm.tenant_id,bm.user_id,bm.source_id,bm.source_version)=
+            (s.tenant_id,s.user_id,s.source_id,s.active_version)
+        AND bm.generation_id=bu.index_generation_id AND bm.status='pending'
+    ) THEN 'pending'
+    WHEN EXISTS (
+      SELECT 1 FROM l2_batch_members bm JOIN users bu USING(tenant_id,user_id)
+      WHERE (bm.tenant_id,bm.user_id,bm.source_id,bm.source_version)=
+            (s.tenant_id,s.user_id,s.source_id,s.active_version)
+        AND bm.generation_id=bu.index_generation_id AND bm.status='failed'
+    ) THEN 'failed'
+    WHEN EXISTS (
       SELECT 1 FROM operations o JOIN work_units w
         USING(tenant_id,user_id,operation_id)
       WHERE (o.tenant_id,o.user_id,o.source_id,o.source_version)=
@@ -114,6 +126,11 @@ WHERE s.tenant_id=%s AND s.user_id=%s
       AND o.status='succeeded'
       AND ((%s AND o.kind IN ('index_interaction','consolidate')
       AND o.stage_state->>'insights_ready'='true' AND NOT EXISTS (
+        SELECT 1 FROM l2_batch_members bm JOIN users bu USING(tenant_id,user_id)
+        WHERE (bm.tenant_id,bm.user_id,bm.source_id,bm.source_version)=
+              (o.tenant_id,o.user_id,o.source_id,o.source_version)
+          AND bm.generation_id=bu.index_generation_id AND bm.status IN ('pending','failed')
+      ) AND NOT EXISTS (
         SELECT 1 FROM operations repair JOIN work_units repair_work
           USING(tenant_id,user_id,operation_id)
         WHERE (repair.tenant_id,repair.user_id,repair.source_id,repair.source_version)=

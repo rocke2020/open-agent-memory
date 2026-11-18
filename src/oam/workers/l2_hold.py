@@ -35,7 +35,7 @@ def set_l2_hold(dsn: str, tenant_id: str, user_id: str, held: bool) -> None:
         if held:
             active = connection.execute(
                 "SELECT EXISTS(SELECT 1 FROM work_units WHERE tenant_id=%s AND user_id=%s "
-                "AND stage='consolidate' AND status='running')",
+                "AND stage IN ('consolidate','consolidate_batch') AND status='running')",
                 (tenant_id, user_id),
             ).fetchone()
             if active is None:
@@ -80,7 +80,8 @@ def l2_hold_from_environment(
             row = connection.execute(
                 "SELECT coalesce(h.held,false), "
                 "(SELECT count(*) FROM work_units w WHERE w.tenant_id=u.tenant_id "
-                "AND w.user_id=u.user_id AND w.stage='consolidate' AND w.status='running') "
+                "AND w.user_id=u.user_id AND w.stage IN ('consolidate','consolidate_batch') "
+                "AND w.status='running') "
                 "FROM users u LEFT JOIN l2_claim_holds h USING(tenant_id,user_id) "
                 "WHERE u.tenant_id=%s AND u.user_id=%s",
                 (tenant_id, user_id),
