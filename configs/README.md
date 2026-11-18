@@ -70,16 +70,17 @@ Fast recall uses equal arm weights, including when graph expansion is enabled; i
 
 ## 4. Why the tested presets keep both expansions off
 
-The selected LME-500 fast and BEAM-10M normal configurations keep semantic-link and causal expansion disabled. Their graph settings differ because normal retains entity and alias expansion:
+The latest LME-500 normal run, earlier LME-500 fast runs and recorded BEAM-10M run keep semantic-link and causal expansion disabled. BEAM retains entity and alias expansion; both LME presets disable graph expansion:
 
 | Evaluated workload | Recall mode | `entity_semantic_graph` | `causal_graph` | Graph expansion used |
 |---|---|---|---|---|
-| LME-500 | `fast` | `"off"` | `false` | None. |
+| Latest LME-500 | `normal` | `"off"` | `false` | None. |
+| Earlier LME-500 | `fast` | `"off"` | `false` | None. |
 | BEAM-10M | `normal` | `light` | `false` | Entity and alias only. |
 
-Both configurations also disable causal indexing. They retain direct dense semantic search and lexical retrieval, temporal retrieval when applicable, original source evidence and explicit reasons preserved in fact text. Questions about causes can still retrieve those reasons directly; a stored causal edge is an additional retrieval route, not a prerequisite for answering "why."
+These configurations also disable causal indexing. They retain direct dense semantic search and lexical retrieval, temporal retrieval when applicable, original source evidence and explicit reasons preserved in fact text. Questions about causes can still retrieve those reasons directly; a stored causal edge is an additional retrieval route, not a prerequisite for answering "why."
 
-Tuning progressed from graph weight `1.0` to `0.1`, then to disabling semantic-link and causal expansion. Normal's retained entity/alias expansion still uses `0.1`; fast has graph expansion off.
+Tuning progressed from graph weight `1.0` to `0.1`, then to disabling semantic-link and causal expansion. BEAM's retained entity/alias expansion uses `0.1`; the LME presets have graph expansion off.
 
 Our tuning observations favored conservative expansion: broad graph neighbors could add off-topic context and displace useful support. Candidate explanations, unverified separately for each expansion, are that fact-to-fact similarity can drift away from the query and that an explicitly recorded cause can still be irrelevant to the current question. Additional candidates compete for finite retrieval and context capacity, so more connected evidence does not automatically mean better answers.
 

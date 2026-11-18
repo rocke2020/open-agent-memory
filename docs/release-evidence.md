@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is preserved historical v0.0.1 candidate evidence. See the [v0.0.3 release record](releases/0.0.3.md) for the current product changes and verification scope.
+This is preserved historical v0.0.1 candidate evidence. See the [v0.1.0 release record](releases/0.1.0.md) for the current product changes and verification scope.
 
 The November 8, 2026 candidate is prepared for human review. Local application, security, packaging and integration checks are complete. Both plugins are now published on npm at `0.0.1`, with anonymous downloads and fresh native installations verified. Source visibility, container-image publication, remote CI execution and GitHub Release downloads remain unverified. See [candidate identities and measurements](release-candidate.json) and [publication instructions](releasing.md).
 

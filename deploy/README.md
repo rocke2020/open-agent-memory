@@ -8,14 +8,14 @@ For a first installation, [Your first useful memory](../docs/start-here.md) conn
 
 ## 1. Prepare configuration
 
-Use the published multi-architecture image from the repository root:
+Use the versioned multi-architecture image from the repository root. See the [release record](../docs/releases/0.1.0.md) for artifact verification and publication status:
 
 ```bash
-docker pull ghcr.io/rocke2020/open-agent-memory:0.0.3
+docker pull ghcr.io/rocke2020/open-agent-memory:0.1.0
 cp deploy/.env.example deploy/.env
 ```
 
-The example selects that release image through `OAM_IMAGE`. To build from source instead, run `docker build -t oam:0.0.3-candidate .` and set `OAM_IMAGE=oam:0.0.3-candidate` in `deploy/.env`.
+The example selects that release image through `OAM_IMAGE`. To build from source instead, run `docker build -t oam:0.1.0-candidate .` and set `OAM_IMAGE=oam:0.1.0-candidate` in `deploy/.env`.
 
 Fill `deploy/.env` with independent random hexadecimal database passwords, a random root API key, and the configured generation/embedding endpoint, credential and model triplets. Generate each secret separately, for example with `openssl rand -hex 24`. Hexadecimal passwords avoid URI-escaping ambiguity in the example DSNs. The file is ignored by Git; keep it private. The root key manages users and cannot directly access their personal memory. Runtime services receive separate non-superuser API, queue and content credentials, not the database administrator password.
 
@@ -54,8 +54,8 @@ Keep at least one healthy API and worker available during rolling replacement. S
 The Dockerfile pins its multi-architecture Python base by digest. Update that digest deliberately and rerun both architecture checks when changing the base. On a Mac with Docker emulation enabled:
 
 ```bash
-docker buildx build --platform linux/arm64 --load -t oam:0.0.3-arm64 .
-docker buildx build --platform linux/amd64 --load -t oam:0.0.3-amd64 .
+docker buildx build --platform linux/arm64 --load -t oam:0.1.0-arm64 .
+docker buildx build --platform linux/amd64 --load -t oam:0.1.0-amd64 .
 ```
 
 Record which checks ran natively or under emulation. The manual candidate workflow exports an OCI archive without publishing it. A local image ID, an OCI manifest digest and a published registry digest are different identities; record the one actually tested. Candidate evidence and the opt-in public HTTP probe are described in [release evidence](../docs/release-evidence.md). Source visibility, release uploads, registry publication and release-triggering pushes remain manual release actions after content review.

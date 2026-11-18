@@ -2,9 +2,9 @@
 
 ## Overview
 
-OAM records **95.2% (476/500)** on LongMemEval S with MiniMax M3.1 Flash native-adaptive answering and judging, normal recall and an **18,000-token retrieval-context limit**. The 497 scored cases average **11,373.58 saved context tokens**; three disputed-gold cases remain counted as incorrect in the unchanged 500-question denominator. The frozen retrieval source matches the published main source; the v0.0.3 image was not rerun.
+OAM records **95.2% (476/500)** on LongMemEval S with MiniMax M3.1 Flash native-adaptive answering and judging, normal recall and an **18,000-token retrieval-context limit**. The 497 scored cases average **11,373.58 saved context tokens**; three disputed-gold cases remain counted as incorrect in the unchanged 500-question denominator.
 
-The [latest LME-500 evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) publishes saved contexts, visible answers, judgments, the exact main source commit and runtime file hashes. The earlier [466/463 paired comparison](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/lme500) and [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m) remain separate recorded evaluations.
+The [latest LME-500 evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) publishes saved contexts, visible answers, judgments and the evaluated OAM commit. The earlier [466/463 paired comparison](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/lme500) and [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m) remain separate recorded evaluations.
 
 ## 1. Latest LongMemEval S: 476/500 at 18k
 
@@ -27,9 +27,19 @@ The hard 100 contribute **83/100** and the remaining 400 contribute **393/400**,
 | Exact saved context tokens | 5,652,671 total; 11,373.58 mean across 497; 18,000 maximum |
 | Independent context counter | tiktoken `o200k_base.encode_ordinary` |
 | Retrieval HTTP samples | 994; mean 332.95 ms, median 328.59 ms, p95 428.25 ms; no exclusions |
-| Runtime provenance | 116 frozen runtime file hashes match final main; exact source commit and evaluation override are published in OAMB |
+| Runtime provenance | The evaluated OAM commit and evaluation configuration are recorded in the linked OAMB evidence |
 
-MiniMax M3.1 Flash is a low-priced model: its vendor lists **USD 0.15 per million input tokens and USD 0.60 per million output tokens**, with cached input at USD 0.015, checked on November 17, 2026. These are vendor list prices, not a reconciled bill for this Tencent Cloud AI run. [MiniMax official pricing](https://platform.minimax.io/docs/pricing/overview).
+### Low-cost Flash models
+
+The evaluated pipelines use MiniMax M3.1 Flash and DeepSeek Flash for answering and judging. Their vendors publish the following list prices, checked on November 18, 2026, in USD per million tokens:
+
+| Model | Uncached input | Output | Source |
+| --- | --- | --- | --- |
+| MiniMax M3.1 Flash | **$0.15** | **$0.60** | [MiniMax official announcement](https://www.minimax.io/blog/minimax-m31f) |
+| DeepSeek Flash, off-peak | **$0.15** | **$0.60** | [DeepSeek official pricing](https://api-docs.deepseek.com/quick_start/pricing/) |
+| DeepSeek Flash, peak | **$0.30** | **$1.20** | [DeepSeek official pricing](https://api-docs.deepseek.com/quick_start/pricing/) |
+
+These prices support describing the models as low-cost; they do not establish a market-wide cheapest model, the Tencent route's reconciled bill or a controlled whole-campaign cost comparison. Cached-input discounts and peak schedules are defined by the vendors. Saved context size alone does not include indexing, reasoning, output, retries or all final model-input tokens.
 
 ### Comparison with the recorded Hindsight result
 
@@ -63,7 +73,7 @@ These are fixed-reference judge acceptance scores, not independently established
 | OAM mean answer-visible context | 32,106.88 `cl100k_base` tokens | OAM uses 17.43% more context |
 | OAM retrieval timing | 2,906.5 ms mean; 2,617.9 ms median; 5,527.6 ms p95 | Engine not rerun |
 
-The BEAM results summarize recorded selected answers with DeepSeek Flash judging and preserve each answer's actual model settings in the evidence. They are separate from the current DeepSeek max answer profile. Hindsight's saved contexts were replayed without rerunning its indexing or retrieval.
+The BEAM results use DeepSeek Flash for answering and judging: 156 selected answers use high reasoning and 44 use max reasoning. The evidence preserves each selected answer's actual model settings. They are separate from the current DeepSeek max answer profile. Hindsight's saved contexts were replayed without rerunning its indexing or retrieval.
 
 BEAM assigns each question the mean of its rubric-item scores; its mean rubric score differs from its threshold pass rate. The retrieval timings come from 540 probes on histories 2–10, with none excluded. Complete comparable indexing-generation usage, full-campaign cost and indexing wall time are unavailable. The dataset revision is `9b2096193fe74e2837e4713e483351e19817773c`, with SHA-256 `c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8`. Recall is normal, using L1; L2 and Profile are excluded from scored contexts.
 
@@ -77,9 +87,9 @@ The self-contained `report.html` files show full saved contexts and individual o
 git clone https://github.com/rocke2020/open-agent-memory-benchmark.git
 cd open-agent-memory-benchmark
 uv sync --locked
-uv run pytest -q tests/test_published_oam_evidence.py tests/reporting/test_historical_report.py
+uv run pytest -q tests/test_published_oam_evidence.py tests/test_published_lme500_20261117.py tests/reporting/test_historical_report.py
 ```
 
-The latest campaign's manifest pins the final OAM main commit and the 116 matching frozen runtime files. Use that exact commit for a source build, and the adjacent evaluation configuration for the recorded retrieval settings. These commands validate saved measurements; no fresh model calls are needed.
+The latest campaign's OAMB manifest records the evaluated OAM commit. Use that exact commit for a source build, and the adjacent evaluation configuration for the recorded retrieval settings. These commands validate saved measurements; no fresh model calls are needed.
 
 The current [native OAM workflow](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/docs/native-oam.md) remains a separate LME fast-recall protocol. Changing only its model names does not reproduce the latest normal-recall/AMB-prompt campaign. New model output can vary; a successful run is not proof of score parity. Provider and infrastructure costs depend on the chosen configuration.

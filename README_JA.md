@@ -1,151 +1,123 @@
 # Open Agent Memory
 
-[English（正本）](README.md) | [简体中文](README_CN.md) | 日本語
+**日常の AI エージェントに、役立つメモリを。**
 
-**すべてを公開し、ともに育て、日常のエージェントで使うメモリ。**
+[English](README.md) | [中文](README_CN.md) | [日本語](README_JA.md)
 
-Open Agent Memory（OAM）は、AI エージェント向けの完全にオープンソースのメモリエンジンです。新しいセッションで好みや以前の決定を、その出典とともに取り出せます。適格な会話から事実と Insights を作成し、文書は独立した Resources として保持します。User Profile は明示的な更新時にのみ作成します。
+[はじめに](#はじめに) · [性能](#パフォーマンスと精度) · [エージェント連携](#エージェントを接続する) · [ドキュメント](docs/indexing-retrieval.md) · [リリース](https://github.com/rocke2020/open-agent-memory/releases)
 
-**コミュニティのために公開：**メモリシステム全体を [Apache-2.0](LICENSE) で提供し、ともに実行、確認、改善、利用できます。[開発への参加](CONTRIBUTING.md)や[利用体験の共有](https://github.com/rocke2020/open-agent-memory/discussions/1)を歓迎します。
+Open Agent Memory（OAM）は、AI エージェント向けの完全にオープンソースのメモリエンジンです。会話をまたいで有用な事実、好み、経験を記憶し、エージェントが必要とするときに、関連する証拠を出典付きで取り出します。
 
-**LME-500 で 95.2%（476/500）**：MiniMax M3.1 Flash のネイティブ adaptive 回答・判定を使用し、検索コンテキストの上限は 18k です。BEAM-10M は記録済みの DeepSeek Flash 設定で **61.56%、Hindsight の 52.16% を 9.40 ポイント上回りました**。[結果と比較条件](#パフォーマンスと精度)。
-
-![概念図：好みを保存し、新しいセッションで出典付きの記憶を検索する](docs/assets/memory-across-sessions.svg)
-
-これは利用場面の概念図であり、実測したモデル出力ではありません。エージェントは OAM の出典付きコンテキストから回答を作成します。
-
-**[最初の出典付きメモリを取得する →](docs/start-here.md)** デプロイ、ユーザーキー、保存 → 準備状態の確認 → 検索、新しい MCP セッションまでを一つのガイドで進めます。
-
-## Open Agent Memory とは
-
-「Open」はメモリシステム全体を意味します。インデックス作成、検索、Profile、ユーザーによる制御、ネイティブなマルチノード運用を、開発者が確認、実行、変更、改善できます。コミュニティがともに作り、利用できるメモリエンジンを目指しています。コード、再現可能な不具合報告、文書、例、実際のエージェントでの利用報告を歓迎します。
-
-HTTP API、ローカルの [MCP サーバー](integrations/mcp/README.md)、または OpenClaw と DeepSeek Harness のプラグインで接続できます。同梱の Memory Inspector では、メモリの閲覧、出典の確認、Resources の検索、保持する内容の管理ができます。
-
-## Open Agent Memory を選ぶ理由
-
-- **システム全体をオープンソースで提供し、マルチノード展開をネイティブにサポート。** 共有 PostgreSQL/pgvector を使い、ステートレスな API レプリカと永続的な処理を担うワーカーを複数ノードで実行できます。協調制御、復旧、デプロイのコードも含まれます。
-- **根拠付きのメモリ検索。** 事実や Insights と、それを裏付ける原文の抜粋や引用をまとめて取得し、エージェントが出典に基づいて推論できるようにします。
-- **会話と文書をまとめて検索。** HTML、PDF、画像の Resources は、学習による個人メモリと分離したまま、共通の検索経路で取得できます。
-- **必要なときにパーソナライズ。** 適格なメモリと明示的に提供された Profile Data から、要求に応じて User Profile を作成・保存します。入力が変わらなければ生成せずに再利用します。
-- **メモリの確認と制御。** Inspector で出典を閲覧し、個別の Memory Unit や Insight を削除できます。文書 Resources も、同じ認可済み API で管理できます。
-- **データとモデルを自分で管理。** メモリを PostgreSQL/pgvector 上にセルフホストし、利用するモデルのエンドポイントを設定できます。
-
-検証済みの動作、デプロイの制約、配布物については、[受け入れ要件](docs/acceptance.md)、[変更点と検証記録](docs/releases/0.0.3.md)、[公開リリース](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.3)を参照してください。
-
-## はじめに
-
-**[ここから開始：新規デプロイから最初の出典付き検索まで](docs/start-here.md)。** PostgreSQL とモデルのエンドポイントを設定し、OAM の初期化、ユーザーの作成、保存した原文の確認を済ませてからエージェントを接続します。ガイドでは Linux AMD64 または ARM64 向けの公開済み v0.0.3 イメージを使用し、[Docker Compose ガイド](deploy/README.md)に案内します。
-
-| エージェント・アプリケーション | 最初の前提手順 | 接続方法 |
-|---|---|---|
-| 独自アプリケーション | [入門ガイドを完了](docs/start-here.md) | [HTTP API](docs/api.md) と[コピーして使える HTTP の例](docs/quickstart.md) |
-| Claude Code または Cursor | [入門ガイドを完了](docs/start-here.md) | [MCP サーバーとクライアント設定](integrations/mcp/README.md#client-configuration)、Node.js 22+ が必要 |
-| OpenClaw | [入門ガイドを完了](docs/start-here.md) | [OpenClaw プラグイン](integrations/openclaw/README.md#npm-installation) |
-| DeepSeek Harness（DSH） | [入門ガイドを完了](docs/start-here.md) | [DSH プラグイン](integrations/dsh/README.md) |
-
-自分のユーザースコープのキーを使い、クライアント設定は非公開にしてください。
-
-## 出典を確認する
-
-![合成デモデータを表示する実際の Memory Inspector の注釈付き画像](docs/assets/inspect-memory.png)
-
-実際の Inspector UI に合成デモデータを表示した画像です。注釈はメモリと出典の確認箇所を示します。ベンチマーク結果ではありません。
-
-<details>
-<summary>既存の出典付き検索デモを見る</summary>
-
-[![OAM が出典付きで好みを想起する様子を見る](docs/assets/cited-recall-demo.gif)](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4)
-
-[71 秒のデモを見る](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4)：既存の合成メモリを使い、新しく起動した MCP プロセスから準備状態を確認して検索し、続いて Memory Inspector で元の出典を表示します。録画は 2× 速で、完成済みのインデックスを再利用しています。
-
-</details>
+会話と文書を自分の PostgreSQL データベースに保存し、モデルプロバイダーを選び、エージェントが何を記憶しているか確認できます。OAM がメモリを提供し、エージェントが回答を作成します。
 
 ## パフォーマンスと精度
 
-OAM は日常のエージェント作業で役立つメモリを目指しています。**LongMemEval S の全 500 問**で、MiniMax M3.1 Flash のネイティブ adaptive 回答・判定を使用し、**95.2%（476/500）**を記録しました。Hindsight の記録は **94.6%（473/500）**です。回答・判定モデルが異なるため、記録された評価パイプライン全体の比較です。
+**低コストの Flash モデルを使い、対応する Hindsight の比較結果を上回る記録スコアと、LongMemEval S で 73.63% 小さい保存済みコンテキストを実現しました。**
 
-最新の LME 評価では L1 メモリと normal 検索、**18,000 トークンのコンテキスト上限**を使用し、実際に採点した 497 問の**保存済みコンテキストは平均 11,373.58 トークン**でした。参照回答に疑義がある 3 問も、不正解として元の 500 問の分母に残しています。保存済み整形コンテキストは Hindsight の記録より **73.63% 小さく**、プロバイダーの課金トークンの比較ではありません。凍結した検索ソースは現在の main と一致し、v0.0.3 イメージは再測定していません。[ベンチマーク結果とエビデンス](docs/benchmarks.md)を参照してください。
+| ベンチマーク | OAM | Hindsight の比較結果 | 回答コンテキスト |
+| --- | --- | --- | --- |
+| **LongMemEval S**、全 500 問 | **95.2%（476/500）** | 94.6%（473/500） | 保存済みコンテキストは平均 **11,373.58** トークン、比較対象は 43,124.55；**73.63% 削減** |
+| **BEAM-10M**、完全な履歴 10 件に対する 200 問 | **61.56%** 平均ルーブリックスコア | 52.16%、保存済みコンテキストの再評価 | OAM のコンテキストは 17.43% 多い |
 
-**BEAM-10M：61.56%、Hindsight の保存済みコンテキストの再評価は 52.16% で、差は 9.40 ポイントです。** 200 問の保存された選択回答と DeepSeek Flash の判定による測定であり、現在の max 回答プロファイルと分けて示しています。Hindsight のエンジンは再実行していません。OAM の回答コンテキストは 17.43% 多くなりました。[比較方法と質問ごとのエビデンス](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m/README.md)を参照してください。
+最新の LongMemEval の結果では、回答と判定に **MiniMax M3.1 Flash** を使用し、コンテキストの上限は 18,000 トークンです。同じコンテキストを使った以前の LongMemEval 実行では、**DeepSeek Flash** の結果も記録しています。BEAM-10M は回答と判定に **DeepSeek Flash** を使用し、レポートには記録時の high/max 回答設定を保持しています。いずれも低コストの Flash モデルによる評価パイプラインであり、高価な最上位モデルを回答用に使う必要はありません。
 
-BEAM-10M は、**切り詰めていない完全な会話履歴 10 件**を履歴ごとに 20 問で評価しました。レポートには各実行のモデル設定、評価対象のリビジョン、制約を記録しています。
+比較対象とは回答・判定のパイプラインが異なります。コンテキストのサイズは保存された整形済みテキストのトークン数であり、プロバイダーの課金トークン数ではありません。現在の LME の平均値には 497 件のコンテキストを使用し、正解データに疑義がある 3 問も 500 問のスコアでは不正解として数えています。評価対象は L1 メモリであり、Insights、User Profile、文書 Resources は採点していません。
 
-これらは L1 メモリによる検索、回答、判定の評価です。L2 Insights、User Profile、文書 Resources は採点対象に含めていません。
+[結果・モデル料金・評価方法](docs/benchmarks.md) · [LME の質問ごとのエビデンス](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM の質問ごとのエビデンス](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m)
 
-評価方法、モデル設定、コンテキストの計数、評価対象のリビジョン、制約、全質問の保存済みエビデンスは[ベンチマーク結果と再現手順](docs/benchmarks.md)を参照してください。
+## OAM を選ぶ理由
 
-## プロダクトモデル
+- **セッションをまたいで記憶。** 役立つ好み、決定、経験を保存し、新しい会話でもエージェントが利用できます。
+- **証拠を確認。** 検索したメモリから元のメッセージを辿れます。Memory Inspector でメモリの閲覧や削除ができます。
+- **会話と文書をまとめて検索。** 学習メモリとともに、関連するテキスト、HTML、PDF、画像の Resources を検索できます。文書は学習された個人メモリとは分けて保持します。
+- **役立つ個人プロフィールを作成。** 対象となるメモリと構造化された Profile Data から、保存済みの User Profile を明示的に更新できます。
+- **データとモデルを自分で管理。** PostgreSQL/pgvector でセルフホストし、独自のエンドポイントを設定し、検索コンテキストの予算を制御できます。
 
-- **L0 出典となる証拠：** 役割、時刻、出典の識別情報、学習対象かどうかを含む、適格な会話の保存データ。
-- **L1 学習メモリ：** 長期記憶の対象となるやり取りから抽出した、出典に紐づく事実、好み、経験、イベント、制約。
-- **L2 Insights：** 関連する適格な L1 レコードを統合して保存したものです。根拠の連鎖を通じて L0 に遡れます。説明用のサブタイプとして `preferences`、`patterns`、`projects`、`relationships`、`experiences`、`general_insights` のいずれかを持ちますが、サブタイプは順位付けに影響しません。
-- **L3 User Profile：** Profile Data と適格な学習メモリから作成する、明示的に更新される読み取り専用の単一文書です。入力が変わらなければ、生成モデルを呼び出さずに再利用します。
-- **Profile Data：** 明示的に提供された構造化された基本情報や好みです。User Profile の正確な入力値に対応付けられ、通常の検索には含まれません。
-- **Resources：** 保存されたテキスト、HTML、PDF、画像の原本と、詳細な抜粋、位置情報、要約です。検索可能な証拠として保持され、自動的に L1–L3 へ取り込まれることはありません。
+## はじめに
 
-`api_key` モードでは、認証情報から決まるテナントと、ユーザーキーに紐づく `user_id` によって個人メモリのコレクションを識別します。管理者は `POST /v1/users` でユーザーを作成し、そのユーザーの最初のキーを一度だけ受け取ります。ホストアプリケーションはユーザーキーを使い、`POST /v1/retain` でやり取りを保存し、`POST /v1/users/{user_id}/resources` で文書の原本を保存し、`POST /v1/users/{user_id}/profile-data` で構造化されたユーザー入力を保存し、`POST /v1/recall` で検索します。管理者キーは個人の内容を直接読み書きできません。ローカルの `dev` モードはキーなしのリクエストを受け付け、プライバシー保護を保証しません。`trusted` モードはゲートウェイが表明するテナントとユーザーのヘッダーを使用し、ローカル以外からのリクエストにはルートキーが必要です。やり取りの保存では、呼び出し側による出典 ID やメッセージ ID の管理は不要です。文書には安定した `document_id` を使い、`replace` またはテキスト専用の `append` を明示します。リビジョンは OAM が割り当てます。[HTTP API](docs/api.md)では、モード選択、JSON と multipart の例、ユーザーキーのローテーション、再試行キー、処理の準備状態を説明しています。
+**Docker と Compose**、**Git**、テキストと画像の入力をサポートする生成モデルのエンドポイント、OpenAI 互換の embedding エンドポイントが必要です。OAM は既定のモデルエンドポイントや認証情報を提供しません。モデルの事前チェックとインデックス作成では、設定したプロバイダーを呼び出すため、料金が発生する場合があります。
 
-検索では、レンダリング後のコンテキスト全体に対して、`search.fast.context_max_tokens: 18000` と `search.normal.context_max_tokens: 24000` の単一上限を適用します。既定では原文のチャンクを含めます。`include.chunks: false` にすると、適格な学習テキスト、必要な根拠となる事実、引用を残しつつ、原文の全文を省略します。学習された証拠と原文は関連性に従って採用され、事実が抽出されなかった原文も対象になります。証拠のグループは切り詰めずに全体が収まる必要があり、共有される出典チャンクは一度だけ数えます。適格な L1 の事実が 1 件のみで、その完全な根拠と合わせて上限を超える場合は、より上位の主結果をまだ採用していないときに限り、そのグループだけを返して追加を終了し、超過量を報告します。Insights にこの例外はありません。`context_tokens` はローカルの `o200k_base` トークナイザーで引用とメタデータを含む返却テキスト全体を数えます。プロバイダーの使用量ではありません。ホストは最終的に組み立てたモデル入力を別途計測します。
-
-## アーキテクチャ
-
-OAM は Python、FastAPI、psycopg を使った明示的な SQL、pgvector を備えた PostgreSQL を使用します。API プロセスはステートレスです。受理した原本、認可、出典のライフサイクル、操作、ワーカーのタスク取得、リース、フェンシングトークン、アプリケーションレプリカの復旧は PostgreSQL が担います。各サービスは OpenAI Chat、OpenAI Responses、Anthropic Messages のいずれかを通じて、設定された 1 つの VLM を使用します。役割ごとの推論強度に加え、独立した embedding モデルと任意の reranker モデルを設定できます。既定のプロバイダー、モデル、エンドポイント、認証情報はありません。
-
-![Conversations → facts → Insights; separate document Resources; cited recall and explicit Profile refresh](docs/assets/memory-flow.svg)
-
-会話から出典に裏付けられた事実と Insights を作成し、文書は独立した Resources の経路に保持します。両方を fast/normal で出典付き検索できます。User Profile は明示的に更新します。入力が変わらなければ生成なしで保存済み Profile を再利用し、変わった場合は永続的な操作を作成します。
-
-[アーキテクチャ](docs/architecture.md)、[HTTP API](docs/api.md)、[設定ガイド](configs/README.md)、[運用](docs/operations.md)、[Memory Web UI ガイド](docs/memory-web-ui.md)、[受け入れ要件](docs/acceptance.md)、過去の[手順 1–4 の基盤検証記録](docs/foundation-evidence.md)を参照してください。
-
-## 開発環境
-
-Python 3.12–3.14 と `uv` が必要です。
+### 1. 設定を準備する
 
 ```bash
-uv sync --locked
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
-uv run oam preflight --config configs/oam.yaml --json
+git clone https://github.com/rocke2020/open-agent-memory.git
+cd open-agent-memory
+cp deploy/.env.example deploy/.env
 ```
 
-正本となる設定では、共通の `models.vlm` と独立した `models.embedding` を定義します。生成プロトコルには `openai_chat`、`openai_responses`、`anthropic_messages` のいずれかを選び、モデル、エンドポイント、認証情報を非公開の環境変数で設定します。`models.reasoning_effort` は `none`、`low`、`high`、`max` によって各役割を有効化します。YAML の null はその役割を無効化します。VLM の推論モードによって、実際に送信する設定が決まります。Preflight は選択したプロトコルを使って、有効なテキストと画像の役割を検証します。実際のモデル機能はエンドポイントに依存します。プロトコルのパスと推論オプションは[モデル設定](docs/operations.md)を参照してください。既定のテストは非公開の `.env` を読まず、外部プロバイダーにも接続しません。
+`deploy/.env` を編集します。
 
-運用設定を使い、永続的な処理を担う内蔵ワーカーとともに API を実行します。
+- `VLM_BASE_URL`、`VLM_API_KEY`、`VLM_MODEL` と `OAM_EMBEDDING_URL`、`OAM_EMBEDDING_KEY`、`OAM_EMBEDDING_MODEL` にプロバイダーの設定を指定します。
+- 各データベースのパスワードと `OAM_ROOT_API_KEY` に、それぞれ異なるランダムな値を設定します。各値は `openssl rand -hex 24` で生成できます。
+- embedding の既定の次元数は **1024** です。エンドポイントが別のサポート対象の次元数を返す場合は、**初期化前に** `deploy/oam.yaml` の `index.embedding_dimensions` を設定してください。[モデル設定](docs/operations.md#1-configuration)を参照してください。
+
+### 2. OAM を起動する
 
 ```bash
-uv run oam api --config configs/oam.yaml --host 127.0.0.1
+docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait postgres
+docker compose --env-file deploy/.env -f deploy/compose.yaml run migrate
+docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T postgres psql -U postgres -d oam -f /bootstrap/runtime-roles.sql
+docker compose --env-file deploy/.env -f deploy/compose.yaml run api preflight --json
+docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api worker
 ```
 
-既定の `worker.embedded_enabled: true` では、API、キュー、ワーカーのコンテンツアクセス用の DSN が必要です。ワーカーを別プロセスにする場合は、運用 YAML で `worker.embedded_enabled: false` を設定し、そのファイルを使って `oam api` と `oam worker` を実行します。各ランナーは正本の `worker.max_tasks` 制限を使い、現在はタスクスロットが 10 個です。プロセス数はデプロイツールが制御します。PostgreSQL による共有のアドミッション制御は、レプリカ数にかかわらず、生成、embedding、HTTP トラフィックを制限します。[運用](docs/operations.md#4-limits-and-failure-ownership)を参照してください。
+コマンドが失敗した場合は、そこで止めてエラーを解決してから続けてください。Compose ファイルは Linux AMD64 または ARM64 向けの **v0.1.0** イメージを選択します。ポート、ホスト上のモデルサーバー、ソースからのビルド、レプリカ構成は[デプロイガイド](deploy/README.md)を参照してください。
 
-`GET /health/live`、`GET /health/ready`、`GET /v1/capabilities`、`/openapi.json`、`/ui/` を提供しています。準備状態のチェックは、制限時間内で行うデータベースとスキーマ、有効なモデル設定、アドミッション制御、該当するワーカーの確認に成功すると `200` を返し、それ以外は理由を添えて `503` を返します。モデルは呼び出さず、モデル品質やリリースの準備完了を保証するものではありません。コア機能を使う前に、API、キュー、ワーカーのコンテンツ用の個別 DSN と、抽出、Insight、embedding、要約のモデル役割を設定してください。委任検索には、追加で任意の planner バインディングが必要です。新しいデータベースでは、ルートシークレットも受け渡し先も指定しなければ、`oam migrate` はルートキー不要のローカル `dev` を選択します。キーを使うデプロイを初期化するには、`OAM_ROOT_API_KEY` または `OAM_BOOTSTRAP_OUTPUT` を設定してください。[運用](docs/operations.md)を参照してください。バッチ検索と任意の 1 回の呼び出しによる委任検索は、既存の検索経路を使用します。Resources と出典の制御、記録済みのデバッグ情報、エクスポート検証、ブラウザーの Inspector は [HTTP API](docs/api.md)で説明しています。保存された User Profile は `/profile`、文書 Resources は `/resources`、構造化された Profile Data は `/profile-data` を使用します。User Profile の生成には、対応するモデル役割の設定が必要です。
+### 3. 最初のメモリを保存して検索する
 
-## リリースの範囲
+**Memory Inspector：<http://127.0.0.1:17333/ui/>** を開きます。[個人コレクションの作成](docs/start-here.md#2-create-your-personal-collection)、[好みの保存と検索](docs/start-here.md#3-store-and-recall-a-preference)の順に進めてください。ユーザーキーを作成し、簡単な好みを保存し、インデックス作成を待ってから、出典付きで取り出します。
 
-v0.0.3 は LME-500 の結果とエビデンスへのリンクを更新し、グラフ展開の設定を `entity_semantic_graph` に改名し、公開セットアップ文書を改善します。検証と公開の状況は[リリース記録](docs/releases/0.0.3.md)を参照してください。各連携パッケージのバージョンは変更していません。
+最初の成功の目印は、検索した好みの出典から元のメッセージを確認できることです。その後でエージェントを接続し、新しいセッションでその好みを使うよう依頼してください。
 
-v0.0.3 には、L0–L3 の全レイヤー、独立した Resources の取り込み、fast/normal による統合検索、出典のライフサイクル、説明・差分・記録済み結果の再生、可搬性のあるエクスポート、Memory Inspector、複数 API・複数ワーカーの復旧、適合性の検証記録、公開されたマルチアーキテクチャイメージが含まれます。サポートする検索モードは fast と normal です。Python SDK、他プロバイダーからのインポーター、完全な User Profile Studio、ホスティングサービス、データベースの高可用性、マルチリージョン運用は今後の対象です。
+**[最初のメモリまでの完全ガイド →](docs/start-here.md)**
 
-[Docker/Compose ガイド](deploy/README.md)は、Inspector のアセットを同梱した単一の非 root API/ワーカーイメージと PostgreSQL/pgvector を使用します。レプリカの例はローカルで 2 つの API と 2 つのワーカーをシミュレートするもので、物理的に異なるホスト間の耐障害性を立証するものではありません。[OpenClaw](integrations/openclaw/README.md) と [DSH](integrations/dsh/README.md) は npm からインストールします。OpenClaw は ClawHub でも利用でき、再現性のためにバージョン付きのプラグイン tarball も保持されています。公開リリースとイメージの利用可能性は、ローカルの候補版の検証とは別の確認事項です。
+## エージェントを接続する
 
-## ロードマップ
+先にサービスを起動し、ユーザーキーを作成してください。クライアントパッケージは OAM に接続するもので、サーバーを起動するものではありません。
 
-v0.0.2 では、管理者向けユーザー一覧、安定した Insight タイトル、ユーザー原文の直接検索、MCP 接続を追加しました。変更内容とアップグレード手順は[リリースノート](docs/releases/0.0.2.md)を参照してください。以下の作業を計画しています。検証されたユーザーのフィードバックによって範囲が変わる可能性があり、リリース日は確約していません。
+| エージェント・アプリケーション | 接続方法 |
+| --- | --- |
+| Claude Code または Cursor | [MCP サーバーとクライアント設定](integrations/mcp/README.md#client-configuration)、Node.js 22+ |
+| OpenClaw | [プラグインのインストール](integrations/openclaw/README.md#npm-installation)、自動検索と対象コンテンツの自動保存に対応 |
+| DeepSeek Harness（DSH） | [DSH プラグイン](integrations/dsh/README.md) |
+| 独自アプリケーション | [コピーして使える HTTP の例](docs/quickstart.md)と [API リファレンス](docs/api.md) |
 
-| リリース | 計画中の作業 |
-|---|---|
-| v0.1.0 | 汎用的な検索品質を改善し、既存の完成済み LME-500 と BEAM-10M のインデックスに対して、取り込み、抽出、インデックス作成を繰り返すことなく、検索、回答、採点を再実行します。LME-500 の目標は少なくとも 473/500（94.6%）です。 |
+## エージェントの記憶を確認する
 
-OpenClaw プラグインは独立したバージョン 0.0.2、MCP と DSH は 0.0.1 です。トークナイザー最適化は v0.0.1 のソースタグで提供済みであり、再インデックスは不要です。今後の作業には、導入体験の改善、不要なインデックス作成トークンと回答コンテキストトークンの削減、キーワード順位付け手法の評価、共有 Resource の所有権と OIDC/LDAP サポートの定義が含まれます。これらは提案されている改善であり、提供済みの機能ではありません。
+![検索した証拠と元の出典を表示する Memory Inspector](docs/assets/inspect-memory.png)
 
-設定や検索に関するフィードバックは [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1) で共有してください。現行リリースでサポートされる動作と制約は、上記および[変更点と検証記録](docs/releases/0.0.3.md)に記載しています。
+Inspector では、保存した出典の閲覧、検索したメモリと出典の確認、Resources の管理、User Profile の更新ができます。このスクリーンショットは合成デモデータを使用しています。[Inspector ガイド](docs/memory-web-ui.md)。
+
+## メモリの仕組み
+
+OAM は元の会話（**L0**）を保持し、出典に裏付けられた事実（**L1**）を抽出し、関連する事実から根拠のある Insights（**L2**）を作成します。明示的に更新する User Profile（**L3**）は、エージェントの振る舞いの個人化に役立ちます。テキスト、HTML、PDF、画像の **Resources** は独立した証拠として保持し、学習メモリとともに検索できます。
+
+検索は **fast** と **normal** モードをサポートし、最終回答は生成せず、出典付きコンテキストを返します。コンテキスト上限の既定値は、それぞれ 18,000 と 24,000 トークンです。証拠の使い方、最終回答、入力全体の予算はエージェントが管理します。
+
+[メモリと検索の設計](docs/indexing-retrieval.md) · [アーキテクチャ](docs/architecture.md) · [設定](configs/README.md)
+
+## v0.1.0
+
+このリリースは、上記の検索品質のマイルストーンです。低コストの Flash モデルと小さな LME コンテキストで、より高いベンチマークスコアを記録しました。出典となる証拠の選択とコンテキスト形式を改善し、normal の既定コンテキスト上限を 24,000 トークンに下げ、任意で有効化する fast スコアリングと実験的な出典本文ポリシーを追加しています。v0.0.3 からのアップグレードでは既存のインデックスを再利用でき、新たなマイグレーションや再インデックスは不要です。
+
+検証と公開の状況は[リリースノートとアップグレードガイド](docs/releases/0.1.0.md)を参照してください。OpenClaw は独立したバージョン 0.0.2、MCP と DSH は 0.0.1 のままです。
+
+## ドキュメントと開発
+
+| 目的 | ガイド |
+| --- | --- |
+| OAM のデプロイ・アップグレード | [Docker Compose](deploy/README.md) |
+| HTTP での保存と検索 | [クイックスタート](docs/quickstart.md) · [API リファレンス](docs/api.md) |
+| プロバイダー設定とサービス運用 | [運用](docs/operations.md) |
+| 検証済みの動作と制約の確認 | [受け入れ要件](docs/acceptance.md) · [リリースノート](docs/releases/0.1.0.md) |
+| ビルド・テスト・開発への参加 | [貢献ガイド](CONTRIBUTING.md) · [リリース手順](docs/releasing.md) |
+
+今後は、導入体験の改善、インデックス作成と回答コンテキストのトークン削減、Resources の共有所有権に取り組む予定です。Python SDK、ホスティングサービス、データベースの高可用性、OIDC/LDAP 対応は今後の対象です。設定や検索に関するフィードバックは [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1) で共有してください。
 
 ## 謝辞
 
-OAM の開発に参考となったオープンソースの取り組みを提供してくださった、[Hindsight](https://github.com/vectorize-io/hindsight)、[OpenViking](https://github.com/volcengine/OpenViking)、[Mem0](https://github.com/mem0ai/mem0)、[MemOS](https://github.com/MemTensor/MemOS)、[TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory)、[gbrain](https://github.com/garrytan/gbrain) の貢献者の皆様に感謝します。また、評価に使用したベンチマークを提供してくださった [LongMemEval](https://github.com/xiaowu0162/LongMemEval) と [BEAM](https://github.com/mohammadtavakoli78/BEAM) の著者および貢献者の皆様にも感謝します。プロジェクト、ベンチマーク、ライセンスに関する謝辞は、[謝辞の全文](ACKNOWLEDGMENTS.md)と[サードパーティに関する表示](THIRD_PARTY.md)を参照してください。
+OAM は、[Hindsight](https://github.com/vectorize-io/hindsight)、[OpenViking](https://github.com/volcengine/OpenViking)、[Mem0](https://github.com/mem0ai/mem0)、[MemOS](https://github.com/MemTensor/MemOS)、[TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory)、[gbrain](https://github.com/garrytan/gbrain) のオープンソースの取り組みを参考にしています。[LongMemEval](https://github.com/xiaowu0162/LongMemEval) と [BEAM](https://github.com/mohammadtavakoli78/BEAM) の著者および貢献者の皆様にも感謝します。[謝辞の全文](ACKNOWLEDGMENTS.md)と[サードパーティに関する表示](THIRD_PARTY.md)を参照してください。
 
 ## ライセンス
 
-Apache License 2.0。[LICENSE](LICENSE) と [THIRD_PARTY.md](THIRD_PARTY.md) を参照してください。
+[Apache License 2.0](LICENSE)。

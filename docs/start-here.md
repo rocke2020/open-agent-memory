@@ -2,7 +2,7 @@
 
 ## Overview
 
-Run OAM, store a small preference, retrieve it with citations, then use it in a fresh agent session. OAM supplies evidence; your agent generates the answer. This guide uses the published self-hosted release and a synthetic example, so you do not need to upload a private conversation.
+Run OAM, store a small preference, retrieve it with citations, then use it in a fresh agent session. OAM supplies evidence; your agent generates the answer. This guide uses the versioned self-hosted image and a synthetic example, so you do not need to upload a private conversation. See the [release record](releases/0.1.0.md) for artifact verification and publication status.
 
 ![Illustrative workflow: keep a preference, recall it in a new session, and inspect its original source.](assets/memory-across-sessions.svg)
 
@@ -12,12 +12,12 @@ Already have a running OAM service and user key? Skip to [store and recall a pre
 
 You need Docker with Compose, Git, Bash, `curl`, `jq`, and working credentials for a generation model that supports text and image inputs and an OpenAI-compatible embedding endpoint. Default extraction preflight checks both text and vision, even for this text-only example. Indexing and preflight call your configured providers and may incur charges; recall uses query embeddings and does not generate the final answer. There are no default model endpoints or credentials. Setup time depends on image downloads, your machine and your providers; no fixed completion time is promised.
 
-Clone the repository, pull the published Linux AMD64/ARM64 image, and create your private deployment settings:
+Clone the repository, pull the versioned Linux AMD64/ARM64 image, and create your private deployment settings:
 
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory.git
 cd open-agent-memory
-docker pull ghcr.io/rocke2020/open-agent-memory:0.0.3
+docker pull ghcr.io/rocke2020/open-agent-memory:0.1.0
 cp deploy/.env.example deploy/.env
 ```
 
