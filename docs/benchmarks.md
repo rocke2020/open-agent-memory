@@ -2,36 +2,74 @@
 
 ## Overview
 
-OAM reaches **93.2% (466/500)** on LongMemEval S with MiniMax M3.1 Flash native-adaptive answers and DeepSeek Flash high-effort judging. DeepSeek Flash max-effort answers reach **92.6% (463/500)** on the same 500 questions and byte-identical saved OAM contexts. These are recorded L1/fast-recall pipeline measurements; publishing OAM 0.0.3 does not make them fresh measurements of its release image.
+OAM records **95.2% (476/500)** on LongMemEval S with MiniMax M3.1 Flash native-adaptive answering and judging, normal recall and an **18,000-token retrieval-context limit**. The 497 scored cases average **11,373.58 saved context tokens**; three disputed-gold cases remain counted as incorrect in the unchanged 500-question denominator.
 
-The [paired LME-500 evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500) contains the questions, full contexts, both answers and original judgments. The separate [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m) records a 61.56% mean rubric score with DeepSeek Flash over ten complete histories. OAMB is identified by its Git commit; OAM keeps its product version.
+The [latest LME-500 evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) publishes saved contexts, visible answers, judgments and the evaluated OAM commit. The earlier [466/463 paired comparison](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/lme500) and [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m) remain separate recorded evaluations.
 
-## 1. LongMemEval S: all 500 questions
+## 1. Latest LongMemEval S: 476/500 at 18k
+
+The hard 100 contribute **83/100** and the remaining 400 contribute **393/400**, totaling **476/500**. All 500 canonical question IDs and fixed gold answers remain unchanged. There are 497 current answer/judge pairs and three explicitly carried incorrect outcomes; the latter have no newly generated context, answer or judgment. Existing completed indexes were reused without indexing.
+
+| Recorded setting | Value |
+| --- | --- |
+| Dataset | Cleaned LongMemEval S; 500 canonical IDs |
+| Dataset revision | `98d7416c24c778c2fee6e6f3006e7a073259d48f` |
+| Dataset SHA-256 | `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442` |
+| Answer and judge | `minimax-m3.1-flash`; native adaptive for both |
+| Model wire settings | `thinking: {type: adaptive}`, `reasoning_split: true`; no explicit effort field or structured-output mode |
+| Prompt policy | Exact AMB answer and category-specific judge prompts at `7021c59c3497d1dd08d61f12fa4629be983fcfb1` |
+| Judgment parsing | First usable explicit boolean, including inline `correct=false`; valid No judgments are retained |
+| Recall | Normal; L1; chunks included; graph, Insights, Profile and reranker disabled |
+| Context limit | 18,000 tokens, an evaluation override; the product normal default is 24,000 |
+| Candidate selection | Whole query; 64 per channel, 128 fused, 36 source seeds, at most 96 learned items and 96 original bodies |
+| Source formatting | User-fact exchanges; adjacent user evidence enabled, 1,000-character bound |
+| Deadline | 5 seconds |
+| Exact saved context tokens | 5,652,671 total; 11,373.58 mean across 497; 18,000 maximum |
+| Independent context counter | tiktoken `o200k_base.encode_ordinary` |
+| Retrieval HTTP samples | 994; mean 332.95 ms, median 328.59 ms, p95 428.25 ms; no exclusions |
+| Runtime provenance | The evaluated OAM commit and evaluation configuration are recorded in the linked OAMB evidence |
+
+### Answer and judge variability
+
+Reported accuracy depends on the generated answers and model-based judgments as well as retrieval. A real same-input example is LongMemEval question `e66b632c`: “What was my previous personal best time for the charity 5K run?” With byte-identical final context and identical complete answer-request settings, `minimax-m3.1-flash` answered **27:45** correctly in the published attempt and **28:00** incorrectly in a later repeat. Both requests used native adaptive thinking, `temperature: 0` and `top_p: 1`. The context contains the explicit earlier 27:45 record alongside a later 26:30 result and an approximate improvement; the two answers interpret that evidence differently.
+
+The [saved two-attempt example](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/model-variability-20261118) preserves context and request hashes, visible answers, judge decisions and request options. It illustrates observed answer variation, not how often it occurs. A selected example or one paired small-cohort rerun does not establish a randomness rate or benchmark error bar. The judges received different answers, so this example does not isolate independent judge variability. The published benchmark scores remain the recorded outcomes, not guaranteed repeat-run scores.
+
+### Low-cost Flash models
+
+The evaluated pipelines use MiniMax M3.1 Flash and DeepSeek Flash for answering and judging. Their vendors publish the following list prices, checked on November 18, 2026, in USD per million tokens:
+
+| Model | Uncached input | Output | Source |
+| --- | --- | --- | --- |
+| MiniMax M3.1 Flash | **$0.15** | **$0.60** | [MiniMax official announcement](https://www.minimax.io/blog/minimax-m31f) |
+| DeepSeek Flash, off-peak | **$0.15** | **$0.60** | [DeepSeek official pricing](https://api-docs.deepseek.com/quick_start/pricing/) |
+| DeepSeek Flash, peak | **$0.30** | **$1.20** | [DeepSeek official pricing](https://api-docs.deepseek.com/quick_start/pricing/) |
+
+These prices support describing the models as low-cost; they do not establish a market-wide cheapest model, the Tencent route's reconciled bill or a controlled whole-campaign cost comparison. Cached-input discounts and peak schedules are defined by the vendors. Saved context size alone does not include indexing, reasoning, output, retries or all final model-input tokens.
+
+### Comparison with the recorded Hindsight result
+
+| Recorded pipeline | Accepted answers | Mean saved formatted context, `o200k_base` |
+| --- | --- | --- |
+| OAM, MiniMax M3.1 Flash answer and judge | **476/500 (95.2%)** | **11,373.58** across 497 contexts |
+| Hindsight, Gemini 3.1 Pro Preview answer and Gemini 2.5 Flash Lite judge | **473/500 (94.6%)** | **43,124.55** across 500 contexts |
+
+OAM's recorded score is 0.6 percentage points higher and its saved formatted contexts are **73.63% smaller**. The Hindsight result is the [AMB artifact at revision `7021c59`](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz). Different answer and judge models, context populations and full pipelines prevent attributing the difference to retrieval alone. Hindsight's actual server revision and complete resolved settings are not established by that artifact. Saved formatted context counts are not exact model-input or billing counts; the Hindsight answer path can use raw recall JSON instead.
+
+The change from the earlier 466/500 is a net gain of ten accepted answers: 22 previously incorrect cases become correct and 12 previously correct cases become incorrect, including one carried disputed-gold No. Retrieval, formatting, prompts and judge model changed together. This is evidence of the resulting pipeline, not an isolated ten-question causal gain from retrieval. A same-selected-evidence formatting comparison reduces total context tokens by **332,235 (5.55%)**, while keeping all **4,137,965 evidence-body tokens** unchanged.
+
+## 2. Earlier same-context answer-model comparison
 
 | Answer model | Answer reasoning | Judge | Accepted answers |
 | --- | --- | --- | --- |
 | `minimax-m3.1-flash` | Native adaptive | DeepSeek Flash, high | **466/500 (93.2%)** |
 | `deepseek-flash` | Max | DeepSeek Flash, high | **463/500 (92.6%)** |
 
-Every canonical question ID occurs once in each arm. MiniMax M3.1 Flash uses native adaptive answer reasoning; DeepSeek Flash uses max answer reasoning. The saved responses retain their original model settings and fixed-reference judgments.
+These earlier arms use the same 500 questions and byte-identical L1/fast contexts: **5,740,548 tokens total; 11,481.10 mean**. Both arms are accepted on 448 questions, MiniMax alone on 18, DeepSeek alone on 15, and neither on 19. The recorded 0.6 percentage-point difference is three questions. Original judgments, including disputed source/gold cases, are retained in the [immutable paired evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/lme500).
 
-Both arms are accepted on 448 questions, MiniMax alone on 18, DeepSeek alone on 15, and neither on 19. The 0.6 percentage-point difference is three questions in this recorded comparison. Fixed references and original verdicts remain unchanged, including disputed source/gold cases. These are judge acceptance scores, not independently established true accuracy or a universal model ranking.
+These are fixed-reference judge acceptance scores, not independently established true accuracy or a universal model ranking. L2 Insights, User Profiles and document Resources are outside the scored scope. Existing indexes were reused; no new indexing cost or time was measured. Embedding tokens are excluded from generation totals; reasoning belongs in output usage. The two arms' recorded periods, latency and provider token counts do not establish controlled speed or monetary-cost ratios.
 
-| Recorded setting | Value |
-| --- | --- |
-| Dataset | Cleaned LongMemEval S, 500 canonical IDs |
-| Dataset revision | `98d7416c24c778c2fee6e6f3006e7a073259d48f` |
-| Dataset SHA-256 | `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442` |
-| Recall and representation | Fast; L1; graph, Insights and Profile disabled |
-| Exact saved context tokens | 5,740,548 total; 11,481.10 mean |
-| Independent context counter | tiktoken 0.14.0, `o200k_base.encode_ordinary` |
-| Query embeddings | Qwen3-Embedding-0.6B, 1,024 dimensions, bundled Qwen tokenizer |
-| Indexing | Existing completed indexes reused; no new indexing time or cost measured |
-| Runtime provenance | Saved context/source identities and known revisions are recorded in the LME manifest; no single extraction or released-image identity is inferred |
-
-L2 Insights, User Profiles and document Resources are outside the scored scope. The two models' answers and judgments were collected in different periods; recorded latency and provider token counts do not establish controlled speed or monetary-cost ratios. Embedding tokens are excluded from generation totals; reasoning is included in output usage.
-
-## 2. BEAM-10M
+## 3. BEAM-10M
 
 | Measurement | OAM | Hindsight saved-context replay |
 | --- | --- | --- |
@@ -41,22 +79,23 @@ L2 Insights, User Profiles and document Resources are outside the scored scope. 
 | OAM mean answer-visible context | 32,106.88 `cl100k_base` tokens | OAM uses 17.43% more context |
 | OAM retrieval timing | 2,906.5 ms mean; 2,617.9 ms median; 5,527.6 ms p95 | Engine not rerun |
 
-The BEAM results summarize recorded selected answers with DeepSeek Flash judging and preserve each answer's actual model settings in the evidence. They are separate from the current DeepSeek max answer profile. Hindsight's saved contexts were replayed without rerunning its indexing or retrieval.
+The BEAM results use DeepSeek Flash for answering and judging: 156 selected answers use high reasoning and 44 use max reasoning. The evidence preserves each selected answer's actual model settings. They are separate from the current DeepSeek max answer profile. Hindsight's saved contexts were replayed without rerunning its indexing or retrieval.
 
 BEAM assigns each question the mean of its rubric-item scores; its mean rubric score differs from its threshold pass rate. The retrieval timings come from 540 probes on histories 2–10, with none excluded. Complete comparable indexing-generation usage, full-campaign cost and indexing wall time are unavailable. The dataset revision is `9b2096193fe74e2837e4713e483351e19817773c`, with SHA-256 `c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8`. Recall is normal, using L1; L2 and Profile are excluded from scored contexts.
 
-The [BEAM manifest](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m/manifest.json) records per-history configuration, exact model bindings and available runtime revisions. Unknown inputs remain unknown. Context size, model settings and saved-context replay prevent attributing the score difference to the memory engine alone.
+The [BEAM manifest](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m/manifest.json) records per-history configuration, exact model bindings and available runtime revisions. Unknown inputs remain unknown. Context size, model settings and saved-context replay prevent attributing the score difference to the memory engine alone.
 
-## 3. Inspect and recompute the saved results
+## 4. Inspect and recompute the saved results
 
-The self-contained `report.html` files show full contexts and individual outcomes without model calls. The adjacent gzip JSON shards retain both LME arms' full context text and scoring evidence. Recompute coverage, scores, context totals and evidence integrity from an OAMB checkout:
+The self-contained `report.html` files show full saved contexts and individual outcomes without model calls. Adjacent gzip JSON shards retain visible answers and judgments; the latest campaign marks carried outcomes explicitly. Recompute coverage, scores, context totals and evidence integrity from an OAMB checkout:
 
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory-benchmark.git
 cd open-agent-memory-benchmark
-git rev-parse HEAD  # Record the benchmark source revision.
 uv sync --locked
-uv run pytest -q tests/test_published_oam_evidence.py tests/reporting/test_historical_report.py
+uv run pytest -q tests/test_published_oam_evidence.py tests/test_published_lme500_20261117.py tests/reporting/test_historical_report.py
 ```
 
-These commands validate saved measurements. For a new run against your deployment, follow the [native OAM workflow](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/docs/native-oam.md), choose the DeepSeek max or MiniMax native-adaptive LME profile, and record actual OAM revision, settings, usage and results. New model output can vary; a successful run is not proof of score parity. Provider and infrastructure costs depend on your configuration.
+The latest campaign's OAMB manifest records the evaluated OAM commit. Use that exact commit for a source build, and the adjacent evaluation configuration for the recorded retrieval settings. These commands validate saved measurements; no fresh model calls are needed.
+
+The current [native OAM workflow](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/docs/native-oam.md) remains a separate LME fast-recall protocol. Changing only its model names does not reproduce the latest normal-recall/AMB-prompt campaign. New model output can vary; a successful run is not proof of score parity. Provider and infrastructure costs depend on the chosen configuration.

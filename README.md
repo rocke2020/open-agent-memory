@@ -1,147 +1,125 @@
 # Open Agent Memory
 
-English (canonical) | [简体中文](README_CN.md) | [日本語](README_JA.md)
+**Useful memory for everyday AI agents.**
 
-**Fully open memory. Built together. Made for everyday agents.**
+[English](README.md) | [中文](README_CN.md) | [日本語](README_JA.md)
 
-Open Agent Memory (OAM) is a fully open source memory engine for AI agents. Remember preferences, find earlier decisions and retrieve supporting sources in a new session. OAM turns eligible conversations into facts and Insights, keeps documents as separate Resources, and builds a User Profile only when explicitly refreshed.
+[Get started](#quick-start) · [Performance](#performance--accuracy) · [Integrations](#connect-your-agent) · [Documentation](docs/indexing-retrieval.md) · [Releases](https://github.com/rocke2020/open-agent-memory/releases)
 
-**Built for the community:** the complete memory system is [Apache-2.0 licensed](LICENSE), so we can run it, inspect it, improve it and use it together. [Build with us](CONTRIBUTING.md) or [share your experience](https://github.com/rocke2020/open-agent-memory/discussions/1).
+Open Agent Memory (OAM) is a fully open-source memory engine for AI agents. It remembers useful facts, preferences and experiences across conversations, then retrieves relevant evidence with citations when your agent needs it.
 
-**93.2% on LME-500** with MiniMax M3.1 Flash native-adaptive answers and DeepSeek Flash judging. On BEAM-10M, OAM scored **61.56% versus Hindsight’s 52.16% (+9.40 percentage points)** using recorded DeepSeek Flash settings. [Results and comparison details](#performance--accuracy).
-
-![Illustrative flow: retain a preference, start a new session, then recall it with source evidence](docs/assets/memory-across-sessions.svg)
-
-Illustrative scenario, not measured model output. Your agent uses OAM's cited context to compose its answer.
-
-**[Get your first cited memory →](docs/start-here.md)** Deployment, a user key, retain → readiness → recall, and a fresh MCP session in one guide.
-
-## What Is Open Agent Memory?
-
-“Open” means the complete memory system: indexing, retrieval, Profiles, user controls and native multi-node operation are available for developers to inspect, run, modify and improve. The aim is a memory engine the community can build and use together. Contributions can be code, reproducible bug reports, documentation, examples or feedback from your own agent.
-
-Integrate through the HTTP API, the local [MCP server](integrations/mcp/README.md), or the OpenClaw and DeepSeek Harness plugins. The bundled Memory Inspector lets users browse memory, follow its sources, search Resources and manage what is retained.
-
-## Why Open Agent Memory?
-
-- **Fully open source, with native multi-node deployment.** Run stateless API replicas and durable workers across nodes over shared PostgreSQL/pgvector. Coordination, recovery and deployment code are included.
-- **Recall with evidence.** Retrieve facts and Insights together with supporting original passages and citations, so the agent can reason from the source.
-- **Search conversations and documents together.** HTML, PDF and image Resources remain separate from learned personal memory while sharing one retrieval path.
-- **Personalize when you choose.** Build a stored User Profile from eligible memory and explicit Profile Data on request; unchanged inputs reuse it without generation.
-- **Inspect and control memory.** Browse sources in the Inspector, remove an individual Memory Unit or Insight, and manage document Resources through the same authorized API.
-- **Control your data and models.** Self-host your memory in PostgreSQL/pgvector and configure your own model endpoints.
-
-See the [acceptance requirements](docs/acceptance.md), [release notes and verification](docs/releases/0.0.2.md) and [published release](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.2) for verified behavior, deployment limits and artifacts.
-
-## Get Started
-
-**[Start here: from a fresh deployment to your first cited recall](docs/start-here.md).** Configure PostgreSQL and your model endpoints, initialize OAM, create a user and verify the retained source before connecting your agent. The guide uses the published v0.0.2 image for Linux AMD64 or ARM64 and links to the [Docker Compose guide](deploy/README.md).
-
-| Your agent or application | First prerequisite | Integration route |
-|---|---|---|
-| Custom application | [Complete Start here](docs/start-here.md) | [HTTP API](docs/api.md) and [copyable HTTP example](docs/quickstart.md) |
-| Claude Code or Cursor | [Complete Start here](docs/start-here.md) | [MCP server and client configuration](integrations/mcp/README.md#client-configuration), Node.js 22+ |
-| OpenClaw | [Complete Start here](docs/start-here.md) | [OpenClaw plugin](integrations/openclaw/README.md#npm-installation) |
-| DeepSeek Harness (DSH) | [Complete Start here](docs/start-here.md) | [DSH plugin](integrations/dsh/README.md) |
-
-Use your own user-scoped key and keep client configuration private.
-
-## Inspect the evidence
-
-![Annotated crop of the real Memory Inspector showing synthetic demonstration data](docs/assets/inspect-memory.png)
-
-Real Inspector UI with synthetic demonstration data; annotations highlight where to inspect memory and its source. This is a demonstration, not a benchmark result.
-
-<details>
-<summary>Watch the existing cited-recall demo</summary>
-
-[![Watch OAM recall preferences with source citations](docs/assets/cited-recall-demo.gif)](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4)
-
-[Watch the 71-second demo](https://github.com/rocke2020/open-agent-memory/releases/download/v0.0.1/oam-v0.0.1-cited-recall-demo.mp4): an existing synthetic memory, readiness and recall from a fresh MCP process, then the original source in Memory Inspector. The recording runs at 2× speed and reuses the completed index.
-
-</details>
+Keep your conversations and documents in your own PostgreSQL database, choose your model providers, and inspect what the agent remembers. OAM supplies the memory; your agent writes the answer.
 
 ## Performance & Accuracy
 
-OAM is built for useful memory in everyday agent work. It reaches **93.2% (466/500)** on **all 500 LongMemEval S questions** with MiniMax M3.1 Flash native-adaptive answers and DeepSeek Flash high-effort judging.
+**Higher recorded scores than the Hindsight comparisons, with low-cost Flash models and 73.63% less saved context on LongMemEval S.**
 
-The LME evaluation uses fast recall with L1 memory and **11,481.10 average answer-context tokens**. This is a fixed-reference judge acceptance score for the recorded pipeline, not a fresh measurement of the v0.0.3 image. See [benchmark results and evidence](docs/benchmarks.md).
+| Benchmark | OAM | Hindsight comparison | Answer context |
+| --- | --- | --- | --- |
+| **LongMemEval S**, all 500 questions | **95.2% (476/500)** | 94.6% (473/500) | **11,373.58** mean saved tokens vs 43,124.55; **73.63% smaller** |
+| **BEAM-10M**, 200 questions across 10 complete histories | **61.56%** mean rubric score | 52.16% saved-context replay | OAM used 17.43% more context |
 
-**BEAM-10M: 61.56% versus Hindsight’s saved-context replay at 52.16%, a difference of 9.40 percentage points.** These saved measurements cover 200 selected answers with DeepSeek Flash judging and are separate from the current max-effort answer profile. Hindsight's engine was not rerun. OAM used 17.43% more answer context. See the [comparison methodology and per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m/README.md).
+The latest LongMemEval result uses **MiniMax M3.1 Flash** for answering and judging, with an 18,000-token context limit. Earlier same-context LongMemEval runs also record results with **DeepSeek Flash**. BEAM-10M uses **DeepSeek Flash** for answering and judging, with the recorded high/max answer settings preserved in its report. These are low-cost Flash-model pipelines, rather than a requirement to use an expensive flagship answer model.
 
-BEAM-10M tested **10 complete, untruncated conversation histories**, with 20 questions per history. The linked reports record each run's model bindings, evaluated revisions and limitations.
+The comparisons use different answer and judge pipelines. Context sizes count saved formatted text, not provider-billed tokens; 497 current LME contexts contribute to the mean, and three disputed-gold cases remain counted as incorrect in the 500-question score. The evaluations cover L1 memory; Insights, Profiles and document Resources were not scored.
 
-These recorded evaluations measure retrieval, answering and judging with L1 memory; L2 Insights, User Profiles and document Resources were not scored.
+Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](docs/benchmarks.md#answer-and-judge-variability), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
 
-See [benchmark results and reproduction](docs/benchmarks.md) for the evaluation methodology, model settings, context counters, evaluated revisions, limitations and every question's saved evidence.
+[Results, model pricing and methodology](docs/benchmarks.md) · [LME per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m)
 
-## Product Model
+## Why OAM?
 
-- **L0 Source evidence:** retained eligible conversations with roles, times, source identities, and learning eligibility.
-- **L1 Learned memory:** source-linked facts, preferences, experiences, events, and constraints extracted from interactions eligible for long-term memory.
-- **L2 Insights:** persisted synthesis over related eligible L1 records with transitive L0 support and one descriptive subtype: `preferences`, `patterns`, `projects`, `relationships`, `experiences` or `general_insights`; subtype does not alter ranking.
-- **L3 User Profile:** one explicitly refreshed, read-only document built from Profile Data and eligible Learned Memory; unchanged inputs reuse it with zero generation calls.
-- **Profile Data:** explicitly supplied structured basic information or preferences, mapped to exact User Profile inputs and excluded from ordinary recall.
-- **Resources:** retained text/HTML/PDF/image originals, detailed passages, locators, and abstracts that remain searchable evidence and never automatically become L1–L3.
+- **Remember across sessions.** Retain useful preferences, decisions and experiences so your agent can use them in a new conversation.
+- **Check the evidence.** Recalled memories link back to original source messages. Browse and remove memory through the Memory Inspector.
+- **Search conversations and documents together.** Recall relevant learned memory alongside text, HTML, PDF and image Resources; documents stay separate from learned personal memory.
+- **Build a useful personal Profile.** Explicitly refresh a stored User Profile from eligible memory and structured Profile Data.
+- **Own your data and models.** Self-host with PostgreSQL/pgvector, configure your own endpoints, and control the recall context budget.
 
-In `api_key` mode, one credential-derived tenant and one key-bound `user_id` identify a personal memory collection. An administrator creates it with `POST /v1/users` and receives that user's first key once; the host uses the user key for `POST /v1/retain` interactions, `POST /v1/users/{user_id}/resources` document originals, `POST /v1/users/{user_id}/profile-data` structured user inputs, and `POST /v1/recall`. The administrator key cannot read or write personal content directly. Local `dev` mode admits requests without a key and makes no privacy claim; `trusted` mode uses gateway-asserted tenant/user headers, with a root key required on nonlocal requests. Interactions need no caller-managed source/message IDs. Documents use a stable `document_id` with explicit `replace` or text-only `append`; OAM allocates revisions. The [HTTP API](docs/api.md) documents mode selection, JSON and multipart examples, user-key rotation, retry keys and operation readiness.
+## Quick Start
 
-Recall uses one limit on the complete rendered context: `search.fast.context_max_tokens: 18000` and `search.normal.context_max_tokens: 32768`. Chunks are included by default; `include.chunks: false` omits full original bodies while retaining eligible learned text, required supporting facts and citations. Relevance determines admission across learned evidence and originals, including originals with no extracted facts. Complete evidence groups must fit without clipping; shared source chunks are counted once. If the only eligible L1 fact and its complete support exceed the total, return that bundle alone only when no higher-ranked root has been admitted, stop filling and report the overshoot. Insights have no such exception. `context_tokens` counts the complete returned text, including citations and metadata, with the local `o200k_base` tokenizer. It is not provider usage; hosts count their final composed model input separately.
+You need **Docker with Compose**, **Git**, a generation endpoint that supports text and image inputs, and an OpenAI-compatible embedding endpoint. OAM has no default model endpoints or credentials. Model preflight and indexing use your configured providers and may incur charges.
 
-## Architecture
-
-OAM uses Python, FastAPI, explicit SQL through psycopg, and PostgreSQL with pgvector. API processes are stateless; PostgreSQL owns accepted originals, authorization, source lifecycle, operations, worker claims, leases, fences, and application-replica recovery. Each service uses one configured VLM through OpenAI Chat, OpenAI Responses or Anthropic Messages, with per-role reasoning effort and separate embedding and optional reranker models. There are no provider, model, endpoint, or credential defaults.
-
-![Conversations → facts → Insights; separate document Resources; cited recall and explicit Profile refresh](docs/assets/memory-flow.svg)
-
-Conversations become source-backed facts and Insights; documents stay in a separate Resource path. Both feed cited fast/normal recall. User Profile refresh is explicit: unchanged inputs reuse the stored Profile with zero generation calls; changed inputs create a durable operation.
-
-See [architecture](docs/architecture.md), [HTTP API](docs/api.md), [configuration guide](configs/README.md), [operations](docs/operations.md), the [Memory web UI guide](docs/memory-web-ui.md), [acceptance](docs/acceptance.md), and the historical [Steps 1–4 foundation evidence](docs/foundation-evidence.md).
-
-## Development Setup
-
-Python 3.12–3.14 and `uv` are required.
+### 1. Prepare your settings
 
 ```bash
-uv sync --locked
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
-uv run oam preflight --config configs/oam.yaml --json
+git clone https://github.com/rocke2020/open-agent-memory.git
+cd open-agent-memory
+cp deploy/.env.example deploy/.env
 ```
 
-The canonical configuration defines one shared `models.vlm`, plus a separate `models.embedding`. Select `openai_chat`, `openai_responses`, or `anthropic_messages` as the generation protocol, and configure the model, endpoint and credential through private environment variables. `models.reasoning_effort` enables each role with `none`, `low`, `high` or `max`; YAML null disables that role. The VLM reasoning mode determines which settings are sent. Preflight exercises enabled text and vision roles with the selected protocol; actual model capabilities depend on the endpoint. See [model configuration](docs/operations.md) for protocol paths and reasoning options. Default tests never read private `.env` or contact external providers.
+Edit `deploy/.env`:
 
-Run the API with its embedded durable worker using the operator configuration:
+- Set `VLM_BASE_URL`, `VLM_API_KEY`, `VLM_MODEL` and `OAM_EMBEDDING_URL`, `OAM_EMBEDDING_KEY`, `OAM_EMBEDDING_MODEL` to your provider settings.
+- Set each database password and `OAM_ROOT_API_KEY` to a separate random value; generate each with `openssl rand -hex 24`.
+- The default embedding dimension is **1024**. If your endpoint returns a different supported size, set `index.embedding_dimensions` in `deploy/oam.yaml` **before initialization**. See [model configuration](docs/operations.md#1-configuration).
+
+### 2. Start OAM
 
 ```bash
-uv run oam api --config configs/oam.yaml --host 127.0.0.1
+docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait postgres
+docker compose --env-file deploy/.env -f deploy/compose.yaml run migrate
+docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T postgres psql -U postgres -d oam -f /bootstrap/runtime-roles.sql
+docker compose --env-file deploy/.env -f deploy/compose.yaml run api preflight --json
+docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api worker
 ```
 
-The default `worker.embedded_enabled: true` requires the API, queue and worker-content DSNs. For separate worker processes, set `worker.embedded_enabled: false` in the operator YAML and run `oam api` and `oam worker` with that file. Each runner uses the canonical `worker.max_tasks` limit, currently ten task slots; deployment tooling controls process count. Shared PostgreSQL admission bounds generation, embeddings and HTTP traffic independently of replica count; see [operations](docs/operations.md#4-limits-and-failure-ownership).
+Stop if a command fails and resolve the reported error before continuing. The Compose file selects the **v0.1.0** image for Linux AMD64 or ARM64. See the [deployment guide](deploy/README.md) for ports, model servers on your host, source builds and replica setup.
 
-`GET /health/live`, `GET /health/ready`, `GET /v1/capabilities`, `/openapi.json`, and `/ui/` are available. Readiness returns `200` when the bounded database/schema, enabled-model configuration, admission and applicable worker checks succeed, or `503` with a reason. It makes no model calls and does not certify model quality or release readiness. Configure distinct API, queue and worker-content DSNs plus extraction, Insight, embedding and abstract model roles before using the core; delegated search also needs an optional planner binding. On a fresh database, `oam migrate` selects rootless local `dev` when no root secret or handoff destination is supplied; set `OAM_ROOT_API_KEY` or `OAM_BOOTSTRAP_OUTPUT` to initialize a keyed deployment. See [operations](docs/operations.md). Batch search and optional one-call delegated search use the existing recall path; Resource/source controls, recorded debug, export validation and the browser Inspector are documented in the [HTTP API](docs/api.md). The stored User Profile uses `/profile`; document Resources use `/resources`, and structured Profile Data uses `/profile-data`; User Profile generation requires its configured model role.
+### 3. Store and recall your first memory
 
-## Release Boundary
+Open the **Memory Inspector at <http://127.0.0.1:17333/ui/>**. Follow [Create your personal collection](docs/start-here.md#2-create-your-personal-collection), then [Store and recall a preference](docs/start-here.md#3-store-and-recall-a-preference): create a user key, retain a small preference, wait for indexing, and retrieve it with citations.
 
-v0.0.3 updates the LME-500 results and evidence links, renames graph expansion configuration to `entity_semantic_graph`, and improves public setup documentation. See the [release record](docs/releases/0.0.3.md) for verification and publication status. Integration package versions are unchanged.
+Your first success is a recalled preference whose citation leads to the original message. Then connect your agent and ask it to use that preference in a fresh session.
 
-v0.0.2 includes all L0–L3 layers, separate Resource ingestion, fast/normal joint recall, source lifecycle, explain/diff/recorded replay, portable export, Memory Inspector, multi-API/multi-worker recovery, conformance evidence, and a public multi-architecture image. Fast and normal are the supported recall modes. The Python SDK, supplier importers, full User Profile Studio, hosted service, database HA, and multi-region operation are later work.
+**[Complete first-memory walkthrough →](docs/start-here.md)**
 
-The [Docker/Compose guide](deploy/README.md) uses one non-root API/worker image, bundled Inspector assets and PostgreSQL/pgvector. The replica example simulates two APIs and two workers locally; it does not establish physical multi-host resilience. [OpenClaw](integrations/openclaw/README.md) and [DSH](integrations/dsh/README.md) install from npm, with OpenClaw also available on ClawHub and versioned plugin tarballs retained for reproducibility. Public release and image availability are separate from local candidate verification.
+## Connect Your Agent
 
-## Roadmap
+Start the service and create a user key first. Client packages connect to OAM; they do not start the server.
 
-v0.0.2 adds administrator user listing, stable Insight titles, direct user-original recall eligibility and the MCP integration. See the [release notes](docs/releases/0.0.2.md) for changes and upgrade steps. The following work is planned; scope may change with validated user feedback, and no release dates are committed.
+| Agent or application | Integration |
+| --- | --- |
+| Claude Code or Cursor | [MCP server and client configuration](integrations/mcp/README.md#client-configuration), Node.js 22+ |
+| OpenClaw | [Plugin installation](integrations/openclaw/README.md#npm-installation), with automatic recall and eligible capture |
+| DeepSeek Harness (DSH) | [DSH plugin](integrations/dsh/README.md) |
+| Your own application | [Copyable HTTP example](docs/quickstart.md) and [API reference](docs/api.md) |
 
-| Release | Planned work |
-|---|---|
-| v0.1.0 | Improve general retrieval quality and rerun retrieval, answering and judging against the existing completed LME-500 and BEAM-10M indexes, without repeating ingestion, extraction or indexing. The LME-500 target is at least 473/500 (94.6%). |
+## See What Your Agent Remembers
 
-The OpenClaw plugin remains independently versioned at 0.0.2; MCP and DSH remain at 0.0.1. The tokenizer optimization already shipped in the v0.0.1 source tag and is retained without reindexing. Further work includes smoother onboarding, reducing unnecessary indexing and answer-context tokens, evaluating keyword-ranking approaches, and defining shared Resource ownership and OIDC/LDAP support. These are proposed improvements, not delivered capabilities.
+![Memory Inspector showing recalled evidence and its original source](docs/assets/inspect-memory.png)
 
-Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1). The current release's supported behavior and limits remain documented above and in the [release notes and verification](docs/releases/0.0.2.md).
+The Inspector lets you browse retained sources, inspect recalled memories and citations, manage Resources, and refresh your User Profile. This screenshot uses synthetic demonstration data. [Inspector guide](docs/memory-web-ui.md).
+
+## How Memory Works
+
+OAM preserves original conversations (**L0**), extracts source-backed facts (**L1**), and builds supported Insights across related facts (**L2**). An explicitly refreshed User Profile (**L3**) helps the agent personalize its behavior. Text, HTML, PDF and image **Resources** remain separate evidence and can be retrieved alongside learned memory.
+
+Recall supports **fast** and **normal** modes and returns cited context without generating the final answer. The default context limits are 18,000 and 24,000 tokens respectively. Your agent decides how to use that evidence and owns its final answer and total input budget.
+
+[Memory and retrieval design](docs/indexing-retrieval.md) · [Architecture](docs/architecture.md) · [Configuration](configs/README.md)
+
+## v0.1.0
+
+This release marks the retrieval-quality milestone above: higher recorded benchmark scores with low-cost Flash models and compact LME context. It improves source-evidence selection and context formatting, lowers the normal context default to 24,000 tokens, and adds opt-in fast scoring and experimental source-body policies. Existing indexes can be reused; no new migration or reindexing is required when upgrading from v0.0.3.
+
+See the [release notes and upgrade guide](docs/releases/0.1.0.md) for verification and publication status. OpenClaw remains independently versioned at 0.0.2; MCP and DSH remain at 0.0.1.
+
+## Documentation & Development
+
+| Goal | Guide |
+| --- | --- |
+| Deploy or upgrade OAM | [Docker Compose](deploy/README.md) |
+| Store and recall through HTTP | [Quickstart](docs/quickstart.md) · [API reference](docs/api.md) |
+| Configure providers and operate the service | [Operations](docs/operations.md) |
+| Understand verified behavior and limits | [Acceptance](docs/acceptance.md) · [Release notes](docs/releases/0.1.0.md) |
+| Build, test or contribute | [Contributing](CONTRIBUTING.md) · [Release procedure](docs/releasing.md) |
+
+Future work includes smoother onboarding, lower indexing and answer-context token usage, and shared Resource ownership. The Python SDK, hosted service, database high availability and OIDC/LDAP support remain future work. Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1).
 
 ## Acknowledgments
 
-We thank the contributors to [Hindsight](https://github.com/vectorize-io/hindsight), [OpenViking](https://github.com/volcengine/OpenViking), [Mem0](https://github.com/mem0ai/mem0), [MemOS](https://github.com/MemTensor/MemOS), [TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) and [gbrain](https://github.com/garrytan/gbrain) for their open-source work, which informed OAM. We also thank the authors and contributors of [LongMemEval](https://github.com/xiaowu0162/LongMemEval) and [BEAM](https://github.com/mohammadtavakoli78/BEAM) for the benchmarks used in our evaluations. See the [full acknowledgments](ACKNOWLEDGMENTS.md) and [third-party notices](THIRD_PARTY.md) for project, benchmark and license credits.
+OAM is informed by open-source work from [Hindsight](https://github.com/vectorize-io/hindsight), [OpenViking](https://github.com/volcengine/OpenViking), [Mem0](https://github.com/mem0ai/mem0), [MemOS](https://github.com/MemTensor/MemOS), [TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) and [gbrain](https://github.com/garrytan/gbrain). We thank the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) and [BEAM](https://github.com/mohammadtavakoli78/BEAM) authors and contributors. See [full acknowledgments](ACKNOWLEDGMENTS.md) and [third-party notices](THIRD_PARTY.md).
+
+## License
+
+[Apache License 2.0](LICENSE).

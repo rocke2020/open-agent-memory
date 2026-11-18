@@ -1,5 +1,6 @@
 """Local evidence selection preserves independent hits and complete support."""
 
+from collections import Counter
 from contextlib import contextmanager
 from copy import deepcopy
 
@@ -585,9 +586,66 @@ def sparse_service(rows, ranked_ids, config):
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_direct_lexical_assistant_first_original_reaches_context_without_a_user_witness(mode):
+    passage = original("opening", 0, "assistant")
+    passage["text"] = "The observatory dome is copper and opens toward the east."
+    passage["locator"] = passage["citations"][0]
+    claim = fact("derived", passage)
+    neighbor = original("neighbor", 1, "assistant")
+    neighbor["locator"] = neighbor["citations"][0]
+    values = CONFIG.model_dump(mode="json")
+    values["search"][mode].update(
+        partial_match_gate="user_fact_exchange", adjacent_user_context=False
+    )
+    result = sparse_service(
+        [passage, claim, neighbor], ["opening", "derived"], type(CONFIG).model_validate(values)
+    ).search(object(), SearchRequest(query="What is the dome made of?", recall_level=mode))
+
+    assert [item["unit_id"] for item in result["items"]] == ["opening"]
+    assert passage["text"] in result["context"]
+    assert result["items"][0]["citations"] == passage["citations"]
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_weaker_lexical_assistant_originals_still_need_a_local_witness(mode):
+    first, second = original("first", 0, "assistant"), original("second", 2, "assistant")
+    for row in (first, second):
+        row["locator"] = row["citations"][0]
+    values = CONFIG.model_dump(mode="json")
+    values["search"][mode].update(
+        partial_match_gate="user_fact_exchange", adjacent_user_context=False
+    )
+    result = sparse_service(
+        [first, second], ["first", "second"], type(CONFIG).model_validate(values)
+    ).search(object(), SearchRequest(query="Recall the source description", recall_level=mode))
+    assert [item["unit_id"] for item in result["items"]] == ["first"]
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_lexical_original_fallback_skips_facts_resources_and_invalid_roles(mode):
+    resource = original("resource", 0, origin="evidence")
+    invalid = original("invalid", 0)
+    invalid["locator"] = {**invalid["citations"][0], "role": "system"}
+    first, second = original("first", 0, "assistant"), original("second", 2, "assistant")
+    for row in (resource, first, second):
+        row["locator"] = row["citations"][0]
+    claim = fact("claim", first)
+    values = CONFIG.model_dump(mode="json")
+    values["search"][mode].update(
+        partial_match_gate="user_fact_exchange", adjacent_user_context=False
+    )
+    result = sparse_service(
+        [claim, resource, invalid, first, second],
+        ["claim", "resource", "invalid", "first", "second"],
+        type(CONFIG).model_validate(values),
+    ).search(object(), SearchRequest(query="Recall the description", recall_level=mode))
+    assert [item["unit_id"] for item in result["items"]] == ["resource", "first"]
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("chunks", [True, False])
-@pytest.mark.parametrize("locator_role", ["user", "assistant", None])
-def test_direct_lexical_user_original_needs_no_dense_fact_witness(mode, chunks, locator_role):
+@pytest.mark.parametrize("locator_role", ["user", "assistant", "system", None])
+def test_direct_lexical_original_needs_no_dense_fact_witness(mode, chunks, locator_role):
     user, reply = original("user", 4), original("reply", 5, "assistant")
     user["text"] = "I finished a pottery workshop on June 3."
     if locator_role is not None:
@@ -606,10 +664,9 @@ def test_direct_lexical_user_original_needs_no_dense_fact_witness(mode, chunks, 
         ),
     )
 
-    assert [item["unit_id"] for item in result["items"]] == (
-        ["user"] if locator_role == "user" and chunks else []
-    )
-    if locator_role == "user" and chunks:
+    expected = ["user"] if locator_role in {"user", "assistant"} else ["reply"]
+    assert [item["unit_id"] for item in result["items"]] == (expected if chunks else [])
+    if locator_role in {"user", "assistant"} and chunks:
         assert result["items"][0]["text"] == user["text"]
         assert result["items"][0]["citations"] == user["citations"]
         assert user["text"] in result["context"]
@@ -619,8 +676,19 @@ def test_direct_lexical_user_original_needs_no_dense_fact_witness(mode, chunks, 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("ranked_ids", [("first", "second"), ("second", "first")])
 @pytest.mark.parametrize("limit", ["none", "channel", "fusion", "results", "tokens"])
-def test_sparse_user_originals_keep_relevance_order_and_all_limits(mode, ranked_ids, limit):
+@pytest.mark.parametrize(
+    ("roles", "unbounded_first_order", "unbounded_second_order"),
+    [
+        (("user", "user"), ["first", "second"], ["second", "first"]),
+        (("assistant", "assistant"), ["first"], ["second"]),
+        (("user", "assistant"), ["first"], ["second", "first"]),
+    ],
+)
+def test_sparse_originals_keep_relevance_order_and_all_limits(
+    mode, ranked_ids, limit, roles, unbounded_first_order, unbounded_second_order
+):
     first, second, neighbor = original("first", 0), original("second", 2), original("neighbor", 4)
+    first["citations"][0]["role"], second["citations"][0]["role"] = roles
     first["text"] = "I finished a ceramics workshop in June."
     second["text"] = "My laptop runs Fedora and has 32 GB of RAM."
     for row in (first, second, neighbor):
@@ -642,7 +710,9 @@ def test_sparse_user_originals_keep_relevance_order_and_all_limits(mode, ranked_
         object(), SearchRequest(query="Recall my past updates", recall_level=mode)
     )
 
-    expected = list(ranked_ids) if limit == "none" else [ranked_ids[0]]
+    expected = unbounded_first_order if ranked_ids[0] == "first" else unbounded_second_order
+    if limit != "none":
+        expected = [ranked_ids[0]]
     assert [item["unit_id"] for item in result["items"]] == expected
     assert result["context_tokens"] <= tier["context_max_tokens"]
     assert all("excerpt" not in item for item in result["items"])
@@ -752,6 +822,7 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
     bulky["citations"][0]["source_id"] = "separate_source"
     bulky["text"] = "An independently retrieved long assistant discussion. " * 100
     reply = original("recovered_reply", 1, "assistant")
+    reply["locator"] = reply["citations"][0]
     weak_user = original("weak_user", 0)
     weak_user["citations"][0]["source_id"] = "weak_source"
     weak = fact("weak", weak_user)
@@ -816,12 +887,11 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
         config=type(CONFIG).model_validate(values),
     ).search(object(), SearchRequest(query=query, recall_level=mode))
     selected = {row["unit_id"] for row in result["items"]}
-    assert {"root", "support", "earlier"} <= selected
+    assert {"root", "support", "earlier", "recovered_reply"} <= selected
     assert earlier_text in result["context"]
     assert "bulky" not in selected
     assert (
         not {
-            "recovered_reply",
             "weak",
             "weak_user",
             "assistant_fact",
@@ -835,3 +905,122 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
     assert result["context_tokens"] <= getattr(CONFIG.search, mode).context_max_tokens
     assert result["diagnostics"]["local_context"]["window_originals"] == 0
     assert result["diagnostics"]["local_context"]["selected_recovered_user_originals"] == 1
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_late_companion_support_remains_recoverable_when_its_bundle_does_not_fit(cached):
+    support = original("support", 8)
+    anchor = fact("anchor", support)
+    earlier, bridge = original("earlier", 0), original("bridge", 6)
+    earlier["text"] = "I prefer hands-on practice and already teach this subject."
+    late = fact("late", earlier)
+    late["text"] = "A large lower-ranked learned record. " * 1000
+    bulky = original("bulky", 0, "assistant")
+    bulky["citations"][0]["source_id"] = "other_source"
+    bulky["text"] = "An independently retrieved discussion. " * 100
+
+    class RecoveryRepository(SourceRepository):
+        def dense(self, vector, limit):
+            return [
+                {"unit_id": "anchor", "kind": "fact", "score": 0.9},
+                {
+                    "unit_id": "bulky",
+                    "kind": "passage",
+                    "score": 0.8,
+                    "source_id": "other_source",
+                    "source_version": 1,
+                    "passage_id": "bulky",
+                },
+            ]
+
+        def lexical(self, query, limit):
+            return [{"unit_id": "late", "strict_match": True}] if cached else []
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            if ("conversation", 1) in source_keys and "earlier" not in excluded_ids:
+                return [{"unit_id": "earlier"}][:limit]
+            return []
+
+    class RecoveryService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RecoveryRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    cap = context_token_count(render_context([anchor, support, bulky]))
+    values["search"]["fast"].update(
+        partial_match_gate="user_fact_exchange",
+        adjacent_user_context=False,
+        context_max_tokens=cap,
+    )
+    result = RecoveryService(
+        [anchor, support, earlier, bridge, bulky, late],
+        config=type(CONFIG).model_validate(values),
+    ).search(
+        object(), SearchRequest(query="What learning activities suit me?", recall_level="fast")
+    )
+
+    selected = {row["unit_id"]: row for row in result["items"]}
+    assert set(selected) == {"anchor", "support", "earlier"}
+    assert selected["earlier"]["text"] == earlier["text"]
+    assert selected["earlier"]["citations"] == earlier["citations"]
+    assert earlier["text"] in result["context"]
+    assert result["context_tokens"] <= cap
+
+
+@pytest.mark.parametrize("gate", ["off", "user_fact_exchange"])
+def test_recovery_shares_one_ranked_cap_and_reuses_cached_originals(gate):
+    support, earlier = original("support", 8), original("earlier", 0)
+    anchor, companion = fact("anchor", support), fact("companion", earlier)
+    bridge, direct = original("bridge", 6), original("direct", 1000)
+    extras = [original(f"extra-{index:02}", 100 + 2 * index) for index in range(40)]
+    hydration_ids, queries = [], []
+
+    class RecoveryRepository(SourceRepository):
+        def dense(self, vector, limit):
+            return [{"unit_id": "anchor", "kind": "fact", "score": 0.9}]
+
+        def lexical(self, query, limit):
+            return [
+                {"unit_id": "companion", "strict_match": True},
+                {"unit_id": "direct", "strict_match": True},
+            ]
+
+        def hydrate(self, unit_ids):
+            hydration_ids.extend(unit_ids)
+            return super().hydrate(unit_ids)
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            queries.append((source_keys, limit, set(excluded_ids)))
+            ranked = ["support", "direct", "earlier", *[row["unit_id"] for row in extras]]
+            return [{"unit_id": node} for node in ranked if node not in excluded_ids][:limit]
+
+    class RecoveryService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RecoveryRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    values["search"]["fast"].update(
+        partial_match_gate=gate,
+        adjacent_user_context=False,
+        source_seed_results=36,
+        context_max_tokens=18000,
+    )
+    result = RecoveryService(
+        [anchor, companion, support, earlier, bridge, direct, *extras],
+        config=type(CONFIG).model_validate(values),
+    ).search(object(), SearchRequest(query="Remember my activities", recall_level="fast"))
+
+    assert len(queries) == 1
+    sources, limit, excluded = queries[0]
+    assert sources == (("conversation", 1),)
+    assert limit == 36
+    assert {"support", "direct"} <= excluded
+    assert ("earlier" in excluded) is (gate == "off")
+    selected = [row["unit_id"] for row in result["items"]]
+    assert selected.count("earlier") == 1
+    assert "extra-34" in selected
+    assert "extra-37" not in selected
+    assert max(Counter(hydration_ids).values()) == 1
+    assert result["context_tokens"] <= 18000

@@ -46,7 +46,8 @@ class _ContextRenderer:
             for citation in item["citations"]:
                 if isinstance(source := citation.get("source_id"), str):
                     sources.setdefault(source, f"S{len(sources) + 1}")
-        blocks, compact_blocks = [], []
+        blocks, compact_blocks, compact_specs = [], [], []
+        time_counts = {}
         for group in _source_groups(items):
             passage = group[-1] if len(group) > 1 and group[-1]["kind"] == "passage" else None
             source_id = passage["unit_id"] if passage is not None else None
@@ -82,6 +83,16 @@ class _ContextRenderer:
                 compact_blocks.append(
                     self._block(key, _render_compact_item, item, references, sources, owner)
                 )
+                time_text = None
+                if item["time_evidence"] and not (
+                    owner and item["time_evidence"] == owner["time_evidence"]
+                ):
+                    time_text = self._block(
+                        ("time", id(item)),
+                        lambda item=item: _render_time(item["time_evidence"], compact=True),
+                    )[0]
+                    time_counts[time_text] = time_counts.get(time_text, 0) + 1
+                compact_specs.append((key, item, owner, time_text))
         # Preserve the formatting choice for recorded replay. These additive units
         # choose presentation only; live admission counts the complete BPE string.
         separators = max(0, len(blocks) - 1) * 2
@@ -92,10 +103,44 @@ class _ContextRenderer:
             if compact_units <= legacy_units
             else (blocks, legacy_units)
         )
-        return "\n\n".join(text for text, _ in chosen), units
+        baseline = "\n\n".join(text for text, _ in chosen)
+        time_references = {
+            text: f"T{index}"
+            for index, text in enumerate(
+                (text for text, count in time_counts.items() if count > 1), 1
+            )
+        }
+        if not time_references:
+            return baseline, units
+        legend = "\n".join(
+            f"Time {reference}: {text.removeprefix('Time: ')}"
+            for text, reference in time_references.items()
+        )
+        shared_blocks = []
+        for key, item, owner, time_text in compact_specs:
+            reference = time_references.get(time_text)
+            shared_blocks.append(
+                self._block(
+                    (*key, reference),
+                    _render_compact_item,
+                    item,
+                    references,
+                    sources,
+                    owner,
+                    reference,
+                )
+                if reference
+                else self.blocks[key]
+            )
+        shared = legend + "\n\n" + "\n\n".join(text for text, _ in shared_blocks)
+        if context_token_count(shared) < context_token_count(baseline):
+            return shared, estimate_units(legend) + 2 + sum(
+                cost for _, cost in shared_blocks
+            ) + separators
+        return baseline, units
 
 
-def _render_compact_item(item, references, sources, passage):
+def _render_compact_item(item, references, sources, passage, time_reference=None):
     header = f"[{references[item['unit_id']]}] {item['kind']} {item['origin']}" + _text_marker(item)
     inherited_time = bool(
         passage and item["time_evidence"] and item["time_evidence"] == passage["time_evidence"]
@@ -108,7 +153,11 @@ def _render_compact_item(item, references, sources, passage):
     if passage is None:
         rendered += "\n" + _render_citations(item["citations"], sources)
     if item["time_evidence"] and not inherited_time:
-        rendered += "\n" + _render_time(item["time_evidence"], compact=True)
+        rendered += "\n" + (
+            f"Time: {time_reference}"
+            if time_reference
+            else _render_time(item["time_evidence"], compact=True)
+        )
     return rendered + _render_aliases(item, sources)
 
 
@@ -448,14 +497,60 @@ def source_window_excerpts(
     return list(selected.values())
 
 
-def bundle_items(bundles: list[list[dict]]) -> list[dict]:
+def bundle_items(bundles: list[list[dict]], *, fact_source_bodies: str = "required") -> list[dict]:
     """Return the unique items required by actually admitted roots, in admission order."""
     selected = {}
     for bundle in bundles:
         for item in bundle:
             if item["unit_id"] not in selected or not item.get("excerpt"):
                 selected[item["unit_id"]] = item
-    return list(selected.values())
+    if fact_source_bodies == "assistant_deduplicated":
+        retained = {
+            item["unit_id"]
+            for item in bundle_items(bundles, fact_source_bodies="ranked_deduplicated")
+        }
+        required = list(selected.values())
+        projected = [
+            item
+            for item in required
+            if item["unit_id"] in retained
+            or item["kind"] != "fact"
+            or item["origin"] != "memory"
+            or item.get("truncated")
+            or not item["citations"]
+            or not all(
+                citation.get("span", {}).get("role") == "assistant"
+                for citation in item["citations"]
+            )
+        ]
+        if context_token_count(render_context(projected)) > context_token_count(
+            render_context(required)
+        ):
+            return required
+        return projected
+    if fact_source_bodies != "ranked_deduplicated":
+        return list(selected.values())
+    protected = {
+        item["unit_id"] for bundle in bundles if bundle[0]["kind"] == "insight" for item in bundle
+    }
+    originals = {
+        node: item
+        for node, item in selected.items()
+        if item["kind"] == "passage" and not item.get("truncated")
+    }
+    distinct = {}
+    for node, item in selected.items():
+        owner = _supported_passage_id(item, originals) if node not in protected else None
+        if (
+            owner is not None
+            and item["time_evidence"] == originals[owner]["time_evidence"]
+            and not _render_aliases(item)
+        ):
+            # The renderer already places the source at this FACT's group slot.
+            # Retain that relevance position when replacing the derived text.
+            node, item = owner, originals[owner]
+        distinct.setdefault(node, item)
+    return list(distinct.values())
 
 
 def _fact_support_key(item: dict, group: list[dict]) -> str | None:
@@ -502,6 +597,13 @@ def _fact_support_key(item: dict, group: list[dict]) -> str | None:
     )
 
 
+def represent_group(group: list[dict], *, fact_source_bodies: str = "required") -> list[dict]:
+    """Keep citation-grounded facts without forcing their full owner bodies."""
+    if fact_source_bodies != "required" and group[0]["kind"] == "fact":
+        return [row for row in group if row["kind"] not in ORIGINAL_KINDS]
+    return group
+
+
 def assemble_context(
     candidates: list[dict],
     source_passages: list[dict],
@@ -511,6 +613,7 @@ def assemble_context(
     max_results: int,
     evidence_groups: list[list[dict]] | None = None,
     optional_context: dict[str, list[dict]] | None = None,
+    fact_source_bodies: str = "required",
 ) -> tuple[list[dict], list[str], list[list[dict]], bool]:
     """Admit complete representations in root relevance order under one rendered cap."""
     groups = {group[0]["unit_id"]: group for group in evidence_groups or []}
@@ -533,12 +636,16 @@ def assemble_context(
         tentative = bundle_items([*admitted, group])
         originals = sum(row["kind"] in ORIGINAL_KINDS for row in tentative)
         pools_fit = originals <= max_results and len(tentative) - originals <= max_results
+        # Reserve pool slots before deduplication, so removal of a source-owning
+        # root cannot revive more FACTs than the configured pool permits.
+        if fact_source_bodies == "ranked_deduplicated":
+            tentative = bundle_items([*admitted, group], fact_source_bodies=fact_source_bodies)
         tokens_fit = (
             pools_fit and context_token_count(renderer.render(tentative)[0]) <= context_max_tokens
         )
         return tentative, pools_fit, tokens_fit
 
-    for item in [*candidates, *source_passages]:
+    for item in [*candidates, *(source_passages if fact_source_bodies == "required" else [])]:
         identity = item["unit_id"]
         if identity in considered or (identity in optional_ids and identity not in candidate_ids):
             continue
@@ -556,7 +663,9 @@ def assemble_context(
         if support_key is not None and support_key in fact_support_keys:
             continue
         representation = [
-            row for row in group if include_chunks or row["kind"] not in ORIGINAL_KINDS
+            row
+            for row in represent_group(group, fact_source_bodies=fact_source_bodies)
+            if include_chunks or row["kind"] not in ORIGINAL_KINDS
         ]
         tentative, pools_fit, tokens_fit = selection(representation)
         if not pools_fit:
@@ -579,7 +688,7 @@ def assemble_context(
         selected = tentative
         if oversized_single_fact:
             break
-        if item["kind"] == "fact" and include_chunks:
+        if item["kind"] == "fact" and include_chunks and fact_source_bodies == "required":
             selected_by_id = {row["unit_id"]: row for row in selected}
             for neighbor in (optional_context or {}).get(identity, []):
                 current = selected_by_id.get(neighbor["unit_id"])

@@ -296,7 +296,7 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert "recall" not in payload["limits"]["chunk"]
     assert "context" not in payload["limits"]
     assert payload["limits"]["search"]["fast"]["context_max_tokens"] == 18000
-    assert payload["limits"]["search"]["normal"]["context_max_tokens"] == 32768
+    assert payload["limits"]["search"]["normal"]["context_max_tokens"] == 24000
     assert payload["features"]["source_lifecycle"] is True
     assert payload["features"]["recorded_debug"] is True
     assert payload["features"]["portable_export"] is True

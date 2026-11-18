@@ -2,13 +2,13 @@
 
 ## Overview
 
-Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The published product release is 0.0.2; the source target is 0.0.3. Its [release record](releases/0.0.3.md) distinguishes source verification from image/tag publication. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
+Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release target is 0.1.0; its [release record](releases/0.1.0.md) records source verification and defers publication evidence to the GitHub Release artifacts. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
 
 Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DSH 0.0.1. Reuse their existing published archives when their package code is unchanged; do not republish an existing npm version or advance package versions solely because the product version changes. Preserve earlier product tags, images and release records.
 
 ## 1. Review release notes and documentation
 
-Every new product version in `pyproject.toml` requires a release record at `docs/releases/<version>.md`, one file per version. See the [initial release notes](releases/0.0.1.md). Its **Changes** section tells users what was added, changed or fixed, any compatibility or migration actions, and known limitations. Reuse this section as the GitHub Release notes. Keep historical release records unchanged; a version bump alone does not justify changing historical version references or independently versioned plugin packages.
+Every new product version in `pyproject.toml` requires a release record at `docs/releases/<version>.md`, one file per version. See the [initial release notes](releases/0.0.1.md). Its **Changes** and **Upgrade** sections tell users what was added, changed or fixed, any compatibility or migration actions, and known limitations. Reuse both sections as the GitHub Release notes. Keep historical release records unchanged; a version bump alone does not justify changing historical version references or independently versioned plugin packages.
 
 After setting the intended version, stage the intended new files so the scanner includes them, then generate a draft against the previous product tag. For example, when preparing `0.0.2` from `v0.0.1`:
 
@@ -28,7 +28,7 @@ The scanner inventories every tracked Markdown, reStructuredText and AsciiDoc fi
 Run the checker before building or publishing the release:
 
 ```bash
-python tools/check_release_docs.py --base v0.0.1
+python tools/check_release_docs.py --base v0.0.3
 ```
 
 The checker rejects missing release notes, pending or omitted document reviews, an `updated` claim without a document change, and reviews made stale by changes to tracked file contents. The current release record is excluded from its own fingerprint so completing the notes does not invalidate the review. New files must be staged before drafting; removed documents leave the current inventory. The **Base** field records the previous product tag's commit; **Scope** fingerprints the reviewed tracked inputs. Missing Git history or tags fails the check; fetch full history and tags first. No models or external services are called, and the checker never edits files.
@@ -52,7 +52,7 @@ npm --prefix integrations/mcp test
 npm --prefix integrations/dsh test
 ```
 
-Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.0.2, exercise user-list authentication, tenant filtering, accepted-input timestamps and migration 0037, plus Insight-title migration 0036 and its inspection/export/Inspector consumers. Apply all migrations before starting updated API/worker processes. These backfills preserve originals and do not require reindexing or model calls solely to populate titles and activity metadata.
+Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.1.0, verify the 24,000-token normal default, source-discovery and local-evidence boundaries, complete shared temporal metadata, and optional fast scoring and experimental source-body policies against the [changed-surface criteria](acceptance.md#10-v010-changed-surface-checks). Fast scoring must remain disabled by default; strict errors, permitted partial degradation and post-provider source checks retain their documented semantics. No new migration or reindexing is required when upgrading from 0.0.3; apply previously required migrations when upgrading from an older schema.
 
 Use a task-owned PostgreSQL/pgvector instance and synthetic users for release checks. Never select persistent personal/evaluation databases. Keep historical benchmark evidence unchanged; a release smoke test is not a fresh LME-500 or BEAM-10M evaluation. [Acceptance](acceptance.md) and the version's release record define the measured scope and outstanding limits.
 
@@ -63,8 +63,8 @@ Build the Python distribution and both supported container architectures from th
 ```bash
 uv build
 mkdir -p dist/plugins
-docker buildx build --platform linux/arm64 --load -t oam:0.0.2-arm64 .
-docker buildx build --platform linux/amd64 --load -t oam:0.0.2-amd64 .
+docker buildx build --platform linux/arm64 --load -t oam:0.1.0-arm64 .
+docker buildx build --platform linux/amd64 --load -t oam:0.1.0-amd64 .
 ```
 
 For unchanged, already-published integrations, download the exact registry archives and compare their runtime contents with the reviewed source:
@@ -81,15 +81,15 @@ The opt-in `tests/release/verify_candidate.py` command uses the bounded syntheti
 
 ## 4. Publish the verified product
 
-After committing the verified source, create the new annotated product tag at that exact commit and run the documentation gate against the previous product release. Do not move an existing tag. Create a source archive from the new tag and checksums for the reviewed distribution, source and plugin archives. Attach those artifacts and sanitized verification evidence to the GitHub Release, using the release record's Changes section as its notes.
+After committing the verified source, create the new annotated product tag at that exact commit and run the documentation gate against the previous product release. Do not move an existing tag. Create a source archive from the new tag and checksums for the reviewed distribution, source and plugin archives. Attach those artifacts and sanitized verification evidence to the GitHub Release, using the release record's Changes and Upgrade sections as its notes.
 
 Publish the multi-architecture image from that same source:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rocke2020/open-agent-memory:0.0.2 \
-  -t ghcr.io/rocke2020/open-agent-memory:v0.0.2 \
-  -t ghcr.io/rocke2020/open-agent-memory:0.0 \
+  -t ghcr.io/rocke2020/open-agent-memory:0.1.0 \
+  -t ghcr.io/rocke2020/open-agent-memory:v0.1.0 \
+  -t ghcr.io/rocke2020/open-agent-memory:0.1 \
   -t ghcr.io/rocke2020/open-agent-memory:0 \
   -t ghcr.io/rocke2020/open-agent-memory:latest --push .
 ```
