@@ -7,13 +7,14 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     PrivateAttr,
     StringConstraints,
     field_validator,
     model_validator,
 )
 
-from oam.config import OAMConfig
+from oam.config import OAMConfig, SearchTier
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -55,6 +56,14 @@ class SearchIncludeOptions(FrozenContract):
 
 class SearchOutputOptions(FrozenContract):
     recall_level: RecallLevel = RecallLevel.NORMAL
+    overrides: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        description=(
+            "Request-only overrides for fields of the selected search.fast or search.normal "
+            "preset. Omitted fields inherit configuration; merged values use the same validators. "
+            'For example, {"temporal_nodes": 300} changes traversal without changing max_results.'
+        ),
+    )
     fast_graph: bool | None = Field(
         default=None,
         strict=True,
@@ -82,12 +91,25 @@ class SearchOutputOptions(FrozenContract):
         return value
 
     def validate_limits(self, config: OAMConfig) -> None:
-        """Subclasses validate request-specific limits."""
+        self.search_tier(config)
+
+    def search_tier(self, config: OAMConfig) -> SearchTier:
+        mode = self.recall_level.value
+        tier = getattr(config.search, mode)
+        if self.overrides:
+            values = config.model_dump(mode="python")
+            values["search"][mode].update(self.overrides)
+            tier = getattr(OAMConfig.model_validate(values).search, mode)
+        if mode == "fast" and self.fast_graph is not None:
+            tier = tier.model_copy(
+                update={"entity_semantic_graph": "light" if self.fast_graph else "off"}
+            )
+        return tier
 
     def context_limit(self, config: OAMConfig) -> int:
         if self._context_max_tokens is not None:
             return self._context_max_tokens
-        return getattr(config.search, self.recall_level.value).context_max_tokens
+        return self.search_tier(config).context_max_tokens
 
 
 class SearchQueryOptions(SearchOutputOptions):

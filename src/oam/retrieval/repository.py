@@ -364,8 +364,12 @@ class RecallRepository:
 
     @property
     def causal_graph_enabled(self) -> bool:
-        mode = self.request.recall_level.value if self.request is not None else "normal"
-        return getattr(self.config.search, mode).causal_graph
+        tier = (
+            self.request.search_tier(self.config)
+            if self.request is not None
+            else self.config.search.normal
+        )
+        return tier.causal_graph
 
     def record_trace(self, trace_id: str, policy_epoch: int, decisions: dict, result: dict) -> bool:
         rows = self._execute(
@@ -504,7 +508,7 @@ class RecallRepository:
             terms = QueryTerms(candidates, candidates, ())
         request = self.request or SearchRequest(query=query)
         whole_query = fallback or (
-            getattr(self.config.search, request.recall_level.value).lexical_ranking == "whole_query"
+            request.search_tier(self.config).lexical_ranking == "whole_query"
         )
         if whole_query:
             parameters["normalization"] = (

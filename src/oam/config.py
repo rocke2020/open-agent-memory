@@ -108,6 +108,7 @@ class SearchTier(FrozenModel):
     adjacent_user_context_max_chars: int = Field(gt=0, strict=True)
     channel_candidates: PositiveInt
     fused_candidates: PositiveInt
+    temporal_nodes: PositiveInt
     source_seed_results: PositiveInt
     max_results: PositiveInt
     rerank_candidates: PositiveInt | None = None
@@ -153,7 +154,6 @@ class SearchConfig(FrozenModel):
     temporal_seed_max: PositiveInt
     temporal_coverage_buckets: PositiveInt
     temporal_neighbors: PositiveInt
-    temporal_nodes: PositiveInt
     temporal_semantic_floor: float = Field(ge=0, le=1)
     ann_iterative_scan: Literal["strict_order"]
     ann_scan_max_tuples: PositiveInt

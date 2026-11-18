@@ -12,6 +12,43 @@ from oam.retrieval.service import RecallUnavailable
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_recall_preset_overrides_are_validated_before_runtime_dispatch(invalid):
+    from test_query_time_recall import CONFIG, DatedService, EmbeddingOnly
+
+    calls = []
+
+    class Runtime:
+        def search(self, actor, user_id, request):
+            calls.append(request)
+            return DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation").search(
+                object(), request
+            )
+
+    app = create_app(REPOSITORY_ROOT / "configs/oam.yaml", runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/recall",
+            headers={"Authorization": "Bearer synthetic"},
+            json={
+                "user_id": "alice",
+                "query": "Apple harvest",
+                "recall_level": "fast",
+                "overrides": {"temporal_nodes": 0 if invalid else 300},
+            },
+        )
+
+    assert response.status_code == (422 if invalid else 200)
+    assert len(calls) == (0 if invalid else 1)
+    if not invalid:
+        body = response.json()
+        assert body["diagnostics"]["search_config"]["temporal_nodes"] == 300
+        assert body["diagnostics"]["search_config"]["max_results"] == 96
+        assert body["context"]
+
+
 @pytest.fixture
 async def client(tmp_path):
     config = tmp_path / "unbound.yaml"

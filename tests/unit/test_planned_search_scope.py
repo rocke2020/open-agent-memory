@@ -49,6 +49,32 @@ def empty_result(request, deadline):
     }
 
 
+@pytest.mark.parametrize("planned", [False, True])
+def test_search_children_preserve_preset_overrides_and_share_overridden_context(planned):
+    config = planner_config()
+    seen = []
+
+    def search_one(request, deadline):
+        seen.append(request)
+        return empty_result(request, deadline)
+
+    options = {
+        "recall_level": "fast",
+        "overrides": {"temporal_nodes": 300, "context_max_tokens": 20000},
+    }
+    if planned:
+        decompose_and_search(
+            config, SearchRequest(query="one", **options), search_one, Planner(["two"])
+        )
+    else:
+        search_many(config, SearchManyRequest(queries=["one", "two"], **options), search_one)
+
+    assert len(seen) == 2
+    assert all(child.overrides == options["overrides"] for child in seen)
+    assert all(child.search_tier(config).temporal_nodes == 300 for child in seen)
+    assert all(child.context_limit(config) == 10000 for child in seen)
+
+
 def test_planned_search_keeps_original_first_and_deduplicates_expansions():
     config = planner_config()
     query = "What changed in kiln K-17 between 2025-03-01 and 2025-03-05?"

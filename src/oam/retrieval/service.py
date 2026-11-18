@@ -14,7 +14,7 @@ import httpx
 import psycopg
 
 from oam.auth.credentials import AuthorizedUser
-from oam.config import OAMConfig
+from oam.config import FastSearchTier, OAMConfig
 from oam.contracts.search import SearchRequest, TimeBasis
 from oam.quotes import unique_quote
 from oam.retrieval.algorithms import (
@@ -102,7 +102,7 @@ class RecallService:
             "reply_seed_limit=%d recovery_sources=%d recovered_user_originals=%d "
             "selected_recovered_user_originals=%d "
             "adjacent_user_context=%s adjacent_user_context_max_chars=%d window_originals=%d "
-            "facts=%d originals=%d context_tokens=%d/%d "
+            "facts=%d originals=%d temporal_nodes=%d context_tokens=%d/%d "
             "omissions=%d oversized_single_fact=%s duration_ms=%.1f",
             result["trace_id"],
             diagnostics["recall_level"],
@@ -128,6 +128,7 @@ class RecallService:
             local["window_originals"],
             budget["learned_count"],
             budget["original_count"],
+            diagnostics["search_config"]["temporal_nodes"],
             result["context_tokens"],
             budget["limit"],
             len(budget["omitted_ids"]),
@@ -143,11 +144,9 @@ class RecallService:
         started = time.monotonic()
         trace_id = f"trace_{uuid4().hex}"
         mode = request.recall_level.value
-        tier = getattr(self.config.search, mode)
+        tier = request.search_tier(self.config)
         graph = tier.entity_semantic_graph
         causal_graph = tier.causal_graph
-        if mode == "fast" and request.fast_graph is not None:
-            graph = "light" if request.fast_graph else "off"
         deadline = started + getattr(self.config.recall, f"{mode}_deadline_seconds")
         if deadline_at is not None:
             if deadline_at.utcoffset() is None:
@@ -315,11 +314,7 @@ class RecallService:
 
                 def temporal():
                     window = TimeRange(request.time_window.start, request.time_window.end)
-                    node_limit = (
-                        min(self.config.search.temporal_nodes, tier.max_results)
-                        if mode == "fast"
-                        else self.config.search.temporal_nodes
-                    )
+                    node_limit = tier.temporal_nodes
                     with self._repository(authority, request, deadline) as repository:
                         direct_ids = tuple(
                             item.node_id
@@ -519,7 +514,7 @@ class RecallService:
         context_limit = request.context_limit(self.config)
         chunks = request.include.chunks
         fact_source_bodies = (
-            self.config.search.fast.fact_source_bodies if mode == "fast" and chunks else "required"
+            tier.fact_source_bodies if isinstance(tier, FastSearchTier) and chunks else "required"
         )
         admission_source_bodies = (
             "required" if fact_source_bodies == "assistant_deduplicated" else fact_source_bodies
@@ -1210,7 +1205,7 @@ class RecallService:
                 ):
                     roots.setdefault(item["unit_id"], item)
             capped = list(roots)[: tier.rerank_candidates]
-            floor = self.config.search.fast.rerank_min_score
+            floor = tier.rerank_min_score if isinstance(tier, FastSearchTier) else None
             root_texts = {
                 node: render_context(
                     represent_group(
@@ -1464,6 +1459,7 @@ class RecallService:
             "diagnostics": {
                 **({"rerank": fast_rerank} if mode == "fast" else {}),
                 "recall_level": mode,
+                "search_config": tier.model_dump(mode="json"),
                 "graph": graph,
                 "causal_graph": causal_graph,
                 "lexical_ranking": tier.lexical_ranking,

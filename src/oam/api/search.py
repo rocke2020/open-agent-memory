@@ -142,6 +142,7 @@ def _planned_batch(
     batch = SearchManyRequest(
         queries=[request.query, *queries],
         recall_level=request.recall_level,
+        overrides=request.overrides,
         fast_graph=request.fast_graph,
         include=request.include,
         allow_partial=request.allow_partial,
@@ -194,6 +195,7 @@ def _run_batch(
         child = SearchRequest(
             query=query,
             recall_level=request.recall_level,
+            overrides=request.overrides,
             fast_graph=request.fast_graph,
             include=request.include,
             allow_partial=request.allow_partial,
