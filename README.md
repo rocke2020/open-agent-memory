@@ -19,9 +19,11 @@ Keep your conversations and documents in your own PostgreSQL database, choose yo
 | **LongMemEval S**, all 500 questions | **95.2% (476/500)** | 94.6% (473/500) | **11,373.58** mean saved tokens vs 43,124.55; **73.63% smaller** |
 | **BEAM-10M**, 200 questions across 10 complete histories | **61.56%** mean rubric score | 52.16% saved-context replay | OAM used 17.43% more context |
 
+**LME-500: same questions, same gold answers and byte-identical answer/judge prompt templates as Hindsight for a fair comparison.** OAM reuses the answer and category-specific judge prompt templates from Hindsight's published AMB reference byte for byte, keeping answer instructions and grading criteria aligned. See [prompt source and evaluation settings](docs/benchmarks.md#1-latest-longmemeval-s-476500-at-18k).
+
 The latest LongMemEval result uses **MiniMax M3.1 Flash** for answering and judging, with an 18,000-token context limit. Earlier same-context LongMemEval runs also record results with **DeepSeek Flash**. BEAM-10M uses **DeepSeek Flash** for answering and judging, with the recorded high/max answer settings preserved in its report. These are low-cost Flash-model pipelines, rather than a requirement to use an expensive flagship answer model.
 
-The comparisons use different answer and judge pipelines. Context sizes count saved formatted text, not provider-billed tokens; 497 current LME contexts contribute to the mean, and three disputed-gold cases remain counted as incorrect in the 500-question score. The evaluations cover L1 memory; Insights, Profiles and document Resources were not scored.
+The comparisons use different answer and judge models and memory pipelines. Context sizes count saved formatted text, not provider-billed tokens; 497 current LME contexts contribute to the mean, and three disputed-gold cases remain counted as incorrect in the 500-question score. The evaluations cover L1 memory; Insights, Profiles and document Resources were not scored.
 
 Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](docs/benchmarks.md#answer-and-judge-variability), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
 
