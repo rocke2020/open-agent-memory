@@ -61,13 +61,16 @@ def test_user_activity_upgrade_backfills_public_roles_and_enforces_tenant_policy
                     f"2026-11-0{index}T00:00:00Z",
                 ),
             )
-    assert apply_migrations(dsn, MIGRATIONS) == 1
+    latest = max(int(migration.name[:4]) for migration in MIGRATIONS.glob("*.sql"))
+    assert apply_migrations(dsn, MIGRATIONS) == latest - 36
     with psycopg.connect(dsn) as connection:
         rows = connection.execute(
             "SELECT tenant_id,last_write_at::text FROM users ORDER BY tenant_id"
         ).fetchall()
         assert rows == [("a", "2026-11-03 00:00:00+00"), ("b", None)]
-        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone() == (37,)
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone() == (
+            latest,
+        )
         connection.execute("SET LOCAL ROLE oam_user_list_owner")
         connection.execute("SELECT set_config('oam.admin_tenant_id', 'a', true)")
         assert connection.execute("SELECT tenant_id FROM users ORDER BY tenant_id").fetchall() == [

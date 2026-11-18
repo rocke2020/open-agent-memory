@@ -63,6 +63,8 @@ from oam.contracts.operations import (
 )
 from oam.contracts.profile import (
     ProfileDataRequest,
+    ProfileGenerateRequest,
+    ProfilePolicyPatch,
     ProfileRefreshRequest,
 )
 from oam.contracts.retain import (
@@ -101,6 +103,11 @@ from oam.operations.repository import (
     RetryRequiresReconciliation,
 )
 from oam.operations.state import OperationStatus as StoredOperationStatus
+from oam.profiles.generation import (
+    ProfileGenerationChanged,
+    ProfileGenerationDeadlineExceeded,
+    ProfileGenerationUnavailable,
+)
 from oam.profiles.service import ProfileInputsNotReady, ProfileRefreshUnresolved
 from oam.resources.url_fetch import ResourceFetchUnavailable
 from oam.retrieval.service import RecallUnavailable
@@ -1133,6 +1140,33 @@ def _register_reserved_routes(
             )
         )
 
+    @app.post("/v1/users/{user_id}/profile/generate", tags=["User Profile"])
+    async def generate_profile(
+        request: Request, user_id: str, body: ProfileGenerateRequest, response: Response
+    ) -> dict:
+        response.headers["Cache-Control"] = "no-store"
+        return await run_in_threadpool(
+            lambda: _content_call(
+                lambda: _require_runtime(runtime).generate_profile(
+                    request.state.actor, user_id, body.instruction
+                )
+            )
+        )
+
+    @app.get("/v1/users/{user_id}/profile/policy", tags=["User Profile"])
+    def get_profile_policy(request: Request, user_id: str) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).get_profile_policy(request.state.actor, user_id)
+        )
+
+    @app.patch("/v1/users/{user_id}/profile/policy", tags=["User Profile"])
+    def patch_profile_policy(request: Request, user_id: str, body: ProfilePolicyPatch) -> dict:
+        return _content_call(
+            lambda: _require_runtime(runtime).patch_profile_policy(
+                request.state.actor, user_id, body.model_dump(exclude_unset=True)
+            )
+        )
+
     @app.post("/v1/users/{user_id}/profile/refresh", tags=["User Profile"])
     async def refresh_profile(
         request: Request, user_id: str, body: ProfileRefreshRequest, response: Response
@@ -1441,6 +1475,12 @@ def _content_call_inner(call):
         raise HTTPException(503, detail={"code": "SourcePolicyChanged"}) from exc
     except ResourceFetchUnavailable as exc:
         raise HTTPException(502, detail={"code": "ResourceFetchUnavailable"}) from exc
+    except ProfileGenerationUnavailable as exc:
+        raise HTTPException(502, detail={"code": "ProfileGenerationUnavailable"}) from exc
+    except ProfileGenerationChanged as exc:
+        raise HTTPException(409, detail={"code": "ProfileGenerationChanged"}) from exc
+    except ProfileGenerationDeadlineExceeded as exc:
+        raise HTTPException(504, detail={"code": "ProfileGenerationDeadlineExceeded"}) from exc
     except TimeoutError as exc:
         raise HTTPException(504, detail={"code": "RecallDeadlineExceeded"}) from exc
     except (IdempotencyConflict, SourceVersionConflict) as exc:

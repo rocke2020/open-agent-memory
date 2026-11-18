@@ -49,7 +49,7 @@ The configured seed policy selects bounded eligible L1 inputs. The model returns
 
 Every published Insight has a concise, human-readable title naming its enduring subject. CREATE and UPDATE provide a nonblank title of at most 120 characters; an update normally preserves the previous title, changing it only when supported evidence changes or clarifies the subject. Occurrence dates, delivery histories and temporary status belong in the body unless they identify the subject itself. Ordinary support-only updates preserve the title exactly. A full repair after support removal generates its title from surviving evidence and may rename the subject. The title is stored with the search unit's presentation metadata and returned by memory inspection and export; the separate retrieval label retains its existing embedding role. Existing records reuse their saved subject label, or a bounded content preview when no label exists, without generation or reindexing.
 
-New eligible learned input can change L2 and mark an existing Profile stale. The worker never generates a new Profile automatically. Source exclusion and exact memory removal invalidate affected support before later workers can publish from it.
+New eligible learned input can change L2 and mark an existing Profile stale. Optional per-user [Profile schedules](profiles.md) can request automatic refresh; all automatic triggers default off. Source exclusion and exact memory removal invalidate affected support before later workers can publish from it.
 
 Source: [Insight implementation](../src/oam/indexing/), [consolidation worker](../src/oam/workers/l2_index.py).
 
@@ -62,6 +62,8 @@ Evidence joins ordinary retrieval without entering L1/L2/L3. Resource revisions 
 `GET /profile` reads stored content without generation. An explicit refresh either reuses unchanged eligible input identity with zero calls or creates a durable operation. Create/Refresh Profile prepares unfinished interaction inputs first: it reuses active work, retries each failed original operation at most once through existing retry guards, and advances queued Insight work. The Profile job waits through initial indexing and any subsequently queued Insight stage before generating content; compatible completed checkpoints are reused. Exhausted retries and unresolved external outcomes require operator attention rather than an automatic retry loop. A successful result contains supported content and References; failed refresh preserves prior eligible content. Source changes can invalidate saved support independently of refresh. Exact Profile Data values retain their own cited authority.
 
 Source: [resources](../src/oam/resources/), [Profiles](../src/oam/profiles/).
+
+[Profile scheduling and custom generation](profiles.md) describes the personal Profile policy and the transient `POST /profile/generate` API. Automatic refresh reuses [durable Profile admission](../src/oam/profiles/scheduling.py) and the existing worker. [Custom generation](../src/oam/profiles/generation.py) selects evidence using the complete instruction, returns validated content/references, and stores no custom Profile or output payload. Both paths retain the existing evidence eligibility, authorization and token limits; neither changes ordinary recall.
 
 ## 6. Candidate retrieval and ranking
 

@@ -524,6 +524,13 @@ def process_profile_claim(
                 (visible_from, *key),
             )
             connection.execute(
+                "UPDATE profile_refresh_policies SET last_success_at=clock_timestamp(),"
+                "last_full_at=CASE WHEN %s='full' THEN clock_timestamp() ELSE last_full_at END,"
+                "pending_mode=CASE WHEN %s='full' THEN NULL ELSE pending_mode END,paused=false "
+                "WHERE tenant_id=%s AND user_id=%s",
+                (actual_mode, actual_mode, *key),
+            )
+            connection.execute(
                 "UPDATE work_units SET status='succeeded',updated_at=clock_timestamp() "
                 "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s",
                 (*key, claim.work_unit_id),
@@ -590,6 +597,9 @@ def process_profile_claim(
         )
         with connection_context as connection, connection.transaction():
             bind_user(connection.cursor(), authority)
+            connection.execute(
+                "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s FOR UPDATE", key
+            )
             owned = connection.execute(
                 "UPDATE work_units SET status='failed_terminal',updated_at=clock_timestamp() "
                 "WHERE tenant_id=%s AND user_id=%s AND work_unit_id=%s AND owner_id=%s "
@@ -631,6 +641,15 @@ def process_profile_claim(
                     ),
                 )
             if owned:
+                connection.execute(
+                    "UPDATE profile_refresh_policies SET paused=true "
+                    "WHERE tenant_id=%s AND user_id=%s AND NOT EXISTS ("
+                    "SELECT 1 FROM operations newer JOIN operations failed "
+                    "ON (failed.tenant_id,failed.user_id)=(newer.tenant_id,newer.user_id) "
+                    "WHERE failed.tenant_id=%s AND failed.user_id=%s AND failed.operation_id=%s "
+                    "AND newer.kind='refresh_profile' AND newer.created_at>failed.created_at)",
+                    (*key, *key, claim.operation_id),
+                )
                 failure_state: dict[str, object] = {"error": type(error).__name__}
                 if usage:
                     failure_state["usage"] = usage

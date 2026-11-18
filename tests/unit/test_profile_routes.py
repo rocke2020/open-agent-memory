@@ -2,10 +2,89 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from oam.api.app import create_app
 
 ROOT = Path(__file__).parents[2]
+
+
+@pytest.mark.parametrize(
+    "kind,status,code",
+    [
+        ("unavailable", 502, "ProfileGenerationUnavailable"),
+        ("deadline", 504, "ProfileGenerationDeadlineExceeded"),
+        ("changed", 409, "ProfileGenerationChanged"),
+    ],
+)
+async def test_transient_generation_failures_have_specific_http_codes(kind, status, code):
+    from oam.profiles.generation import (
+        ProfileGenerationChanged,
+        ProfileGenerationDeadlineExceeded,
+        ProfileGenerationUnavailable,
+    )
+
+    errors = {
+        "unavailable": ProfileGenerationUnavailable,
+        "deadline": ProfileGenerationDeadlineExceeded,
+        "changed": ProfileGenerationChanged,
+    }
+
+    class Runtime:
+        def generate_profile(self, *args):
+            raise errors[kind]("Synthetic failure")
+
+    app = create_app(ROOT / "configs/oam.yaml", runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+        headers={"Authorization": "Bearer synthetic"},
+    ) as client:
+        response = await client.post(
+            "/v1/users/alice/profile/generate", json={"instruction": "Work profile"}
+        )
+    assert response.status_code == status
+    assert response.json()["detail"]["code"] == code
+
+
+async def test_transient_profile_and_policy_routes_do_not_call_refresh() -> None:
+    class Runtime:
+        def generate_profile(self, actor, user_id, instruction):
+            return {"content": "Work [1]", "references": [{"support_id": "fact-work"}]}
+
+        def get_profile_policy(self, actor, user_id):
+            return {"policy": {"refresh_cron": None}, "paused": False}
+
+        def patch_profile_policy(self, actor, user_id, patch):
+            return {"policy": patch}
+
+        def refresh_profile(self, *args):
+            raise AssertionError("transient generation must not refresh the personal Profile")
+
+    app = create_app(ROOT / "configs/oam.yaml", runtime=Runtime())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": "Bearer synthetic"},
+    ) as client:
+        generated = await client.post(
+            "/v1/users/alice/profile/generate", json={"instruction": "Work profile"}
+        )
+        assert generated.status_code == 200
+        assert generated.json()["references"] == [{"support_id": "fact-work"}]
+        assert generated.headers["cache-control"] == "no-store"
+        assert (
+            await client.post("/v1/users/alice/profile/generate", json={"instruction": " "})
+        ).status_code == 422
+        assert (await client.get("/v1/users/alice/profile/policy")).status_code == 200
+        patched = await client.patch(
+            "/v1/users/alice/profile/policy", json={"refresh_cron": "0 3 * * *"}
+        )
+        assert patched.status_code == 200
+        assert patched.json()["policy"] == {"refresh_cron": "0 3 * * *"}
+        assert (
+            await client.patch("/v1/users/alice/profile/policy", json={"mode": None})
+        ).status_code == 422
 
 
 async def test_profile_read_and_refresh_http_status_contract() -> None:

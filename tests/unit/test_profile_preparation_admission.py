@@ -103,3 +103,54 @@ def test_refresh_enqueues_profile_after_preparing_failed_and_pending_inputs(
     )
     assert profile_work[-2] == ["index-retry", "insight-work"]
     assert profile_work[3] == result["operation_id"]
+
+
+def test_unchanged_explicit_refresh_resumes_paused_automatic_policy(monkeypatch):
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    inputs = ProfileInputs(b"i" * 32, b"s" * 32, {}, (), 0, 0, 0, (), 1, [], set(), 0)
+    inputs.manifest.update({"units": {}, "sources": {}, "exact": "x"})
+    snapshot = {
+        "content": "Supported profile",
+        "instruction": None,
+        "support_ids": [],
+        "input_manifest": inputs.manifest,
+        "input_identity": service.profile_identity(
+            inputs.identity,
+            None,
+            config.profile.max_input_tokens,
+            service.profile_query_prefix(config),
+            service.resolve_counter(config.tokenizer).identity,
+            config.profile.max_memory_tokens,
+        ),
+    }
+    paused = {"value": True}
+
+    class Connection:
+        def transaction(self):
+            return nullcontext()
+
+        def cursor(self):
+            return nullcontext(self)
+
+        def execute(self, query, params=()):
+            self.row = ("gen",) if "SELECT index_generation_id" in query else None
+            if query.startswith("UPDATE profile_refresh_policies SET paused=false"):
+                paused["value"] = False
+            return self
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return []
+
+    monkeypatch.setattr(service, "load_profile_inputs", lambda *args, **kwargs: inputs)
+    monkeypatch.setattr(service, "_current_snapshot", lambda *args: snapshot)
+    monkeypatch.setattr(service, "_public_view", lambda *args: {"generation_calls": 0})
+    authority = AuthorizedUser(
+        "key", "t", "principal", "u", frozenset({"memory:read", "memory:append"})
+    )
+    pool = SimpleNamespace(connection=lambda: nullcontext(Connection()))
+    result = service.ProfileService(config, pool).refresh(authority)
+    assert result == {"status": "unchanged", "generation_calls": 0}
+    assert paused["value"] is False

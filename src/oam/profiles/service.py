@@ -346,6 +346,21 @@ class ProfileService:
                 and not _has_pending_delta(snapshot)
                 and not (mode == "incremental" and not snapshot.get("input_manifest"))
             ):
+                connection.execute(
+                    "UPDATE profile_refresh_policies SET paused=false "
+                    "WHERE tenant_id=%s AND user_id=%s AND NOT EXISTS ("
+                    "SELECT 1 FROM attempts a JOIN work_units w "
+                    "USING(tenant_id,user_id,work_unit_id) JOIN operations o "
+                    "USING(tenant_id,user_id,operation_id) WHERE a.tenant_id=%s "
+                    "AND a.user_id=%s AND o.kind='refresh_profile' "
+                    "AND a.disposition='unknown_external_outcome')",
+                    (
+                        authority.tenant_id,
+                        authority.user_id,
+                        authority.tenant_id,
+                        authority.user_id,
+                    ),
+                )
                 return {
                     "status": "unchanged",
                     **_public_view(

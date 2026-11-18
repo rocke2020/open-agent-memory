@@ -156,6 +156,8 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
         attempt_failed = False
         deferred: Any = None
         prepared_attempt = False
+        policy_clock_mode = None
+        policy_paused = False
 
         def transaction(self):
             return nullcontext()
@@ -165,7 +167,11 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
 
         def execute(self, query, params=()):
             self.row = None
-            if "SELECT w.input_digest" in query:
+            if query.startswith("UPDATE profile_refresh_policies SET last_success_at"):
+                self.policy_clock_mode = params[0]
+            elif query.startswith("UPDATE profile_refresh_policies SET paused=true"):
+                self.policy_paused = True
+            elif "SELECT w.input_digest" in query:
                 self.row = (
                     target,
                     ["initial"] if mode == "prepare_inputs" else [],
@@ -328,6 +334,7 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
                 worker_id="worker",
             )
         assert connection.inserted is None
+        assert connection.policy_paused
         assert connection.stage["embedding_usage"] == {"input_tokens": 2}
         assert connection.stage["usage"]["input_tokens"] == 10
         assert connection.stage["usage"]["output_tokens"] == 4
@@ -356,6 +363,7 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
         assert not connection.attempt_failed
         return
     assert connection.inserted is not None
+    assert connection.policy_clock_mode == connection.stage["mode"]
     if mode in {"retracted", "old_omitted"}:
         assert "sailing [1]" in connection.inserted[3]
         assert "French" not in connection.inserted[3]

@@ -172,6 +172,9 @@ class ChunkConfig(FrozenModel):
 
 class ProfileConfig(FrozenModel):
     enabled: bool = True
+    min_refresh_interval_seconds: int = Field(default=0, ge=0)
+    schedule_poll_seconds: int = Field(default=30, ge=1, le=3600)
+    schedule_batch_size: int = Field(default=100, ge=1, le=1000)
     max_input_tokens: PositiveInt
     max_memory_tokens: PositiveInt
     max_response_tokens: PositiveInt

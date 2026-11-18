@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import sys
+import time
 from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -18,6 +19,7 @@ from oam.config import ConfigurationError, OAMConfig, load_config
 from oam.db.pools import create_worker_pools
 from oam.db.readiness import postgres_connection_ready
 from oam.models.runtime import RuntimeModels
+from oam.profiles.scheduling import run_profile_schedule_tick
 from oam.workers.index_source import process_one
 
 IDLE_POLL_SECONDS = 0.5
@@ -42,6 +44,7 @@ class WorkerRunner:
         self._starting = False
         self._closed = False
         self._failed = False
+        self._next_profile_poll = 0.0
         self._http = httpx.Client(trust_env=False)
         self._pools = None
         self._capacity = None
@@ -150,6 +153,23 @@ class WorkerRunner:
                 pools = self._pools
                 if pools is None:
                     raise RuntimeError("worker pools are not initialized")
+                with self._lock:
+                    poll_profile = time.monotonic() >= self._next_profile_poll
+                    if poll_profile:
+                        self._next_profile_poll = (
+                            time.monotonic() + self.config.profile.schedule_poll_seconds
+                        )
+                if poll_profile:
+                    try:
+                        run_profile_schedule_tick(
+                            self.config, pools.queue, pools.content, stop_event=self.stop_event
+                        )
+                    except Exception as error:
+                        print(
+                            f"profile policy discovery failed: {type(error).__name__}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                 processed = process_one(
                     self.config,
                     self.queue_dsn,
