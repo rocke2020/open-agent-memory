@@ -23,6 +23,8 @@ Open Agent Memory（OAM）は、AI エージェント向けの完全にオープ
 
 比較対象とは回答・判定のパイプラインが異なります。コンテキストのサイズは保存された整形済みテキストのトークン数であり、プロバイダーの課金トークン数ではありません。現在の LME の平均値には 497 件のコンテキストを使用し、正解データに疑義がある 3 問も 500 問のスコアでは不正解として数えています。評価対象は L1 メモリであり、Insights、User Profile、文書 Resources は採点していません。
 
+回答・判定モデルを再実行すると、スコアが変わることがあります。[同じ入力を使った MiniMax の実例](docs/benchmarks.md#answer-and-judge-variability)では、一方の回答は正解、もう一方は不正解でした。これは観測された変動の例であり、その発生頻度を示すものではありません。
+
 [結果・モデル料金・評価方法](docs/benchmarks.md) · [LME の質問ごとのエビデンス](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM の質問ごとのエビデンス](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m)
 
 ## OAM を選ぶ理由

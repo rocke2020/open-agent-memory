@@ -23,6 +23,8 @@ The latest LongMemEval result uses **MiniMax M3.1 Flash** for answering and judg
 
 The comparisons use different answer and judge pipelines. Context sizes count saved formatted text, not provider-billed tokens; 497 current LME contexts contribute to the mean, and three disputed-gold cases remain counted as incorrect in the 500-question score. The evaluations cover L1 memory; Insights, Profiles and document Resources were not scored.
 
+Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](docs/benchmarks.md#answer-and-judge-variability), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
+
 [Results, model pricing and methodology](docs/benchmarks.md) · [LME per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m)
 
 ## Why OAM?

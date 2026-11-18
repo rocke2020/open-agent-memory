@@ -23,6 +23,8 @@ Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。它跨会�
 
 比较双方的回答与评判流程不同。上下文大小统计的是已保存的格式化文本，而非模型服务商的计费 tokens；当前 LME 平均值来自 497 份上下文，另有 3 道参考答案存在争议的题目仍按错误计入 500 题总分。评测覆盖 L1 记忆，未对洞察、用户画像和文档资源评分。
 
+重新运行回答与评判模型时，评分可能变化。在一个[输入相同的 MiniMax 实例](docs/benchmarks.md#answer-and-judge-variability)中，一次回答正确，另一次回答错误；这展示了已观察到的波动，而非其发生频率。
+
 [结果、模型定价与评测方法](docs/benchmarks.md) · [LME 逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM 逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m)
 
 ## 为什么选择 OAM？

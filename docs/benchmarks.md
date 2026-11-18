@@ -29,6 +29,12 @@ The hard 100 contribute **83/100** and the remaining 400 contribute **393/400**,
 | Retrieval HTTP samples | 994; mean 332.95 ms, median 328.59 ms, p95 428.25 ms; no exclusions |
 | Runtime provenance | The evaluated OAM commit and evaluation configuration are recorded in the linked OAMB evidence |
 
+### Answer and judge variability
+
+Reported accuracy depends on the generated answers and model-based judgments as well as retrieval. A real same-input example is LongMemEval question `e66b632c`: “What was my previous personal best time for the charity 5K run?” With byte-identical final context and identical complete answer-request settings, `minimax-m3.1-flash` answered **27:45** correctly in the published attempt and **28:00** incorrectly in a later repeat. Both requests used native adaptive thinking, `temperature: 0` and `top_p: 1`. The context contains the explicit earlier 27:45 record alongside a later 26:30 result and an approximate improvement; the two answers interpret that evidence differently.
+
+The [saved two-attempt example](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/model-variability-20261118) preserves context and request hashes, visible answers, judge decisions and request options. It illustrates observed answer variation, not how often it occurs. A selected example or one paired small-cohort rerun does not establish a randomness rate or benchmark error bar. The judges received different answers, so this example does not isolate independent judge variability. The published benchmark scores remain the recorded outcomes, not guaranteed repeat-run scores.
+
 ### Low-cost Flash models
 
 The evaluated pipelines use MiniMax M3.1 Flash and DeepSeek Flash for answering and judging. Their vendors publish the following list prices, checked on November 18, 2026, in USD per million tokens:
