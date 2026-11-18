@@ -52,6 +52,7 @@ def claim_one(
     lease_seconds: int,
     user_concurrency: int,
     claim_semantic_links: bool = True,
+    claim_consolidation_batches: bool = False,
 ) -> ClaimedWork | None:
     if not worker_id.strip():
         raise ValueError("worker_id cannot be empty")
@@ -63,8 +64,9 @@ def claim_one(
         raise ValueError("user_concurrency must be positive")
     cursor.execute("SELECT oam_settle_expired_semantic_work()", ())
     cursor.execute(
-        CLAIM_ONE_SQL,
-        (worker_id, attempt_id, lease_seconds, user_concurrency, claim_semantic_links),
+        CLAIM_ONE_SQL.replace("%s)", "%s, %s)") if claim_consolidation_batches else CLAIM_ONE_SQL,
+        (worker_id, attempt_id, lease_seconds, user_concurrency, claim_semantic_links)
+        + ((True,) if claim_consolidation_batches else ()),
     )
     row = cursor.fetchone()
     if row is None:

@@ -10,6 +10,16 @@ from oam.auth.credentials import AuthorizedUser
 from oam.profiles.inputs import PENDING_PROFILE_INPUTS_SQL
 
 
+def _create_batch_tables(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        "CREATE TABLE users(tenant_id,user_id,index_generation_id,PRIMARY KEY(tenant_id,user_id));"
+        "CREATE TABLE l2_batch_members(tenant_id,user_id,source_id,source_version,"
+        "generation_id,batch_id,source_operation_id,admitted_at,status,error,"
+        "PRIMARY KEY(tenant_id,user_id,source_id,source_version,generation_id));"
+        "INSERT INTO users VALUES('t','u','gen'),('tenant','alice','gen');"
+    )
+
+
 @pytest.mark.parametrize(
     ("status", "memory_ready", "expected"),
     [
@@ -20,6 +30,7 @@ from oam.profiles.inputs import PENDING_PROFILE_INPUTS_SQL
 )
 def test_profile_coverage_without_insights_tracks_indexing_only(status, memory_ready, expected):
     with sqlite3.connect(":memory:") as connection:
+        _create_batch_tables(connection)
         connection.executescript(
             "CREATE TABLE sources(tenant_id,user_id,source_id,active_version,input_role,status);"
             "CREATE TABLE source_versions(tenant_id,user_id,source_id,source_version,status);"
@@ -55,6 +66,7 @@ def test_profile_coverage_recognizes_only_current_source_insight_retry(
     retry_version, retry_generation, ready, expected
 ) -> None:
     with sqlite3.connect(":memory:") as connection:
+        _create_batch_tables(connection)
         connection.executescript(
             "CREATE TABLE sources(tenant_id,user_id,source_id,active_version,input_role,status);"
             "CREATE TABLE source_versions(tenant_id,user_id,source_id,source_version,status);"
@@ -123,6 +135,7 @@ def test_profile_coverage_recognizes_only_current_source_insight_retry(
 )
 def test_profile_coverage_preserves_each_unresolved_repair(repair, expected) -> None:
     with sqlite3.connect(":memory:") as connection:
+        _create_batch_tables(connection)
         connection.executescript(
             "CREATE TABLE sources(tenant_id,user_id,source_id,active_version,input_role,status);"
             "CREATE TABLE source_versions(tenant_id,user_id,source_id,source_version,status);"

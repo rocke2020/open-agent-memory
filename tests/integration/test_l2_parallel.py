@@ -20,6 +20,18 @@ from oam.models.runtime import EmbeddingResult, ModelResult, Usage
 from oam.workers.index_source import process_one
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def legacy_source_jobs(monkeypatch):
+    """Keep legacy paid-output and parallel source-job recovery under test."""
+    from oam.indexing import scheduling
+
+    monkeypatch.setattr(
+        scheduling, "enqueue_consolidation", scheduling._enqueue_source_consolidation
+    )
+
+
 TOPICS = ("Aurora", "Birch", "Cobalt", "Dahlia")
 
 

@@ -106,6 +106,7 @@ def test_cancel_fences_operation_and_unfinished_units_in_one_transaction() -> No
 def test_retry_creates_linked_operation_without_mutating_terminal_original() -> None:
     connection = Connection(
         [
+            (1,),  # user scheduling lock
             _operation_row(status="failed_terminal"),
             None,  # no existing retry for this caller key
             (0,),  # no dependency-bearing failed units
@@ -136,7 +137,7 @@ def test_retry_creates_linked_operation_without_mutating_terminal_original() -> 
 
 
 def test_retry_fails_closed_for_dependency_graph_that_requires_replanning() -> None:
-    connection = Connection([_operation_row(status="failed_terminal"), None, (2,)])
+    connection = Connection([(1,), _operation_row(status="failed_terminal"), None, (2,)])
 
     with pytest.raises(repository.RetryRequiresPlanning):
         repository.OperationRepository().retry(
@@ -151,7 +152,7 @@ def test_retry_fails_closed_for_dependency_graph_that_requires_replanning() -> N
 
 
 def test_retry_fails_closed_for_unknown_external_outcome() -> None:
-    connection = Connection([_operation_row(status="failed_terminal"), None, (0,), (1,)])
+    connection = Connection([(1,), _operation_row(status="failed_terminal"), None, (0,), (1,)])
 
     with pytest.raises(repository.RetryRequiresReconciliation):
         repository.OperationRepository().retry(
@@ -169,6 +170,7 @@ def test_retry_reuses_existing_linked_operation_for_same_idempotency_payload() -
     existing = _operation_row(status="accepted", operation_id="op-2", retry_of="op-1")
     connection = Connection(
         [
+            (1,),  # user scheduling lock
             _operation_row(status="failed_terminal"),
             (*existing, b"r" * 32),
         ]

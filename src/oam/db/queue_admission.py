@@ -18,23 +18,32 @@ class Cursor(Protocol):
 
 
 PENDING_ROOTS_SQL = """
-SELECT count(DISTINCT CASE
-    WHEN o.kind = 'consolidate' AND o.retry_of_operation_id IS NULL
-    THEN COALESCE(NULLIF(o.stage_state->>'source_operation_id', ''), o.operation_id)
-    ELSE o.operation_id
-END)
-FROM operations o
-WHERE o.tenant_id = %s AND o.user_id = %s
-  AND o.kind <> 'cleanup_source'
-  AND (
-      o.status IN ('accepted', 'running')
-      OR EXISTS (
+WITH active AS (
+    SELECT o.tenant_id,o.user_id,o.operation_id,o.kind,o.retry_of_operation_id,o.stage_state
+    FROM operations o
+    WHERE o.tenant_id = %s AND o.user_id = %s
+      AND o.kind <> 'cleanup_source'
+      AND (o.status IN ('accepted', 'running') OR EXISTS (
           SELECT 1 FROM work_units w
-          WHERE (w.tenant_id, w.user_id, w.operation_id) =
-                (o.tenant_id, o.user_id, o.operation_id)
-            AND w.status IN ('queued', 'running', 'retry_wait')
-      )
-  )
+          WHERE (w.tenant_id,w.user_id,w.operation_id)=
+                (o.tenant_id,o.user_id,o.operation_id)
+            AND w.status IN ('queued','running','retry_wait')
+      ))
+), obligations AS (
+    SELECT CASE WHEN kind='consolidate' AND retry_of_operation_id IS NULL
+                THEN COALESCE(NULLIF(stage_state->>'source_operation_id',''),operation_id)
+                ELSE operation_id END AS root_id
+    FROM active
+    WHERE NOT (kind='consolidate' AND retry_of_operation_id IS NULL
+               AND stage_state->>'l2_batch_id' IS NOT NULL)
+    UNION
+    SELECT bm.source_operation_id
+    FROM l2_batch_members bm
+    JOIN active a ON (a.tenant_id,a.user_id,a.stage_state->>'l2_batch_id')=
+                     (bm.tenant_id,bm.user_id,bm.batch_id)
+    WHERE bm.status='pending'
+)
+SELECT count(DISTINCT root_id) FROM obligations
 """.strip()
 
 

@@ -114,9 +114,27 @@ def process_one(
             lease_seconds=config.lease.seconds,
             user_concurrency=config.user.concurrency,
             claim_semantic_links=config.worker.claim_semantic_links,
+            claim_consolidation_batches=True,
         )
     if claim is None:
         return False
+    if claim.stage == "consolidate_batch":
+        from oam.indexing.batch import BatchStore, run_batch
+
+        batch = BatchStore(
+            content_dsn,
+            config,
+            claim,
+            worker_id,
+            index_generation(config, os.environ),
+            pool=content_pool,
+        )
+        try:
+            run_batch(batch, models)
+        except BaseException as error:
+            batch.fail(error)
+            raise
+        return True
     if claim.stage in {"cleanup_source", "cleanup_memory", "cleanup_insight"}:
         if content_pool is None:
             if claim.stage == "cleanup_source":

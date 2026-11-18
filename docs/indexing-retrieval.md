@@ -53,6 +53,18 @@ New eligible learned input can change L2 and mark an existing Profile stale. The
 
 Source: [Insight implementation](../src/oam/indexing/), [consolidation worker](../src/oam/workers/l2_index.py).
 
+### Upcoming release: user-level L2 windows
+
+The following scheduling change is under development and pending release acceptance; it is not a claim about the released service. The released design above retains delayed source-owned consolidation, and existing source jobs and their checkpoints remain valid during the transition.
+
+New automatic consolidation will collect ready sources for one tenant/user and index generation into a fixed window. Its first admission anchors the configured delay, with a 24-hour default; later sources join only strictly before its immutable cutoff. Arrivals at or after cutoff start the next window even if a worker starts late. With the related seed policy, bounded requests may combine related new facts from several member sources, while unrelated or unpacked facts remain pending. Supporting historical facts remain context rather than newly completed work.
+
+The window owns frozen group inputs and saved responses, but each source retains separate readiness and generation-budget responsibility. Shared call allowance is apportioned by serialized new-seed bytes with deterministic conserved integer rounding, reserved atomically against each participating source's ceiling and never borrowed across sources. Failed or unfinished groups preserve successful work for recovery; unknown external outcomes retain reconciliation requirements. Completing one member can make that source L2-ready before the entire window finishes.
+
+Existing source-owned consolidation and removal repairs remain supported. Old workers cannot claim the new batch stage; updated workers explicitly support it, and both stages share the per-user L2 claim and operator-hold boundary. Explicit existing-L1 indexing remains immediate, source-count limited and skips already assigned source/version/generation work. Profile refresh waits on shared batch dependencies while retaining failed-input and removal-repair gates. These changes make no measured claim of quality, cost or throughput improvement.
+
+Implementation references: [window admission](../src/oam/indexing/scheduling.py), [batch execution and recovery](../src/oam/indexing/batch.py), [generation accounting](../src/oam/indexing/budget.py), [Profile refresh](../src/oam/profiles/service.py).
+
 ## 5. Evidence and Profile paths
 
 Evidence accepts declared text or supported HTML/PDF/image originals, preserves their exact bytes in PostgreSQL, extracts passages with page/region/block locators, and generates an eligible cited abstract. Native PDF extraction and document vision are distinct paths with visible readiness and failures. Original-byte preservation does not imply perfect OCR or abstract quality.
