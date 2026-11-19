@@ -136,8 +136,18 @@ async def test_worker_publishes_checkpoint_subtype_with_supported_synthesis(
         assert locator["retrieval_text"] == retrieval_text
     assert models.embedding_batches[-1] == (retrieval_text or "Repeated supported behavior.",)
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    published = next(event for event in events if event["stage"] == "insight_published")
-    assert published["published"][0]["insight_id"].startswith("insight_")
-    assert published["published"][0]["revision"] == 1
-    assert published["actions"] == ["CREATE"]
+    published = next(event for event in events if event["stage"] == "insight_batch_published")
+    assert published["seed_count"] >= 1
     assert "input_tokens" in published["usage"]
+    with psycopg.connect(dsn) as connection:
+        insight_id, revision = connection.execute(
+            "SELECT insight_id,revision FROM insights WHERE tenant_id=%s", (tenant,)
+        ).fetchone()
+        actions = connection.execute(
+            "SELECT output->'actions' FROM l2_batch_groups WHERE tenant_id=%s "
+            "AND batch_id=%s AND stage_key='insight' AND published",
+            (tenant, published["batch_id"]),
+        ).fetchone()[0]
+    assert insight_id.startswith("insight_")
+    assert revision == 1
+    assert [action["action"] for action in actions] == ["CREATE"]

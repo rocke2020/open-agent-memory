@@ -2409,12 +2409,12 @@ async def test_new_interaction_gets_a_new_profile_refresh_while_one_is_active(
         )
         assert retained.status_code == 202, retained.text
         before_indexing = await client.post("/v1/users/scope/profile/refresh", json={})
-        assert before_indexing.status_code == 409, before_indexing.text
-        assert before_indexing.json()["detail"]["code"] == "ProfileInputsNotReady"
+        assert before_indexing.status_code == 202, before_indexing.text
+        assert before_indexing.json()["operation_id"] != first.json()["operation_id"]
         assert process_source(config, queue_dsn, content_dsn, models=models, worker_id="new-input")
         second = await client.post("/v1/users/scope/profile/refresh", json={})
         assert second.status_code == 202, second.text
-        assert second.json()["operation_id"] != first.json()["operation_id"]
+        assert second.json()["operation_id"] == before_indexing.json()["operation_id"]
         with psycopg.connect(dsn) as connection:
             row = connection.execute(
                 "SELECT w.dependency_ids FROM work_units w WHERE w.tenant_id=%s "
@@ -2554,8 +2554,14 @@ async def test_failed_initial_indexing_keeps_profile_dirty_without_partial(core_
         assert profile.json()["blocked_inputs"] == 1
         assert profile.json()["failed_inputs"] == 0
         retry = await client.post("/v1/users/scope/profile/refresh", json={})
-        assert retry.status_code == 409, retry.text
-        assert retry.json()["detail"]["code"] == "ProfileInputsNotReady"
+        assert retry.status_code == 202, retry.text
+        with psycopg.connect(dsn) as connection:
+            row = connection.execute(
+                "SELECT w.dependency_ids FROM work_units w WHERE w.tenant_id=%s "
+                "AND w.user_id='scope' AND w.operation_id=%s",
+                (tenant, retry.json()["operation_id"]),
+            ).fetchone()
+            assert row is not None and len(row[0]) == 1
 
 
 @pytest.mark.parametrize("insight_failure", [False, True])
@@ -2691,9 +2697,12 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
         assert after_insight.status_code == 202, after_insight.text
         assert after_insight.json()["operation_id"] == requested.json()["operation_id"]
         if insight_failure:
-            assert process_one(
-                config, queue_dsn, content_dsn, models=models, worker_id="profile-next"
-            )
+            from oam.operations.repository import RetryRequiresReconciliation
+            from oam.profiles.preparation import InputsPreparationUnavailable
+
+            with pytest.raises(InputsPreparationUnavailable) as preparation_error:
+                process_one(config, queue_dsn, content_dsn, models=models, worker_id="profile-next")
+            assert isinstance(preparation_error.value.__cause__, RetryRequiresReconciliation)
         else:
             with psycopg.connect(queue_dsn) as connection:
                 claim = claim_one(
@@ -2746,7 +2755,7 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
             f"/v1/users/scope/operations/{requested.json()['operation_id']}"
         )
         assert operation.json()["stage_state"]["pending_inputs"] == (1 if insight_failure else 0)
-        assert operation.json()["status"] == "succeeded"
+        assert operation.json()["status"] == ("partial" if insight_failure else "succeeded")
         assert operation.json()["readiness"]["profile_current"] is not insight_failure
         profile = await client.get("/v1/users/scope/profile")
         assert profile.status_code == 200, profile.text
@@ -2754,15 +2763,22 @@ async def test_profile_refresh_runs_pending_insights_before_building_profile(
         assert profile.json()["pending_inputs"] == (1 if insight_failure else 0)
         assert profile.json()["failed_inputs"] == (1 if insight_failure else 0)
         if insight_failure:
-            assert "brief" in profile.json()["content"]
-            assert profile.json()["references"][0]["kind"] == "fact"
+            assert (
+                profile.json()["content"]
+                == "## Main content\n\nOld\n\n## References\n\nNo references yet."
+            )
+            assert profile.json()["references"] == []
         else:
             assert "brief" in profile.json()["content"]
             assert profile.json()["references"][0]["kind"] == "insight"
         unchanged = await client.post("/v1/users/scope/profile/refresh", json={})
-        assert unchanged.status_code == 200, unchanged.text
-        assert unchanged.json()["status"] == "unchanged"
-        assert models.generation_calls.count("profile") == 1
+        if insight_failure:
+            assert unchanged.status_code == 409, unchanged.text
+            assert unchanged.json()["detail"]["code"] == "ProfileInputsNotReady"
+        else:
+            assert unchanged.status_code == 200, unchanged.text
+            assert unchanged.json()["status"] == "unchanged"
+        assert models.generation_calls.count("profile") == (0 if insight_failure else 1)
 
 
 @pytest.mark.parametrize(
