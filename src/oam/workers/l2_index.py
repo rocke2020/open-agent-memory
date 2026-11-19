@@ -67,6 +67,9 @@ def queue_existing_l1(
                 "AND prior.user_id=o.user_id AND prior.source_id=o.source_id "
                 "AND prior.source_version=o.source_version AND prior.kind='consolidate' "
                 "AND pw.generation_id=w.generation_id) "
+                "AND NOT EXISTS(SELECT 1 FROM l2_batch_members bm "
+                "WHERE (bm.tenant_id,bm.user_id,bm.source_id,bm.source_version,bm.generation_id)="
+                "(o.tenant_id,o.user_id,o.source_id,o.source_version,w.generation_id)) "
                 "ORDER BY o.source_id,o.source_version,w.generation_id,"
                 "o.accepted_seq,o.operation_id "
                 "LIMIT %s",

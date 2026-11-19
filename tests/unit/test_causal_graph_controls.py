@@ -143,11 +143,13 @@ class CapturedRepository(RecallRepository):
 
 
 @pytest.mark.parametrize("causal", [False, True])
-def test_temporal_search_keeps_temporal_edges_and_optionally_causal_edges(tmp_path, causal):
-    config = configuration(tmp_path, "fast", "off", causal)
+@pytest.mark.parametrize("source", ["config", "request"])
+def test_temporal_search_keeps_temporal_edges_and_optionally_causal_edges(tmp_path, causal, source):
+    config = configuration(tmp_path, "fast", "off", causal if source == "config" else not causal)
     request = SearchRequest(
         query="history",
         recall_level="fast",
+        overrides={"causal_graph": causal} if source == "request" else {},
         time_basis="mentioned",
         time_window={"start": "2025-01-01T00:00:00Z", "end": "2025-02-01T00:00:00Z"},
     )

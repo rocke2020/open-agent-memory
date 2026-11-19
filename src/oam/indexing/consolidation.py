@@ -73,11 +73,14 @@ def _set_preparation_timeout(connection, deadline):
 
 
 def _pending_group(store, connection, new_fact_ids, examined):
+    predicate, parameters = _seed_scope(store, new_fact_ids)
+    bounded = hasattr(store, "batch_id")
+    lookahead = " ORDER BY created_at,unit_id LIMIT %s" if bounded else ""
     return _rows(
         connection,
         f"WITH eligible AS ({ELIGIBLE_UNITS}), pending AS MATERIALIZED ("
-        "SELECT * FROM eligible WHERE kind='fact' AND source_id=%s AND source_version=%s "
-        "AND generation_id=%s AND unit_id=ANY(%s) AND NOT (unit_id=ANY(%s))), "
+        f"SELECT * FROM eligible WHERE kind='fact' AND {predicate} "
+        f"AND NOT (unit_id=ANY(%s)){lookahead}), "
         "anchor AS (SELECT * FROM pending ORDER BY created_at,unit_id LIMIT 1) "
         "SELECT p.*,p.embedding::text AS vector FROM pending p CROSS JOIN anchor a "
         "WHERE p.unit_id=a.unit_id OR "
@@ -85,13 +88,32 @@ def _pending_group(store, connection, new_fact_ids, examined):
         "ORDER BY (p.unit_id=a.unit_id) DESC,p.embedding <=> a.embedding,p.created_at,p.unit_id "
         "LIMIT %s",
         (
+            *parameters,
+            list(examined),
+            *((store.config.extraction.max_facts_per_group,) if bounded else ()),
+            store.config.index.semantic_link_min_similarity,
+            min(store.config.index.insight_seed_max, store.config.extraction.max_facts_per_group),
+        ),
+    )
+
+
+def _seed_scope(store, new_fact_ids):
+    if hasattr(store, "batch_id"):
+        return (
+            "generation_id=%s AND EXISTS(SELECT 1 FROM l2_batch_members bm "
+            "WHERE bm.tenant_id=eligible.tenant_id AND bm.user_id=eligible.user_id "
+            "AND bm.source_id=eligible.source_id AND bm.source_version=eligible.source_version "
+            "AND bm.generation_id=eligible.generation_id AND bm.batch_id=%s "
+            "AND bm.status='pending')",
+            (store.generation_id, store.batch_id),
+        )
+    return (
+        "source_id=%s AND source_version=%s AND generation_id=%s AND unit_id=ANY(%s)",
+        (
             store.source["source_id"],
             store.source["source_version"],
             store.generation_id,
             new_fact_ids,
-            list(examined),
-            store.config.index.semantic_link_min_similarity,
-            min(store.config.index.insight_seed_max, store.config.extraction.max_facts_per_group),
         ),
     )
 
@@ -316,17 +338,15 @@ def _freeze_group(store, connection, seeds, *, initial_candidates=None, deadline
 
 def _pending_source_batch(store, connection, new_fact_ids, examined, *, config=None):
     config = config or store.config
+    predicate, parameters = _seed_scope(store, new_fact_ids)
     return _rows(
         connection,
         f"WITH eligible AS ({ELIGIBLE_UNITS}) "
         "SELECT *,embedding::text AS vector FROM eligible WHERE kind='fact' "
-        "AND source_id=%s AND source_version=%s AND generation_id=%s AND unit_id=ANY(%s) "
+        f"AND {predicate} "
         "AND NOT (unit_id=ANY(%s)) ORDER BY created_at,unit_id LIMIT %s",
         (
-            store.source["source_id"],
-            store.source["source_version"],
-            store.generation_id,
-            new_fact_ids,
+            *parameters,
             list(examined),
             min(config.index.insight_seed_max, config.extraction.max_facts_per_group),
         ),
@@ -560,6 +580,10 @@ def _publish_group(store, connection, *, facts, seeds, targets, prepared, digest
     ):
         raise StaleConsolidationInputs("Insight support became ineligible")
 
+    batch = hasattr(store, "batch_id")
+    publication_seq = (
+        store.publication_sequence(connection, digest) if batch else store.source["accepted_seq"]
+    )
     published = []
     for slot, (action, vector) in enumerate(prepared):
         if action.action not in {"UPDATE", "CREATE"}:
@@ -571,8 +595,11 @@ def _publish_group(store, connection, *, facts, seeds, targets, prepared, digest
             else stable_id(
                 "insight",
                 *store.key,
-                store.source["source_id"],
-                store.source["source_version"],
+                *(
+                    (store.batch_id,)
+                    if batch
+                    else (store.source["source_id"], store.source["source_version"])
+                ),
                 store.generation_id,
                 digest.hex(),
                 slot,
@@ -594,7 +621,7 @@ def _publish_group(store, connection, *, facts, seeds, targets, prepared, digest
             connection.execute(
                 "UPDATE insights SET visible_to=%s WHERE tenant_id=%s AND user_id=%s "
                 "AND insight_id=%s AND revision=%s AND visible_to IS NULL",
-                (store.source["accepted_seq"], *store.key, identifier, target["revision"]),
+                (publication_seq, *store.key, identifier, target["revision"]),
             )
         connection.execute(
             "INSERT INTO insights(tenant_id,user_id,insight_id,revision,synthesis_text,subtype,"
@@ -608,7 +635,7 @@ def _publish_group(store, connection, *, facts, seeds, targets, prepared, digest
                 action.subtype,
                 digest,
                 store.generation_id,
-                store.source["accepted_seq"],
+                publication_seq,
             ),
         )
         for memory_id in sorted(support_ids):

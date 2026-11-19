@@ -138,7 +138,7 @@ Fast 还支持实验性的 `search.fast.fact_source_bodies` 策略。默认值 `
 
 实验值 `ranked_deduplicated` 使用相同的 ranked 准入，仅当精确来源定位与唯一引用均有效、全部时间证据一致且不丢失别名证据时，用已选中的完整原文替换普通事实。节选和截断原文不能替代事实。原文保留其来源组的相关性位置及完整文本；未匹配事实与 Insight 必需支持保持不变。去重仅释放渲染 token 空间，仍预留原有的 learned/original 池配额。`diagnostics.context_budget.source_deduplicated_fact_ids` 记录替换事实。此策略没有已测得的准确率保证。
 
-Fast 评分要求同时配置具有 `rerank` 能力的 `models.reranker` 及正数 `search.fast.rerank_candidates`；两者默认均为 null。仅配置绑定不会让 fast 发起评分调用。模型名称原样传递。Normal 保留原有的早期评分路径。
+Fast 评分要求运营者配置具有 `rerank` 能力的 `models.reranker`，且 fast 预设或请求覆盖中的生效 `rerank_candidates` 为正数；两者默认均为 null。仅配置绑定不会让 fast 发起评分调用。模型名称原样传递。Normal 保留原有的早期评分路径。
 
 Fast 上限按来源扩展及局部证据筛选后、原有顺序中的不同合格准入根候选计数。默认 required 策略下，普通事实取两种评分的较小值：完整来源支持组，以及带真实引用、说话者与时间归属的事实自身表示。Ranked 策略下，两种视图均使用含真实引用与元数据的完整投影事实；相同文档共用一次评分。这防止弱相关事实仅凭有用的来源正文获得高分。Insight 保留完整组评分，独立原文单独评分。上限内所属候选的可选原文分别评分，同一请求内相同输入复用评分。必需支持不会被独立过滤。文档数可超过根候选上限，其中每个事实最多多出一个不同的声明文档。超出上限且未评分的根候选会明确省略。
 
@@ -147,3 +147,19 @@ Fast 上限按来源扩展及局部证据筛选后、原有顺序中的不同合
 Fast 评分成功后按分数降序排列保留根候选，同分保持原顺序，再应用现有上下文和条目上限。可选原文只有在所属候选保留且通过已配置门槛时才保留。全部候选可能被过滤，返回空上下文。严格模式下评分失败会使召回失败；只有允许的评分器错误才可在 `allow_partial` 下保留评分前完全相同的顺序和成员，并报告降级。超时仍遵循绝对截止时间。外部评分请求前关闭数据库事务，请求后重新检查 generation、解析完整性及来源策略。
 
 `diagnostics.rerank` 报告状态、是否应用评分、根候选上限、候选／文档／已评分／接受／拒绝数量、实际门槛，以及根候选与可选原文的省略原因。`fact_score_method: min_group_unit` 标识组合事实分数；分数降低不保证最终上下文更小，因为装入顺序可能变化。成功但全部过滤时报告 `status: applied` 与 `accepted: 0`；`status: empty` 表示没有派发合格评分输入。计时、模型用量和追踪决策保留原有位置。这些诊断说明选择过程，不构成准确率保证。
+
+## 7. 时间遍历预算与请求覆盖
+
+Fast 和 normal 是可自定义的配置预设。`search.fast.temporal_nodes` 默认为 96，`search.normal.temporal_nodes` 默认为 300。该正整数预算统计时间遍历的种子节点和后续访问节点；直接时间匹配与最终结果池分别控制。`max_results` 不会限制此遍历预算。
+
+要让 fast 使用与 normal 默认值相同的遍历预算，可使用以下配置覆盖：
+
+```yaml
+search:
+  fast:
+    temporal_nodes: 300
+```
+
+单次召回可传入 `"recall_level": "fast", "overrides": {"temporal_nodes": 300}`。同一对象也可覆盖所选预设的其他字段；未指定字段继承配置。合并后的值复用现有校验，包括候选上限关系和重排器要求；支持 null 的字段可显式清空。未知字段或无效组合会在检索 I/O 前被拒绝。旧的非 null `fast_graph` 选项优先于 `overrides.entity_semantic_graph`。直接、批量和规划召回均保留覆盖值；响应的 `diagnostics.search_config` 记录生效预设。
+
+原共享字段 `search.temporal_nodes` 已移除。要保留旧共享值 N 的行为，将其移至 `search.normal.temporal_nodes`，并把 `search.fast.temporal_nodes` 设为 N 与旧 fast `max_results` 的较小值。新配置可独立设置遍历预算和结果限制。本次仅改变召回配置，无需重建索引。

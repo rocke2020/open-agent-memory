@@ -1126,6 +1126,9 @@ class IndexStore:
             not_dispatched = False
             inputs_changed = False
         with self.transaction() as connection:
+            connection.execute(
+                "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s FOR UPDATE", self.key
+            )
             owned = connection.execute(
                 "UPDATE work_units SET status=CASE WHEN %s AND attempts_remaining>0 "
                 "THEN 'queued' ELSE 'failed_terminal' END,updated_at=clock_timestamp() "
@@ -1193,6 +1196,10 @@ class IndexStore:
                             self.claim.operation_id,
                         ),
                     )
+                self.failure_settled(connection, error, retrying)
+
+    def failure_settled(self, connection, error, retrying):
+        """Source work has no additional ownership to settle in this transaction."""
 
     def summarize_usage(self, connection):
         work_filter = " AND work_unit_id=%s" if self.claim.stage == "consolidate" else ""

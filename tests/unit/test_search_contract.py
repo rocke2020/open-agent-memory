@@ -9,6 +9,61 @@ from oam.contracts.retain import RecallRequest
 from oam.contracts.search import RecallLevel, SearchManyRequest, SearchRequest
 
 
+def test_search_overrides_customize_selected_preset_without_mutating_defaults():
+    config = load_config("configs/oam.yaml").config
+    request = SearchRequest(query="events", recall_level="fast", overrides={"temporal_nodes": 300})
+
+    tier = request.search_tier(config)
+
+    assert tier.temporal_nodes == 300
+    assert tier.max_results == 96
+    assert tier.entity_semantic_graph == "off"
+    assert config.search.fast.temporal_nodes == 96
+    assert (
+        SearchRequest(query="events", recall_level="fast").search_tier(config).temporal_nodes == 96
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"temporal_nodes": 0},
+        {"max_results": 129},
+        {"models": {}},
+        {"normal_deadline_seconds": 600},
+        {"rerank_min_score": 0.5},
+    ],
+)
+def test_invalid_preset_overrides_fail_before_retrieval(overrides):
+    config = load_config("configs/oam.yaml").config
+    request = SearchRequest(query="events", recall_level="fast", overrides=overrides)
+
+    with pytest.raises(ValueError):
+        request.validate_limits(config)
+
+
+def test_search_override_context_total_is_used_unless_child_share_is_assigned():
+    config = load_config("configs/oam.yaml").config
+    request = SearchRequest(
+        query="events", recall_level="fast", overrides={"context_max_tokens": 20000}
+    )
+    assert request.context_limit(config) == 20000
+    request._context_max_tokens = 10000
+    assert request.context_limit(config) == 10000
+
+
+@pytest.mark.parametrize("fast_graph,graph", [(None, "full"), (True, "light"), (False, "off")])
+def test_legacy_fast_graph_takes_precedence_over_preset_override(fast_graph, graph):
+    config = load_config("configs/oam.yaml").config
+    request = SearchRequest(
+        query="events",
+        recall_level="fast",
+        fast_graph=fast_graph,
+        overrides={"entity_semantic_graph": "full"},
+    )
+    assert request.search_tier(config).entity_semantic_graph == graph
+
+
 def test_search_defaults_to_normal_without_profile_selection() -> None:
     request = SearchRequest(query="What changed?")
     batch = SearchManyRequest(queries=["What changed?"])

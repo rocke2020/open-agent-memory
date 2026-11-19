@@ -386,16 +386,28 @@ class ProfileService:
             dependencies: list[str] = []
             if inputs.waiting_source_ids:
                 rows = connection.execute(
-                    "SELECT o.source_id,w.work_unit_id FROM operations o JOIN work_units w "
-                    "USING(tenant_id,user_id,operation_id) JOIN sources s "
-                    "ON (s.tenant_id,s.user_id,s.source_id)="
-                    "(o.tenant_id,o.user_id,o.source_id) "
-                    "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='consolidate' "
-                    "AND o.source_id=ANY(%s) AND o.source_version=s.active_version "
-                    "AND s.status='active' AND o.status IN ('accepted','running') "
-                    "AND w.stage='consolidate' "
+                    "WITH waiting AS (SELECT tenant_id,user_id,source_id,active_version "
+                    "FROM sources WHERE tenant_id=%s AND user_id=%s AND source_id=ANY(%s) "
+                    "AND status='active') "
+                    "SELECT s.source_id,w.work_unit_id FROM waiting s JOIN operations o "
+                    "ON (o.tenant_id,o.user_id,o.source_id,o.source_version)="
+                    "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
+                    "JOIN work_units w ON (w.tenant_id,w.user_id,w.operation_id)="
+                    "(o.tenant_id,o.user_id,o.operation_id) "
+                    "WHERE o.kind='consolidate' AND o.status IN ('accepted','running') "
+                    "AND w.stage='consolidate' AND w.status IN ('queued','running','retry_wait') "
+                    "UNION SELECT s.source_id,w.work_unit_id FROM waiting s "
+                    "JOIN l2_batch_members bm ON "
+                    "(bm.tenant_id,bm.user_id,bm.source_id,bm.source_version)="
+                    "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
+                    "JOIN operations o ON (o.tenant_id,o.user_id,o.stage_state->>'l2_batch_id')="
+                    "(bm.tenant_id,bm.user_id,bm.batch_id) "
+                    "JOIN work_units w ON (w.tenant_id,w.user_id,w.operation_id,w.generation_id)="
+                    "(o.tenant_id,o.user_id,o.operation_id,bm.generation_id) "
+                    "WHERE bm.status='pending' AND o.status IN ('accepted','running') "
+                    "AND w.stage='consolidate_batch' "
                     "AND w.status IN ('queued','running','retry_wait') "
-                    "ORDER BY o.source_id,w.work_unit_id",
+                    "ORDER BY source_id,work_unit_id",
                     (
                         authority.tenant_id,
                         authority.user_id,
@@ -404,7 +416,7 @@ class ProfileService:
                 ).fetchall()
                 if {row[0] for row in rows} != set(inputs.waiting_source_ids):
                     raise ProfileInputsNotReady("Profile inputs are still indexing")
-                dependencies = [row[1] for row in rows]
+                dependencies = sorted({row[1] for row in rows})
                 connection.execute(
                     "UPDATE work_units SET available_at=clock_timestamp(),"
                     "updated_at=clock_timestamp() WHERE tenant_id=%s AND user_id=%s "

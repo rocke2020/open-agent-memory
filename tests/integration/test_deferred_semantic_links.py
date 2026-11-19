@@ -265,7 +265,20 @@ def legacy_direct_completion(store, *, semantic_seed_ids, schedule_consolidation
             semantic_link_manifest=manifest,
             semantic_links_status="pending" if seeds else "succeeded",
         )
-    store.finish(schedule_consolidation=schedule_consolidation)
+    if schedule_consolidation:
+        from oam.indexing.scheduling import _enqueue_source_consolidation
+
+        with store.transaction() as connection:
+            store.guard(connection)
+            _enqueue_source_consolidation(
+                connection,
+                store.config,
+                key=store.key,
+                source_operation_id=store.claim.operation_id,
+                source=store.source,
+                generation_id=store.generation_id,
+            )
+    store.finish()
     if seeds:
         with psycopg.connect(store.dsn) as connection:
             from oam.db.context import bind_user

@@ -151,11 +151,20 @@ def test_fast_floor_requires_explicit_scoring_inputs(missing):
         ([-10.0, -3.0], 0.0, []),
     ],
 )
-def test_fast_scores_global_roots_with_stable_ties_and_optional_floor(scores, floor, want):
+@pytest.mark.parametrize("source", ["config", "request"])
+def test_fast_scores_global_roots_with_stable_ties_and_optional_floor(scores, floor, want, source):
     scorer = Scorer(scores)
-    result = DistinctService(
-        scoring_config(floor=floor), None, scorer, generation_id="generation"
-    ).search(object(), SearchRequest(query="the complete original query", recall_level="fast"))
+    config = scoring_config(cap=None) if source == "request" else scoring_config(floor=floor)
+    result = DistinctService(config, None, scorer, generation_id="generation").search(
+        object(),
+        SearchRequest(
+            query="the complete original query",
+            recall_level="fast",
+            overrides={"rerank_candidates": 2, "rerank_min_score": floor}
+            if source == "request"
+            else {},
+        ),
+    )
     assert [item["unit_id"] for item in result["items"]] == want
     assert scorer.calls[0][0] == "the complete original query"
     assert result["diagnostics"]["rerank"]["applied"] is True

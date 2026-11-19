@@ -16,6 +16,16 @@ from oam.models.runtime import ModelResult, Usage
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def legacy_source_jobs(monkeypatch):
+    """Exercise persisted source-job compatibility, including its original checkpoints."""
+    from oam.indexing import scheduling
+
+    monkeypatch.setattr(
+        scheduling, "enqueue_consolidation", scheduling._enqueue_source_consolidation
+    )
+
+
 class CorroboratingModels(PolicyModels):
     def generate(self, role, **kwargs):
         if role != "insights":

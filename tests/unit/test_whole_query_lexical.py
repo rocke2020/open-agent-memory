@@ -16,12 +16,15 @@ from oam.retrieval.repository import RecallRepository
         ("normal", "can", [{"entity_id": "named-entity", "name_text": "can"}], 0),
     ],
 )
+@pytest.mark.parametrize("source", ["config", "request"])
 def test_configured_whole_query_returns_database_relevance_order(
-    mode, query, entity_names, normalization
+    mode, query, entity_names, normalization, source
 ):
     base = load_config("configs/oam.yaml").config
     values = base.model_dump(mode="json")
-    values["search"][mode or "normal"]["lexical_ranking"] = "whole_query"
+    values["search"][mode or "normal"]["lexical_ranking"] = (
+        "per_term" if source == "request" and mode else "whole_query"
+    )
     values["search"]["query_entity_boost"] = 0.5 if entity_names else 0
     config = type(base).model_validate(values)
     rows = [
@@ -32,7 +35,15 @@ def test_configured_whole_query_returns_database_relevance_order(
     class CapturedRepository(RecallRepository):
         def __init__(self):
             self.config = config
-            self.request = SearchRequest(query=query, recall_level=mode) if mode else None
+            self.request = (
+                SearchRequest(
+                    query=query,
+                    recall_level=mode,
+                    overrides={"lexical_ranking": "whole_query"} if source == "request" else {},
+                )
+                if mode
+                else None
+            )
             self._has_insights = False
             self.calls = []
 

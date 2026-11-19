@@ -10,7 +10,7 @@ import pytest
 from oam.config import load_config
 from oam.contracts.search import SearchRequest
 from oam.models.runtime import Usage
-from oam.retrieval.algorithms import TemporalExpansion, TemporalNode
+from oam.retrieval.algorithms import TemporalEdge, TemporalExpansion, TemporalNode
 from oam.retrieval.query_time import infer_query_time
 from oam.retrieval.service import RecallService, RecallUnavailable
 
@@ -118,6 +118,84 @@ class DatedService(RecallService):
     @contextmanager
     def _repository(self, authority, request, deadline):
         yield DatedRepository(request)
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("source", ["config", "request"])
+@pytest.mark.parametrize(
+    "budget,max_results,stop,chain_length",
+    [
+        (2, 96, "node_budget", 3),
+        (4, 1, "frontier_exhausted", 3),
+        (300, 96, "frontier_exhausted", 100),
+    ],
+)
+def test_temporal_traversal_uses_mode_budget_independently_of_result_limit(
+    tmp_path, mode, source, budget, max_results, stop, chain_length
+):
+    import yaml
+
+    path = tmp_path / "override.yaml"
+    overrides = {"temporal_nodes": budget, "max_results": max_results}
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "search": {
+                    mode: {
+                        **(overrides if source == "config" else {}),
+                        "partial_match_gate": "off",
+                        "adjacent_user_context": False,
+                    }
+                }
+            }
+        )
+    )
+    config = load_config(path).config
+    names = ["old", *(f"step_{i}" for i in range(1, chain_length))]
+    nodes = {name: TemporalNode(name, 0.8, datetime(2024, 7, 1, tzinfo=UTC)) for name in names}
+
+    class ChainRepository(DatedRepository):
+        def __init__(self, request):
+            super().__init__(request)
+            self.rows.update({name: {"year": 2024, "text": name} for name in names[1:]})
+
+        def lexical(self, query, limit):
+            return [{"unit_id": "new"}]
+
+        def dense(self, vector, limit):
+            return [{"unit_id": "new", "kind": "passage", "score": 0.8}]
+
+        def temporal_nodes(self, unit_ids, vector):
+            return ()
+
+        def temporal_candidates(self, vector, limit):
+            return (nodes["old"],)
+
+        def temporal_neighbors_batch(self, source_ids, vector, limit):
+            edges = {
+                parent: (TemporalEdge(nodes[child], 1.0, "temporal"),)
+                for parent, child in zip(names, names[1:], strict=False)
+            }
+            return {source_id: edges.get(source_id, ()) for source_id in source_ids}
+
+    class ChainService(DatedService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield ChainRepository(request)
+
+    result = ChainService(config, None, EmbeddingOnly(), generation_id="generation").search(
+        object(),
+        SearchRequest(
+            query="apple harvest in 2024",
+            recall_level=mode,
+            overrides=overrides if source == "request" else {},
+        ),
+    )
+
+    assert result["diagnostics"]["temporal_stop"] == stop
+    assert result["diagnostics"]["search_config"]["temporal_nodes"] == budget
+    assert result["diagnostics"]["search_config"]["max_results"] == max_results
+    assert len(result["items"]) <= max_results
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
@@ -799,6 +877,61 @@ def test_normal_context_respects_fused_relevance_under_item_cap():
         "z_user",
     ]
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("count,chunks", [(0, True), (2, False), (2, True), (128, True)])
+def test_personal_evidence_reaches_context_when_requested(mode, count, chunks):
+    query = "How should I organize my reading?"
+    calls, traces = [], []
+
+    class Repository(ConversationRepository):
+        def personal_evidence(self, vector, limit):
+            calls.append((vector, limit))
+            return [{"unit_id": "a_noise"}, {"unit_id": "personal"}]
+
+        def hydrate(self, unit_ids):
+            rows = super().hydrate(unit_ids)
+            for row in rows:
+                if row["unit_id"] == "personal":
+                    row["text"] = "I prefer wide margins for handwritten annotations."
+                    row["locator"] = {"role": "user"}
+            return rows
+
+        def record_trace(self, trace_id, policy_epoch, decisions, result):
+            traces.append(decisions)
+            return super().record_trace(trace_id, policy_epoch, decisions, result)
+
+    class Models(EmbeddingOnly):
+        def embed(self, texts, **kwargs):
+            assert texts == (query,)
+            return super().embed(texts, **kwargs)
+
+    class Service(RecallService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield Repository(request)
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    service = Service(config, SimpleNamespace(max_size=1), Models(), generation_id="generation")
+    result = service.search(
+        object(),
+        SearchRequest(
+            query=query,
+            recall_level=mode,
+            include={"chunks": chunks},
+            overrides={"personal_evidence_candidates": count},
+        ),
+    )
+    enabled = count > 0 and chunks
+    limit = min(count, getattr(config.search, mode).channel_candidates)
+    assert calls == ([((0.1,), limit)] if enabled else [])
+    assert ("I prefer wide margins" in result["context"]) == enabled
+    assert ("personal_evidence" in result["diagnostics"]["executed_arms"]) == enabled
+    if enabled:
+        assert traces[0]["arms"]["personal_evidence"] == ["personal"]
+        candidate = next(row for row in traces[0]["fusion"] if row["unit_id"] == "personal")
+        assert candidate["contributions"][0]["arm"] == "personal_evidence"
 
 
 @pytest.mark.parametrize(

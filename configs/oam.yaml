@@ -115,8 +115,6 @@ search:
   temporal_coverage_buckets: 8
   # Maximum neighbors visited from each temporal node.
   temporal_neighbors: 10
-  # Maximum temporal node pool; fast also caps it by max_results.
-  temporal_nodes: 300
   # Minimum query similarity for a fact reached through temporal links.
   temporal_semantic_floor: 0.1
   # pgvector HNSW settings for dense search; strict_order preserves distance order.
@@ -124,6 +122,8 @@ search:
   # Upper bound on tuples visited by iterative ANN scans.
   ann_scan_max_tuples: 20000
   # Per mode: channel_candidates caps each arm; fused_candidates caps rank fusion.
+  # temporal_nodes caps temporal traversal, including seeds, independently of max_results.
+  # Fast and normal are configurable presets; their values can be overridden independently.
   # rerank_candidates plus models.reranker opts into non-generative scoring.
   # Fast scores complete eligible roots late; normal retains early row scoring.
   # source_seed_results caps fact/original seeds and recovered user originals.
@@ -155,6 +155,7 @@ search:
     adjacent_user_context_max_chars: 1000
     channel_candidates: 64
     fused_candidates: 128
+    temporal_nodes: 96
     rerank_candidates: null
     # Optional provider-specific floor; null reorders without score filtering.
     # A finite floor requires both rerank_candidates and models.reranker.
@@ -173,6 +174,7 @@ search:
     adjacent_user_context_max_chars: 1000
     channel_candidates: 64
     fused_candidates: 154
+    temporal_nodes: 300
     rerank_candidates: 48
     source_seed_results: 36
     max_results: 154

@@ -138,7 +138,7 @@ Fast also accepts the experimental `fact_source_bodies: assistant_deduplicated` 
 
 The additional experimental value `ranked_deduplicated` uses the same ranked admission and replaces an ordinary fact with its complete selected original only when its exact source locator and unique quotes validate, all time evidence matches, and no alias witness is lost. Excerpts and truncated originals cannot replace facts. The original keeps its existing source-group relevance position and complete text; unmatched facts and required Insight support remain. Deduplication frees rendered-token space but reserves the original learned/original pool slots. `diagnostics.context_budget.source_deduplicated_fact_ids` records replaced facts. This policy has no measured accuracy guarantee.
 
-Fast scoring requires both a `models.reranker` binding with the `rerank` capability and a positive `search.fast.rerank_candidates`; both remain null by default. A binding alone preserves fast recall without a scoring call. Model names pass through unchanged. Normal retains its existing early scoring path.
+Fast scoring requires both an operator-owned `models.reranker` binding with the `rerank` capability and a positive effective `rerank_candidates` from the fast preset or request overrides; both remain null by default. A binding alone preserves fast recall without a scoring call. Model names pass through unchanged. Normal retains its existing early scoring path.
 
 The fast cap counts distinct eligible admission roots in their existing order after source expansion and local evidence selection. Under the default `required` policy, an ordinary fact uses the lower of two scores: its complete required source-backed group and its own rendered claim with citation quote, speaker and time attribution. With `ranked`, both views use the projected complete fact with its genuine quotes and metadata; identical documents share one score. This prevents a useful source body from supplying all of a weak claim's relevance. An Insight keeps its complete-group score; a standalone original is scored on its own. Optional originals for in-cap owners are scored separately, with identical rendered inputs sharing a score within the same request. Required support is never independently filtered. Document count can exceed the root cap, including at most one additional distinct claim document per fact root. Unscored roots beyond the cap are omitted explicitly.
 
@@ -147,3 +147,25 @@ The fast cap counts distinct eligible admission roots in their existing order af
 Successful fast scoring orders kept roots by descending score with stable ties, then applies the existing context and item caps. Optional originals survive only for a kept owner and, when configured, their own passing score. All roots can be filtered, yielding an empty context. A strict scoring failure fails recall; `allow_partial` preserves the exact pre-scoring selection order and membership on permitted scorer errors and reports degradation. Timeouts retain the absolute deadline failure policy. Database transactions close before the scoring request; generation, incomplete parsing and source policy are checked again afterward.
 
 `diagnostics.rerank` reports status, whether scoring was applied, root cap, candidate/document/scored/accepted/rejected counts, the effective floor, and root/optional omission reasons. `fact_score_method: min_group_unit` identifies the combined fact score; lowering individual scores does not guarantee a smaller final context because packing order can change. Successful all-filtered scoring reports `status: applied` and `accepted: 0`; `status: empty` means no eligible scoring inputs were dispatched. Timing, model usage and trace decisions retain their existing locations. These diagnostics describe selection, not accuracy guarantees.
+
+## 7. Temporal traversal budgets and request overrides
+
+Fast and normal are configurable presets. `search.fast.temporal_nodes` defaults to 96 and `search.normal.temporal_nodes` to 300. Each is a positive traversal budget counting seeds and subsequently visited nodes; direct temporal matches and final result pools have separate admission. `max_results` does not clamp this budget.
+
+To give fast the same traversal budget as the normal default, use this operator override:
+
+```yaml
+search:
+  fast:
+    temporal_nodes: 300
+```
+
+For one recall request, use `"recall_level": "fast", "overrides": {"temporal_nodes": 300}`. Other selected-preset fields can be overridden in the same object; unspecified fields inherit the configured preset. Existing validation applies to the merged values, including candidate-cap relationships and reranker requirements. Explicit supported nulls clear optional fields. Unknown fields and invalid combinations fail before retrieval I/O. The legacy non-null `fast_graph` option takes precedence over `overrides.entity_semantic_graph`. Direct, batch and planned recall preserve overrides; response `diagnostics.search_config` records the effective preset.
+
+The former shared `search.temporal_nodes` key is removed. To preserve an old shared value N, move it to `search.normal.temporal_nodes` and set `search.fast.temporal_nodes` to the smaller of N and the old fast `max_results`. New configurations can set either traversal budget independently of result limits. This recall-only change requires no reindexing.
+
+## 8. Personal evidence candidates
+
+Set `search.fast.personal_evidence_candidates` or `search.normal.personal_evidence_candidates` to a positive count to search user passages backed by active L1 preferences and experiences. The default is zero. The count is capped by `channel_candidates`, and search runs the additional channel when `include.chunks` is true and the query embedding is available. The returned passages compete under the selected mode's ordinary context budget.
+
+For one normal recall request, set `"include": {"chunks": true}, "overrides": {"personal_evidence_candidates": 16}`. When novel passages enter fusion, the recall trace shows a `personal_evidence` arm. This option reuses the existing embedding, stored support and search indexes. [API reference](../docs/api.md#3-retain-and-recall)

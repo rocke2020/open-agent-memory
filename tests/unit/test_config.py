@@ -11,6 +11,35 @@ from oam.config import ConfigurationError, load_config
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+@pytest.mark.parametrize("mode,other,unchanged", [("fast", "normal", 300), ("normal", "fast", 96)])
+def test_temporal_traversal_budget_override_is_independent_per_mode(
+    tmp_path, mode, other, unchanged
+):
+    path = tmp_path / "override.yaml"
+    path.write_text(yaml.safe_dump({"search": {mode: {"temporal_nodes": 150}}}))
+
+    search = load_config(path).config.search
+
+    assert getattr(search, mode).temporal_nodes == 150
+    assert getattr(search, other).temporal_nodes == unchanged
+
+
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("invalid", [0, -1, 1.5])
+def test_temporal_traversal_budget_rejects_invalid_values(tmp_path, mode, invalid):
+    path = tmp_path / "override.yaml"
+    path.write_text(yaml.safe_dump({"search": {mode: {"temporal_nodes": invalid}}}))
+    with pytest.raises(ConfigurationError):
+        load_config(path)
+
+
+def test_removed_shared_temporal_budget_is_rejected(tmp_path):
+    path = tmp_path / "override.yaml"
+    path.write_text(yaml.safe_dump({"search": {"temporal_nodes": 300}}))
+    with pytest.raises(ConfigurationError, match="search.temporal_nodes"):
+        load_config(path)
+
+
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("invalid", [0, -1, True, 1.5])
 def test_adjacent_context_character_cap_rejects_invalid_values(tmp_path, mode, invalid):
