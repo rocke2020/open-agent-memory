@@ -12,22 +12,23 @@ Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。它跨会�
 
 ## 性能与准确率
 
-**使用低成本 Flash 模型，已记录评分高于对应的 Hindsight 比较结果，LongMemEval S 的已保存上下文减少 73.63%。**
+**在 AMB 已公布的 LongMemEval S 和 BEAM-10M 对比范围内达到领先水平（SOTA）。** OAM 使用低成本 **MiniMax M3.1 Flash** 的 adaptive 模式回答和评判，在两个完整数据集上都超过了 Hindsight 的最高已记录成绩。[AMB 成绩清单](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
 
-| 基准测试 | OAM | Hindsight 比较结果 | 回答上下文 |
+| 基准测试 | OAM | Hindsight 公布结果 | 已保存回答上下文均值 |
 | --- | --- | --- | --- |
-| **LongMemEval S**，全部 500 道题 | **95.2%（476/500）** | 94.6%（473/500） | 已保存上下文平均 **11,373.58** tokens，对比 43,124.55；**减少 73.63%** |
-| **BEAM-10M**，10 段完整历史中的 200 道题 | **61.56%** 平均量表得分 | 52.16%，基于已保存上下文的回放 | OAM 使用的上下文多 17.43% |
+| **BEAM-10M** 平均评分 | **78.23%** | 64.08% | **24,676.88** 对比 27,373.25 tokens（**减少 9.85%**） |
+| **BEAM-10M** 通过率（单题得分 ≥ 0.5） | **86.0%（172/200）** | 73.5%（147/200） | |
+| **LongMemEval S** 正确率 | **95.2%（476/500）** | 94.6%（473/500） | **11,373.58** 对比 43,124.55 tokens（**减少 73.63%**） |
 
-**LME-500：为公平比较，采用与 Hindsight 相同的问题、参考答案，以及逐字节一致的回答和评判提示词模板。** OAM 逐字节复用 Hindsight 已发布 AMB 参考版本的回答与分类评判提示词模板，使回答指令与评判标准保持一致。参见[提示词来源与评测设置](docs/benchmarks.md#1-latest-longmemeval-s-476500-at-18k)。
+BEAM-10M 在十段**千万 token 规模**的对话历史上考查事件排序、时间推理和矛盾消解等能力。OAM 平均评分高 **14.15 个百分点**，多通过 **25 道题**。其中 180 道题的当期召回使用 **24,000 tokens** 的原生上下文上限，另 20 道题使用此前保存的上下文。[BEAM 方法及结果](docs/benchmarks.md#3-beam-10m)
 
-最新 LongMemEval 结果使用 **MiniMax M3.1 Flash** 回答和评判，上下文上限为 18,000 tokens。早期使用相同上下文的 LongMemEval 运行也记录了 **DeepSeek Flash** 的结果。BEAM-10M 使用 **DeepSeek Flash** 回答和评判；报告保留了各次运行的 high/max 回答设置。这些评测流程使用低成本 Flash 模型，无需昂贵的旗舰回答模型。
+**为公平比较，两个基准测试均沿用 Hindsight 公布结果中的相同问题、参考答案和评分规则。** OAM 逐字节复用固定版本 AMB 的回答及评判提示词模板。BEAM 有 3 次评判调用在服务商的系统提示中加入 JSON 示例，评判正文和评分规则保持一致。[LongMemEval 配置](docs/benchmarks.md#1-latest-longmemeval-s-476500-at-18k) · [BEAM 评分协议](docs/benchmarks.md#3-beam-10m)
 
-比较双方的回答模型、评判模型和记忆流程不同。上下文大小统计的是已保存的格式化文本，而非模型服务商的计费 tokens；当前 LME 平均值来自 497 份上下文，另有 3 道参考答案存在争议的题目仍按错误计入 500 题总分。评测覆盖 L1 记忆，未对洞察、用户画像和文档资源评分。
+两组对比均衡量完整系统的表现，模型和记忆流程存在差异。已保存文本使用 `o200k_base` 计数。LME 上下文均值来自 497 份当期上下文，3 道参考答案有争议的题仍按错误计入 500 题。MiniMax 官方标价为每百万未缓存输入 tokens 0.15 美元、每百万输出 tokens 0.60 美元。[MiniMax 官方定价](https://platform.minimax.io/docs/pricing/overview#llm)
 
 重新运行回答与评判模型时，评分可能变化。在一个[输入相同的 MiniMax 实例](docs/benchmarks.md#answer-and-judge-variability)中，一次回答正确，另一次回答错误；这展示了已观察到的波动，而非其发生频率。
 
-[结果、模型定价与评测方法](docs/benchmarks.md) · [LME 逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM 逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m)
+[结果、模型定价与评测方法](docs/benchmarks.md) · [LME 逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM 逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
 
 ## 为什么选择 OAM？
 

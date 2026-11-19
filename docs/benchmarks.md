@@ -2,9 +2,11 @@
 
 ## Overview
 
+OAM exceeds the highest recorded Hindsight scores in AMB's published results for **LongMemEval S** and **BEAM-10M**. On BEAM-10M, OAM earns **78.23% mean rubric credit** and **86.0% passes**, versus **64.08%** and **73.5%**, with **9.85% fewer saved context tokens**. Both OAM runs use low-cost MiniMax M3.1 Flash adaptive for answering and judging. [Pinned AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+
 OAM records **95.2% (476/500)** on LongMemEval S with MiniMax M3.1 Flash native-adaptive answering and judging, normal recall and an **18,000-token retrieval-context limit**. The 497 scored cases average **11,373.58 saved context tokens**; three disputed-gold cases remain counted as incorrect in the unchanged 500-question denominator.
 
-The [latest LME-500 evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) publishes saved contexts, visible answers, judgments and the evaluated OAM commit. The earlier [466/463 paired comparison](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/lme500) and [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m) remain separate recorded evaluations.
+Both comparisons use the same questions, references and scoring rules as the published Hindsight runs, with byte-identical answer and judge prompt templates from pinned AMB sources. The evaluations measure recorded end-to-end systems with distinct models and memory pipelines. [LongMemEval evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
 
 ## 1. Latest LongMemEval S: 476/500 at 18k
 
@@ -71,23 +73,27 @@ These are fixed-reference judge acceptance scores, not independently established
 
 ## 3. BEAM-10M
 
-| Measurement | OAM | Hindsight saved-context replay |
-| --- | --- | --- |
-| Coverage | 200 questions; 20 per complete history | Same 200 questions |
-| Mean rubric score | **61.56%** | **52.16%** |
-| OAM selected answers scoring at least 0.5 | 142/200 (71.0%) | Not the mean-rubric comparison |
-| OAM mean answer-visible context | 32,106.88 `cl100k_base` tokens | OAM uses 17.43% more context |
-| OAM retrieval timing | 2,906.5 ms mean; 2,617.9 ms median; 5,527.6 ms p95 | Engine not rerun |
+BEAM-10M tests ten capabilities across **200 questions from ten conversations at the 10-million-token scale**. OAM gained **14.15 percentage points in mean rubric credit** and **25 passes** over Hindsight's published result. The largest gains were in event ordering, temporal reasoning and information extraction. [BEAM benchmark paper](https://arxiv.org/abs/2510.27246) · [Per-capability and per-question results](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
 
-The BEAM results use DeepSeek Flash for answering and judging: 156 selected answers use high reasoning and 44 use max reasoning. The evidence preserves each selected answer's actual model settings. They are separate from the current DeepSeek max answer profile. Hindsight's saved contexts were replayed without rerunning its indexing or retrieval.
+| Measurement | OAM | Published Hindsight |
+| --- | ---: | ---: |
+| Mean rubric credit | **78.23%** | 64.08% |
+| Pass rate (question score ≥ 0.5) | **86.0% (172/200)** | 73.5% (147/200) |
+| Mean saved answer-context tokens, both recounted with `o200k_base` | **24,676.88** | 27,373.25 |
+| Answer model | MiniMax M3.1 Flash adaptive | Gemini 3.1 Pro Preview |
+| Judge model | MiniMax M3.1 Flash adaptive | Gemini 2.5 Flash Lite |
 
-BEAM assigns each question the mean of its rubric-item scores; its mean rubric score differs from its threshold pass rate. The retrieval timings come from 540 probes on histories 2–10, with none excluded. Complete comparable indexing-generation usage, full-campaign cost and indexing wall time are unavailable. The dataset revision is `9b2096193fe74e2837e4713e483351e19817773c`, with SHA-256 `c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8`. Recall is normal, using L1; L2 and Profile are excluded from scored contexts.
+The comparison uses the same questions, reference answers, rubrics, answer and judge prompt templates, and scoring rules from AMB's archived evaluator. The replay matched the byte-identical archived prompt text for 200 OAM answers and 660 accepted judge calls with the corresponding inputs inserted. Three judge calls added a JSON example to the provider's response-format wrapper while preserving the judge text and score calculation. Hindsight's original request bodies are unavailable. [Archived evaluator](https://github.com/vectorize-io/agent-memory-benchmark/blob/5d5e8dbe56f140ad982ae61cbd73f43e100de706/src/memory_bench/dataset/beam.py) · [Published Hindsight artifact](https://github.com/vectorize-io/agent-memory-benchmark/blob/5d5e8dbe56f140ad982ae61cbd73f43e100de706/outputs/beam/hindsight/single-query/10m.json.gz)
 
-The [BEAM manifest](https://github.com/rocke2020/open-agent-memory-benchmark/blob/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m/manifest.json) records per-history configuration, exact model bindings and available runtime revisions. Unknown inputs remain unknown. Context size, model settings and saved-context replay prevent attributing the score difference to the memory engine alone.
+Mean rubric credit averages the fractional scores of the 200 questions. Event ordering measures rank agreement after matching events, while the other categories average their rubric-item scores. Some archived prompts use reference-derived hints. Across the 180 questions outside event ordering, OAM earned **76.48% and 152/180 passes**, versus **64.35% and 136/180** for Hindsight. Model and memory-pipeline differences make this an end-to-end comparison.
+
+The 180 current normal recalls used existing L1 indexes, included original passages and applied a **24,000-token native context cap**. Their answer contexts averaged **23,974.32 tokens** after adding the benchmark heading. Another 20 previously saved contexts from conversation 1 contribute to the full-run mean. Both systems' saved contexts were recounted with the same tokenizer, giving OAM **9.85% fewer tokens**. Hindsight reported 27,341.99 tokens with `cl100k_base`. Campaign billing and comparable indexing cost are unavailable. [OAM capture settings and paired context counts](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+
+The [earlier BEAM saved-context replay](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m) used DeepSeek Flash and a separate scoring setup.
 
 ## 4. Inspect and recompute the saved results
 
-The self-contained `report.html` files show full saved contexts and individual outcomes without model calls. Adjacent gzip JSON shards retain visible answers and judgments; the latest campaign marks carried outcomes explicitly. Recompute coverage, scores, context totals and evidence integrity from an OAMB checkout:
+The [latest BEAM-10M paired outcomes](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m-20261119/scores.csv) provide question IDs, scores and measured context counts. The LME and earlier BEAM `report.html` files show saved contexts and individual outcomes. Validate those HTML reports and their adjacent result shards from an OAMB checkout:
 
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory-benchmark.git

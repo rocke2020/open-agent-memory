@@ -12,22 +12,23 @@ Keep your conversations and documents in your own PostgreSQL database, choose yo
 
 ## Performance & Accuracy
 
-**Higher recorded scores than the Hindsight comparisons, with low-cost Flash models and 73.63% less saved context on LongMemEval S.**
+**State-of-the-art against AMB's published results for LongMemEval S and BEAM-10M.** OAM exceeds the top recorded Hindsight scores on both full datasets using low-cost **MiniMax M3.1 Flash** adaptive for answering and judging. [AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
 
-| Benchmark | OAM | Hindsight comparison | Answer context |
+| Benchmark | OAM | Published Hindsight | Mean saved answer context |
 | --- | --- | --- | --- |
-| **LongMemEval S**, all 500 questions | **95.2% (476/500)** | 94.6% (473/500) | **11,373.58** mean saved tokens vs 43,124.55; **73.63% smaller** |
-| **BEAM-10M**, 200 questions across 10 complete histories | **61.56%** mean rubric score | 52.16% saved-context replay | OAM used 17.43% more context |
+| **BEAM-10M**, mean rubric credit | **78.23%** | 64.08% | **24,676.88** vs 27,373.25 tokens (**9.85% fewer**) |
+| **BEAM-10M**, pass rate (score ≥ 0.5) | **86.0% (172/200)** | 73.5% (147/200) | |
+| **LongMemEval S**, accepted answers | **95.2% (476/500)** | 94.6% (473/500) | **11,373.58** vs 43,124.55 tokens (**73.63% fewer**) |
 
-**LME-500: same questions, same gold answers and byte-identical answer/judge prompt templates as Hindsight for a fair comparison.** OAM reuses the answer and category-specific judge prompt templates from Hindsight's published AMB reference byte for byte, keeping answer instructions and grading criteria aligned. See [prompt source and evaluation settings](docs/benchmarks.md#1-latest-longmemeval-s-476500-at-18k).
+BEAM-10M tests reasoning over ten histories at the **10-million-token scale**, including event ordering, temporal reasoning and reconciling contradictions. OAM gained **14.15 points in mean rubric credit and 25 additional passes**. For 180 current recalls, OAM capped native context at **24,000 tokens**. The full result also includes 20 previously saved contexts. [BEAM method and results](docs/benchmarks.md#3-beam-10m)
 
-The latest LongMemEval result uses **MiniMax M3.1 Flash** for answering and judging, with an 18,000-token context limit. Earlier same-context LongMemEval runs also record results with **DeepSeek Flash**. BEAM-10M uses **DeepSeek Flash** for answering and judging, with the recorded high/max answer settings preserved in its report. These are low-cost Flash-model pipelines, rather than a requirement to use an expensive flagship answer model.
+**For a fair comparison, both benchmarks use the same questions, reference answers and scoring rules as the published Hindsight runs.** OAM reuses byte-identical answer and judge prompt templates from the pinned AMB sources. Three BEAM judge calls needed a JSON example in the provider wrapper. The judge text and scoring rule stayed the same. [LongMemEval settings](docs/benchmarks.md#1-latest-longmemeval-s-476500-at-18k) · [BEAM protocol](docs/benchmarks.md#3-beam-10m)
 
-The comparisons use different answer and judge models and memory pipelines. Context sizes count saved formatted text, not provider-billed tokens; 497 current LME contexts contribute to the mean, and three disputed-gold cases remain counted as incorrect in the 500-question score. The evaluations cover L1 memory; Insights, Profiles and document Resources were not scored.
+The recorded comparisons measure end-to-end results with different models and memory pipelines. Saved text is counted with `o200k_base`. The LME mean uses 497 current contexts, and three disputed-gold cases still count as incorrect in the 500-question score. MiniMax lists USD 0.15 per million uncached input tokens and USD 0.60 per million output tokens. [Official MiniMax pricing](https://platform.minimax.io/docs/pricing/overview#llm)
 
 Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](docs/benchmarks.md#answer-and-judge-variability), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
 
-[Results, model pricing and methodology](docs/benchmarks.md) · [LME per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m)
+[Results, model pricing and methodology](docs/benchmarks.md) · [LME per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
 
 ## Why OAM?
 
