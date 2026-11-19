@@ -163,3 +163,9 @@ search:
 For one recall request, use `"recall_level": "fast", "overrides": {"temporal_nodes": 300}`. Other selected-preset fields can be overridden in the same object; unspecified fields inherit the configured preset. Existing validation applies to the merged values, including candidate-cap relationships and reranker requirements. Explicit supported nulls clear optional fields. Unknown fields and invalid combinations fail before retrieval I/O. The legacy non-null `fast_graph` option takes precedence over `overrides.entity_semantic_graph`. Direct, batch and planned recall preserve overrides; response `diagnostics.search_config` records the effective preset.
 
 The former shared `search.temporal_nodes` key is removed. To preserve an old shared value N, move it to `search.normal.temporal_nodes` and set `search.fast.temporal_nodes` to the smaller of N and the old fast `max_results`. New configurations can set either traversal budget independently of result limits. This recall-only change requires no reindexing.
+
+## 8. Personal evidence candidates
+
+Set `search.fast.personal_evidence_candidates` or `search.normal.personal_evidence_candidates` to a positive count to search user passages backed by active L1 preferences and experiences. The default is zero. The count is capped by `channel_candidates`, and search runs the additional channel when `include.chunks` is true and the query embedding is available. The returned passages compete under the selected mode's ordinary context budget.
+
+For one normal recall request, set `"include": {"chunks": true}, "overrides": {"personal_evidence_candidates": 16}`. When novel passages enter fusion, the recall trace shows a `personal_evidence` arm. This option reuses the existing embedding, stored support and search indexes. [API reference](../docs/api.md#3-retain-and-recall)

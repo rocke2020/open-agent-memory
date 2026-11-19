@@ -107,6 +107,7 @@ class SearchTier(FrozenModel):
     adjacent_user_context: bool
     adjacent_user_context_max_chars: int = Field(gt=0, strict=True)
     channel_candidates: PositiveInt
+    personal_evidence_candidates: NonNegativeInt = 0
     fused_candidates: PositiveInt
     temporal_nodes: PositiveInt
     source_seed_results: PositiveInt

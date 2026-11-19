@@ -277,6 +277,22 @@ class RecallService:
             dense_pool = stage("dense", lambda: read("dense", vector, pool_limit)) or []
             arms["dense"] = tuple(row["unit_id"] for row in dense_pool[: tier.channel_candidates])
         if vector is not None:
+            if request.include.chunks and tier.personal_evidence_candidates:
+                personal = stage(
+                    "personal_evidence",
+                    lambda: read(
+                        "personal_evidence",
+                        vector,
+                        min(tier.personal_evidence_candidates, tier.channel_candidates),
+                    ),
+                )
+                if personal:
+                    dense_ids = set(arms["dense"])
+                    novel = tuple(
+                        row["unit_id"] for row in personal if row["unit_id"] not in dense_ids
+                    )
+                    if novel:
+                        arms["personal_evidence"] = novel
             seeds = tuple(
                 row["unit_id"]
                 for row in dense_pool
@@ -431,16 +447,19 @@ class RecallService:
                 )
             arms["graph"] = tuple(sorted(scores, key=lambda node: (-scores[node], node)))
 
-        def fused_ids():
-            weights = (
-                tuple(getattr(self.config.search.normal_arm_weights, name) for name in arms)
-                if mode == "normal"
-                else None
+        def arm_weights():
+            if mode == "fast":
+                return (1.0,) * len(arms)
+            weights = self.config.search.normal_arm_weights
+            return tuple(
+                getattr(weights, "dense" if name == "personal_evidence" else name) for name in arms
             )
+
+        def fused_ids():
             return tuple(
                 item.node_id
                 for item in reciprocal_rank_fusion(
-                    tuple(arms.values()), rrf_k=self.config.search.rrf_k, weights=weights
+                    tuple(arms.values()), rrf_k=self.config.search.rrf_k, weights=arm_weights()
                 )[: tier.fused_candidates]
             )
 
@@ -526,7 +545,10 @@ class RecallService:
             candidates.append(item)
         seed_limit = tier.source_seed_results
         ranked_candidates = [item for item in candidates if item["unit_id"] != related_tail_id]
-        discovery_seed_items = source_diverse_seed_order(ranked_candidates)[:seed_limit]
+        personal_only = set(arms.get("personal_evidence", ())) - set(arms.get("lexical", ()))
+        discovery_seed_items = source_diverse_seed_order(
+            [item for item in ranked_candidates if item["unit_id"] not in personal_only]
+        )[:seed_limit]
         seed_items = [
             item for item in ranked_candidates if chunks or item["kind"] not in ORIGINAL_KINDS
         ][:seed_limit]
@@ -1117,13 +1139,21 @@ class RecallService:
                 ),
                 None,
             )
-            # Keep this exemption local: it cannot authorize source expansion.
+            # Keep these original-root exemptions local; they create no reply witnesses.
             allowed_ids.update(
                 node
                 for node, row in hydrated_passages.items()
-                if node in arms.get("lexical", ())
-                and row["origin"] == "memory"
-                and (row.get("locator", {}).get("role") == "user" or node == lexical_original)
+                if row["origin"] == "memory"
+                and (
+                    node == lexical_original
+                    or (
+                        row.get("locator", {}).get("role") == "user"
+                        and (
+                            node in arms.get("lexical", ())
+                            or node in arms.get("personal_evidence", ())
+                        )
+                    )
+                )
             )
             # Source-local recovery admits user originals without creating witnesses.
             allowed_ids.update(recovered_user_ids)
@@ -1504,6 +1534,7 @@ class RecallService:
                         "anchors",
                         "embedding",
                         "dense",
+                        "personal_evidence",
                         "related_user_fact",
                         "graph",
                         "temporal",
@@ -1538,11 +1569,7 @@ class RecallService:
                 "timing_ms": {**timing, "total": (time.monotonic() - started) * 1000},
             },
         }
-        weights = (
-            tuple(getattr(self.config.search.normal_arm_weights, name) for name in arms)
-            if mode == "normal"
-            else (1.0,) * len(arms)
-        )
+        weights = arm_weights()
         arm_positions = {
             name: {node_id: rank for rank, node_id in enumerate(dict.fromkeys(ids), 1)}
             for name, ids in arms.items()

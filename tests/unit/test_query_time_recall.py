@@ -879,6 +879,61 @@ def test_normal_context_respects_fused_relevance_under_item_cap():
     assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph"]
 
 
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("count,chunks", [(0, True), (2, False), (2, True), (128, True)])
+def test_personal_evidence_reaches_context_when_requested(mode, count, chunks):
+    query = "How should I organize my reading?"
+    calls, traces = [], []
+
+    class Repository(ConversationRepository):
+        def personal_evidence(self, vector, limit):
+            calls.append((vector, limit))
+            return [{"unit_id": "a_noise"}, {"unit_id": "personal"}]
+
+        def hydrate(self, unit_ids):
+            rows = super().hydrate(unit_ids)
+            for row in rows:
+                if row["unit_id"] == "personal":
+                    row["text"] = "I prefer wide margins for handwritten annotations."
+                    row["locator"] = {"role": "user"}
+            return rows
+
+        def record_trace(self, trace_id, policy_epoch, decisions, result):
+            traces.append(decisions)
+            return super().record_trace(trace_id, policy_epoch, decisions, result)
+
+    class Models(EmbeddingOnly):
+        def embed(self, texts, **kwargs):
+            assert texts == (query,)
+            return super().embed(texts, **kwargs)
+
+    class Service(RecallService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield Repository(request)
+
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    service = Service(config, SimpleNamespace(max_size=1), Models(), generation_id="generation")
+    result = service.search(
+        object(),
+        SearchRequest(
+            query=query,
+            recall_level=mode,
+            include={"chunks": chunks},
+            overrides={"personal_evidence_candidates": count},
+        ),
+    )
+    enabled = count > 0 and chunks
+    limit = min(count, getattr(config.search, mode).channel_candidates)
+    assert calls == ([((0.1,), limit)] if enabled else [])
+    assert ("I prefer wide margins" in result["context"]) == enabled
+    assert ("personal_evidence" in result["diagnostics"]["executed_arms"]) == enabled
+    if enabled:
+        assert traces[0]["arms"]["personal_evidence"] == ["personal"]
+        candidate = next(row for row in traces[0]["fusion"] if row["unit_id"] == "personal")
+        assert candidate["contributions"][0]["arm"] == "personal_evidence"
+
+
 @pytest.mark.parametrize(
     "query,start,end,expression",
     [

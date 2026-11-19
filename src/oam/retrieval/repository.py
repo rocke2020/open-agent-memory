@@ -19,6 +19,7 @@ from oam.contracts.search import SearchRequest
 from oam.db.ann import ANN_SETTINGS_SQL, ann_parameters, owner_scope
 from oam.db.context import SET_USER_CONTEXT_SQL
 from oam.db.eligibility import (
+    _ELIGIBLE_MEMORIES,
     ELIGIBLE_PASSAGE_UNITS,
     ELIGIBLE_SUPPORT,
     ELIGIBLE_UNITS,
@@ -557,13 +558,28 @@ class RecallRepository:
         # Order matches before checking support so a common term does not
         # validate the entire history. Eligibility still precedes every cap.
         eligible_ordered = self.candidate_units_sql.replace("FROM search_units u", "FROM ordered u")
+        term_prefix = ""
+        term_matches = ""
+        if not whole_query:
+            entity_tail = ",NULL::tsquery" if entity_names else ""
+            term_prefix = (
+                ", lexical_terms AS MATERIALIZED (SELECT t.term,t.term_order "
+                f"FROM unnest(ARRAY[{term_queries}{entity_tail}]) "
+                "WITH ORDINALITY AS t(term,term_order))"
+            )
+            # Keep the hit rows small when each term scans them.
+            term_matches = (
+                "ARRAY(SELECT t.term_order FROM lexical_terms t "
+                f"WHERE {lexical_vector} @@ t.term) AS matched_term_orders,"
+            )
         hits_sql = (
             "WITH queries AS (SELECT "
-            f"{candidate} AS candidate,{primary} AS primary,{full} AS full)" + entity_prefix + ", "
-            "hits AS MATERIALIZED (SELECT u.tenant_id,u.user_id,u.unit_id,u.kind,u.origin,"
+            f"{candidate} AS candidate,{primary} AS primary,{full} AS full)"
+            f"{entity_prefix}{term_prefix}, hits AS MATERIALIZED "
+            "(SELECT u.tenant_id,u.user_id,u.unit_id,u.kind,u.origin,"
             "u.source_id,u.source_version,u.evidence_id,u.passage_id,u.memory_id,"
             "u.insight_id,u.insight_revision,u.generation_id,"
-            f"{lexical_vector} AS lexical_bilingual,u.mentioned_at,"
+            f"{term_matches}u.mentioned_at,"
             f"ts_rank_cd(%(weights)s::float4[],{lexical_vector},q.candidate,"
             "%(normalization)s) AS partial_score,"
             f"{lexical_vector} @@ q.full AS full_match,"
@@ -586,16 +602,14 @@ class RecallRepository:
                 "u.mentioned_at DESC NULLS LAST,u.unit_id LIMIT %(limit)s",
                 parameters,
             )
-        entity_tail = ",NULL::tsquery" if entity_names else ""
         rows = self._execute(
             hits_sql + " "
             "SELECT t.term_order,hit.unit_id,hit.mentioned_at,hit.full_match,hit.primary_match,"
             "hit.entity_match "
-            f"FROM unnest(ARRAY[{term_queries}{entity_tail}]) "
-            "WITH ORDINALITY AS t(term,term_order) "
+            "FROM lexical_terms t "
             "CROSS JOIN LATERAL (WITH ordered AS (SELECT u.*,"
             f"{score} AS score "
-            "FROM hits u WHERE u.lexical_bilingual @@ t.term "
+            "FROM hits u WHERE t.term_order = ANY(u.matched_term_orders) "
             "OR (t.term IS NULL AND u.entity_match AND u.partial_score=0) "
             "ORDER BY u.full_match DESC,u.primary_match DESC,score DESC,"
             "u.mentioned_at DESC NULLS LAST,u.unit_id OFFSET 0) "
@@ -710,6 +724,31 @@ class RecallRepository:
             f"ORDER BY {distance} LIMIT %(limit)s",
             {"vector": json.dumps(tuple(vector)), "limit": limit},
             configure_ann=True,
+        )
+
+    def personal_evidence(self, vector: Sequence[float], limit: int) -> list[dict]:
+        return self._execute(
+            "WITH eligible_passages AS NOT MATERIALIZED (" + ELIGIBLE_PASSAGE_UNITS + "), "
+            "eligible_memories AS NOT MATERIALIZED (" + _ELIGIBLE_MEMORIES + "), "
+            "eligible_support AS NOT MATERIALIZED (" + ELIGIBLE_SUPPORT + "), "
+            "supported AS MATERIALIZED ("
+            "SELECT DISTINCT s.tenant_id,s.user_id,s.source_id,s.source_version,"
+            "s.evidence_id,s.passage_id,s.generation_id "
+            "FROM eligible_support s JOIN eligible_memories m "
+            "ON (m.tenant_id,m.user_id,m.memory_id,m.generation_id)="
+            "(s.tenant_id,s.user_id,s.memory_id,s.generation_id) "
+            "WHERE m.category IN ('preference','experience') AND s.span->>'role'='user'), "
+            "qualified AS MATERIALIZED ("
+            "SELECT u.unit_id,u.embedding FROM eligible_passages u JOIN supported s "
+            "ON (s.tenant_id,s.user_id,s.source_id,s.source_version)="
+            "(u.tenant_id,u.user_id,u.source_id,u.source_version) "
+            "AND (s.evidence_id,s.passage_id,s.generation_id)="
+            "(u.evidence_id,u.passage_id,u.generation_id) "
+            "WHERE u.kind='passage' AND u.origin='memory' "
+            "AND u.locator->>'role'='user' AND u.embedding IS NOT NULL) "
+            "SELECT u.unit_id FROM qualified u "
+            "ORDER BY u.embedding <=> %(vector)s::vector,u.unit_id LIMIT %(limit)s",
+            {"vector": json.dumps(tuple(vector)), "limit": limit},
         )
 
     def related_user_fact(self, unit_ids: Sequence[str]) -> dict | None:

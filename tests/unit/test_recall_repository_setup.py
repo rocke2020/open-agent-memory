@@ -7,6 +7,7 @@ import pytest
 from test_query_time_recall import CONFIG
 
 from oam.auth.credentials import AuthorizedUser
+from oam.contracts.search import SearchRequest
 from oam.retrieval.repository import RecallRepository
 
 
@@ -54,6 +55,26 @@ def test_insight_lookup_only_runs_for_candidate_queries():
     repository.lexical("workshop", 5)
     repository.lexical("workshop", 5)
     assert sum("SELECT EXISTS(SELECT 1 FROM insights" in sql for sql in connection.statements) == 1
+
+
+def test_per_term_lexical_materializes_term_matches_instead_of_search_vectors():
+    connection = RecordingConnection()
+    authority = AuthorizedUser("key", "tenant", "reader", "user", frozenset({"memory:read"}))
+    request = SearchRequest(
+        query="observatory maintenance", overrides={"lexical_ranking": "per_term"}
+    )
+    repository = RecallRepository(
+        connection, authority, CONFIG, request=request, deadline=time.monotonic() + 5
+    )
+
+    repository.lexical(request.query, 64)
+
+    query = connection.statements[-1]
+    assert "lexical_terms AS MATERIALIZED" in query
+    assert "AS matched_term_orders" in query
+    assert "t.term_order = ANY(u.matched_term_orders)" in query
+    assert "u.lexical_bilingual AS lexical_bilingual" not in query
+    assert connection.parameters[-1]["limit"] == 64
 
 
 def test_repository_binds_scope_and_jit_in_one_transaction_local_statement():
