@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 /.codex
+/.claude
 
 # C extensions
 *.so
