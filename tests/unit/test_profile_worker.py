@@ -1,6 +1,7 @@
 import hashlib
 import json
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ from oam.workers.claims import ClaimedWork
         "old_omitted",
         "pending",
         "baseline_scrubbed",
+        "prepare_inputs",
     ],
 )
 def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> None:
@@ -50,6 +52,8 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
         "source_passages": [{"source_id": "s", "source_version": 1, "passage_id": "p"}],
     }
     inputs = ProfileInputs(b"i" * 32, b"s" * 32, {"f": item}, (), 0, 0, 0, (), 1, [item], {"f"}, 0)
+    if mode == "prepare_inputs":
+        inputs = replace(inputs, pending_inputs=1, waiting_source_ids=("s",))
     baseline: dict[str, Any] | None = None
     if mode in {
         "incremental",
@@ -150,6 +154,10 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
         stage: Any = None
         attempt_usage: Any = None
         attempt_failed = False
+        deferred: Any = None
+        prepared_attempt = False
+        policy_clock_mode = None
+        policy_paused = False
 
         def transaction(self):
             return nullcontext()
@@ -159,8 +167,23 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
 
         def execute(self, query, params=()):
             self.row = None
-            if "SELECT w.input_digest" in query:
-                self.row = (target, [], None, None, "auto")
+            if query.startswith("UPDATE profile_refresh_policies SET last_success_at"):
+                self.policy_clock_mode = params[0]
+            elif query.startswith("UPDATE profile_refresh_policies SET paused=true"):
+                self.policy_paused = True
+            elif "SELECT w.input_digest" in query:
+                self.row = (
+                    target,
+                    ["initial"] if mode == "prepare_inputs" else [],
+                    None,
+                    None,
+                    "auto",
+                )
+            elif query.startswith("UPDATE work_units SET status='queued'"):
+                self.deferred = params
+                self.row = ("w",)
+            elif query.startswith("UPDATE attempts SET disposition='succeeded'"):
+                self.prepared_attempt = True
             elif "SET lease_expires_at" in query:
                 self.row = (
                     ("w",) if clock["now"] <= clock["expires"] or clock["expires"] == 0 else None
@@ -193,6 +216,9 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
     monkeypatch.setattr(worker, "_latest_snapshot", lambda *_: baseline)
     monkeypatch.setattr(worker, "claim_generation", lambda *_: "gen")
     monkeypatch.setattr(worker, "load_profile_inputs", lambda *a, **k: inputs)
+    monkeypatch.setattr(
+        worker, "prepare_profile_dependencies", lambda *a, **k: ["consolidate"], raising=False
+    )
 
     def rank_candidates(*args, **kwargs):
         rank_scopes.append(kwargs.get("candidate_ids"))
@@ -217,6 +243,7 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
         ingestion_counter = counter
 
         def embed(self, *args, **kwargs):
+            assert mode != "prepare_inputs", "Preparation must not call models"
             assert mode not in {"retracted", "old_omitted"}
             clock["now"] += 150
             if mode == "embedding_timeout":
@@ -307,6 +334,7 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
                 worker_id="worker",
             )
         assert connection.inserted is None
+        assert connection.policy_paused
         assert connection.stage["embedding_usage"] == {"input_tokens": 2}
         assert connection.stage["usage"]["input_tokens"] == 10
         assert connection.stage["usage"]["output_tokens"] == 4
@@ -328,7 +356,14 @@ def test_slow_embedding_renews_lease_and_preserves_usage(monkeypatch, mode) -> N
     worker.process_profile_claim(
         config, "unused", models=Models(), pool=cast(Any, pool), claim=claim, worker_id="worker"
     )
+    if mode == "prepare_inputs":
+        assert connection.inserted is None
+        assert connection.deferred[0] == ["consolidate"]
+        assert connection.prepared_attempt
+        assert not connection.attempt_failed
+        return
     assert connection.inserted is not None
+    assert connection.policy_clock_mode == connection.stage["mode"]
     if mode in {"retracted", "old_omitted"}:
         assert "sailing [1]" in connection.inserted[3]
         assert "French" not in connection.inserted[3]

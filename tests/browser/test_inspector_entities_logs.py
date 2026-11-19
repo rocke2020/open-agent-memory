@@ -80,7 +80,9 @@ def test_entities_and_request_overview(tmp_path):
         parsed = urlparse(route.request.url)
         q = parse_qs(parsed.query)
         queries.append((parsed.path, q))
-        if parsed.path.endswith("/entities/graph"):
+        if parsed.path.endswith("/profile"):
+            data = {"profile_revision": None, "updated_at": None}
+        elif parsed.path.endswith("/entities/graph"):
             if pause_graph:
                 held.append(route)
                 return
@@ -334,6 +336,8 @@ def test_browse_defaults_and_selection_survive_list_updates(tmp_path, view):
             if pause_list and active:
                 held.append((route, payload))
                 return
+        elif suffix == "profile":
+            payload = {"profile_revision": None, "updated_at": None}
         else:
             payload = next(
                 item

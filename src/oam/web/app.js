@@ -77,7 +77,10 @@
     try { saved = localStorage.getItem(LANGUAGE_STORAGE_KEY); } catch (_) { /* Browser language remains available without storage. */ }
     const browserLanguage = (navigator.languages?.length ? navigator.languages : [navigator.language]).map(supportedLanguage).find(Boolean);
     setLanguage(supportedLanguage(saved) || browserLanguage || "en");
-    document.getElementById("language").addEventListener("change", event => setLanguage(event.target.value, true));
+    document.getElementById("language").addEventListener("change", event => {
+      setLanguage(event.target.value, true);
+      renderCollectionUpdated();
+    });
   }
 
   const byId = (id) => document.getElementById(id);
@@ -101,6 +104,9 @@
     entityLayout: "list",
     graphDispose: null,
     savedProfileInstruction: "",
+    collectionUpdatedAt: {},
+    profileUpdatedAt: null,
+    profileRevision: null,
   };
   function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -141,6 +147,9 @@
     byId("log-page-buttons").replaceChildren();
     state.requestScope = null;
     state.savedProfileInstruction = "";
+    state.collectionUpdatedAt = {};
+    state.profileUpdatedAt = null;
+    state.profileRevision = null;
     byId("profile-instruction").value = "";
     setText(byId("profile-instruction-status"), "");
     setText(byId("profile-default-prompt"), "");
@@ -148,6 +157,8 @@
     byId("profile-customization").open = false;
     byId("profile-refresh-mode").value = "incremental";
     byId("profile-use-default").hidden = true;
+    byId("collection-updated").replaceChildren();
+    byId("collection-updated").hidden = true;
     byId("item-list").replaceChildren();
     setText(byId("list-summary"), "");
     byId("detail").replaceChildren(element("p", msg("Select an item to inspect its source and readiness.")));
@@ -218,7 +229,7 @@
     const generation = state.generation;
     status(msg("Checking access…"));
     try {
-      const [memories] = await Promise.all([
+      const [memories, resources] = await Promise.all([
         json(route("memories")),
         json(route("resources")),
       ]);
@@ -228,8 +239,10 @@
       byId("connection").hidden = true;
       byId("workspace").hidden = false;
       byId("account").hidden = false;
+      state.collectionUpdatedAt.resources = resources.updated_at || null;
       state.view = "memories";
       setView("memories", memories);
+      loadProfileHeader();
       status(msg("Connected. Current source policy is applied to every view."));
     } catch (error) {
       if (generation !== state.generation) return;
@@ -257,6 +270,7 @@
     closeEntity();
     state.logOffset = 0;
     state.view = view;
+    renderCollectionUpdated();
     state.detailRequest += 1;
     state.listRequest += 1;
     state.items = [];
@@ -306,6 +320,8 @@
       return;
     }
     if (initial) {
+      state.collectionUpdatedAt[view] = initial.updated_at || null;
+      renderCollectionUpdated();
       applyList(initial, false);
     } else {
       loadList(false).catch(showError);
@@ -373,24 +389,52 @@
     const badge = element("span", labels[profile.freshness] || msg("Status unknown"), "profile-state");
     badge.dataset.freshness = profile.freshness || "unknown";
     line.append(badge);
-    const updated = profile.updated_at ? new Date(profile.updated_at) : null;
-    if (updated && !Number.isNaN(updated.getTime())) {
-      const elapsed = (Date.now() - updated.getTime()) / 1000;
-      const units = [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60], ["second", 1]];
-      const [unit, seconds] = units.find(([, seconds]) => Math.abs(elapsed) >= seconds) || units.at(-1);
-      const relative = () => new Intl.RelativeTimeFormat(language, { numeric: "auto" }).format(-Math.round(elapsed / seconds), unit);
-      const time = element("time", msg("Updated {relative}", { relative }));
-      time.dateTime = profile.updated_at;
-      setAttribute(time, "title", () => updated.toLocaleString(language));
-      line.append(element("span", "·"), time);
-    } else if (profile.profile_revision != null) {
-      line.append(element("span", "·"), element("span", msg("Updated time not recorded")));
-    }
     return line;
+  }
+
+  function showProfileUpdated(profile) {
+    state.profileUpdatedAt = profile.updated_at || null;
+    state.profileRevision = profile.profile_revision ?? null;
+    renderCollectionUpdated();
+  }
+
+  function renderCollectionUpdated() {
+    const node = byId("collection-updated");
+    const view = ["insights", "resources", "profiles"].includes(state.view) ? state.view : "memories";
+    const timestamp = view === "profiles" ? state.profileUpdatedAt : state.collectionUpdatedAt[view];
+    const label = { memories: "Memory updated {time}", insights: "Insight updated {time}", resources: "Resource updated {time}", profiles: "Profile updated {time}" }[view];
+    const updated = timestamp ? new Date(timestamp) : null;
+    if (updated && !Number.isNaN(updated.getTime())) {
+      const time = element("time", msg(label, {
+        time: updated.toLocaleString(language, { dateStyle: "medium", timeStyle: "short" }),
+      }));
+      time.dateTime = timestamp;
+      setAttribute(time, "title", () => updated.toLocaleString(language, { dateStyle: "full", timeStyle: "long" }));
+      node.replaceChildren(time);
+      node.hidden = false;
+    } else if (view === "profiles" && state.profileRevision != null) {
+      node.replaceChildren(element("span", msg("Profile update time not recorded")));
+      node.hidden = false;
+    } else {
+      node.replaceChildren();
+      node.hidden = true;
+    }
+  }
+
+  async function loadProfileHeader() {
+    const generation = state.generation;
+    const requestId = state.profileRequest;
+    try {
+      const profile = await json(route("profile?max_tokens=0"));
+      if (current(generation) && state.user && requestId === state.profileRequest) showProfileUpdated(profile);
+    } catch (_) {
+      // The header time is optional; the User Profile view reports read errors.
+    }
   }
 
   function showProfile(profile) {
     const instruction = profile.instruction || "";
+    showProfileUpdated(profile);
     const editor = byId("profile-instruction");
     if (editor.value === state.savedProfileInstruction) editor.value = instruction;
     state.savedProfileInstruction = instruction;
@@ -513,6 +557,10 @@
     try {
       const data = await json(route(`${endpoint}${suffix}`));
       if (current(generation) && view === state.view && requestId === state.listRequest) {
+        if (!append && ["memories", "insights", "resources"].includes(view)) {
+          state.collectionUpdatedAt[view] = data.updated_at || null;
+          renderCollectionUpdated();
+        }
         if (isGraph) {
           disposeEntityGraph();
           state.items = data.nodes;

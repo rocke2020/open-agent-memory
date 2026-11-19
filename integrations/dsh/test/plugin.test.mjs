@@ -266,7 +266,7 @@ test('tool declarations exclude subagents and tool results mark memory as untrus
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   try {
     let tool, options, dispose;
-    const ctx={on(){},inject(_,f){f({tools:{register(t,o){tool=t;options=o;}}});},effect(f){dispose=f();},logger:{warn(){},info(){}}};
+    const ctx={on(){},inject(_,f){f({tools:{register(t,o){if(t.name==='memory_search'){tool=t;options=o;}}}});},effect(f){dispose=f();},logger:{warn(){},info(){}}};
     apply(ctx,{baseUrl:`http://127.0.0.1:${server.address().port}`,userId:'u',apiKey:'key'});
     const main={session:{header:{id:'s'}}};const child={session:{header:{id:'c',origin:'subagent'}}};
     assert.equal(options.when({agent:main}),true);assert.equal(options.when({agent:child}),false);

@@ -201,6 +201,12 @@ class APIRuntime(Protocol):
 
     def get_profile(self, actor: RequestActor, user_id: str, max_tokens: int) -> dict: ...
 
+    def generate_profile(self, actor: RequestActor, user_id: str, instruction: str) -> dict: ...
+
+    def get_profile_policy(self, actor: RequestActor, user_id: str) -> dict: ...
+
+    def patch_profile_policy(self, actor: RequestActor, user_id: str, patch: dict) -> dict: ...
+
     def refresh_profile(
         self,
         actor: RequestActor,
@@ -402,6 +408,44 @@ class DatabaseRuntime:
         with self.pool.connection() as connection:
             authority = self._authorize(connection, actor, user_id, "memory:read")
         return ProfileService(self.config, self.pool).get(authority, max_tokens)
+
+    def generate_profile(self, actor: RequestActor, user_id: str, instruction: str) -> dict:
+        from oam.profiles.generation import ProfileGenerator
+
+        if not self.config.profile.enabled:
+            raise NotImplementedError("Profile feature is disabled")
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+
+        def reauthorize(connection):
+            # Recheck current credentials/grants within the generation deadline.
+            if isinstance(actor, str):
+                self._credential_cache.invalidate(digest_secret(actor))
+            self._authorize(connection, actor, user_id, "memory:read")
+
+        return ProfileGenerator(self.config, self.pool, self.models).generate(
+            authority, instruction, reauthorize=reauthorize
+        )
+
+    def get_profile_policy(self, actor: RequestActor, user_id: str) -> dict:
+        from oam.profiles.scheduling import ProfilePolicyService
+
+        if not self.config.profile.enabled:
+            raise NotImplementedError("Profile feature is disabled")
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:read")
+        return ProfilePolicyService(self.config, self.pool).get(authority)
+
+    def patch_profile_policy(self, actor: RequestActor, user_id: str, patch: dict) -> dict:
+        from oam.profiles.scheduling import ProfilePolicyService
+
+        if not self.config.profile.enabled:
+            raise NotImplementedError("Profile feature is disabled")
+        with self.pool.connection() as connection:
+            authority = self._authorize(connection, actor, user_id, "memory:append")
+            self._authorize(connection, actor, user_id, "memory:read")
+            authority = replace(authority, capabilities=frozenset({"memory:append", "memory:read"}))
+        return ProfilePolicyService(self.config, self.pool).patch(authority, patch)
 
     def refresh_profile(
         self,

@@ -29,6 +29,7 @@ dependencies = [
     "toktok-rs==0.3.0",
     "tokenizers>=0.23,<0.24",
     "uvicorn[standard]>=0.37",
+    "croniter>=6,<7",
 ]
 
 [project.scripts]
@@ -42,6 +43,7 @@ dev = [
     "pytest-asyncio>=1.2",
     "pytest-cov>=7.0",
     "ruff>=0.14",
+    "types-croniter>=6.2.4.20261006",
     "types-PyYAML>=6.0",
 ]
 

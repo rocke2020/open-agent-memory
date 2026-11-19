@@ -24,7 +24,7 @@ class QuietHandler(SimpleHTTPRequestHandler):
 
 
 @pytest.mark.parametrize("revise", [False, True])
-@pytest.mark.parametrize("destination", ["selection", "memories", "resources", "profile-data"])
+@pytest.mark.parametrize("destination", ["selection", "memories", "resources"])
 def test_resource_receipt_preserves_newer_browse_intent(tmp_path, revise, destination):
     try:
         with urlopen("http://127.0.0.1:9222/json/version", timeout=5) as response:
@@ -63,7 +63,9 @@ def test_resource_receipt_preserves_newer_browse_intent(tmp_path, revise, destin
         if route.request.method in {"POST", "PUT"}:
             writes.append(route)
             return
-        if path.endswith("/memories"):
+        if path.endswith("/profile"):
+            data = {"profile_revision": None, "updated_at": None}
+        elif path.endswith("/memories"):
             data = {"items": [memory] if hold_lists else [], "next_after": None}
         elif path.endswith("/resources"):
             data = {"items": resources, "next_after": None}
@@ -159,7 +161,7 @@ def test_resource_receipt_preserves_newer_browse_intent(tmp_path, revise, destin
         thread.join(timeout=5)
 
 
-def test_delete_list_refresh_preserves_new_profile_data_draft(tmp_path):
+def test_delete_list_refresh_preserves_new_resource_draft(tmp_path):
     try:
         with urlopen("http://127.0.0.1:9222/json/version", timeout=5) as response:
             websocket = json.load(response)["webSocketDebuggerUrl"]
@@ -206,9 +208,8 @@ def test_delete_list_refresh_preserves_new_profile_data_draft(tmp_path):
                 page.once("dialog", lambda dialog: dialog.accept())
                 with page.expect_request("**/resources"):
                     page.get_by_role("button", name="Delete Resource", exact=True).click()
-                page.locator('[data-view="profile-data"]').click()
-                page.get_by_role("button", name="Add Profile Data", exact=True).click()
-                draft = page.get_by_label("Profile Data ID", exact=True)
+                page.get_by_role("button", name="Add Resource", exact=True).click()
+                draft = page.get_by_label("Resource ID", exact=True)
                 draft.fill("unsaved-owner-input")
                 with page.expect_response("**/resources") as refreshed:
                     pending.pop().fulfill(
@@ -429,8 +430,9 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert navigation.bounding_box()["width"] <= 190
                 assert header.bounding_box()["height"] <= 72
                 assert header.locator("#scope-label").inner_text() == "default / alice"
+                assert header.locator("#collection-updated").is_hidden()
                 assert (
-                    navigation.get_by_role("button", name="Profile Data", exact=True).count() == 1
+                    navigation.get_by_role("button", name="Profile Data", exact=True).count() == 0
                 )
                 assert page.get_by_role("button", name="Create export", exact=True).count() == 0
                 detail = page.locator("#detail")
@@ -480,7 +482,9 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 detail.get_by_text("Current search context", exact=True).wait_for()
                 assert sources.is_hidden()
                 assert "Please keep replies brief." in detail.locator("pre").inner_text()
-                assert not any("/profile" in call[1] for call in calls)
+                assert not any(
+                    "/profile" in call[1] and "max_tokens=0" not in call[1] for call in calls
+                )
                 assert "include_profile" not in json.loads(calls[-1][2])
 
                 pause_resource_list = True
@@ -568,10 +572,9 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 )
                 summary = detail.get_by_label("User Profile status", exact=True)
                 assert summary.get_by_text("Up to date", exact=True).is_visible()
-                updated = summary.locator("time")
+                updated = page.locator(".site-header #collection-updated time")
                 assert updated.get_attribute("datetime") == "2026-09-29T12:30:00+00:00"
-                assert "Updated" in updated.inner_text()
-                assert "ago" in updated.inner_text()
+                assert "Profile updated" in updated.inner_text()
                 assert "2026" in updated.get_attribute("title")
                 assert top_level[0].startswith("Up to date")
                 assert detail.get_by_text("Freshness", exact=True).count() == 0
@@ -640,7 +643,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert prompt.text_content() == PROFILE_SYSTEM
                 assert "no saved custom instruction" in instruction_status.text_content()
                 assert summary.get_by_text("Not created", exact=True).is_visible()
-                assert summary.locator("time").count() == 0
+                assert page.locator("#collection-updated").is_hidden()
                 assert detail.get_by_text("Last refreshed", exact=True).count() == 0
                 assert detail.get_by_text("partial User Profile", exact=False).count() == 0
                 page.locator("#refresh-profile").click()
@@ -709,8 +712,12 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                     "This stored revision has no User Profile document", exact=False
                 ).wait_for()
                 assert summary.get_by_text("Needs rebuild", exact=True).is_visible()
-                assert summary.get_by_text("Updated time not recorded", exact=True).is_visible()
-                assert summary.locator("time").count() == 0
+                assert (
+                    page.locator("#collection-updated")
+                    .get_by_text("Profile update time not recorded", exact=True)
+                    .is_visible()
+                )
+                assert page.locator("#collection-updated time").count() == 0
                 assert detail.get_by_text("Last refreshed", exact=True).count() == 0
                 assert (
                     detail.get_by_text(
@@ -735,7 +742,7 @@ def test_memory_source_messages_and_profile_create_flow(tmp_path):
                 assert "server's display limit" in page.locator("#status").inner_text()
                 assert detail.get_by_text("Refresh it to rebuild", exact=False).count() == 0
                 assert summary.get_by_text("Up to date", exact=True).is_visible()
-                assert summary.locator("time").is_visible()
+                assert page.locator("#collection-updated time").is_visible()
 
                 profile_overrides.update(freshness="stale", omitted=[])
                 page.locator('[data-view="profiles"]').click()
@@ -911,6 +918,8 @@ def test_unit_removal_preserves_sources_and_invalidates_pending_reads(
             }
         elif path.endswith("/resources"):
             data = {"items": [], "next_after": None}
+        elif path.endswith("/profile") or "/profile?" in path:
+            data = {"profile_revision": None, "updated_at": None}
         else:
             raise AssertionError(f"Unexpected request: {path}")
         if navigate_while_removing and route.request.method == "DELETE":

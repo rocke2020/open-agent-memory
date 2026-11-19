@@ -213,6 +213,11 @@ a:focus-visible {
   text-transform: uppercase;
 }
 
+.collection-updated {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .profile-freshness {
   display: flex;
   flex-wrap: wrap;

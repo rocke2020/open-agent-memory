@@ -135,6 +135,8 @@ def test_insights_entities_and_memory_connections(tmp_path):
             }
         elif parsed.path.endswith("/resources"):
             data = {"items": [], "next_after": None}
+        elif parsed.path.endswith("/profile"):
+            data = {"profile_revision": None, "updated_at": None}
         else:
             raise AssertionError(f"Unexpected request: {route.request.url}")
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))

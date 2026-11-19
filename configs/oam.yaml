@@ -250,6 +250,11 @@ profile:
   max_output_tokens: 4096
   # Per-call generation timeout for Profile refresh, overriding model.attempt_timeout_seconds.
   attempt_timeout_seconds: 180
+  # Worker policy-discovery cadence; per-user automatic triggers default off.
+  schedule_poll_seconds: 30
+  schedule_batch_size: 100
+  # Default automatic refresh interval; per-user null inherits this value.
+  min_refresh_interval_seconds: 0
 
 planner:
   # Decompose-and-search permits at most one generative planner call; only 1 is supported.

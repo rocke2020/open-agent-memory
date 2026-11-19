@@ -36,13 +36,15 @@ For URL Evidence, run one isolated deterministic HTML, PDF and image URL through
 
 ## 4. Step 7 User Profile Gate
 
-Step 7 implements L3 user Profiles on the evaluated core: one stored content document with separate References, eligible L0/L1/L2 and explicit Profile Data inputs, dirty-but-not-automatically-generated behavior, read-only `GET`, asynchronous changed-input refresh, and unchanged `200` reuse with zero generation calls. Verify User Profile exclusion of report-derived content and preservation of the still-eligible prior document after failed refresh. Legacy field-based revisions remain a read-compatibility path, not the current storage contract.
+Step 7 implements L3 user Profiles on the evaluated core: one stored content document with separate References, eligible L0/L1/L2 and explicit Profile Data inputs, dirty-without-generation behavior when automatic triggers are disabled, read-only `GET`, asynchronous changed-input refresh, and unchanged `200` reuse with zero generation calls. Verify User Profile exclusion of report-derived content and preservation of the still-eligible prior document after failed refresh. Legacy field-based revisions remain a read-compatibility path, not the current storage contract.
 
 The agent-integration scenario starts with host-run fast recall before the agent invocation. During the ReAct loop, the agent can request any of fast or normal again. The HTTP contract must preserve the chosen mode and never perform an automatic escalation or impose a fixed sequence.
 
 LongMemEval screening records the selected recall mode, indexed histories and evaluation identity. Keep final fast-only measurements distinct from historical mode comparisons. Accuracy, context tokens, latency and generation-only indexing usage are reported evidence; v0.0.1 has no numerical benchmark publication thresholds.
 
 Recall, batch recall and planned-search retrieval must remain independent of L3: reject the removed Profile-selection option, never access or attach the stored document, and preserve the full retrieval budget and relevant underlying facts. Verify recall with a stored Profile and a fail-on-read Profile accessor, then repeat retrieval with Profiles disabled while explicit Profile read/refresh report capability unavailable. Independently read the Profile, request a changed-input refresh, observe its successful operation and read the updated document. Preserve zero-generation reads, zero-call unchanged refreshes, whole-document budget omission and source eligibility rules.
+
+The [Profile policy and custom generation](profiles.md) extension additionally requires UTC cron boundaries, an independent full-rebuild clock, coalesced interval delays, active explicit-work preservation, failure pause/recovery, and per-user/tenant isolation. Verify transient Markdown and JSON generation with current references and unchanged stored Profile/operation state, plus no content logs or caches. Distinguish deterministic scheduling tests from observed timer-to-publication evidence and report skipped database/runtime cases.
 
 ## 5. Step 8 Source and Inspector Gate
 

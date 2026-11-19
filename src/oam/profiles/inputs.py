@@ -182,6 +182,7 @@ class ProfileInputs:
     uncovered_inputs: int
     stored_support_inputs: list[dict[str, Any]] = dataclass_field(default_factory=list)
     manifest: dict[str, Any] = dataclass_field(default_factory=dict)
+    failed_source_ids: tuple[str, ...] = ()
 
 
 def _identity(payload: dict[str, Any]) -> bytes:
@@ -469,6 +470,9 @@ def load_profile_inputs(
         exact_fields=exact_fields,
         pending_inputs=len(pending),
         failed_inputs=sum(row["coverage_state"] == "failed" for row in pending),
+        failed_source_ids=tuple(
+            row["source_id"] for row in pending if row["coverage_state"] == "failed"
+        ),
         blocked_inputs=sum(row["coverage_state"] == "blocked" for row in pending),
         waiting_source_ids=tuple(
             row["source_id"] for row in pending if row["coverage_state"] in {"pending", "blocked"}
