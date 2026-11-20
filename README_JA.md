@@ -12,19 +12,23 @@ Open Agent Memory（OAM）は、AI エージェント向けの完全にオープ
 
 ## パフォーマンスと精度
 
-**AMB の公開結果との比較で、LongMemEval S と BEAM-10M の両方で最高水準（SOTA）を達成しました。** OAM は低コストの **MiniMax M3.1 Flash** の adaptive モードで回答と判定を行い、両方の全データセットで Hindsight の公開最高スコアを上回りました。[AMB の結果マニフェスト](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+**LongMemEval S（LME-500）** は 500 問の回答精度を測定します。以下の比較では、Hindsight が公開した Agent Memory Benchmark（AMB）実行の保存済みコンテキスト平均サイズと精度を並べています。[Hindsight の固定版 LME-500 結果](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
 
-| ベンチマーク | OAM | Hindsight の公開結果 | 保存済み回答コンテキストの平均 |
+| ベンチマーク | OAM | Hindsight の公開結果 | 保存済みコンテキストの平均 |
 | --- | --- | --- | --- |
+| **LongMemEval S** 正答率 | **95.2%（476/500）** | 94.6%（473/500） | **11,373.58** 対 43,124.55 トークン（**73.63% 削減**） |
 | **BEAM-10M** 平均ルーブリックスコア | **78.23%** | 64.08% | **24,676.88** 対 27,373.25 トークン（**9.85% 削減**） |
 | **BEAM-10M** 通過率（各問のスコア ≥ 0.5） | **86.0%（172/200）** | 73.5%（147/200） | |
-| **LongMemEval S** 正答率 | **95.2%（476/500）** | 94.6%（473/500） | **11,373.58** 対 43,124.55 トークン（**73.63% 削減**） |
 
-BEAM-10M は **1,000 万トークン規模**の会話履歴 10 件で、イベントの並べ替え、時間推論、矛盾の解消などを評価します。OAM の平均スコアは **14.15 ポイント高く**、通過した問題は **25 問多く**なりました。今回取得した 180 問の検索コンテキスト上限は **24,000 トークン**で、残りの 20 問は以前の保存済みコンテキストを使用しました。[BEAM の評価方法と結果](docs/benchmarks.md#3-beam-10m)
+**BEAM-10M は会話 1 件あたり 1,000 万トークン規模のメモリを評価します。** 10 件の履歴にまたがる 200 問を対象に、イベントの並べ替え、時間推論、矛盾の解消を評価します。OAM の平均スコアは **14.15 ポイント高く**、通過した問題は **25 問多く**なりました。全結果では、180 問の今回の検索に **24,000 トークン**のネイティブコンテキスト上限を用い、残りの 20 問は以前に保存済みのコンテキストを使用しました。[BEAM の評価方法と結果](docs/benchmarks.md#3-beam-10m)
+
+OAM は低コストの **MiniMax M3.1 Flash** の adaptive モードで回答と判定を行い、両方の全データセットで Hindsight の公開最高スコアを上回りました。[AMB の結果マニフェスト](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
 
 **公平に比較するため、両方のベンチマークで Hindsight の公開結果と同じ質問、参照回答、採点ルールを使用しました。** 回答・判定プロンプトのテンプレートは固定した AMB リビジョンとバイト単位で同一です。BEAM の判定呼び出し 3 件ではプロバイダー向けのシステムプロンプトに JSON の例を追加し、判定本文と採点ルールを維持しました。[LongMemEval の設定](docs/benchmarks.md#1-latest-longmemeval-s-476500-at-18k) · [BEAM の採点方式](docs/benchmarks.md#3-beam-10m)
 
-比較はシステム全体の結果を対象とし、使用モデルとメモリ処理は異なります。`o200k_base` で保存済みテキストを計測しました。LME の平均値は今回の 497 件のコンテキストを使用し、参照回答に疑義がある 3 問は全 500 問のうち不正解として集計しています。MiniMax の公表価格はキャッシュされていない入力 100 万トークンあたり 0.15 米ドル、出力 100 万トークンあたり 0.60 米ドルです。[MiniMax 公式価格](https://platform.minimax.io/docs/pricing/overview#llm)
+比較はシステム全体の結果を対象とし、使用モデルとメモリ処理は異なります。コンテキストの計測は `o200k_base` で保存済みテキストを数えています。LME-500 の平均値は OAM の 497 件と Hindsight の 500 件のコンテキストを使用しています。参照回答に疑義がある OAM の 3 問は、500 問のスコアでは不正解として集計しています。[LME-500 トークンの再集計](docs/benchmarks.md#comparison-with-the-recorded-hindsight-result)
+
+MiniMax の公表価格はキャッシュされていない入力 100 万トークンあたり 0.15 米ドル、出力 100 万トークンあたり 0.60 米ドルです。[MiniMax 公式価格](https://platform.minimax.io/docs/pricing/overview#llm)
 
 回答・判定モデルを再実行すると、スコアが変わることがあります。[同じ入力を使った MiniMax の実例](docs/benchmarks.md#answer-and-judge-variability)では、一方の回答は正解、もう一方は不正解でした。これは観測された変動の例であり、その発生頻度を示すものではありません。
 

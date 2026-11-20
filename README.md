@@ -12,19 +12,23 @@ Keep your conversations and documents in your own PostgreSQL database, choose yo
 
 ## Performance & Accuracy
 
-**State-of-the-art against AMB's published results for LongMemEval S and BEAM-10M.** OAM exceeds the top recorded Hindsight scores on both full datasets using low-cost **MiniMax M3.1 Flash** adaptive for answering and judging. [AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+**LongMemEval S (LME-500)** measures answer accuracy across 500 questions. The comparison below pairs accuracy with mean saved context size using Hindsight's published Agent Memory Benchmark (AMB) run. [Hindsight's pinned LME-500 result](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
 
-| Benchmark | OAM | Published Hindsight | Mean saved answer context |
+| Benchmark | OAM | Published Hindsight | Mean saved context |
 | --- | --- | --- | --- |
+| **LongMemEval S**, accepted answers | **95.2% (476/500)** | 94.6% (473/500) | **11,373.58** vs 43,124.55 tokens (**73.63% fewer**) |
 | **BEAM-10M**, mean rubric credit | **78.23%** | 64.08% | **24,676.88** vs 27,373.25 tokens (**9.85% fewer**) |
 | **BEAM-10M**, pass rate (score ≥ 0.5) | **86.0% (172/200)** | 73.5% (147/200) | |
-| **LongMemEval S**, accepted answers | **95.2% (476/500)** | 94.6% (473/500) | **11,373.58** vs 43,124.55 tokens (**73.63% fewer**) |
 
-BEAM-10M tests reasoning over ten histories at the **10-million-token scale**, including event ordering, temporal reasoning and reconciling contradictions. OAM gained **14.15 points in mean rubric credit and 25 additional passes**. For 180 current recalls, OAM capped native context at **24,000 tokens**. The full result also includes 20 previously saved contexts. [BEAM method and results](docs/benchmarks.md#3-beam-10m)
+**BEAM-10M tests memory at the 10-million-token scale per conversation.** It covers 200 questions across ten histories and tests event ordering, temporal reasoning and contradiction resolution. OAM gained **14.15 percentage points in mean rubric credit and 25 additional passes**. The full result uses 180 current recalls with a **24,000-token** native context cap and 20 previously saved contexts. [BEAM method and results](docs/benchmarks.md#3-beam-10m)
+
+OAM exceeds the top recorded Hindsight scores on both full datasets using low-cost **MiniMax M3.1 Flash** adaptive for answering and judging. [AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
 
 **For a fair comparison, both benchmarks use the same questions, reference answers and scoring rules as the published Hindsight runs.** OAM reuses byte-identical answer and judge prompt templates from the pinned AMB sources. Three BEAM judge calls needed a JSON example in the provider wrapper. The judge text and scoring rule stayed the same. [LongMemEval settings](docs/benchmarks.md#1-latest-longmemeval-s-476500-at-18k) · [BEAM protocol](docs/benchmarks.md#3-beam-10m)
 
-The recorded comparisons measure end-to-end results with different models and memory pipelines. Saved text is counted with `o200k_base`. The LME mean uses 497 current contexts, and three disputed-gold cases still count as incorrect in the 500-question score. MiniMax lists USD 0.15 per million uncached input tokens and USD 0.60 per million output tokens. [Official MiniMax pricing](https://platform.minimax.io/docs/pricing/overview#llm)
+The recorded comparisons measure end-to-end results with different models and memory pipelines. Context counts measure saved text with `o200k_base`. LME-500 averages use 497 OAM contexts and 500 Hindsight contexts. Three OAM cases with disputed reference answers count as incorrect in the 500-question score. [LME-500 token recount](docs/benchmarks.md#comparison-with-the-recorded-hindsight-result)
+
+MiniMax lists USD 0.15 per million uncached input tokens and USD 0.60 per million output tokens. [Official MiniMax pricing](https://platform.minimax.io/docs/pricing/overview#llm)
 
 Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](docs/benchmarks.md#answer-and-judge-variability), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
 
