@@ -53,6 +53,6 @@ One request shares `profile.attempt_timeout_seconds` across selection, generatio
 
 ## 3. Deployment
 
-Apply migrations before starting upgraded API and worker processes. Migration `0039_profile_refresh_policy.sql` adds user-scoped policy metadata with forced row-level security and a restricted queue-only discovery routine. Multiple workers use database admission and the existing user lock to prevent duplicate Profile work. No additional scheduler service is required.
+Apply pending migrations, including 0038 and 0039 when upgrading from v0.1.0, before starting upgraded APIs and workers. Migration `0039_profile_refresh_policy.sql` adds user-scoped policy metadata with forced row-level security and a restricted queue-only discovery routine. Multiple workers use database admission and the existing user lock to prevent duplicate Profile work. No additional scheduler service is required.
 
 See [API reference](api.md), [indexing and retrieval](indexing-retrieval.md), [policy admission](../src/oam/profiles/scheduling.py), [custom generation](../src/oam/profiles/generation.py), and [Profile publication](../src/oam/profiles/worker.py).

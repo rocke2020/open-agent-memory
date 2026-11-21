@@ -2,9 +2,9 @@
 
 ## Overview
 
-Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release target is 0.1.0; its [release record](releases/0.1.0.md) records source verification and defers publication evidence to the GitHub Release artifacts. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
+Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release target is 0.2.0; its [release record](releases/0.2.0.md) records source verification and defers publication evidence to the GitHub Release artifacts. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
 
-Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DSH 0.0.1. Reuse their existing published archives when their package code is unchanged; do not republish an existing npm version or advance package versions solely because the product version changes. Preserve earlier product tags, images and release records.
+Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DSH 0.0.2. Reuse their existing published archives when their package code is unchanged; do not republish an existing npm version or advance package versions solely because the product version changes. Preserve earlier product tags, images and release records.
 
 ## 1. Review release notes and documentation
 
@@ -28,7 +28,7 @@ The scanner inventories every tracked Markdown, reStructuredText and AsciiDoc fi
 Run the checker before building or publishing the release:
 
 ```bash
-python tools/check_release_docs.py --base v0.0.3
+python tools/check_release_docs.py --base v0.1.0
 ```
 
 The checker rejects missing release notes, pending or omitted document reviews, an `updated` claim without a document change, and reviews made stale by changes to tracked file contents. The current release record is excluded from its own fingerprint so completing the notes does not invalidate the review. New files must be staged before drafting; removed documents leave the current inventory. The **Base** field records the previous product tag's commit; **Scope** fingerprints the reviewed tracked inputs. Missing Git history or tags fails the check; fetch full history and tags first. No models or external services are called, and the checker never edits files.
@@ -52,7 +52,7 @@ npm --prefix integrations/mcp test
 npm --prefix integrations/dsh test
 ```
 
-Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.1.0, verify the 24,000-token normal default, source-discovery and local-evidence boundaries, complete shared temporal metadata, and optional fast scoring and experimental source-body policies against the [changed-surface criteria](acceptance.md#10-v010-changed-surface-checks). Fast scoring must remain disabled by default; strict errors, permitted partial degradation and post-provider source checks retain their documented semantics. No new migration or reindexing is required when upgrading from 0.0.3; apply previously required migrations when upgrading from an older schema.
+Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.2.0, apply migrations 0038 and 0039 to an isolated v0.1.0 database and verify that existing indexes remain usable. Exercise Profile policy and custom generation, shared Insight windows, and recall overrides against the [changed-surface criteria](acceptance.md#11-v020-changed-surface-checks).
 
 Use a task-owned PostgreSQL/pgvector instance and synthetic users for release checks. Never select persistent personal/evaluation databases. Keep historical benchmark evidence unchanged; a release smoke test is not a fresh LME-500 or BEAM-10M evaluation. [Acceptance](acceptance.md) and the version's release record define the measured scope and outstanding limits.
 
@@ -63,8 +63,8 @@ Build the Python distribution and both supported container architectures from th
 ```bash
 uv build
 mkdir -p dist/plugins
-docker buildx build --platform linux/arm64 --load -t oam:0.1.0-arm64 .
-docker buildx build --platform linux/amd64 --load -t oam:0.1.0-amd64 .
+docker buildx build --platform linux/arm64 --load -t oam:0.2.0-arm64 .
+docker buildx build --platform linux/amd64 --load -t oam:0.2.0-amd64 .
 ```
 
 For unchanged, already-published integrations, download the exact registry archives and compare their runtime contents with the reviewed source:
@@ -72,10 +72,10 @@ For unchanged, already-published integrations, download the exact registry archi
 ```bash
 npm pack @rocke-dong/oam-openclaw@0.0.2 --pack-destination dist/plugins
 npm pack @rocke-dong/oam-mcp@0.0.1 --pack-destination dist/plugins
-npm pack @rocke-dong/oam-dsh@0.0.1 --pack-destination dist/plugins
+npm pack @rocke-dong/oam-dsh@0.0.2 --pack-destination dist/plugins
 ```
 
-Record source commit, archive checksums, native versus emulated checks and immutable image identities. A local image ID does not prove a published registry digest. Verify installed Python/CLI metadata, packaged configuration/migrations and Inspector assets. Against an isolated candidate image, exercise authorized API input, readiness and cited recall, the changed user-list/title surfaces, and the relevant native integration paths. Bound any provider calls and retain actual usage and failures separately from deterministic tests.
+Record source commit, archive checksums, native versus emulated checks and immutable image identities. A local image ID does not prove a published registry digest. Verify installed Python/CLI metadata, packaged configuration/migrations and Inspector assets. Against an isolated candidate image, exercise authorized API input, readiness and cited recall, the changed Profile, Insight and recall surfaces, and the relevant native integration paths. Bound any provider calls and retain actual usage and failures separately from deterministic tests.
 
 The opt-in `tests/release/verify_candidate.py` command uses the bounded synthetic overlay documented in [deployment](../deploy/README.md#trusted-gateway-boundary). Configure its isolated endpoint, root key and private output directory explicitly. Never place credentials, raw model responses or private user content in public artifacts.
 
@@ -87,9 +87,9 @@ Publish the multi-architecture image from that same source:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rocke2020/open-agent-memory:0.1.0 \
-  -t ghcr.io/rocke2020/open-agent-memory:v0.1.0 \
-  -t ghcr.io/rocke2020/open-agent-memory:0.1 \
+  -t ghcr.io/rocke2020/open-agent-memory:0.2.0 \
+  -t ghcr.io/rocke2020/open-agent-memory:v0.2.0 \
+  -t ghcr.io/rocke2020/open-agent-memory:0.2 \
   -t ghcr.io/rocke2020/open-agent-memory:0 \
   -t ghcr.io/rocke2020/open-agent-memory:latest --push .
 ```

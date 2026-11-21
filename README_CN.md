@@ -39,7 +39,7 @@ MiniMax 官方标价为每百万未缓存输入 tokens 0.15 美元、每百万�
 - **跨会话记忆。** 保存有用的偏好、决定和经历，让 Agent 在新会话中继续使用。
 - **核对原始证据。** 召回的记忆可以追溯到原始消息。在 Memory Inspector 中浏览和删除记忆。
 - **一起搜索会话与文档。** 同时召回相关的学习记忆以及文本、HTML、PDF 和图片资源；文档与学习得到的个人记忆保持分离。
-- **构建实用的个人画像。** 显式刷新已保存的用户画像，输入来自符合条件的记忆和结构化画像数据。
+- **构建实用的个人画像。** 手动或定时刷新已保存的用户画像，也可为特定用途按需生成自定义画像。
 - **掌控数据与模型。** 使用 PostgreSQL/pgvector 自托管，配置自己的模型端点，并控制召回上下文预算。
 
 ## 快速开始
@@ -70,7 +70,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml run api preflight -
 docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api worker
 ```
 
-任何命令失败时，请先停止并解决报错，再继续下一步。Compose 文件选用 Linux AMD64 或 ARM64 的 **v0.1.0** 镜像。端口、宿主机上的模型服务、源码构建和副本配置见[部署指南](deploy/README.md)。
+任何命令失败时，请先停止并解决报错，再继续下一步。Compose 文件选用 Linux AMD64 或 ARM64 的 **v0.2.0** 镜像。端口、宿主机上的模型服务、源码构建和副本配置见[部署指南](deploy/README.md)。
 
 ### 3. 保存并召回第一条记忆
 
@@ -99,17 +99,19 @@ Inspector 可用于浏览已保存的来源、检查召回的记忆和引用、�
 
 ## 记忆如何工作
 
-OAM 保留原始会话（**L0**），抽取有来源支撑的事实（**L1**），再根据相关事实构建有证据支持的洞察（**L2**）。显式刷新的用户画像（**L3**）帮助 Agent 提供个性化行为。文本、HTML、PDF 和图片**资源（Resources）**作为独立证据保留，可与学习记忆一起检索。
+OAM 保留原始会话（**L0**），抽取有来源支撑的事实（**L1**），再根据相关事实构建有证据支持的洞察（**L2**）。可刷新的持久化用户画像（**L3**）帮助 Agent 提供个性化行为。文本、HTML、PDF 和图片**资源（Resources）**作为独立证据保留，可与学习记忆一起检索。
 
 召回支持 **fast** 和 **normal** 模式，返回带引用的上下文，不生成最终回答。两种模式的默认上下文上限分别为 18,000 和 24,000 tokens。Agent 决定如何使用证据，并负责最终回答和总输入预算。
 
 [记忆与检索设计](docs/indexing-retrieval.md) · [架构](docs/architecture.md) · [配置](configs/README.md)
 
-## v0.1.0
+## v0.2.0
 
-本次发布是上文所述的检索质量里程碑：使用低成本 Flash 模型，取得更高的已记录基准评分，并保持紧凑的 LME 上下文。它改进了来源证据选择和上下文格式，将 normal 上下文默认上限降至 24,000 tokens，并新增需显式启用的 fast 评分和实验性来源正文策略。从 v0.0.3 升级时可复用已有索引，无需新增数据库迁移或重新索引。
+**更新的 BEAM-10M 评测。** OAM 的平均评分为 78.23%，Hindsight 的公开结果为 64.08%。在 200 道题中，OAM 多通过 25 道，保存的上下文少用 9.85% tokens。对比沿用同一评测协议，模型和记忆处理流程各自独立。[结果与方法](docs/benchmarks.md#3-beam-10m)
 
-验证与发布状态见[版本说明和升级指南](docs/releases/0.1.0.md)。OpenClaw 保持独立版本 0.0.2；MCP 和 DSH 保持 0.0.1。
+本版新增个人画像的定时刷新、按需生成的自定义画像，以及在同一用户窗口内跨来源合并洞察。召回支持单次请求覆盖预设，并可选用个人证据检索。从 v0.1.0 升级须执行迁移 0038 和 0039，已有索引可复用。
+
+验证与发布状态见[版本说明和升级指南](docs/releases/0.2.0.md)。OpenClaw 和 DSH 的独立版本为 0.0.2，MCP 为 0.0.1。
 
 ## 文档与开发
 
@@ -118,7 +120,7 @@ OAM 保留原始会话（**L0**），抽取有来源支撑的事实（**L1**）�
 | 部署或升级 OAM | [Docker Compose](deploy/README.md) |
 | 通过 HTTP 保存与召回 | [快速入门](docs/quickstart.md) · [API 参考](docs/api.md) |
 | 配置服务商并运维服务 | [运维](docs/operations.md) |
-| 了解已验证的行为与限制 | [验收](docs/acceptance.md) · [版本说明](docs/releases/0.1.0.md) |
+| 了解已验证的行为与限制 | [验收](docs/acceptance.md) · [版本说明](docs/releases/0.2.0.md) |
 | 构建、测试或贡献 | [参与贡献](CONTRIBUTING.md) · [发布流程](docs/releasing.md) |
 
 后续工作包括更顺畅的入门体验、减少索引和回答上下文的 token 用量，以及共享资源所有权。Python SDK、托管服务、数据库高可用和 OIDC/LDAP 支持仍属于未来工作。欢迎在 [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1) 中分享配置和检索反馈。

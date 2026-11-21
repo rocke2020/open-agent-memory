@@ -43,7 +43,7 @@ Source: [source worker](../src/oam/workers/index_source.py), [indexing](../src/o
 
 ## 4. Insight consolidation
 
-L2 is a required supported representation whose purpose is useful memory, not exhaustive rewriting of every L1 fact. Consolidation reads existing L1 and can be enabled after L1 indexing without extracting the same originals again. The canonical configuration schedules consolidation after a 24-hour delay. An isolated functional fixture can shorten that delay explicitly without changing the production default.
+L2 is a required supported representation whose purpose is useful memory, not exhaustive rewriting of every L1 fact. Consolidation reads existing L1 and can be enabled after L1 indexing without extracting the same originals again. Ready sources enter a fixed per-user consolidation window with a default duration of 24 hours. An isolated functional fixture can shorten the window without changing the default.
 
 The configured seed policy selects bounded eligible L1 inputs. The model returns supported candidate changes or a valid no-Insight result; malformed, empty, refused and failed output remain separate outcomes. Publication validates current support and revisions, preserves stable Insight identity where an update applies, and records its descriptive subtype. Mechanical support IDs are grounding checks; paraphrases of one event do not establish independent recurrence.
 
@@ -53,15 +53,13 @@ New eligible learned input can change L2 and mark an existing Profile stale. Opt
 
 Source: [Insight implementation](../src/oam/indexing/), [consolidation worker](../src/oam/workers/l2_index.py).
 
-### Upcoming release: user-level L2 windows
+### Automatic consolidation windows
 
-The following scheduling change is under development and pending release acceptance; it is not a claim about the released service. The released design above retains delayed source-owned consolidation, and existing source jobs and their checkpoints remain valid during the transition.
-
-New automatic consolidation will collect ready sources for one tenant/user and index generation into a fixed window. Its first admission anchors the configured delay, with a 24-hour default; later sources join only strictly before its immutable cutoff. Arrivals at or after cutoff start the next window even if a worker starts late. With the related seed policy, bounded requests may combine related new facts from several member sources, while unrelated or unpacked facts remain pending. Supporting historical facts remain context rather than newly completed work.
+Automatic consolidation collects ready sources for one tenant/user and index generation into a fixed window. Its first admission anchors the configured delay, with a 24-hour default; later sources join only strictly before its immutable cutoff. Arrivals at or after cutoff start the next window even if a worker starts late. With the related seed policy, bounded requests may combine related new facts from several member sources, while unrelated or unpacked facts remain pending. Supporting historical facts provide context and retain their previous completion state.
 
 The window owns frozen group inputs and saved responses, but each source retains separate readiness and generation-budget responsibility. Shared call allowance is apportioned by serialized new-seed bytes with deterministic conserved integer rounding, reserved atomically against each participating source's ceiling and never borrowed across sources. Failed or unfinished groups preserve successful work for recovery; unknown external outcomes retain reconciliation requirements. Completing one member can make that source L2-ready before the entire window finishes.
 
-Existing source-owned consolidation and removal repairs remain supported. Old workers cannot claim the new batch stage; updated workers explicitly support it, and both stages share the per-user L2 claim and operator-hold boundary. Explicit existing-L1 indexing remains immediate, source-count limited and skips already assigned source/version/generation work. Profile refresh waits on shared batch dependencies while retaining failed-input and removal-repair gates. These changes make no measured claim of quality, cost or throughput improvement.
+Existing source-owned consolidation and removal repairs remain supported. Old workers cannot claim the new batch stage; updated workers explicitly support it, and both stages share the per-user L2 claim and operator-hold boundary. Explicit existing-L1 indexing remains immediate, source-count limited and skips already assigned source/version/generation work. Profile refresh waits on shared batch dependencies while retaining failed-input and removal-repair gates. See the [release verification](releases/0.2.0.md) for the measured scope.
 
 Implementation references: [window admission](../src/oam/indexing/scheduling.py), [batch execution and recovery](../src/oam/indexing/batch.py), [generation accounting](../src/oam/indexing/budget.py), [Profile refresh](../src/oam/profiles/service.py).
 

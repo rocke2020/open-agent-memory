@@ -2,7 +2,7 @@
 
 ## Overview
 
-Run OAM, store a small preference, retrieve it with citations, then use it in a fresh agent session. OAM supplies evidence; your agent generates the answer. This guide uses the versioned self-hosted image and a synthetic example, so you do not need to upload a private conversation. See the [release record](releases/0.1.0.md) for artifact verification and publication status.
+Run OAM, store a small preference, retrieve it with citations, then use it in a fresh agent session. OAM supplies evidence; your agent generates the answer. This guide uses the versioned self-hosted image and a synthetic example, so you do not need to upload a private conversation. See the [release record](releases/0.2.0.md) for artifact verification and publication status.
 
 ![Illustrative workflow: keep a preference, recall it in a new session, and inspect its original source.](assets/memory-across-sessions.svg)
 
@@ -17,7 +17,7 @@ Clone the repository, pull the versioned Linux AMD64/ARM64 image, and create you
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory.git
 cd open-agent-memory
-docker pull ghcr.io/rocke2020/open-agent-memory:0.1.0
+docker pull ghcr.io/rocke2020/open-agent-memory:0.2.0
 cp deploy/.env.example deploy/.env
 ```
 

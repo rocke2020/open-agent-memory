@@ -13,6 +13,7 @@ The locked runtime graph includes MIT, BSD, Apache-2.0, MPL-2.0, LGPL-3.0-only, 
 | Component | License and notice location |
 |---|---|
 | Extraction overflow splitting and retry | MIT; Copyright (c) 2025 Vectorize AI, Inc. The adapted source notice is included as `third_party_licenses/extraction-split-MIT.txt`. |
+| `croniter` | MIT. The installed wheel carries the license under its `.dist-info/licenses/` directory. |
 | `jieba` | MIT; its upstream license is included as `third_party_licenses/jieba-MIT.txt` because the installed package has no license file. |
 | `psycopg`, `psycopg-pool` | LGPL-3.0-only; installed package license files contain the LGPL text, and `third_party_licenses/GPL-3.0.txt` provides the GPLv3 companion text. The release runtime uses the system `libpq`; review that system package and its license in the release image. `psycopg-binary` is a local development dependency and is excluded from the release runtime. Direct recipients to the [corresponding Psycopg source](https://github.com/psycopg/psycopg). |
 | `certifi` | MPL-2.0; retain its installed license and direct recipients to the [source](https://github.com/certifi/python-certifi). |

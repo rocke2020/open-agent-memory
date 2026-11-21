@@ -39,7 +39,7 @@ Scores can vary when answer and judge models are rerun. In a [same-input MiniMax
 - **Remember across sessions.** Retain useful preferences, decisions and experiences so your agent can use them in a new conversation.
 - **Check the evidence.** Recalled memories link back to original source messages. Browse and remove memory through the Memory Inspector.
 - **Search conversations and documents together.** Recall relevant learned memory alongside text, HTML, PDF and image Resources; documents stay separate from learned personal memory.
-- **Build a useful personal Profile.** Explicitly refresh a stored User Profile from eligible memory and structured Profile Data.
+- **Build a useful personal Profile.** Refresh a stored User Profile manually or on a schedule, or generate a custom Profile for a specific purpose.
 - **Own your data and models.** Self-host with PostgreSQL/pgvector, configure your own endpoints, and control the recall context budget.
 
 ## Quick Start
@@ -70,7 +70,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml run api preflight -
 docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api worker
 ```
 
-Stop if a command fails and resolve the reported error before continuing. The Compose file selects the **v0.1.0** image for Linux AMD64 or ARM64. See the [deployment guide](deploy/README.md) for ports, model servers on your host, source builds and replica setup.
+Stop if a command fails and resolve the reported error before continuing. The Compose file selects the **v0.2.0** image for Linux AMD64 or ARM64. See the [deployment guide](deploy/README.md) for ports, model servers on your host, source builds and replica setup.
 
 ### 3. Store and recall your first memory
 
@@ -99,17 +99,19 @@ The Inspector lets you browse retained sources, inspect recalled memories and ci
 
 ## How Memory Works
 
-OAM preserves original conversations (**L0**), extracts source-backed facts (**L1**), and builds supported Insights across related facts (**L2**). An explicitly refreshed User Profile (**L3**) helps the agent personalize its behavior. Text, HTML, PDF and image **Resources** remain separate evidence and can be retrieved alongside learned memory.
+OAM preserves original conversations (**L0**), extracts source-backed facts (**L1**), and builds supported Insights across related facts (**L2**). A stored, refreshable User Profile (**L3**) helps the agent personalize its behavior. Text, HTML, PDF and image **Resources** remain separate evidence and can be retrieved alongside learned memory.
 
 Recall supports **fast** and **normal** modes and returns cited context without generating the final answer. The default context limits are 18,000 and 24,000 tokens respectively. Your agent decides how to use that evidence and owns its final answer and total input budget.
 
 [Memory and retrieval design](docs/indexing-retrieval.md) · [Architecture](docs/architecture.md) · [Configuration](configs/README.md)
 
-## v0.1.0
+## v0.2.0
 
-This release marks the retrieval-quality milestone above: higher recorded benchmark scores with low-cost Flash models and compact LME context. It improves source-evidence selection and context formatting, lowers the normal context default to 24,000 tokens, and adds opt-in fast scoring and experimental source-body policies. Existing indexes can be reused; no new migration or reindexing is required when upgrading from v0.0.3.
+**Updated BEAM-10M evaluation.** OAM earns 78.23% mean rubric credit versus Hindsight's published 64.08%, with 25 more passes across 200 questions and 9.85% fewer saved context tokens. This recorded comparison uses the same evaluation protocol with different models and memory pipelines. [Results and method](docs/benchmarks.md#3-beam-10m)
 
-See the [release notes and upgrade guide](docs/releases/0.1.0.md) for verification and publication status. OpenClaw remains independently versioned at 0.0.2; MCP and DSH remain at 0.0.1.
+The release adds scheduled personal Profile refresh, custom Profiles generated on demand, and Insight consolidation across sources in a shared user window. Recall adds per-request preset overrides and optional personal-evidence selection. Upgrading from v0.1.0 requires migrations 0038 and 0039. Existing indexes are reusable.
+
+See the [release notes and upgrade guide](docs/releases/0.2.0.md) for verification and publication status. OpenClaw and DSH are independently versioned at 0.0.2. MCP is at 0.0.1.
 
 ## Documentation & Development
 
@@ -118,7 +120,7 @@ See the [release notes and upgrade guide](docs/releases/0.1.0.md) for verificati
 | Deploy or upgrade OAM | [Docker Compose](deploy/README.md) |
 | Store and recall through HTTP | [Quickstart](docs/quickstart.md) · [API reference](docs/api.md) |
 | Configure providers and operate the service | [Operations](docs/operations.md) |
-| Understand verified behavior and limits | [Acceptance](docs/acceptance.md) · [Release notes](docs/releases/0.1.0.md) |
+| Understand verified behavior and limits | [Acceptance](docs/acceptance.md) · [Release notes](docs/releases/0.2.0.md) |
 | Build, test or contribute | [Contributing](CONTRIBUTING.md) · [Release procedure](docs/releasing.md) |
 
 Future work includes smoother onboarding, lower indexing and answer-context token usage, and shared Resource ownership. The Python SDK, hosted service, database high availability and OIDC/LDAP support remain future work. Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1).
