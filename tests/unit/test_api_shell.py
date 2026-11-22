@@ -332,6 +332,7 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["limits"]["chunk"]["ingestion"]["max_estimated_tokens"] == 4096
     assert "recall" not in payload["limits"]["chunk"]
     assert "context" not in payload["limits"]
+    assert payload["limits"]["search"]["partial_match_gate"] == "user_fact_exchange"
     assert payload["limits"]["search"]["fast"]["context_max_tokens"] == 18000
     assert payload["limits"]["search"]["normal"]["context_max_tokens"] == 24000
     assert payload["features"]["source_lifecycle"] is True

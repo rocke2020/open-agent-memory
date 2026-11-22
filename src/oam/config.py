@@ -101,7 +101,6 @@ class SearchTier(FrozenModel):
     context_max_tokens: PositiveInt
     entity_semantic_graph: Literal["off", "light", "full"]
     causal_graph: bool
-    partial_match_gate: Literal["off", "user_fact_exchange"]
     channel_candidates: PositiveInt
     personal_evidence_candidates: NonNegativeInt = 0
     fused_candidates: PositiveInt
@@ -145,6 +144,7 @@ class SearchConfig(FrozenModel):
     query_concurrency: PositiveInt
     rrf_k: PositiveInt
     lexical_ranking: Literal["per_term", "whole_query"]
+    partial_match_gate: Literal["off", "user_fact_exchange"]
     adjacent_user_context: bool
     adjacent_user_context_max_chars: int = Field(gt=0, strict=True)
     lexical_ranker: Literal["bm25", "fts"]

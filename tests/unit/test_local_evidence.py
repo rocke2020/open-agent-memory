@@ -13,6 +13,10 @@ from oam.retrieval import context
 from oam.retrieval.context import assemble_context, context_token_count, render_context
 from oam.retrieval.local_context import local_evidence_ids
 
+GATED_CONFIG = CONFIG.model_copy(
+    update={"search": CONFIG.search.model_copy(update={"partial_match_gate": "user_fact_exchange"})}
+)
+
 
 def original(identity, index, role="user", *, version=1, origin="memory"):
     return {
@@ -395,7 +399,7 @@ def test_configured_neighbor_cap_reaches_the_actual_recall_context(
             yield RankedRepository(request, self.rows, {})
 
     values = load_config("configs/oam.yaml").config.model_dump(mode="json")
-    values["search"][mode]["partial_match_gate"] = "off"
+    values["search"]["partial_match_gate"] = "off"
     if source == "config":
         values["search"]["adjacent_user_context_max_chars"] = limit
     config = type(CONFIG).model_validate(values)
@@ -571,12 +575,14 @@ def test_oversized_optional_context_never_rejects_or_truncates_required_support(
     assert oversized is False
 
 
-def sparse_service(rows, ranked_ids, config):
+def sparse_service(rows, ranked_ids, config, *, allow_source_discovery=False):
     class SparseRepository(SourceRepository):
         def lexical(self, query, limit):
             return [{"unit_id": node, "strict_match": False} for node in ranked_ids][:limit]
 
         def source_user_passage_ids(self, *args):
+            if allow_source_discovery:
+                return []
             pytest.fail("sparse user originals must not authorize further source discovery")
 
     class SparseService(SourceService):
@@ -595,11 +601,12 @@ def test_direct_lexical_assistant_first_original_reaches_context_without_a_user_
     claim = fact("derived", passage)
     neighbor = original("neighbor", 1, "assistant")
     neighbor["locator"] = neighbor["citations"][0]
-    values = CONFIG.model_dump(mode="json")
+    values = GATED_CONFIG.model_dump(mode="json")
     values["search"]["adjacent_user_context"] = False
-    values["search"][mode]["partial_match_gate"] = "user_fact_exchange"
     result = sparse_service(
-        [passage, claim, neighbor], ["opening", "derived"], type(CONFIG).model_validate(values)
+        [passage, claim, neighbor],
+        ["opening", "derived"],
+        type(GATED_CONFIG).model_validate(values),
     ).search(object(), SearchRequest(query="What is the dome made of?", recall_level=mode))
 
     assert [item["unit_id"] for item in result["items"]] == ["opening"]
@@ -608,17 +615,41 @@ def test_direct_lexical_assistant_first_original_reaches_context_without_a_user_
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
-def test_weaker_lexical_assistant_originals_still_need_a_local_witness(mode):
+@pytest.mark.parametrize(
+    ("config_gate", "request_gate", "gate"),
+    [
+        (None, None, "user_fact_exchange"),
+        ("off", None, "off"),
+        (None, "off", "off"),
+        ("off", "user_fact_exchange", "user_fact_exchange"),
+    ],
+)
+def test_shared_partial_match_gate_controls_weak_assistant_matches(
+    tmp_path, mode, config_gate, request_gate, gate
+):
     first, second = original("first", 0, "assistant"), original("second", 2, "assistant")
     for row in (first, second):
         row["locator"] = row["citations"][0]
-    values = CONFIG.model_dump(mode="json")
-    values["search"]["adjacent_user_context"] = False
-    values["search"][mode]["partial_match_gate"] = "user_fact_exchange"
+    path = tmp_path / "override.yaml"
+    path.write_text(f'search: {{partial_match_gate: "{config_gate}"}}' if config_gate else "{}")
+    config = load_config(path).config
     result = sparse_service(
-        [first, second], ["first", "second"], type(CONFIG).model_validate(values)
-    ).search(object(), SearchRequest(query="Recall the source description", recall_level=mode))
-    assert [item["unit_id"] for item in result["items"]] == ["first"]
+        [first, second], ["first", "second"], config, allow_source_discovery=True
+    ).search(
+        object(),
+        SearchRequest(
+            query="Recall the source description",
+            recall_level=mode,
+            overrides={"partial_match_gate": request_gate} if request_gate else {},
+        ),
+    )
+    assert [item["unit_id"] for item in result["items"]] == (
+        ["first", "second"] if gate == "off" else ["first"]
+    )
+    assert result["diagnostics"]["search_config"]["partial_match_gate"] == gate
+    assert result["diagnostics"]["local_context"]["gate_status"] == (
+        "off" if gate == "off" else "applied"
+    )
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
@@ -630,13 +661,12 @@ def test_lexical_original_fallback_skips_facts_resources_and_invalid_roles(mode)
     for row in (resource, first, second):
         row["locator"] = row["citations"][0]
     claim = fact("claim", first)
-    values = CONFIG.model_dump(mode="json")
+    values = GATED_CONFIG.model_dump(mode="json")
     values["search"]["adjacent_user_context"] = False
-    values["search"][mode]["partial_match_gate"] = "user_fact_exchange"
     result = sparse_service(
         [claim, resource, invalid, first, second],
         ["claim", "resource", "invalid", "first", "second"],
-        type(CONFIG).model_validate(values),
+        type(GATED_CONFIG).model_validate(values),
     ).search(object(), SearchRequest(query="Recall the description", recall_level=mode))
     assert [item["unit_id"] for item in result["items"]] == ["resource", "first"]
 
@@ -651,10 +681,9 @@ def test_direct_lexical_original_needs_no_dense_fact_witness(mode, chunks, locat
         user["locator"] = {**user["citations"][0], "role": locator_role}
     reply["locator"] = reply["citations"][0]
     claim = fact("claim", user)
-    values = CONFIG.model_dump(mode="json")
+    values = GATED_CONFIG.model_dump(mode="json")
     values["search"]["adjacent_user_context"] = False
-    values["search"][mode]["partial_match_gate"] = "user_fact_exchange"
-    config = type(CONFIG).model_validate(values)
+    config = type(GATED_CONFIG).model_validate(values)
     result = sparse_service([user, reply, claim], ["user", "reply", "claim"], config).search(
         object(),
         SearchRequest(
@@ -691,10 +720,9 @@ def test_sparse_originals_keep_relevance_order_and_all_limits(
     second["text"] = "My laptop runs Fedora and has 32 GB of RAM."
     for row in (first, second, neighbor):
         row["locator"] = row["citations"][0]
-    values = CONFIG.model_dump(mode="json")
+    values = GATED_CONFIG.model_dump(mode="json")
     tier = values["search"][mode]
     values["search"]["adjacent_user_context"] = False
-    tier["partial_match_gate"] = "user_fact_exchange"
     if limit == "channel":
         tier["channel_candidates"] = 1
     elif limit == "fusion":
@@ -706,7 +734,7 @@ def test_sparse_originals_keep_relevance_order_and_all_limits(
     elif limit == "tokens":
         leading = first if ranked_ids[0] == "first" else second
         tier["context_max_tokens"] = context_token_count(render_context([leading]))
-    config = type(CONFIG).model_validate(values)
+    config = type(GATED_CONFIG).model_validate(values)
     result = sparse_service([first, second, neighbor], ranked_ids, config).search(
         object(), SearchRequest(query="Recall my past updates", recall_level=mode)
     )
@@ -762,10 +790,9 @@ def test_configured_gate_reaches_the_actual_fast_context():
         def _repository(self, authority, request, deadline):
             yield LocalRepository(request, self.rows, self.graph_paths)
 
-    values = CONFIG.model_dump(mode="json")
+    values = GATED_CONFIG.model_dump(mode="json")
     values["search"]["adjacent_user_context"] = False
-    values["search"]["fast"]["partial_match_gate"] = "user_fact_exchange"
-    config = type(CONFIG).model_validate(values)
+    config = type(GATED_CONFIG).model_validate(values)
     result = LocalService(
         [support, root, answer, later, strict, independent], config=config
     ).search(object(), SearchRequest(query="history", recall_level="fast"))
@@ -791,9 +818,7 @@ def test_unavailable_dense_retrieval_preserves_degraded_lexical_recall():
         def embed(self, *args, **kwargs):
             raise RuntimeError("embedding unavailable")
 
-    tier = CONFIG.search.fast.model_copy(update={"partial_match_gate": "user_fact_exchange"})
-    config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={"fast": tier})})
-    service = PartialService([item], config=config)
+    service = PartialService([item], config=GATED_CONFIG)
     service.models = FailedEmbedding()
     result = service.search(
         object(), SearchRequest(query="history", recall_level="fast", allow_partial=True)
@@ -854,7 +879,7 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
 
         def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
             assert source_keys == (("conversation", 1),)
-            assert limit == getattr(CONFIG.search, mode).source_seed_results
+            assert limit == getattr(GATED_CONFIG.search, mode).source_seed_results
             assert "earlier" not in excluded_ids
             return [{"unit_id": "earlier"}]
 
@@ -863,11 +888,10 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
         def _repository(self, authority, request, deadline):
             yield RecoveryRepository(request, self.rows, {})
 
-    values = CONFIG.model_dump(mode="json")
+    values = GATED_CONFIG.model_dump(mode="json")
     values["search"]["adjacent_user_context"] = False
-    values["search"][mode].update(
-        partial_match_gate="user_fact_exchange",
-        context_max_tokens=context_token_count(render_context([root, support, bulky])),
+    values["search"][mode]["context_max_tokens"] = context_token_count(
+        render_context([root, support, bulky])
     )
     result = RecoveryService(
         [
@@ -884,7 +908,7 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
             stale,
             stale_user,
         ],
-        config=type(CONFIG).model_validate(values),
+        config=type(GATED_CONFIG).model_validate(values),
     ).search(object(), SearchRequest(query=query, recall_level=mode))
     selected = {row["unit_id"] for row in result["items"]}
     assert {"root", "support", "earlier", "recovered_reply"} <= selected
@@ -902,7 +926,7 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
         & selected
     )
     assert result["diagnostics"]["generative_calls"] == 0
-    assert result["context_tokens"] <= getattr(CONFIG.search, mode).context_max_tokens
+    assert result["context_tokens"] <= getattr(GATED_CONFIG.search, mode).context_max_tokens
     assert result["diagnostics"]["local_context"]["window_originals"] == 0
     assert result["diagnostics"]["local_context"]["selected_recovered_user_originals"] == 1
 
@@ -946,16 +970,13 @@ def test_late_companion_support_remains_recoverable_when_its_bundle_does_not_fit
         def _repository(self, authority, request, deadline):
             yield RecoveryRepository(request, self.rows, {})
 
-    values = CONFIG.model_dump(mode="json")
+    values = GATED_CONFIG.model_dump(mode="json")
     cap = context_token_count(render_context([anchor, support, bulky]))
     values["search"]["adjacent_user_context"] = False
-    values["search"]["fast"].update(
-        partial_match_gate="user_fact_exchange",
-        context_max_tokens=cap,
-    )
+    values["search"]["fast"]["context_max_tokens"] = cap
     result = RecoveryService(
         [anchor, support, earlier, bridge, bulky, late],
-        config=type(CONFIG).model_validate(values),
+        config=type(GATED_CONFIG).model_validate(values),
     ).search(
         object(), SearchRequest(query="What learning activities suit me?", recall_level="fast")
     )
@@ -1000,16 +1021,16 @@ def test_recovery_shares_one_ranked_cap_and_reuses_cached_originals(gate):
         def _repository(self, authority, request, deadline):
             yield RecoveryRepository(request, self.rows, {})
 
-    values = CONFIG.model_dump(mode="json")
+    values = GATED_CONFIG.model_dump(mode="json")
     values["search"]["adjacent_user_context"] = False
+    values["search"]["partial_match_gate"] = gate
     values["search"]["fast"].update(
-        partial_match_gate=gate,
         source_seed_results=36,
         context_max_tokens=18000,
     )
     result = RecoveryService(
         [anchor, companion, support, earlier, bridge, direct, *extras],
-        config=type(CONFIG).model_validate(values),
+        config=type(GATED_CONFIG).model_validate(values),
     ).search(object(), SearchRequest(query="Remember my activities", recall_level="fast"))
 
     assert len(queries) == 1

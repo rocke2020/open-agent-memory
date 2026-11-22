@@ -1277,13 +1277,16 @@ def test_temporal_sql_discovers_six_hops_and_rejects_hidden_bridge(recall_databa
             )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     # Isolate temporal traversal from the separately tested exchange-selection gate.
-    tier = getattr(config.search, mode).model_copy(
-        update={"channel_candidates": 1, "partial_match_gate": "off"}
-    )
+    tier = getattr(config.search, mode).model_copy(update={"channel_candidates": 1})
     config = config.model_copy(
         update={
             "search": config.search.model_copy(
-                update={mode: tier, "graph_seed_max": 1, "temporal_seed_max": 1}
+                update={
+                    mode: tier,
+                    "partial_match_gate": "off",
+                    "graph_seed_max": 1,
+                    "temporal_seed_max": 1,
+                }
             )
         }
     )

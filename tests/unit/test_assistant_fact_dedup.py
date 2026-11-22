@@ -205,11 +205,11 @@ def test_projection_never_refills_required_budget_omissions():
 
     for policy in ("required", "assistant_deduplicated"):
         values = config.model_dump(mode="json")
+        values["search"]["partial_match_gate"] = "user_fact_exchange"
         values["search"]["fast"].update(
             context_max_tokens=300,
             fact_source_bodies=policy,
             source_seed_results=1,
-            partial_match_gate="user_fact_exchange",
         )
         result = Service(rows, config=type(config).model_validate(values)).search(
             object(), SearchRequest(query="Which reservation?", recall_level="fast")

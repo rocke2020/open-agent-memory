@@ -20,6 +20,7 @@ NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)
 _SHARED_SEARCH_OVERRIDES = frozenset(
     {
         "lexical_ranking",
+        "partial_match_gate",
         "adjacent_user_context",
         "adjacent_user_context_max_chars",
     }
@@ -67,7 +68,7 @@ class SearchOutputOptions(FrozenContract):
         default_factory=dict,
         description=(
             "Request-only overrides for fields of the selected search.fast or search.normal "
-            "preset and the shared lexical_ranking, adjacent_user_context, and "
+            "preset and the shared lexical_ranking, partial_match_gate, adjacent_user_context, and "
             "adjacent_user_context_max_chars settings. Omitted fields inherit configuration; "
             "merged values use the same validators. "
             'For example, {"temporal_nodes": 300} changes traversal without changing max_results.'

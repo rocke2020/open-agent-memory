@@ -509,7 +509,7 @@ class RecallService:
             raise RecallUnavailable("user generation changed during recall")
         if index_state["parse_partial"] and not request.allow_partial:
             raise RecallUnavailable("PDF parse became incomplete during recall")
-        gate_active = tier.partial_match_gate == "user_fact_exchange" and "dense" in executed
+        gate_active = settings.partial_match_gate == "user_fact_exchange" and "dense" in executed
         independent_ids = (
             set(arms.get("dense", ()))
             | set(arms.get("graph", ()))
@@ -1205,7 +1205,7 @@ class RecallService:
         }
         for owner, originals in recovered_user_context.items():
             optional_context.setdefault(owner, []).extend(originals)
-        if tier.partial_match_gate != "off" or settings.adjacent_user_context:
+        if settings.partial_match_gate != "off" or settings.adjacent_user_context:
             timing["local_context_selection"] = (time.monotonic() - selection_started) * 1000
             executed.append("local_context_selection")
         if admission_source_bodies != "required":
@@ -1353,6 +1353,7 @@ class RecallService:
                 "search_config": {
                     **tier.model_dump(mode="json"),
                     "lexical_ranking": settings.lexical_ranking,
+                    "partial_match_gate": settings.partial_match_gate,
                     "adjacent_user_context": settings.adjacent_user_context,
                     "adjacent_user_context_max_chars": settings.adjacent_user_context_max_chars,
                 },
@@ -1362,12 +1363,12 @@ class RecallService:
                 "local_context": {
                     "query_entity_boost": self.config.search.query_entity_boost,
                     "query_entity_matches": len(query_entity_ids),
-                    "partial_match_gate": tier.partial_match_gate,
+                    "partial_match_gate": settings.partial_match_gate,
                     "gate_status": (
                         "applied"
                         if gate_active
                         else "off"
-                        if tier.partial_match_gate == "off"
+                        if settings.partial_match_gate == "off"
                         else "dense_unavailable"
                     ),
                     "filtered_roots": len(gate_omissions),

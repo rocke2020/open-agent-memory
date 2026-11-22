@@ -55,11 +55,11 @@ def test_output_cap_does_not_reduce_the_configured_reply_witness_budget(
             yield Repository(request, self.rows, {})
 
     values = CONFIG.model_dump(mode="json")
+    values["search"]["partial_match_gate"] = "user_fact_exchange"
     values["search"]["fast"].update(
         max_results=1,
         source_seed_results=source_seeds,
         channel_candidates=channel_limit,
-        partial_match_gate="user_fact_exchange",
     )
     service = Service(rows, config=type(CONFIG).model_validate(values))
     result = service.search(

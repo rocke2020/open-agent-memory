@@ -80,6 +80,15 @@ search:
   rrf_k: 60
   # Fast and normal rank one full-text candidate list. per_term fuses term lists.
   lexical_ranking: whole_query
+  # Shared by fast and normal. "off" disables the partial-match filter.
+  # In a matched 13-question Fast test, filtering weaker conversation matches
+  # with user_fact_exchange reduced rendered context tokens by 34.1% versus "off".
+  # user_fact_exchange keeps direct dense, strict lexical, lexical user originals,
+  # and the leading lexical memory original with a stored user/assistant role.
+  # Other memory matches need a dense user fact in their exchange.
+  # Indirect assistant replies use only the first source_seed_results dense hits
+  # for both a user fact and its exact cited original.
+  partial_match_gate: user_fact_exchange
   # Include eligible neighboring user passages when original chunks are requested.
   adjacent_user_context: true
   # Per-neighbor character cap. Keep the previous passage's tail or the next passage's head.
@@ -143,17 +152,10 @@ search:
   # full: entity graph expansion plus stored semantic-link expansion.
   # causal_graph independently enables outgoing effect-to-cause traversal, including within temporal retrieval, even when entity_semantic_graph is "off".
   # Direct dense semantic search and lexical entity-name matching remain independent.
-  # user_fact_exchange keeps direct dense, strict lexical, lexical user originals,
-  # and the leading lexical memory original with a stored user/assistant role.
-  # Other memory matches need a dense user fact in their exchange.
-  # Indirect assistant replies use only the first source_seed_results dense hits
-  # for both a user fact and its exact cited original; user roots and optional
-  # user context keep their existing scope.
   fast:
     context_max_tokens: 18000
     entity_semantic_graph: "off"
     causal_graph: false
-    partial_match_gate: user_fact_exchange
     channel_candidates: 64
     fused_candidates: 128
     temporal_nodes: 96
@@ -164,7 +166,6 @@ search:
     context_max_tokens: 24000
     entity_semantic_graph: light
     causal_graph: false
-    partial_match_gate: "off"
     channel_candidates: 64
     fused_candidates: 154
     temporal_nodes: 300

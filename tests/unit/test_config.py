@@ -45,6 +45,7 @@ def test_removed_shared_temporal_budget_is_rejected(tmp_path):
     "key,value",
     [
         ("lexical_ranking", "per_term"),
+        ("partial_match_gate", "off"),
         ("adjacent_user_context", False),
         ("adjacent_user_context_max_chars", 1000),
     ],

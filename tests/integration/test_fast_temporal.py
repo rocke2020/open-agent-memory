@@ -61,9 +61,8 @@ def test_fast_last_week_six_hops_keeps_direct_outside_but_rejects_outside_bridge
         update={
             "search": config.search.model_copy(
                 update={
-                    "fast": config.search.fast.model_copy(
-                        update={"channel_candidates": 2, "partial_match_gate": "off"}
-                    ),
+                    "fast": config.search.fast.model_copy(update={"channel_candidates": 2}),
+                    "partial_match_gate": "off",
                     "graph_seed_max": 1,
                     "temporal_seed_max": 1,
                 }

@@ -143,13 +143,13 @@ Recall diagnostics report the selected `entity_semantic_graph` value as `graph`,
 
 ### 5.1. Partial-match gate
 
-Fast defaults to `search.fast.partial_match_gate: user_fact_exchange`. It filters weaker conversation matches before they take up space in the returned context. Normal defaults to `search.normal.partial_match_gate: "off"` and keeps the broader candidate pool for context selection. Both presets accept either value. [Default configuration](oam.yaml)
+Fast and normal share `search.partial_match_gate`. The default `user_fact_exchange` filters weaker conversation matches before context assembly. The value `"off"` disables that filter. Both values are available in either recall mode. Use `overrides.partial_match_gate` to select a value for a single request. [Default configuration](oam.yaml)
 
 Suppose the query is “Did I pay for the workshop?” A lower-ranked assistant reply about registration can match the word “workshop.” If the reply has only a partial lexical match and dense retrieval found no fact citing the exact preceding user message in the same conversation revision, the gate can drop it. This leaves room for payment evidence. Filtering a derived fact can also save the space its required source passages would occupy.
 
 An indirectly matched assistant original can qualify through the exchange when the bounded dense results contain both the user-backed fact and the exact user passage it cites. Direct dense and strict lexical hits, directly retrieved lexical user originals, and the first eligible lexical conversation original can pass independently. The context budget and required support rules still apply. [Local evidence logic](../src/oam/retrieval/local_context.py) · [Recall selection](../src/oam/retrieval/service.py)
 
-Fast uses the gate to make better use of its context budget. In an earlier matched 13-question Fast comparison, enabling it reduced rendered context tokens by 34.1% and retained 12 of 16 tracked evidence passages, up from 9 of 16. Mean retrieval latency was roughly the same at 410 ms with the gate enabled and 412 ms with it off. For an individual request, check `diagnostics.local_context.gate_status` and `diagnostics.local_context.filtered_roots` to see whether the gate ran and how many candidates it removed.
+In an earlier matched 13-question Fast comparison, enabling it reduced rendered context tokens by 34.1% and retained 12 of 16 tracked evidence passages, up from 9 of 16. Mean retrieval latency was roughly the same at 410 ms with the gate enabled and 412 ms with it off. For an individual request, check `diagnostics.local_context.gate_status` and `diagnostics.local_context.filtered_roots` to see whether the gate ran and how many candidates it removed.
 
 ## 6. Fast source bodies and Normal reranking
 

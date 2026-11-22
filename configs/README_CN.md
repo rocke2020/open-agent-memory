@@ -143,13 +143,13 @@ Normal 召回启用实体及别名扩展，图融合权重为 `0.1`。语义链�
 
 ### 5.1. 部分匹配筛选
 
-Fast 的 `search.fast.partial_match_gate` 默认为 `user_fact_exchange`，在组装返回的上下文前筛除相关性证据较弱的对话候选。Normal 的 `search.normal.partial_match_gate` 默认为 `"off"`，保留更广的候选范围供上下文选择。两种模式均支持这两个值。[默认配置](oam.yaml)
+Fast 和 normal 共用 `search.partial_match_gate`。默认值 `user_fact_exchange` 在组装上下文前筛除相关性证据较弱的对话候选。`"off"` 会关闭该筛选。两种召回模式均支持这两个值。可通过 `overrides.partial_match_gate` 为单次请求选择值。[默认配置](oam.yaml)
 
 假设查询是“我付过研讨会的费用吗？”。一条排名靠后的助手回复讲的是如何报名，也可能因为包含“研讨会”而被召回。如果这条回复仅属于部分词项匹配，并且向量检索没有找到引用同一对话版本中紧邻其前的那条用户消息的事实，筛选就可以将它排除，为付款证据留出空间。筛除一条派生事实，还可能省下该事实所需来源原文占用的空间。
 
 间接匹配的助手原文可通过同一轮问答的证据取得准入资格，条件是限定范围内的向量检索结果同时包含一条由用户消息支持的事实，以及该事实所引用的确切用户原文。直接向量命中、严格词项匹配、通过词项检索直接命中的用户原文，以及词项候选中排名第一且符合条件的对话原文，都可以独立通过筛选。上下文预算和必需支持仍按原有规则处理。[局部证据逻辑](../src/oam/retrieval/local_context.py) · [召回选择](../src/oam/retrieval/service.py)
 
-Fast 默认启用该筛选，以提高上下文预算的使用效率。此前对同一组 13 道题进行 Fast 对照测试时，开启筛选后，渲染后的上下文 token 数减少了 34.1%，保留的跟踪证据段落从 9/16 增至 12/16。平均检索延迟接近，开启时约为 410 毫秒，关闭时约为 412 毫秒。单次请求可查看 `diagnostics.local_context.gate_status` 和 `diagnostics.local_context.filtered_roots`，确认筛选是否执行以及移除了多少候选。
+此前对同一组 13 道题进行 Fast 对照测试时，开启筛选后，渲染后的上下文 token 数减少了 34.1%，保留的跟踪证据段落从 9/16 增至 12/16。平均检索延迟接近，开启时约为 410 毫秒，关闭时约为 412 毫秒。单次请求可查看 `diagnostics.local_context.gate_status` 和 `diagnostics.local_context.filtered_roots`，确认筛选是否执行以及移除了多少候选。
 
 ## 6. Fast 来源正文与 Normal 重排
 

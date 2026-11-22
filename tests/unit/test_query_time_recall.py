@@ -21,7 +21,7 @@ CONFIG = CONFIG.model_copy(
         "search": CONFIG.search.model_copy(
             update={
                 "adjacent_user_context": False,
-                "fast": CONFIG.search.fast.model_copy(update={"partial_match_gate": "off"}),
+                "partial_match_gate": "off",
             }
         )
     }
@@ -141,10 +141,8 @@ def test_temporal_traversal_uses_mode_budget_independently_of_result_limit(
             {
                 "search": {
                     "adjacent_user_context": False,
-                    mode: {
-                        **(overrides if source == "config" else {}),
-                        "partial_match_gate": "off",
-                    },
+                    "partial_match_gate": "off",
+                    mode: overrides if source == "config" else {},
                 }
             }
         )
