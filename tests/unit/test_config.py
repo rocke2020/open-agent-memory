@@ -41,13 +41,26 @@ def test_removed_shared_temporal_budget_is_rejected(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
-@pytest.mark.parametrize("invalid", [0, -1, True, 1.5])
-def test_adjacent_context_character_cap_rejects_invalid_values(tmp_path, mode, invalid):
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("lexical_ranking", "per_term"),
+        ("adjacent_user_context", False),
+        ("adjacent_user_context_max_chars", 1000),
+    ],
+)
+def test_legacy_preset_search_setting_requires_moving_to_shared_key(tmp_path, mode, key, value):
     path = tmp_path / "override.yaml"
-    path.write_text(
-        yaml.safe_dump({"search": {mode: {"adjacent_user_context_max_chars": invalid}}})
-    )
-    with pytest.raises(ConfigurationError):
+    path.write_text(yaml.safe_dump({"search": {mode: {key: value}}}))
+    with pytest.raises(ConfigurationError, match=rf"search\.{mode}\.{key}"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5])
+def test_adjacent_context_character_cap_rejects_invalid_values(tmp_path, invalid):
+    path = tmp_path / "override.yaml"
+    path.write_text(yaml.safe_dump({"search": {"adjacent_user_context_max_chars": invalid}}))
+    with pytest.raises(ConfigurationError, match=r"search\.adjacent_user_context_max_chars"):
         load_config(path)
 
 
@@ -63,10 +76,10 @@ def test_index_causal_extraction_switch_is_owned_by_canonical_yaml():
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 def test_recall_causal_switch_is_independent_of_entity_graph_mode(mode):
-    from oam.config import FastSearchTier, SearchTier
+    from oam.config import FastSearchTier, NormalSearchTier
 
     values = yaml.safe_load((REPOSITORY_ROOT / "configs/oam.yaml").read_text())["search"][mode]
-    tier_type = FastSearchTier if mode == "fast" else SearchTier
+    tier_type = FastSearchTier if mode == "fast" else NormalSearchTier
     disabled = tier_type.model_validate(values)
     enabled = tier_type.model_validate(
         {**values, "causal_graph": True, "entity_semantic_graph": "off"}

@@ -34,7 +34,13 @@ class InsightLookup(RecallRepository):
 
     def __init__(self, connection, authority, config, *, generation_id, deadline):
         self.generation_predicate = "u.generation_id=" + sql.Literal(generation_id).as_string()
-        super().__init__(connection, authority, config, deadline=deadline)
+        # Keep indexing target selection on per-term FTS within this generation.
+        search = config.search.model_copy(
+            update={"lexical_ranker": "fts", "lexical_ranking": "per_term"}
+        )
+        super().__init__(
+            connection, authority, config.model_copy(update={"search": search}), deadline=deadline
+        )
 
     @property
     def lexical_candidate_predicate(self) -> str:

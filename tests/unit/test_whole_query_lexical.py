@@ -1,4 +1,4 @@
-"""Mode configuration selects whole-query lexical scores without per-term fusion."""
+"""Shared search configuration selects whole-query lexical scores for both modes."""
 
 import pytest
 
@@ -16,17 +16,18 @@ from oam.retrieval.repository import RecallRepository
         ("normal", "can", [{"entity_id": "named-entity", "name_text": "can"}], 0),
     ],
 )
-@pytest.mark.parametrize("source", ["config", "request"])
-def test_configured_whole_query_returns_database_relevance_order(
-    mode, query, entity_names, normalization, source
+@pytest.mark.parametrize("source", ["default", "request"])
+def test_whole_query_returns_database_relevance_order(
+    tmp_path, mode, query, entity_names, normalization, source
 ):
-    base = load_config("configs/oam.yaml").config
-    values = base.model_dump(mode="json")
-    values["search"][mode or "normal"]["lexical_ranking"] = (
-        "per_term" if source == "request" and mode else "whole_query"
+    path = tmp_path / "override.yaml"
+    ranking = "  lexical_ranking: per_term\n" if source == "request" and mode else ""
+    entity_boost = 0.5 if entity_names else 0
+    path.write_text(
+        f"search:\n{ranking}  query_entity_boost: {entity_boost}\n",
+        encoding="utf-8",
     )
-    values["search"]["query_entity_boost"] = 0.5 if entity_names else 0
-    config = type(base).model_validate(values)
+    config = load_config(path).config
     rows = [
         {"unit_id": "specific", "score": 0.8, "strict_match": True},
         {"unit_id": "partial", "score": 0.2, "strict_match": False},
@@ -48,6 +49,7 @@ def test_configured_whole_query_returns_database_relevance_order(
             self.calls = []
 
         def _execute(self, sql, parameters=()):
+            assert "lexical_terms AS MATERIALIZED" not in sql
             self.calls.append((sql, parameters))
             return rows
 

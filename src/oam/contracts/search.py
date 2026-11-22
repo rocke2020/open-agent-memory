@@ -14,9 +14,16 @@ from pydantic import (
     model_validator,
 )
 
-from oam.config import OAMConfig, SearchTier
+from oam.config import OAMConfig, SearchConfig, SearchTier
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+_SHARED_SEARCH_OVERRIDES = frozenset(
+    {
+        "lexical_ranking",
+        "adjacent_user_context",
+        "adjacent_user_context_max_chars",
+    }
+)
 
 
 class FrozenContract(BaseModel):
@@ -60,7 +67,9 @@ class SearchOutputOptions(FrozenContract):
         default_factory=dict,
         description=(
             "Request-only overrides for fields of the selected search.fast or search.normal "
-            "preset. Omitted fields inherit configuration; merged values use the same validators. "
+            "preset and the shared lexical_ranking, adjacent_user_context, and "
+            "adjacent_user_context_max_chars settings. Omitted fields inherit configuration; "
+            "merged values use the same validators. "
             'For example, {"temporal_nodes": 300} changes traversal without changing max_results.'
         ),
     )
@@ -91,14 +100,28 @@ class SearchOutputOptions(FrozenContract):
         return value
 
     def validate_limits(self, config: OAMConfig) -> None:
+        self.search_settings(config)
         self.search_tier(config)
+
+    def search_settings(self, config: OAMConfig) -> SearchConfig:
+        shared_overrides = {
+            key: value for key, value in self.overrides.items() if key in _SHARED_SEARCH_OVERRIDES
+        }
+        if not shared_overrides:
+            return config.search
+        return SearchConfig.model_validate({**config.search.model_dump(), **shared_overrides})
 
     def search_tier(self, config: OAMConfig) -> SearchTier:
         mode = self.recall_level.value
         tier = getattr(config.search, mode)
-        if self.overrides:
+        tier_overrides = {
+            key: value
+            for key, value in self.overrides.items()
+            if key not in _SHARED_SEARCH_OVERRIDES
+        }
+        if tier_overrides:
             values = config.model_dump(mode="python")
-            values["search"][mode].update(self.overrides)
+            values["search"][mode].update(tier_overrides)
             tier = getattr(OAMConfig.model_validate(values).search, mode)
         if mode == "fast" and self.fast_graph is not None:
             tier = tier.model_copy(

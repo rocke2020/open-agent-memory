@@ -138,6 +138,44 @@ def test_bilingual_fts_keeps_partial_candidates_and_ranks_primary_and_modifiers(
     assert [row["unit_id"] for row in repository.lexical("apples orchard", 3)] == ["c_english"]
 
 
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+def test_default_lexical_ranker_adds_owner_local_bm25_to_cover_density(recall_database, mode):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    add_fact(connection, authority, "match", "orchard")
+    add_fact(connection, authority, "unrelated", "garden")
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    request = SearchRequest(query="orchard", recall_level=mode)
+    connection.execute("SET LOCAL ROLE oam_api")
+
+    def search(config):
+        repository = RecallRepository(
+            connection, authority, config, deadline=time.monotonic() + 5, request=request
+        )
+        return repository.lexical(request.query, 10)
+
+    rows = search(config)
+    assert [row["unit_id"] for row in rows] == ["match"]
+    assert rows[0]["strict_match"] is True
+    # One occurrence, average field length one, df=1 across two documents, weight=0.1.
+    assert rows[0]["score"] == pytest.approx(0.2 + 0.1 * math.log(2))
+
+    values = config.model_dump(mode="json")
+    values["search"]["lexical_ranker"] = "fts"
+    control = search(type(config).model_validate(values))
+    assert [row["unit_id"] for row in control] == ["match"]
+    assert control[0]["score"] == pytest.approx(0.1)
+
+    connection.execute("RESET ROLE")
+    add_fact(connection, authority, "second_match", "orchard")
+    connection.execute("SET LOCAL ROLE oam_api")
+    scores = {row["unit_id"]: row["score"] for row in search(config)}
+    assert scores == pytest.approx(
+        {"match": 0.2 + 0.1 * math.log(1.6), "second_match": 0.2 + 0.1 * math.log(1.6)}
+    )
+
+
 def add_user_passage(connection, authority, node_id, text, mentioned_at, *, direction=1.0):
     add_fact(connection, authority, node_id, text, direction=direction)
     connection.execute(
@@ -454,15 +492,17 @@ def test_lexical_eligibility_avoids_second_unit_lookup_for_each_hit(recall_datab
     from oam.retrieval.repository import RecallRepository
 
     connection, authority = recall_database
-    for index in range(256):
+    candidate_count = 256
+    for index in range(candidate_count):
+        vocabulary = " ".join(f"term{index}n{term}" for term in range(24))
         add_fact(
             connection,
             authority,
             f"orchard{index:03d}",
-            f"Shared orchard note {index}.",
+            f"Shared orchard note {index}. {vocabulary}",
             direction=0.0,
         )
-    for table in ("search_units", "memories", "support", "passages", "evidence"):
+    for table in ("search_units", "memories", "support", "passages", "evidence", "bm25_term_stats"):
         connection.execute(f"ANALYZE {table}")
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     connection.execute("SET LOCAL ROLE oam_api")
@@ -477,22 +517,35 @@ def test_lexical_eligibility_avoids_second_unit_lookup_for_each_hit(recall_datab
     monkeypatch.setattr(repository, "_execute", capture)
     assert len(repository.lexical("shared orchard", 10)) == 10
     sql, parameters = captured[-1]
-    plan = connection.execute("EXPLAIN (ANALYZE,FORMAT JSON) " + sql, parameters).fetchone()[0][0][
-        "Plan"
-    ]
+    plan = execute("EXPLAIN (ANALYZE,FORMAT JSON) " + sql, parameters)[0]["QUERY PLAN"][0]["Plan"]
 
     def nodes(node):
         yield node
         for child in node.get("Plans", ()):
             yield from nodes(child)
 
+    # The two query terms only need their field statistics. Scanning an owner's
+    # whole vocabulary makes rare as well as common queries pay for history size.
+    term_reads = [node for node in nodes(plan) if node.get("Relation Name") == "bm25_term_stats"]
+    assert term_reads
+    assert (
+        sum(
+            (node.get("Actual Rows", 0) + node.get("Rows Removed by Filter", 0))
+            * node.get("Actual Loops", 0)
+            for node in term_reads
+        )
+        <= 32
+    )
+
+    # Posting admission can fetch each matched unit once for positional ranking.
+    # Eligibility must reuse those rows.
     assert (
         sum(
             node.get("Actual Loops", 0)
             for node in nodes(plan)
             if node.get("Index Name") == "search_units_pkey"
         )
-        == 0
+        <= candidate_count
     )
     # Ranking a common term should validate only enough supported candidates to
     # fill each term's cap, rather than every matching memory in the history.
@@ -608,7 +661,7 @@ def test_anchor_remainder_preserves_bilingual_ranking(recall_database, query, ta
     assert [row["unit_id"] for row in repository.anchors(query, 1)] == ["z_target"]
 
 
-def test_common_query_term_cannot_exhaust_partial_match_cap(recall_database):
+def test_per_term_keeps_rare_match_at_tight_cap(recall_database):
     from oam.retrieval.repository import RecallRepository
 
     connection, authority = recall_database
@@ -618,9 +671,12 @@ def test_common_query_term_cannot_exhaust_partial_match_cap(recall_database):
         add_fact(connection, authority, f"filler_{index}", "Good good good good good.")
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     connection.execute("SET LOCAL ROLE oam_api")
-    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+    request = SearchRequest(query="Zephyr good outcome", overrides={"lexical_ranking": "per_term"})
+    repository = RecallRepository(
+        connection, authority, config, request=request, deadline=time.monotonic() + 5
+    )
 
-    assert [row["unit_id"] for row in repository.lexical("Zephyr good outcome", 1)] == ["a_target"]
+    assert [row["unit_id"] for row in repository.lexical(request.query, 1)] == ["a_target"]
 
 
 def test_common_term_remains_a_bounded_candidate_source(recall_database):
@@ -648,7 +704,7 @@ def test_common_term_remains_a_bounded_candidate_source(recall_database):
         ("风扇 压力 湿度", "风扇压力升高。", ("风扇", "压力", "湿度")),
     ],
 )
-def test_partial_query_coverage_survives_repeated_single_term_competitors(
+def test_per_term_retains_partial_coverage_against_repeated_single_term_competitors(
     recall_database, query, partial, terms
 ):
     from oam.retrieval.repository import RecallRepository
@@ -667,7 +723,10 @@ def test_partial_query_coverage_survives_repeated_single_term_competitors(
     add_fact(connection, authority, "a_hidden", query, eligible=False)
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     connection.execute("SET LOCAL ROLE oam_api")
-    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
+    request = SearchRequest(query=query, overrides={"lexical_ranking": "per_term"})
+    repository = RecallRepository(
+        connection, authority, config, request=request, deadline=time.monotonic() + 5
+    )
 
     assert "z_partial" in {row["unit_id"] for row in repository.lexical(query, 2)}
 

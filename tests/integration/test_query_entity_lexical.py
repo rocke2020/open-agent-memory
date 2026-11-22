@@ -17,11 +17,8 @@ from oam.retrieval.service import RecallService
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.parametrize("ranking", ["per_term", "whole_query"])
 @pytest.mark.parametrize("query", ["Nova Research warranty", "NR warranty", "IT", "After"])
-def test_insight_candidate_pushdown_preserves_fact_backed_entity_names(
-    recall_database, ranking, query
-):
+def test_insight_candidate_pushdown_preserves_fact_backed_entity_names(recall_database, query):
     from oam.indexing.consolidation import InsightLookup
 
     class UnfilteredLookup(InsightLookup):
@@ -31,15 +28,6 @@ def test_insight_candidate_pushdown_preserves_fact_backed_entity_names(
 
     connection, authority = recall_database
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    config = config.model_copy(
-        update={
-            "search": config.search.model_copy(
-                update={
-                    "normal": config.search.normal.model_copy(update={"lexical_ranking": ranking})
-                }
-            )
-        }
-    )
     alias = query if query in {"IT", "After"} else "NR"
     name = "Information Technology" if alias in {"IT", "After"} else "Nova Research"
     definition = f"{name} is also called {alias}."
@@ -122,20 +110,32 @@ def lexical(connection, authority, config, query, mode="fast", limit=4):
     return repository.lexical(query, limit)
 
 
-@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize(
+    ("mode", "ranking", "first"),
+    [
+        ("fast", "whole_query", "z_target"),
+        # Normal's whole-query length normalization favors the shorter generic match here.
+        ("normal", "whole_query", "a_other"),
+        ("normal", "per_term", "z_target"),
+    ],
+)
 def test_supported_alias_boosts_relevant_fact_without_promoting_unrelated_entity_fact(
-    recall_database, mode
+    recall_database, mode, ranking, first
 ):
     connection, authority = recall_database
     config, _ = alias_history(connection, authority)
+    config = config.model_copy(
+        update={"search": config.search.model_copy(update={"lexical_ranking": ranking})}
+    )
     connection.execute("SET LOCAL ROLE oam_api")
 
     rows = lexical(connection, authority, config, "NR battery warranty", mode)
 
-    assert rows[0]["unit_id"] == "z_target"
-    assert rows[0]["entity_match"] is True
-    assert rows[0]["strict_match"] is False
-    assert next(row for row in rows if row["unit_id"] == "a_other")["entity_match"] is False
+    assert rows[0]["unit_id"] == first
+    by_id = {row["unit_id"]: row for row in rows}
+    assert by_id["z_target"]["entity_match"] is True
+    assert by_id["z_target"]["strict_match"] is False
+    assert by_id["a_other"]["entity_match"] is False
     assert [row["unit_id"] for row in rows].index("picnic") > 1
 
 

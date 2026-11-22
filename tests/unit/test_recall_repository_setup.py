@@ -7,6 +7,7 @@ import pytest
 from test_query_time_recall import CONFIG
 
 from oam.auth.credentials import AuthorizedUser
+from oam.config import load_config
 from oam.contracts.search import SearchRequest
 from oam.retrieval.repository import RecallRepository
 
@@ -57,14 +58,25 @@ def test_insight_lookup_only_runs_for_candidate_queries():
     assert sum("SELECT EXISTS(SELECT 1 FROM insights" in sql for sql in connection.statements) == 1
 
 
-def test_per_term_lexical_materializes_term_matches_instead_of_search_vectors():
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("source", ["config", "request"])
+def test_per_term_lexical_materializes_term_matches_instead_of_search_vectors(
+    tmp_path, mode, source
+):
     connection = RecordingConnection()
     authority = AuthorizedUser("key", "tenant", "reader", "user", frozenset({"memory:read"}))
+    config = CONFIG
+    if source == "config":
+        path = tmp_path / "override.yaml"
+        path.write_text("search:\n  lexical_ranking: per_term\n", encoding="utf-8")
+        config = load_config(path).config
     request = SearchRequest(
-        query="observatory maintenance", overrides={"lexical_ranking": "per_term"}
+        query="observatory maintenance",
+        recall_level=mode,
+        overrides={"lexical_ranking": "per_term"} if source == "request" else {},
     )
     repository = RecallRepository(
-        connection, authority, CONFIG, request=request, deadline=time.monotonic() + 5
+        connection, authority, config, request=request, deadline=time.monotonic() + 5
     )
 
     repository.lexical(request.query, 64)

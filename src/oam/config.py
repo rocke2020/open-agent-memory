@@ -13,7 +13,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    FiniteFloat,
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
@@ -102,32 +101,35 @@ class SearchTier(FrozenModel):
     context_max_tokens: PositiveInt
     entity_semantic_graph: Literal["off", "light", "full"]
     causal_graph: bool
-    lexical_ranking: Literal["per_term", "whole_query"]
     partial_match_gate: Literal["off", "user_fact_exchange"]
-    adjacent_user_context: bool
-    adjacent_user_context_max_chars: int = Field(gt=0, strict=True)
     channel_candidates: PositiveInt
     personal_evidence_candidates: NonNegativeInt = 0
     fused_candidates: PositiveInt
     temporal_nodes: PositiveInt
     source_seed_results: PositiveInt
     max_results: PositiveInt
-    rerank_candidates: PositiveInt | None = None
 
     @model_validator(mode="after")
     def validate_caps(self) -> SearchTier:
         if self.max_results > self.fused_candidates:
             raise ValueError("max_results cannot exceed fused_candidates")
-        if self.rerank_candidates and self.rerank_candidates > self.fused_candidates:
-            raise ValueError("rerank_candidates cannot exceed fused_candidates")
         return self
 
 
 class FastSearchTier(SearchTier):
-    rerank_min_score: FiniteFloat | None = None
     fact_source_bodies: Literal[
         "required", "ranked", "ranked_deduplicated", "assistant_deduplicated"
     ] = "required"
+
+
+class NormalSearchTier(SearchTier):
+    rerank_candidates: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def validate_rerank_cap(self) -> NormalSearchTier:
+        if self.rerank_candidates and self.rerank_candidates > self.fused_candidates:
+            raise ValueError("rerank_candidates cannot exceed fused_candidates")
+        return self
 
 
 class NormalArmWeights(FrozenModel):
@@ -142,6 +144,10 @@ class SearchConfig(FrozenModel):
     max_queries: PositiveInt
     query_concurrency: PositiveInt
     rrf_k: PositiveInt
+    lexical_ranking: Literal["per_term", "whole_query"]
+    adjacent_user_context: bool
+    adjacent_user_context_max_chars: int = Field(gt=0, strict=True)
+    lexical_ranker: Literal["bm25", "fts"]
     fts_rank_weights: tuple[float, float, float, float]
     query_entity_boost: float = Field(ge=0, le=1)
     normal_arm_weights: NormalArmWeights
@@ -159,7 +165,7 @@ class SearchConfig(FrozenModel):
     ann_iterative_scan: Literal["strict_order"]
     ann_scan_max_tuples: PositiveInt
     fast: FastSearchTier
-    normal: SearchTier
+    normal: NormalSearchTier
 
     @field_validator("fts_rank_weights")
     @classmethod
@@ -481,17 +487,6 @@ class OAMConfig(FrozenModel):
     export: ExportConfig
     backup: BackupConfig
     models: ModelsConfig = Field(default_factory=ModelsConfig)
-
-    @model_validator(mode="after")
-    def validate_fast_rerank(self) -> OAMConfig:
-        if self.search.fast.rerank_min_score is not None and (
-            self.models.reranker is None or self.search.fast.rerank_candidates is None
-        ):
-            raise ValueError(
-                "search.fast.rerank_min_score requires models.reranker and "
-                "search.fast.rerank_candidates"
-            )
-        return self
 
     def for_insight_source_batch(self) -> OAMConfig:
         """Apply source-batch packing limits without changing L1 or target lookup limits."""

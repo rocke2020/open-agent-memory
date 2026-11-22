@@ -287,9 +287,9 @@ async def test_insight_lexical_lookup_ranks_only_insight_hits(
             rows = execute(query, parameters, **kwargs)
             if "hits AS MATERIALIZED" in query:
                 plans.append(
-                    connection.execute(
-                        "EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters
-                    ).fetchone()[0][0]["Plan"]
+                    execute("EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters)[0]["QUERY PLAN"][
+                        0
+                    ]["Plan"]
                 )
             return rows
 

@@ -260,37 +260,3 @@ def test_final_insight_invalidation_preserves_independent_original_and_cleans_pa
     assert (
         result["diagnostics"]["l2_source_expansion"][0]["reason"] == "insight_changed_before_return"
     )
-
-
-def test_optional_reranker_receives_required_facts_and_full_originals():
-    from types import SimpleNamespace
-
-    import test_source_context
-    from test_fast_rerank import scoring_config
-
-    from oam.contracts.search import SearchRequest
-    from oam.models.runtime import Usage
-
-    Service, rows, config = service_fixture()
-    values = scoring_config(cap=8).model_dump(mode="json")
-    values["search"]["fast"].update(config.search.fast.model_dump(mode="json"))
-    values["search"]["fast"].update(
-        rerank_candidates=8, fact_source_bodies="assistant_deduplicated"
-    )
-
-    class Scorer(test_source_context.EmbeddingOnly):
-        def rerank(self, query, documents, **kwargs):
-            self.documents = documents
-            return SimpleNamespace(scores=(0.8,) * len(documents), usage=Usage(coverage="complete"))
-
-    service = Service(rows, config=type(config).model_validate(values))
-    service.models = Scorer()
-    result = service.search(
-        object(), SearchRequest(query="Which workshop did I miss?", recall_level="fast")
-    )
-    assert any(
-        rows[0]["text"] in text and rows[2]["text"] in text for text in service.models.documents
-    )
-    assert rows[0]["text"] not in result["context"]
-    assert rows[2]["text"] in result["context"]
-    assert result["diagnostics"]["rerank"]["status"] == "applied"

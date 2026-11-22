@@ -241,6 +241,36 @@ def _rank_queries(terms: QueryTerms, parameters: dict) -> tuple[str, str, str, s
     return candidate, primary, full, term_queries
 
 
+def _bm25_candidate_ctes(candidates: tuple[tuple[str, str], ...]) -> str:
+    # Use the same PostgreSQL dictionaries and parameters as the candidate tsquery.
+    lexemes = " || ".join(
+        f"tsvector_to_array(to_tsvector('{configuration}',%(candidate_{index})s))"
+        for index, (configuration, _) in enumerate(candidates)
+    )
+    return f"""
+        , requested_lexemes AS MATERIALIZED (
+            SELECT q.lexeme,oam_bm25_term_key(q.lexeme) AS term_key
+            FROM (SELECT DISTINCT unnest({lexemes}) AS lexeme) q
+        ), term_weights AS MATERIALIZED (
+            SELECT t.term_key,t.field,
+                (%(weights)s::float8[])[t.field]
+                    * ln(1.0 + (s.n - t.df + 0.5) / (t.df + 0.5))::float8 AS weight,
+                s.total_length::float8 / s.n AS avgdl
+            FROM requested_lexemes q JOIN bm25_term_stats t
+              ON t.term_key=q.term_key AND t.lexeme=q.lexeme
+            JOIN bm25_corpus_stats s USING (tenant_id,user_id,field)
+            WHERE (t.tenant_id,t.user_id)=(%(ann_tenant)s,%(ann_user)s)
+        ), bm25_hits AS MATERIALIZED (
+            SELECT p.unit_id,
+                sum(w.weight * p.tf * 2.2 / (p.tf + 1.2 * (0.25 + 0.75*p.length/w.avgdl)))
+                    AS score
+            FROM term_weights w JOIN bm25_postings p
+              ON (p.tenant_id,p.user_id,p.term_key,p.field)
+               = (%(ann_tenant)s,%(ann_user)s,w.term_key,w.field)
+            GROUP BY p.unit_id
+        )"""
+
+
 class RecallRepository:
     def __init__(
         self,
@@ -507,26 +537,30 @@ class RecallRepository:
                 )
             candidates = (("simple", query),)
             terms = QueryTerms(candidates, candidates, ())
-        request = self.request or SearchRequest(query=query)
-        whole_query = fallback or (
-            request.search_tier(self.config).lexical_ranking == "whole_query"
-        )
+        request = self.request
+        settings = request.search_settings(self.config) if request else self.config.search
+        whole_query = fallback or settings.lexical_ranking == "whole_query"
         if whole_query:
             parameters["normalization"] = (
                 LEXICAL_DOCUMENT_LENGTH_NORMALIZATION
-                if self.request is not None
-                and request.recall_level.value == "normal"
-                and not fallback
+                if request is not None and request.recall_level.value == "normal" and not fallback
                 else LEXICAL_WHOLE_QUERY_NORMALIZATION
             )
         candidate, primary, full, term_queries = _rank_queries(terms, parameters)
         if fallback:
             candidate = primary = full = _tsquery(candidates, "&&", parameters, "fallback")
         lexical_vector = "u.lexical" if fallback else "u.lexical_bilingual"
+        bm25 = not fallback and self.config.search.lexical_ranker == "bm25"
+        bm25_prefix = _bm25_candidate_ctes(candidates) if bm25 else ""
         entity_prefix = ""
         entity_match = "false"
-        hits_source = "search_units u"
         hits_predicate = f"{lexical_vector} @@ q.candidate"
+        hits_source = "search_units u"
+        if bm25:
+            hits_source += (
+                " JOIN bm25_hits bm ON (u.tenant_id,u.user_id,u.unit_id)"
+                "=(%(ann_tenant)s,%(ann_user)s,bm.unit_id)"
+            )
         if entity_names:
             parameters["query_entities"] = sorted({row["entity_id"] for row in entity_names})
             memberships = ELIGIBLE_ENTITY_MEMBERSHIPS.replace(
@@ -543,17 +577,34 @@ class RecallRepository:
                 + ") eligible_memberships)"
             )
             entity_match = "u.unit_id IN (SELECT unit_id FROM query_entity_units)"
+            lexical_ids = (
+                "SELECT unit_id FROM bm25_hits"
+                if bm25
+                else (
+                    "SELECT u.unit_id FROM search_units u,queries q WHERE "
+                    "u.tenant_id=current_setting('oam.tenant_id',true) "
+                    "AND u.user_id=current_setting('oam.user_id',true) "
+                    f"AND {self.lexical_candidate_predicate} AND {hits_predicate}"
+                )
+            )
             entity_prefix += (
-                ", lexical_candidate_ids AS MATERIALIZED ("
-                "SELECT u.unit_id FROM search_units u,queries q WHERE "
-                "u.tenant_id=current_setting('oam.tenant_id',true) "
-                "AND u.user_id=current_setting('oam.user_id',true) "
-                f"AND {self.lexical_candidate_predicate} "
-                f"AND {lexical_vector} @@ q.candidate "
+                f", lexical_candidate_ids AS MATERIALIZED ({lexical_ids} "
                 "UNION SELECT unit_id FROM query_entity_units)"
             )
-            hits_source = "lexical_candidate_ids ids JOIN search_units u ON u.unit_id=ids.unit_id"
-            hits_predicate = "true"
+            hits_source = (
+                "lexical_candidate_ids ids JOIN search_units u "
+                "ON (u.tenant_id,u.user_id,u.unit_id)"
+                "=(%(ann_tenant)s,%(ann_user)s,ids.unit_id)"
+            )
+            if bm25:
+                hits_source += " LEFT JOIN bm25_hits bm ON bm.unit_id=ids.unit_id"
+                hits_predicate = f"({hits_predicate} OR {entity_match})"
+            else:
+                hits_predicate = "true"
+        cover_density = (
+            f"ts_rank_cd(%(weights)s::float4[],{lexical_vector},q.candidate,%(normalization)s)"
+        )
+        partial_score = f"coalesce(bm.score,0) + 2.0 * {cover_density}" if bm25 else cover_density
         score = "u.partial_score*(1+%(entity_boost)s*u.entity_match::int)"
         # Order matches before checking support so a common term does not
         # validate the entire history. Eligibility still precedes every cap.
@@ -575,13 +626,12 @@ class RecallRepository:
         hits_sql = (
             "WITH queries AS (SELECT "
             f"{candidate} AS candidate,{primary} AS primary,{full} AS full)"
-            f"{entity_prefix}{term_prefix}, hits AS MATERIALIZED "
+            f"{bm25_prefix}{entity_prefix}{term_prefix}, hits AS MATERIALIZED "
             "(SELECT u.tenant_id,u.user_id,u.unit_id,u.kind,u.origin,"
             "u.source_id,u.source_version,u.evidence_id,u.passage_id,u.memory_id,"
             "u.insight_id,u.insight_revision,u.generation_id,"
             f"{term_matches}u.mentioned_at,"
-            f"ts_rank_cd(%(weights)s::float4[],{lexical_vector},q.candidate,"
-            "%(normalization)s) AS partial_score,"
+            f"{partial_score} AS partial_score,"
             f"{lexical_vector} @@ q.full AS full_match,"
             f"{lexical_vector} @@ q.primary AS primary_match,"
             f"({entity_match}) AS entity_match "

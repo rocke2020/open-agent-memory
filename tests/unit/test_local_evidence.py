@@ -7,6 +7,7 @@ from copy import deepcopy
 import pytest
 from test_source_context import CONFIG, SourceRepository, SourceService
 
+from oam.config import load_config
 from oam.contracts.search import SearchRequest
 from oam.retrieval import context
 from oam.retrieval.context import assemble_context, context_token_count, render_context
@@ -240,9 +241,7 @@ def test_source_window_cannot_bypass_omission_when_no_boundary_fits():
             yield RankedRepository(request, self.rows, {})
 
     values = CONFIG.model_dump(mode="json")
-    values["search"]["fast"].update(
-        adjacent_user_context=True, adjacent_user_context_max_chars=1000
-    )
+    values["search"]["adjacent_user_context"] = True
     result = RankedService(
         [root, support, neighbor], config=type(CONFIG).model_validate(values)
     ).search(object(), SearchRequest(query="history", recall_level="fast"))
@@ -265,9 +264,8 @@ def test_omitted_fact_does_not_make_a_rejected_neighbor_an_independent_original(
             yield RankedRepository(request, self.rows, {})
 
     values = CONFIG.model_dump(mode="json")
-    values["search"]["fast"].update(
-        adjacent_user_context=True, adjacent_user_context_max_chars=1000, context_max_tokens=1500
-    )
+    values["search"]["adjacent_user_context"] = True
+    values["search"]["fast"]["context_max_tokens"] = 1500
     result = RankedService(
         [root, oversized, support, neighbor], config=type(CONFIG).model_validate(values)
     ).search(object(), SearchRequest(query="history", recall_level="fast"))
@@ -370,14 +368,16 @@ def test_excerpt_metadata_is_visible_in_both_renderings_and_recorded_replay(monk
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize(
-    ("limit", "before_text", "after_text"),
+    ("source", "limit", "before_text", "after_text"),
     [
-        (10, "Previous.", "Next."),
-        (20, "Previous. Previous.", "Next. Next. Next."),
+        ("default", 1000, ("Previous. " * 100).strip(), ("Next. " * 166).strip()),
+        ("config", 10, "Previous.", "Next."),
+        ("request", 20, "Previous. Previous.", "Next. Next. Next."),
     ],
+    ids=["default", "config", "request"],
 )
 def test_configured_neighbor_cap_reaches_the_actual_recall_context(
-    mode, limit, before_text, after_text
+    mode, source, limit, before_text, after_text
 ):
     support = original("support", 4)
     support["text"] = "Required source stays complete. " * 100
@@ -394,16 +394,17 @@ def test_configured_neighbor_cap_reaches_the_actual_recall_context(
         def _repository(self, authority, request, deadline):
             yield RankedRepository(request, self.rows, {})
 
-    values = CONFIG.model_dump(mode="json")
-    values["search"][mode].update(
-        partial_match_gate="off",
-        adjacent_user_context=True,
-        adjacent_user_context_max_chars=limit,
-    )
+    values = load_config("configs/oam.yaml").config.model_dump(mode="json")
+    values["search"][mode]["partial_match_gate"] = "off"
+    if source == "config":
+        values["search"]["adjacent_user_context_max_chars"] = limit
     config = type(CONFIG).model_validate(values)
-    result = RankedService([root, support, before, after], config=config).search(
-        object(), SearchRequest(query="history", recall_level=mode)
+    request = SearchRequest(
+        query="history",
+        recall_level=mode,
+        overrides={"adjacent_user_context_max_chars": limit} if source == "request" else {},
     )
+    result = RankedService([root, support, before, after], config=config).search(object(), request)
     selected = {row["unit_id"]: row for row in result["items"]}
     assert selected["support"]["text"] == support["text"]
     assert "excerpt" not in selected["support"]
@@ -413,6 +414,7 @@ def test_configured_neighbor_cap_reaches_the_actual_recall_context(
         assert len(selected[identity]["text"]) <= limit
         assert "excerpt" in selected[identity]
     assert result["diagnostics"]["local_context"]["adjacent_user_context_max_chars"] == limit
+    assert result["diagnostics"]["search_config"]["adjacent_user_context_max_chars"] == limit
 
 
 def test_partial_matches_require_the_actual_user_fact_exchange():
@@ -594,9 +596,8 @@ def test_direct_lexical_assistant_first_original_reaches_context_without_a_user_
     neighbor = original("neighbor", 1, "assistant")
     neighbor["locator"] = neighbor["citations"][0]
     values = CONFIG.model_dump(mode="json")
-    values["search"][mode].update(
-        partial_match_gate="user_fact_exchange", adjacent_user_context=False
-    )
+    values["search"]["adjacent_user_context"] = False
+    values["search"][mode]["partial_match_gate"] = "user_fact_exchange"
     result = sparse_service(
         [passage, claim, neighbor], ["opening", "derived"], type(CONFIG).model_validate(values)
     ).search(object(), SearchRequest(query="What is the dome made of?", recall_level=mode))
@@ -612,9 +613,8 @@ def test_weaker_lexical_assistant_originals_still_need_a_local_witness(mode):
     for row in (first, second):
         row["locator"] = row["citations"][0]
     values = CONFIG.model_dump(mode="json")
-    values["search"][mode].update(
-        partial_match_gate="user_fact_exchange", adjacent_user_context=False
-    )
+    values["search"]["adjacent_user_context"] = False
+    values["search"][mode]["partial_match_gate"] = "user_fact_exchange"
     result = sparse_service(
         [first, second], ["first", "second"], type(CONFIG).model_validate(values)
     ).search(object(), SearchRequest(query="Recall the source description", recall_level=mode))
@@ -631,9 +631,8 @@ def test_lexical_original_fallback_skips_facts_resources_and_invalid_roles(mode)
         row["locator"] = row["citations"][0]
     claim = fact("claim", first)
     values = CONFIG.model_dump(mode="json")
-    values["search"][mode].update(
-        partial_match_gate="user_fact_exchange", adjacent_user_context=False
-    )
+    values["search"]["adjacent_user_context"] = False
+    values["search"][mode]["partial_match_gate"] = "user_fact_exchange"
     result = sparse_service(
         [claim, resource, invalid, first, second],
         ["claim", "resource", "invalid", "first", "second"],
@@ -653,9 +652,8 @@ def test_direct_lexical_original_needs_no_dense_fact_witness(mode, chunks, locat
     reply["locator"] = reply["citations"][0]
     claim = fact("claim", user)
     values = CONFIG.model_dump(mode="json")
-    values["search"][mode].update(
-        partial_match_gate="user_fact_exchange", adjacent_user_context=False
-    )
+    values["search"]["adjacent_user_context"] = False
+    values["search"][mode]["partial_match_gate"] = "user_fact_exchange"
     config = type(CONFIG).model_validate(values)
     result = sparse_service([user, reply, claim], ["user", "reply", "claim"], config).search(
         object(),
@@ -695,11 +693,14 @@ def test_sparse_originals_keep_relevance_order_and_all_limits(
         row["locator"] = row["citations"][0]
     values = CONFIG.model_dump(mode="json")
     tier = values["search"][mode]
-    tier.update(partial_match_gate="user_fact_exchange", adjacent_user_context=False)
+    values["search"]["adjacent_user_context"] = False
+    tier["partial_match_gate"] = "user_fact_exchange"
     if limit == "channel":
         tier["channel_candidates"] = 1
     elif limit == "fusion":
-        tier.update(fused_candidates=1, max_results=1, rerank_candidates=None)
+        tier.update(fused_candidates=1, max_results=1)
+        if mode == "normal":
+            tier["rerank_candidates"] = None
     elif limit == "results":
         tier["max_results"] = 1
     elif limit == "tokens":
@@ -762,9 +763,8 @@ def test_configured_gate_reaches_the_actual_fast_context():
             yield LocalRepository(request, self.rows, self.graph_paths)
 
     values = CONFIG.model_dump(mode="json")
-    values["search"]["fast"].update(
-        partial_match_gate="user_fact_exchange", adjacent_user_context=False
-    )
+    values["search"]["adjacent_user_context"] = False
+    values["search"]["fast"]["partial_match_gate"] = "user_fact_exchange"
     config = type(CONFIG).model_validate(values)
     result = LocalService(
         [support, root, answer, later, strict, independent], config=config
@@ -864,9 +864,9 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
             yield RecoveryRepository(request, self.rows, {})
 
     values = CONFIG.model_dump(mode="json")
+    values["search"]["adjacent_user_context"] = False
     values["search"][mode].update(
         partial_match_gate="user_fact_exchange",
-        adjacent_user_context=False,
         context_max_tokens=context_token_count(render_context([root, support, bulky])),
     )
     result = RecoveryService(
@@ -948,9 +948,9 @@ def test_late_companion_support_remains_recoverable_when_its_bundle_does_not_fit
 
     values = CONFIG.model_dump(mode="json")
     cap = context_token_count(render_context([anchor, support, bulky]))
+    values["search"]["adjacent_user_context"] = False
     values["search"]["fast"].update(
         partial_match_gate="user_fact_exchange",
-        adjacent_user_context=False,
         context_max_tokens=cap,
     )
     result = RecoveryService(
@@ -1001,9 +1001,9 @@ def test_recovery_shares_one_ranked_cap_and_reuses_cached_originals(gate):
             yield RecoveryRepository(request, self.rows, {})
 
     values = CONFIG.model_dump(mode="json")
+    values["search"]["adjacent_user_context"] = False
     values["search"]["fast"].update(
         partial_match_gate=gate,
-        adjacent_user_context=False,
         source_seed_results=36,
         context_max_tokens=18000,
     )

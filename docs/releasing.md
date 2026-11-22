@@ -54,6 +54,8 @@ npm --prefix integrations/dsh test
 
 Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.2.0, apply migrations 0038 and 0039 to an isolated v0.1.0 database and verify that existing indexes remain usable. Exercise Profile policy and custom generation, shared Insight windows, and recall overrides against the [changed-surface criteria](acceptance.md#11-v020-changed-surface-checks).
 
+Apply the [changed-surface criteria for the upcoming release](acceptance.md#12-upcoming-release-changes-to-recall) and verify the [migration 0040 upgrade](operations.md#3-bootstrap-and-credentials) on existing indexed data. For the historical v0.1.0 release, use its [tagged acceptance criteria](https://github.com/rocke2020/open-agent-memory/blob/v0.1.0/docs/acceptance.md#10-v010-changed-surface-checks) and [upgrade instructions](releases/0.1.0.md#upgrade).
+
 Use a task-owned PostgreSQL/pgvector instance and synthetic users for release checks. Never select persistent personal/evaluation databases. Keep historical benchmark evidence unchanged; a release smoke test is not a fresh LME-500 or BEAM-10M evaluation. [Acceptance](acceptance.md) and the version's release record define the measured scope and outstanding limits.
 
 ## 3. Prepare artifacts

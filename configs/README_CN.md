@@ -66,7 +66,18 @@
 
 每个已执行的通道为候选贡献 `weight / (search.rrf_k + rank)`，其中排名从 1 开始。当前 normal 模式中，词法、直接向量和时间通道的权重为 `1.0`，图检索通道为 `0.1`。在排名相同时，图检索的贡献是直接向量或词法检索的十分之一。被多个通道找到的候选会累加各通道的贡献。可选的 normal 模式重排在融合之后执行。
 
-Fast 召回为各通道使用相同权重，即使启用了图扩展也是如此；它不使用 `normal_arm_weights`，其默认的 null `rerank_candidates` 会跳过模型评分。图权重 `0.1` 既不是相似度阈值，也不表示图结果占 10% 的配额。
+Fast 召回为各通道使用相同权重，即使启用了图扩展也是如此。Fast 始终跳过模型重排。图权重 `0.1` 既不是相似度阈值，也不表示图结果占 10% 的配额。
+
+`search.lexical_ranker` 对 fast 和 normal 召回默认使用 `bm25`，以用户范围内的 BM25 得分加上两倍的词项邻近度得分（cover density）对普通全文匹配排序。设置为 `fts` 时仅使用词项邻近度。两种设置都通过 `search.fts_rank_weights` 配置正文、图注、标题层级和文档标题的权重，并沿用相同的排序模式和候选上限。PostgreSQL 在两种设置下都会维护 BM25 索引数据。[索引与检索](../docs/indexing-retrieval.md#6-candidate-retrieval-and-ranking)
+
+`search.lexical_ranking` 对两种召回模式均默认为 `whole_query`，将命中任一所选查询词项的候选统一排序。设为 `per_term` 时，每个词项分别排序后再融合。两种模式也默认启用相邻用户上下文，每段可选相邻原文最多保留 1,000 个字符。升级运维 YAML 时，从 `fast` 和 `normal` 中移除这三个字段，并在 `search` 下设置所需的共享值。单次请求的 `overrides` 对象也可以覆盖这三个字段。
+
+```yaml
+search:
+  lexical_ranking: whole_query
+  adjacent_user_context: true
+  adjacent_user_context_max_chars: 1000
+```
 
 ## 4. 为什么已测试的配置关闭语义图扩展和因果扩展
 
@@ -130,23 +141,25 @@ Normal 召回启用实体及别名扩展，图融合权重为 `0.1`。语义链�
 
 召回诊断将选定的 `entity_semantic_graph` 值记录为 `graph`，并同时报告 `causal_graph` 和 `executed_arms`；检查这些字段可以区分已配置的路径与实际执行的通道。实现入口：[召回服务](../src/oam/retrieval/service.py)、[图检索仓储](../src/oam/retrieval/repository.py)、[语义链接构建](../src/oam/indexing/links.py)、[提取](../src/oam/indexing/extraction.py)和[配置模型](../src/oam/config.py)。
 
-## 6. 可选的 fast 评分
+### 5.1. 部分匹配筛选
 
-Fast 还支持实验性的 `search.fast.fact_source_bodies` 策略。默认值 `required` 在启用 chunks 时保留每个已选事实的完整来源正文。`ranked` 验证相同的完整持久化来源，保留完整事实、真实引用和来源信息，但完整正文必须在恢复和局部证据筛选后，作为独立且合格的原文候选参与竞争。引用所属来源的扩展、仅来源细节和附属可选邻居不会单独插入正文。完整 Insight 组、normal 和 `include.chunks:false` 保持原有行为。只作为事实支持的原文可能含有有用但未被引用的细节，这些细节可能丢失；采用前应按实际负载验证。可选 fast 评分和最终组装使用相同表示，去重仍依据完整且已验证的支持证据。
+Fast 的 `search.fast.partial_match_gate` 默认为 `user_fact_exchange`，在组装返回的上下文前筛除相关性证据较弱的对话候选。Normal 的 `search.normal.partial_match_gate` 默认为 `"off"`，保留更广的候选范围供上下文选择。两种模式均支持这两个值。[默认配置](oam.yaml)
 
-实验值 `assistant_deduplicated` 先完成普通 required 策略的准入、生命周期检查和 token 修剪，再仅移除由助手来源支持、未截断且冗余的事实：其对应的精确完整原文必须已经选中，时间证据完全一致，且不会丢失别名信息。保留全部原文、用户／混合／未知来源事实及 Insight 必需成员。此策略保留准入和条目顺序，不补入其他候选，不改变重排输入；若精确 token 数反而增加，则回退到完整 required 表示。Normal、关闭 chunks 和默认 required 的行为不变。被移除事实的 ID 记录于 `diagnostics.context_budget.assistant_deduplicated_fact_ids`；此实验策略没有通用准确率保证。
+假设查询是“我付过研讨会的费用吗？”。一条排名靠后的助手回复讲的是如何报名，也可能因为包含“研讨会”而被召回。如果这条回复仅属于部分词项匹配，并且向量检索没有找到引用同一对话版本中紧邻其前的那条用户消息的事实，筛选就可以将它排除，为付款证据留出空间。筛除一条派生事实，还可能省下该事实所需来源原文占用的空间。
+
+间接匹配的助手原文可通过同一轮问答的证据取得准入资格，条件是限定范围内的向量检索结果同时包含一条由用户消息支持的事实，以及该事实所引用的确切用户原文。直接向量命中、严格词项匹配、通过词项检索直接命中的用户原文，以及词项候选中排名第一且符合条件的对话原文，都可以独立通过筛选。上下文预算和必需支持仍按原有规则处理。[局部证据逻辑](../src/oam/retrieval/local_context.py) · [召回选择](../src/oam/retrieval/service.py)
+
+Fast 默认启用该筛选，以提高上下文预算的使用效率。此前对同一组 13 道题进行 Fast 对照测试时，开启筛选后，渲染后的上下文 token 数减少了 34.1%，保留的跟踪证据段落从 9/16 增至 12/16。平均检索延迟接近，开启时约为 410 毫秒，关闭时约为 412 毫秒。单次请求可查看 `diagnostics.local_context.gate_status` 和 `diagnostics.local_context.filtered_roots`，确认筛选是否执行以及移除了多少候选。
+
+## 6. Fast 来源正文与 Normal 重排
+
+Fast 还支持实验性的 `search.fast.fact_source_bodies` 策略。默认值 `required` 在启用 chunks 时保留每个已选事实的完整来源正文。`ranked` 验证相同的完整持久化来源，保留完整事实、真实引用和来源信息，但完整正文必须在恢复和局部证据筛选后，作为独立且合格的原文候选参与竞争。引用所属来源的扩展、仅来源细节和附属可选邻居不会单独插入正文。完整 Insight 组、normal 和 `include.chunks:false` 保持原有行为。只作为事实支持的原文可能含有有用但未被引用的细节，这些细节可能丢失；采用前应按实际负载验证。去重依据完整且已验证的支持证据。
+
+实验值 `assistant_deduplicated` 先完成普通 required 策略的准入、生命周期检查和 token 修剪，再仅移除由助手来源支持、未截断且冗余的事实：其对应的精确完整原文必须已经选中，时间证据完全一致，且不会丢失别名信息。保留全部原文、用户／混合／未知来源事实及 Insight 必需成员。此策略保留准入和条目顺序，不补入其他候选。若精确 token 数反而增加，则回退到完整 required 表示。Normal、关闭 chunks 和默认 required 的行为不变。被移除事实的 ID 记录于 `diagnostics.context_budget.assistant_deduplicated_fact_ids`；此实验策略没有通用准确率保证。
 
 实验值 `ranked_deduplicated` 使用相同的 ranked 准入，仅当精确来源定位与唯一引用均有效、全部时间证据一致且不丢失别名证据时，用已选中的完整原文替换普通事实。节选和截断原文不能替代事实。原文保留其来源组的相关性位置及完整文本；未匹配事实与 Insight 必需支持保持不变。去重仅释放渲染 token 空间，仍预留原有的 learned/original 池配额。`diagnostics.context_budget.source_deduplicated_fact_ids` 记录替换事实。此策略没有已测得的准确率保证。
 
-Fast 评分要求运营者配置具有 `rerank` 能力的 `models.reranker`，且 fast 预设或请求覆盖中的生效 `rerank_candidates` 为正数；两者默认均为 null。仅配置绑定不会让 fast 发起评分调用。模型名称原样传递。Normal 保留原有的早期评分路径。
-
-Fast 上限按来源扩展及局部证据筛选后、原有顺序中的不同合格准入根候选计数。默认 required 策略下，普通事实取两种评分的较小值：完整来源支持组，以及带真实引用、说话者与时间归属的事实自身表示。Ranked 策略下，两种视图均使用含真实引用与元数据的完整投影事实；相同文档共用一次评分。这防止弱相关事实仅凭有用的来源正文获得高分。Insight 保留完整组评分，独立原文单独评分。上限内所属候选的可选原文分别评分，同一请求内相同输入复用评分。必需支持不会被独立过滤。文档数可超过根候选上限，其中每个事实最多多出一个不同的声明文档。超出上限且未评分的根候选会明确省略。
-
-`search.fast.rerank_min_score` 默认为 null，仅排序而不过滤。有限数值还会移除低于该供应商评分门槛的根候选及可选原文；必须同时配置 fast 上限和重排绑定。分数是不透明的有限值，可以为负。Normal 不接受此 fast 专用字段。运营者负责选择并验证评分器、门槛、输入覆盖和实际延迟；产品不提供通用门槛。适配器接收完整原始查询及完整选定组表示，客户端不截断；供应商必须支持这些输入。
-
-Fast 评分成功后按分数降序排列保留根候选，同分保持原顺序，再应用现有上下文和条目上限。可选原文只有在所属候选保留且通过已配置门槛时才保留。全部候选可能被过滤，返回空上下文。严格模式下评分失败会使召回失败；只有允许的评分器错误才可在 `allow_partial` 下保留评分前完全相同的顺序和成员，并报告降级。超时仍遵循绝对截止时间。外部评分请求前关闭数据库事务，请求后重新检查 generation、解析完整性及来源策略。
-
-`diagnostics.rerank` 报告状态、是否应用评分、根候选上限、候选／文档／已评分／接受／拒绝数量、实际门槛，以及根候选与可选原文的省略原因。`fact_score_method: min_group_unit` 标识组合事实分数；分数降低不保证最终上下文更小，因为装入顺序可能变化。成功但全部过滤时报告 `status: applied` 与 `accepted: 0`；`status: empty` 表示没有派发合格评分输入。计时、模型用量和追踪决策保留原有位置。这些诊断说明选择过程，不构成准确率保证。
+Normal 可配置具有 `rerank` 能力的 `models.reranker`，在组装上下文前对融合后的候选文本评分。`search.normal.rerank_candidates` 默认为 48。上限设为 null 时，对融合后的有界候选列表全部评分。模型绑定设为 null 时按融合相关性排序。Fast 跳过模型重排。升级时，从运维 YAML 和 Fast 请求覆盖中移除 `search.fast.rerank_candidates` 和 `search.fast.rerank_min_score` 对应的字段。
 
 ## 7. 时间遍历预算与请求覆盖
 
@@ -160,6 +173,6 @@ search:
     temporal_nodes: 300
 ```
 
-单次召回可传入 `"recall_level": "fast", "overrides": {"temporal_nodes": 300}`。同一对象也可覆盖所选预设的其他字段；未指定字段继承配置。合并后的值复用现有校验，包括候选上限关系和重排器要求；支持 null 的字段可显式清空。未知字段或无效组合会在检索 I/O 前被拒绝。旧的非 null `fast_graph` 选项优先于 `overrides.entity_semantic_graph`。直接、批量和规划召回均保留覆盖值；响应的 `diagnostics.search_config` 记录生效预设。
+单次召回可传入 `"recall_level": "fast", "overrides": {"temporal_nodes": 300}`。同一对象也可覆盖所选预设的其他字段；未指定字段继承配置。合并后的值复用现有校验，包括候选上限关系；支持 null 的字段可显式清空。未知字段或无效组合会在检索 I/O 前被拒绝。旧的非 null `fast_graph` 选项优先于 `overrides.entity_semantic_graph`。直接、批量和规划召回均保留覆盖值。响应的 `diagnostics.search_config` 记录生效预设和共享召回设置。
 
 原共享字段 `search.temporal_nodes` 已移除。要保留旧共享值 N 的行为，将其移至 `search.normal.temporal_nodes`，并把 `search.fast.temporal_nodes` 设为 N 与旧 fast `max_results` 的较小值。新配置可独立设置遍历预算和结果限制。本次仅改变召回配置，无需重建索引。

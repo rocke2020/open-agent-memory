@@ -66,36 +66,6 @@ def test_ranked_fact_sources_still_validate_complete_persisted_support(evidence_
     assert result["diagnostics"]["context_budget"]["source_omitted_ids"] == ["fact"]
 
 
-@pytest.mark.parametrize("degraded", [False, True])
-def test_ranked_source_projection_matches_fast_scoring_and_degraded_output(evidence_rows, degraded):
-    from test_fast_rerank import Scorer, scoring_config
-
-    class Repository(SourceRepository):
-        def lexical(self, query, limit):
-            return [{"unit_id": "fact"}]
-
-    class Service(SourceService):
-        @contextmanager
-        def _repository(self, authority, request, deadline):
-            yield Repository(request, self.rows, {})
-
-    evidence_rows[2]["text"] += " Unrelated background retained only in the complete original."
-    values = scoring_config().model_dump(mode="json")
-    values["search"]["fast"]["fact_source_bodies"] = "ranked"
-    service = Service(evidence_rows, config=type(CONFIG).model_validate(values))
-    scorer = Scorer([0.8], error=RuntimeError("unavailable") if degraded else None)
-    service.models = scorer
-    result = service.search(
-        object(),
-        SearchRequest(query="Which workshop did I miss?", recall_level="fast", allow_partial=True),
-    )
-    assert len(scorer.calls[0][1]) == 1
-    assert "Unrelated background" not in scorer.calls[0][1][0]
-    assert [row["unit_id"] for row in result["items"]] == ["fact"]
-    assert "Unrelated background" not in result["context"]
-    assert result["diagnostics"]["rerank"]["status"] == ("degraded" if degraded else "applied")
-
-
 def pack(candidates, groups, *, sources=(), optional=None, chunks=True, limit=18000):
     return assemble_context(
         candidates,

@@ -31,10 +31,14 @@ def test_search_overrides_customize_selected_preset_without_mutating_defaults():
         {"max_results": 129},
         {"models": {}},
         {"normal_deadline_seconds": 600},
+        {"lexical_ranking": "invalid"},
+        {"lexical_ranking": None},
+        {"adjacent_user_context_max_chars": True},
+        {"rerank_candidates": 2},
         {"rerank_min_score": 0.5},
     ],
 )
-def test_invalid_preset_overrides_fail_before_retrieval(overrides):
+def test_invalid_search_overrides_fail_before_retrieval(overrides):
     config = load_config("configs/oam.yaml").config
     request = SearchRequest(query="events", recall_level="fast", overrides=overrides)
 

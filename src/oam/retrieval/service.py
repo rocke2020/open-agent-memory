@@ -14,7 +14,7 @@ import httpx
 import psycopg
 
 from oam.auth.credentials import AuthorizedUser
-from oam.config import FastSearchTier, OAMConfig
+from oam.config import FastSearchTier, NormalSearchTier, OAMConfig
 from oam.contracts.search import SearchRequest, TimeBasis
 from oam.quotes import unique_quote
 from oam.retrieval.algorithms import (
@@ -32,7 +32,6 @@ from oam.retrieval.context import (
     bundle_items,
     context_token_count,
     render_context,
-    represent_group,
     source_diverse_seed_order,
     source_window_excerpts,
     source_window_ids,
@@ -145,6 +144,7 @@ class RecallService:
         trace_id = f"trace_{uuid4().hex}"
         mode = request.recall_level.value
         tier = request.search_tier(self.config)
+        settings = request.search_settings(self.config)
         graph = tier.entity_semantic_graph
         causal_graph = tier.causal_graph
         deadline = started + getattr(self.config.recall, f"{mode}_deadline_seconds")
@@ -476,7 +476,7 @@ class RecallService:
                 )
             return identifiers
 
-        if mode != "fast" and self.config.models.reranker is not None:
+        if isinstance(tier, NormalSearchTier) and self.config.models.reranker is not None:
             validate_paths()
             rows = read("hydrate", fused_ids())[: tier.rerank_candidates]
             if rows:
@@ -1172,7 +1172,7 @@ class RecallService:
                 group for group in evidence_groups if group[0]["unit_id"] in allowed_ids
             ]
         optional_context = {}
-        if tier.adjacent_user_context and chunks and source_ids:
+        if settings.adjacent_user_context and chunks and source_ids:
             required_originals = {
                 group[0]["unit_id"]: {
                     row["unit_id"] for row in group if row["kind"] in ORIGINAL_KINDS
@@ -1193,7 +1193,7 @@ class RecallService:
                     item,
                     locators,
                     available_originals,
-                    max_chars=tier.adjacent_user_context_max_chars,
+                    max_chars=settings.adjacent_user_context_max_chars,
                 )
             # Window discovery cannot return a rejected neighbor as a full body.
             # Independently selected originals still compete in packing_candidates.
@@ -1205,144 +1205,12 @@ class RecallService:
         }
         for owner, originals in recovered_user_context.items():
             optional_context.setdefault(owner, []).extend(originals)
-        if tier.partial_match_gate != "off" or tier.adjacent_user_context:
+        if tier.partial_match_gate != "off" or settings.adjacent_user_context:
             timing["local_context_selection"] = (time.monotonic() - selection_started) * 1000
             executed.append("local_context_selection")
         if admission_source_bodies != "required":
             source_passages = []
             optional_context = {}
-        fast_rerank = {
-            "status": "disabled",
-            "applied": False,
-            "root_cap": None,
-            "candidates": 0,
-            "documents": 0,
-            "scored": 0,
-            "accepted": 0,
-            "rejected": 0,
-            "min_score": None,
-            "omitted_ids": [],
-            "omission_reasons": {},
-            "optional_omissions": [],
-        }
-        rerank_omissions = {}
-        if mode == "fast" and self.config.models.reranker is not None and tier.rerank_candidates:
-            groups = {group[0]["unit_id"]: group for group in evidence_groups}
-            roots = {}
-            for item in (*packing_candidates, *source_passages):
-                if (chunks or item["kind"] not in ORIGINAL_KINDS) and (
-                    item["kind"] in ORIGINAL_KINDS or item["unit_id"] in groups
-                ):
-                    roots.setdefault(item["unit_id"], item)
-            capped = list(roots)[: tier.rerank_candidates]
-            floor = tier.rerank_min_score if isinstance(tier, FastSearchTier) else None
-            root_texts = {
-                node: render_context(
-                    represent_group(
-                        groups.get(node, [roots[node]]), fact_source_bodies=admission_source_bodies
-                    )
-                )
-                for node in capped
-            }
-            fact_texts = {
-                node: render_context([roots[node]])
-                for node in capped
-                if roots[node]["kind"] == "fact"
-            }
-            optional_texts = {
-                node: [(item, render_context([item])) for item in optional_context.get(node, [])]
-                for node in capped
-            }
-            documents = tuple(
-                dict.fromkeys(
-                    [
-                        *root_texts.values(),
-                        *fact_texts.values(),
-                        *(text for entries in optional_texts.values() for _, text in entries),
-                    ]
-                )
-            )
-            fast_rerank.update(
-                status="empty",
-                root_cap=tier.rerank_candidates,
-                candidates=len(roots),
-                documents=len(documents),
-                min_score=floor,
-                fact_score_method="min_group_unit",
-            )
-            if documents:
-                # No transaction may span external scoring. All subsequent reads are fresh.
-                sql_phase.close()
-                shared_repository = None
-                sql_phase_ready = False
-
-                def score_fast():
-                    scored = self.models.rerank(
-                        request.query, documents, timeout_seconds=_remaining(deadline)
-                    )
-                    return scored, dict(zip(documents, scored.scores, strict=True))
-
-                scoring = stage("rerank", score_fast)
-                # External I/O can outlive source-generation or policy changes.
-                index_state = read("user_state")
-                if index_state["index_generation_id"] != initial_index_state["index_generation_id"]:
-                    raise RecallUnavailable("user generation changed during recall")
-                if index_state["parse_partial"] and not request.allow_partial:
-                    raise RecallUnavailable("PDF parse became incomplete during recall")
-                if index_state["policy_epoch"] != initial_index_state["policy_epoch"]:
-                    raise RecallUnavailable("source policy changed during recall")
-                if scoring is None:
-                    fast_rerank["status"] = "degraded"
-                else:
-                    scored, text_scores = scoring
-                    usage["rerank"] = scored.usage.model_dump(mode="json")
-                    rerank_scores = {
-                        node: min(text_scores[text], text_scores[fact_texts[node]])
-                        if node in fact_texts
-                        else text_scores[text]
-                        for node, text in root_texts.items()
-                    }
-                    kept = [
-                        node for node in capped if floor is None or rerank_scores[node] >= floor
-                    ]
-                    kept.sort(key=lambda node: -rerank_scores[node])
-                    rerank_omissions = {
-                        node: "rerank_root_cap" if node not in root_texts else "rerank_score_floor"
-                        for node in roots
-                        if node not in kept
-                    }
-                    packing_candidates = [roots[node] for node in kept]
-                    source_passages = []
-                    evidence_groups = [groups[node] for node in kept if node in groups]
-                    optional_context = {
-                        node: [
-                            item
-                            for item, text in sorted(
-                                optional_texts[node], key=lambda entry: -text_scores[entry[1]]
-                            )
-                            if floor is None or text_scores[text] >= floor
-                        ]
-                        for node in kept
-                    }
-                    fast_rerank.update(
-                        status="applied",
-                        applied=True,
-                        scored=len(capped),
-                        accepted=len(kept),
-                        rejected=len(roots) - len(kept),
-                        omitted_ids=list(rerank_omissions),
-                        omission_reasons=rerank_omissions,
-                        optional_omissions=[
-                            {
-                                "owner_unit_id": node,
-                                "unit_id": item["unit_id"],
-                                "reason": "rerank_score_floor",
-                            }
-                            for node in kept
-                            for item, text in optional_texts[node]
-                            if floor is not None and text_scores[text] < floor
-                        ],
-                    )
         packing_started = time.monotonic()
         items, budget_omissions, admitted_roots, oversized_single_fact = assemble_context(
             packing_candidates,
@@ -1373,8 +1241,7 @@ class RecallService:
             identity = diagnostic["unit_id"]
             if identity not in selected_ids:
                 diagnostic.update(
-                    status="rerank_omitted" if identity in rerank_omissions else "budget_omitted",
-                    reason=rerank_omissions.get(identity, "complete_group_exceeds_hard_limit"),
+                    status="budget_omitted", reason="complete_group_exceeds_hard_limit"
                 )
                 continue
             old = next(item for item in primary_insights if item["unit_id"] == identity)
@@ -1420,9 +1287,6 @@ class RecallService:
             timing["context_packing"] += (time.monotonic() - projection_started) * 1000
         selected_ids = {item["unit_id"] for item in items}
         omitted_by_gate = [node for node in gate_omissions if node not in selected_ids]
-        omitted_by_rerank = {
-            node: reason for node, reason in rerank_omissions.items() if node not in selected_ids
-        }
         for diagnostic in l2_diagnostics:
             if diagnostic["status"] == "included" and diagnostic["unit_id"] not in selected_ids:
                 diagnostic.update(
@@ -1464,7 +1328,6 @@ class RecallService:
                         *source_omissions,
                         *sorted(support_limit_omissions),
                         *omitted_by_gate,
-                        *omitted_by_rerank,
                     ]
                 )
             ),
@@ -1473,7 +1336,6 @@ class RecallService:
                 **dict.fromkeys(source_omissions, "missing_or_invalid_source_support"),
                 **dict.fromkeys(sorted(support_limit_omissions), "support_expansion_limit"),
                 **dict.fromkeys(omitted_by_gate, "partial_match_without_local_witness"),
-                **omitted_by_rerank,
                 **{
                     entry["unit_id"]: entry["reason"] for entry in l2_diagnostics if entry["reason"]
                 },
@@ -1487,12 +1349,16 @@ class RecallService:
             "context_tokens": context_tokens,
             "tokenizer": CONTEXT_TOKENIZER,
             "diagnostics": {
-                **({"rerank": fast_rerank} if mode == "fast" else {}),
                 "recall_level": mode,
-                "search_config": tier.model_dump(mode="json"),
+                "search_config": {
+                    **tier.model_dump(mode="json"),
+                    "lexical_ranking": settings.lexical_ranking,
+                    "adjacent_user_context": settings.adjacent_user_context,
+                    "adjacent_user_context_max_chars": settings.adjacent_user_context_max_chars,
+                },
                 "graph": graph,
                 "causal_graph": causal_graph,
-                "lexical_ranking": tier.lexical_ranking,
+                "lexical_ranking": settings.lexical_ranking,
                 "local_context": {
                     "query_entity_boost": self.config.search.query_entity_boost,
                     "query_entity_matches": len(query_entity_ids),
@@ -1521,8 +1387,8 @@ class RecallService:
                         }
                         for owner, originals in recovered_user_context.items()
                     ],
-                    "adjacent_user_context": tier.adjacent_user_context,
-                    "adjacent_user_context_max_chars": tier.adjacent_user_context_max_chars,
+                    "adjacent_user_context": settings.adjacent_user_context,
+                    "adjacent_user_context_max_chars": settings.adjacent_user_context_max_chars,
                     "window_originals": len(window_original_ids & selected_ids),
                 },
                 "generation_id": generation_id,
