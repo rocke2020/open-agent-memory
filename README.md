@@ -109,9 +109,9 @@ Recall supports **fast** and **normal** modes and returns cited context without 
 
 **Updated BEAM-10M evaluation.** OAM earns 78.23% mean rubric credit versus Hindsight's published 64.08%, with 25 more passes across 200 questions and 9.85% fewer saved context tokens. This recorded comparison uses the same evaluation protocol with different models and memory pipelines. [Results and method](docs/benchmarks.md#3-beam-10m)
 
-The release adds scheduled personal Profile refresh, custom Profiles generated on demand, and Insight consolidation across sources in a shared user window. Recall adds per-request preset overrides and optional personal-evidence selection. Upgrading from v0.1.0 requires migrations 0038 and 0039. Existing indexes are reusable.
+The release adds scheduled personal Profile refresh, custom Profiles generated on demand, and Insight consolidation across sources in a shared user window. Recall adds per-request preset overrides and optional personal-evidence selection.
 
-See the [release notes and upgrade guide](docs/releases/0.2.0.md) for verification and publication status. OpenClaw and DSH are independently versioned at 0.0.2. MCP is at 0.0.1.
+See the [release notes](docs/releases/0.2.0.md) for verification and publication status. OpenClaw and DSH are independently versioned at 0.0.2. MCP is at 0.0.1.
 
 ## Documentation & Development
 
