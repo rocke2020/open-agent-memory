@@ -81,12 +81,12 @@ search:
 
 ## 4. Why the tested presets keep both expansions off
 
-The latest LME-500 normal run, earlier LME-500 fast runs and recorded BEAM-10M run keep semantic-link and causal expansion disabled. BEAM retains entity and alias expansion; both LME presets disable graph expansion:
+The 8k Fast FTS+BM25 and 18k Normal FTS LME-500 runs disabled graph expansion. The recorded BEAM-10M run retained entity and alias expansion. All three disabled semantic-link and causal expansion. [Evaluation settings](../docs/benchmarks.md)
 
 | Evaluated workload | Recall mode | `entity_semantic_graph` | `causal_graph` | Graph expansion used |
 |---|---|---|---|---|
-| Latest LME-500 | `normal` | `"off"` | `false` | None. |
-| Earlier LME-500 | `fast` | `"off"` | `false` | None. |
+| LME-500, 8k FTS+BM25 | `fast` | `"off"` | `false` | None. |
+| LME-500, 18k FTS | `normal` | `"off"` | `false` | None. |
 | BEAM-10M | `normal` | `light` | `false` | Entity and alias only. |
 
 These configurations also disable causal indexing. They retain direct dense semantic search and lexical retrieval, temporal retrieval when applicable, original source evidence and explicit reasons preserved in fact text. Questions about causes can still retrieve those reasons directly; a stored causal edge is an additional retrieval route, not a prerequisite for answering "why."

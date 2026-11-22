@@ -105,6 +105,8 @@ The upcoming release uses PostgreSQL full-text matching and ranks ordinary match
 
 BM25 statistics count the physically indexed units for one tenant and user. PostgreSQL updates the affected postings and statistics in the same transaction as each lexical insertion, replacement or physical deletion. Scores use current statistics at read time. Withdrawn or superseded sources are immediately excluded by recall eligibility and leave the statistics at physical cleanup. Migration 0040 populates the projection from stored lexical fields without rerunning extraction or embeddings. [Lexical projection migration](../migrations/0040_bm25.sql)
 
+The November 22 LME-500 result used the BM25 plus cover-density formula through an evaluation adapter over retained indexes. It scored 476/500 with an 8,000-token Fast context cap. A fresh run against this implementation can set `search.lexical_ranker: bm25` and `search.fast.context_max_tokens: 8000`. The default Fast cap is 18,000 tokens. [Evaluation settings](benchmarks.md#1-longmemeval-s-at-8k-and-18k) · [Default configuration](../configs/oam.yaml)
+
 Both modes can attach already-discovered neighboring user passages to admitted ordinary facts when chunks are requested. `search.adjacent_user_context` is enabled by default and `search.adjacent_user_context_max_chars` defaults to 1,000 characters per optional neighbor.
 
 Fast uses fused relevance for context selection and skips model scoring. Normal can use the optional `models.reranker` binding to score hydrated candidates before source support and context assembly. `search.normal.rerank_candidates` caps the candidate batch. [Configuration guide](../configs/README.md#6-fast-source-bodies-and-normal-reranking)

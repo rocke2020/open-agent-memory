@@ -2,15 +2,49 @@
 
 ## Overview
 
-On **LongMemEval S**, OAM records **95.2% (476/500)** accuracy and averages **11,373.58 tokens of saved formatted context**, compared with Hindsight's **94.6% (473/500)** and **43,124.55 tokens**. OAM uses normal recall with an **18,000-token retrieval-context limit**. Its mean covers 497 measured contexts, and three disputed-gold cases count as incorrect in the 500-question score. [Hindsight's pinned AMB result](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
+On **LongMemEval S**, OAM's 8k Fast run with full-text search (FTS) and BM25 scored **95.2% (476/500)** with **7,989.54 mean saved context tokens**. The completed 18k Normal FTS run scored **95.6% (478/500)** with **11,375.12 mean tokens**. The 8k run used **29.8% less context on average**. Hindsight's published result was **94.6% (473/500)** with **43,124.55 mean tokens**. Each score and context mean covers all 500 questions. [Hindsight's pinned AMB result](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
 
-On **BEAM-10M**, OAM earns **78.23% mean rubric credit** and **86.0% passes**, versus Hindsight's **64.08%** and **73.5%**, with **9.85% fewer saved context tokens**. Both OAM runs use low-cost MiniMax M3.1 Flash adaptive for answering and judging and exceed the highest recorded Hindsight scores on the two datasets in AMB's published results. [Pinned AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+On **BEAM-10M**, OAM earns **78.23% mean rubric credit** and **86.0% passes**, versus Hindsight's **64.08%** and **73.5%**, with **9.85% fewer saved context tokens**. The headline OAM results on both benchmarks use MiniMax M3.1 Flash with adaptive reasoning for answering and judging. [Pinned AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
 
-Both comparisons use the same questions, references and scoring rules as the published Hindsight runs, with byte-identical answer and judge prompt templates from pinned AMB sources. The evaluations measure recorded end-to-end systems with distinct models and memory pipelines. [LongMemEval evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/lme500-20261117) · [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+Both benchmarks use the same questions, fixed references, scoring rules and answer and judge prompt templates as the published Hindsight evaluations in Agent Memory Benchmark (AMB). The results measure end-to-end systems with distinct models and memory pipelines. [OAMB results index](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md) · [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
 
-## 1. Latest LongMemEval S: 476/500 at 18k
+## 1. LongMemEval S at 8k and 18k
 
-The hard 100 contribute **83/100** and the remaining 400 contribute **393/400**, totaling **476/500**. All 500 canonical question IDs and fixed gold answers remain unchanged. There are 497 current answer/judge pairs and three explicitly carried incorrect outcomes; the latter have no newly generated context, answer or judgment. Existing completed indexes were reused without indexing.
+The November 22 run used Fast recall with an 8,000-token rendered context cap. PostgreSQL full-text search (FTS) matched evidence, and the benchmark adapter ranked ordinary matches with owner-local BM25 plus **2 × `ts_rank_cd`**. BM25 weights terms using their frequency in the owner's index and adjusts for document length. PostgreSQL cover density favors query terms that occur close together. Strict matches and exact quoted phrases or identifiers retained their existing priority, and the lexical list was fused with dense retrieval.
+
+| Measurement | Fast FTS+BM25, November 22 | Completed Normal FTS comparison |
+| --- | ---: | ---: |
+| Accepted answers | **476/500 (95.2%)** | **478/500 (95.6%)** |
+| Hard100, the preselected 100 hard questions | 83/100 | 85/100 |
+| Remaining 400 | 393/400 | 393/400 |
+| Rendered context cap | **8,000** | 18,000 |
+| Mean saved context tokens across 500 questions | **7,989.54** | 11,375.12 |
+
+Across matching IDs, eight answers passed only at 8k, ten passed only at 18k, and fourteen failed in both runs. The two recorded runs differ in recall mode, ranker and context cap. The paired 8k plain-FTS control measured retrieval and evidence visibility.
+
+### 8k retrieval and scoring
+
+| Recorded setting | Value |
+| --- | --- |
+| Dataset | Cleaned LongMemEval S at `98d7416c24c778c2fee6e6f3006e7a073259d48f`, all 500 canonical question IDs |
+| Indexed evidence | Retained L1 indexes, saved 1,024-dimensional embeddings of the full questions |
+| Lexical ranking | Whole-query FTS, BM25 `k1 = 1.2` and `b = 0.75`, plus positional cover density |
+| Candidate selection | 64 per channel, 128 fused, 36 source seeds, 96 temporal traversal nodes and up to 96 final results per pool |
+| Source evidence | Original chunks, required source bodies, `user_fact_exchange` gate for partial matches, and adjacent user context capped at 1,000 characters per neighbor |
+| Optional paths | Entity-semantic and causal graph expansion, Insights and reranking disabled. Profile omitted from recall requests. |
+| Answer and judge | MiniMax M3.1 Flash with native adaptive thinking and separate reasoning output, text responses |
+| Verdict | First usable explicit boolean, using the original golds and the pinned AMB answer and category-specific judge templates |
+| Saved context | 3,994,771 tokens across 500 contexts, range 7,693–8,000, counted with `o200k_base` |
+
+The 8k score includes two reused pilot answer/judge pairs and one judge request that produced a usable verdict on a second model route after six unusable responses. Scoring recorded 1,029 model calls and 4,998,133 reported tokens, with 325,110 reasoning tokens included in output. Whole-context relevance review covers 400 of 500 questions. Fresh indexing time, fresh indexing generation usage and billed cost were unavailable for this run. [Pinned AMB prompt templates](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/src/memory_bench/dataset/longmemeval.py)
+
+The matched retrieval check used the same 8k cap, retained indexes and query vectors in three passes per question for FTS+BM25 and plain FTS. Across the four cohorts and both all-pass and repeat-pass measurements, the highest cohort lexical p95 was **0.99×** plain FTS. The highest repeat-pass end-to-end recall p95 was **1.03×**. The first cohort used loopback HTTP and later cohorts used an in-process API route backed by PostgreSQL. Timings exclude live embedding calls.
+
+<a id="1-latest-longmemeval-s-476500-at-18k"></a>
+
+### November 17 Normal FTS archive and follow-up
+
+The November 17 archive recorded **476/500** with 497 judged contexts and three disputed-reference cases carried as incorrect. The follow-up regenerated the three missing contexts using the archived Normal FTS settings and accepted two of three answers using the original golds. The completed comparison combines those three measurements with the original 497. The settings and counts below describe the original archive. [November 17 OAMB evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/e8c92db691defccbb6768bdcb110732ab74e0311/eval_results/lme500-20261117)
 
 | Recorded setting | Value |
 | --- | --- |
@@ -53,14 +87,14 @@ These prices support describing the models as low-cost; they do not establish a 
 
 | Recorded pipeline | Accepted answers | Mean saved formatted context, `o200k_base` |
 | --- | --- | --- |
-| OAM, MiniMax M3.1 Flash answer and judge | **476/500 (95.2%)** | **11,373.58** across 497 contexts |
+| OAM Fast FTS+BM25 (8k), MiniMax M3.1 Flash answer and judge | **476/500 (95.2%)** | **7,989.54** across 500 contexts |
 | Hindsight, Gemini 3.1 Pro Preview answer and Gemini 2.5 Flash Lite judge | **473/500 (94.6%)** | **43,124.55** across 500 contexts |
 
-OAM's recorded score is 0.6 percentage points higher and its mean saved formatted context is **73.63% smaller**. To reproduce the Hindsight figure, decompress the pinned archive and count each `results[].context` with tiktoken's `o200k_base.encode_ordinary`. The 500 contexts total **21,562,274 tokens**. AMB's own `avg_context_tokens` field shows **43,624.5** with `cl100k_base`. On the same 497 question IDs with OAM contexts, Hindsight averages **43,121.55 tokens** with `o200k_base`. [Pinned AMB archive](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz) · [AMB tokenizer source](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/src/memory_bench/utils.py#L8-L14)
+OAM's 8k score is 0.6 percentage points higher and its mean saved formatted context is **81.47% smaller**. To reproduce the Hindsight figure, decompress the pinned archive and count each `results[].context` with tiktoken's `o200k_base.encode_ordinary`. The 500 contexts total **21,562,274 tokens**. AMB's own `avg_context_tokens` field shows **43,624.5** with `cl100k_base`. [Pinned AMB archive](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz) · [AMB tokenizer source](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/src/memory_bench/utils.py#L8-L14)
 
 The pinned AMB adapter requests high-budget Hindsight recall with separate **32,768-token limits** for memories and original chunks on LongMemEval. The answer template uses raw recall JSON when available, and the public archive omits that field. The measured gap describes saved context size in these recorded pipelines, whose answer models, judge models and retrieval settings differ. Hindsight's full runtime configuration and original model-input token usage are unavailable from the archive. [AMB recall adapter](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/src/memory_bench/memory/hindsight.py#L231-L256) · [AMB answer template](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/src/memory_bench/dataset/longmemeval.py#L129-L132)
 
-The change from the earlier 466/500 is a net gain of ten accepted answers: 22 previously incorrect cases become correct and 12 previously correct cases become incorrect, including one carried disputed-gold No. Retrieval, formatting, prompts and judge model changed together. This is evidence of the resulting pipeline, not an isolated ten-question causal gain from retrieval. A same-selected-evidence formatting comparison reduces total context tokens by **332,235 (5.55%)**, while keeping all **4,137,965 evidence-body tokens** unchanged.
+The November 17 archive gained ten accepted answers over the earlier 466/500 run. Twenty-two previously incorrect cases became correct and twelve previously correct cases became incorrect, including one carried disputed-reference verdict. Retrieval, formatting, prompts and the judge model changed together. A separate comparison using the same selected evidence found that formatting reduced total context by **332,235 tokens (5.55%)** while keeping all **4,137,965 evidence-body tokens**.
 
 ## 2. Earlier same-context answer-model comparison
 
@@ -95,7 +129,9 @@ The [earlier BEAM saved-context replay](https://github.com/rocke2020/open-agent-
 
 ## 4. Inspect and recompute the saved results
 
-The [latest BEAM-10M paired outcomes](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m-20261119/scores.csv) provide question IDs, scores and measured context counts. The LME and earlier BEAM `report.html` files show saved contexts and individual outcomes. Validate those HTML reports and their adjacent result shards from an OAMB checkout:
+The latest BEAM-10M CSV provides question IDs, scores and measured context counts. The November 17 LME and earlier BEAM `report.html` files show saved contexts and individual outcomes. [BEAM-10M paired outcomes](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m-20261119/scores.csv) · [OAMB results index](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md)
+
+To validate the archived HTML reports and their adjacent result shards from an OAMB checkout, run the saved-evidence tests.
 
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory-benchmark.git
@@ -104,6 +140,6 @@ uv sync --locked
 uv run pytest -q tests/test_published_oam_evidence.py tests/test_published_lme500_20261117.py tests/reporting/test_historical_report.py
 ```
 
-The latest campaign's OAMB manifest records the evaluated OAM commit. Use that exact commit for a source build, and the adjacent evaluation configuration for the recorded retrieval settings. These commands validate saved measurements; no fresh model calls are needed.
+The November 17 campaign's OAMB manifest pins its evaluated OAM commit and retrieval configuration. These tests validate saved measurements without fresh model calls.
 
-The current [native OAM workflow](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/docs/native-oam.md) remains a separate LME fast-recall protocol. Changing only its model names does not reproduce the latest normal-recall/AMB-prompt campaign. New model output can vary; a successful run is not proof of score parity. Provider and infrastructure costs depend on the chosen configuration.
+The native OAMB LME workflow prepares the index through the OAM API, uses Fast recall and scores with OAMB's bundled prompts. The reported 8k campaign used retained indexes, an experimental ranking adapter and the pinned AMB prompts. Reproducing that retrieval path requires the campaign's adapter, frozen runtime and retained index state. Repeating its scoring requires the saved rendered contexts. [Native OAMB workflow](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/docs/native-oam.md)

@@ -81,12 +81,12 @@ search:
 
 ## 4. 为什么已测试的配置关闭语义图扩展和因果扩展
 
-最新 LME-500 normal、早期 LME-500 fast 和已记录 BEAM-10M 配置均关闭语义链接扩展和因果扩展。BEAM 保留实体及别名扩展，两种 LME 配置则关闭图扩展：
+LME-500 的 8k Fast FTS+BM25 和 18k Normal FTS 评测均关闭图扩展。已记录的 BEAM-10M 评测保留实体及别名扩展。三组评测均关闭语义链接扩展和因果扩展。[评测配置](../docs/benchmarks.md)
 
 | 评测负载 | 召回模式 | `entity_semantic_graph` | `causal_graph` | 使用的图扩展 |
 |---|---|---|---|---|
-| 最新 LME-500 | `normal` | `"off"` | `false` | 无。 |
-| 早期 LME-500 | `fast` | `"off"` | `false` | 无。 |
+| LME-500，8k FTS+BM25 | `fast` | `"off"` | `false` | 无。 |
+| LME-500，18k FTS | `normal` | `"off"` | `false` | 无。 |
 | BEAM-10M | `normal` | `light` | `false` | 仅实体及别名扩展。 |
 
 这些配置也都关闭因果索引。它们保留直接向量语义检索、词法检索、适用时的时间检索、原始来源证据，以及事实文本中保留的明确原因。关于原因的问题仍可直接检索这些原因；已存储的因果边是额外的检索路径，不是回答“为什么”的前提。
