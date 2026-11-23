@@ -3,11 +3,13 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from oam.config import ModelsConfig, load_config
-from oam.indexing import extraction
+from oam.indexing import consolidation, extraction
+from oam.indexing.batch import BatchBudgetModels, run_batch
 from oam.models.runtime import ModelResult, Usage
 
 CONFIG = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
@@ -120,6 +122,46 @@ def test_incremental_update_can_retitle_the_same_insight():
     result = synthesize(Reply([update(title="Production deployment approval")]))
     assert result.actions[0].title == "Production deployment approval"
     assert result.actions[0].target_id == "policy"
+
+
+@pytest.mark.parametrize("legacy_recall_config", [False, True])
+def test_resumed_batch_can_publish_an_update_to_a_frozen_target(monkeypatch, legacy_recall_config):
+    facts, target = inputs()
+    stored_target = {**target, "vector": [1.0, 0.0]}
+    model = Reply([update()])
+    store = MagicMock(config=CONFIG, generation_id="generation", batch_id="batch")
+    store.claim.operation_id = "batch"
+    saved = consolidation._group_inputs(store, facts, ("new",), (target,), [stored_target])
+    saved["batch_config"] = CONFIG.model_dump(mode="json")
+    saved["batch_config"]["index"]["insight_max_output_tokens"] = 2048
+    if legacy_recall_config:
+        saved["batch_config"]["search"].pop("deep")
+        saved["batch_config"]["recall"].pop("deep_deadline_seconds")
+    connection = store.transaction.return_value.__enter__.return_value
+    connection.execute.return_value.fetchone.side_effect = [
+        (saved,),
+        None,
+        ({"l2_seed_policy": "related"},),
+    ]
+    store.l2_progress.return_value = (set(), "no_insight")
+    store.checkpoint.side_effect = lambda stage, inputs, produce: produce().model_dump(mode="json")
+    monkeypatch.setattr(BatchBudgetModels, "_reserve", lambda *_: None)
+    monkeypatch.setattr(consolidation, "_pending_group", lambda *_: [])
+    published = []
+
+    def publish(store, connection, *, targets, prepared, **kwargs):
+        published.append((targets[0]["revision"], prepared[0]))
+
+    monkeypatch.setattr(consolidation, "_publish_group", publish)
+    run_batch(store, model)
+
+    ((revision, (action, vector)),) = published
+    assert revision == action.expected_revision == 1
+    assert action.action == "UPDATE"
+    assert action.target_id == "policy"
+    assert vector == [1.0, 0.0]
+    assert model.requests[0][1]["max_output_tokens"] == 2048
+    assert json.loads(model.requests[0][1]["user"]) == saved["envelope"]
 
 
 def test_keep_text_with_retained_support_normalizes_to_no_change():

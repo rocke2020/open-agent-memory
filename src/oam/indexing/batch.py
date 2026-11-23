@@ -13,7 +13,7 @@ import time
 from psycopg.types.json import Jsonb
 
 from oam.auth.credentials import AuthorizedUser
-from oam.config import OAMConfig
+from oam.config import ExtractionConfig, IndexConfig, ModelRuntimeConfig
 from oam.db.eligibility import ELIGIBLE_UNITS
 from oam.indexing.budget import BatchBudgetModels, BatchGenerationBudgetRejection
 from oam.indexing.extraction import ConsolidationResult, InsightInput, consolidate_insights
@@ -365,11 +365,18 @@ def run_batch(store, models):
             ).fetchone()
             if saved:
                 inputs = saved[0]
-                config = OAMConfig.model_validate(inputs["batch_config"])
+                frozen_config = inputs["batch_config"]
+                config = store.config.model_copy(
+                    update={
+                        "extraction": ExtractionConfig.model_validate(frozen_config["extraction"]),
+                        "index": IndexConfig.model_validate(frozen_config["index"]),
+                        "model": ModelRuntimeConfig.model_validate(frozen_config["model"]),
+                    }
+                )
                 facts = tuple(InsightInput.model_validate(fact) for fact in inputs["private_facts"])
                 seeds = tuple(inputs["envelope"]["seed_ids"])
-                targets = tuple(inputs["envelope"]["targets"])
                 private_targets = inputs["private_targets"]
+                targets = tuple(private_targets)
             else:
                 examined, _ = store.l2_progress(connection)
                 config = store.config
