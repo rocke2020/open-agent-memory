@@ -56,7 +56,7 @@ The November 17 archive recorded **476/500** with 497 judged contexts and three 
 | Prompt policy | Exact AMB answer and category-specific judge prompts at `7021c59c3497d1dd08d61f12fa4629be983fcfb1` |
 | Judgment parsing | First usable explicit boolean, including inline `correct=false`; valid No judgments are retained |
 | Recall | Normal; L1; chunks included; graph, Insights, Profile and reranker disabled |
-| Context limit | 18,000 tokens, an evaluation override; the product normal default is 24,000 |
+| Context limit | 18,000 tokens, a pinned evaluation override; the current product Normal default is 16,000 |
 | Candidate selection | Whole query; 64 per channel, 128 fused, 36 source seeds, at most 96 learned items and 96 original bodies |
 | Source formatting | User-fact exchanges; adjacent user evidence enabled, 1,000-character bound |
 | Deadline | 5 seconds |

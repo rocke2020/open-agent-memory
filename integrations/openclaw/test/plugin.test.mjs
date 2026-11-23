@@ -960,6 +960,21 @@ test('host context ceiling rejects valid server results above its injection budg
   } finally { recallResponse = undefined; }
 });
 
+test('explicit deep search consumes a complete 24k response within the host budget', async () => {
+  requests.length = 0;
+  const { tool } = await installedPlugin({ maxContextTokens: 24000 });
+  const context = '[source: s1] Complete deep evidence. '.repeat(2000);
+  recallResponse = { context, context_tokens: 24000, items: [{ source_id: 's1' }] };
+  try {
+    const search = directSearch(tool);
+    const result = await search.execute('deep-search', { query: 'Project history', recall_level: 'deep' });
+    assert.equal(result.isError, undefined);
+    assert.ok(result.content[0].text.includes(context.trim()));
+    assert.equal(requests[0].body.recall_level, 'deep');
+    assert.deepEqual(search.parameters.properties.recall_level.enum, ['fast', 'normal', 'deep']);
+  } finally { recallResponse = undefined; }
+});
+
 test('explicit search rejects removed modes without dispatching recall', async () => {
   requests.length = 0;
   const { tool } = await installedPlugin();
@@ -967,12 +982,12 @@ test('explicit search rejects removed modes without dispatching recall', async (
     agentId: 'main', messageChannel: 'telegram', nativeChannelId: '42', requesterSenderId: '7',
     conversationReadOrigin: 'direct-operator', assertInvocationCurrent() {},
   });
-  for (const recall_level of ['deep', 'mid']) {
+  for (const recall_level of ['mid', 'unknown']) {
     const result = await search.execute('removed-mode', { query: 'Lin preference', recall_level });
     assert.equal(result.isError, true);
   }
   assert.deepEqual(requests, []);
-  assert.deepEqual(search.parameters.properties.recall_level.enum, ['fast', 'normal']);
+  assert.deepEqual(search.parameters.properties.recall_level.enum, ['fast', 'normal', 'deep']);
 });
 
 test('memory_remove deletes exactly one memory or Insight ID through its typed route', async () => {

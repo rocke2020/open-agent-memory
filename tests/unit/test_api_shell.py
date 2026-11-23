@@ -45,7 +45,7 @@ async def test_recall_preset_overrides_are_validated_before_runtime_dispatch(inv
     if not invalid:
         body = response.json()
         assert body["diagnostics"]["search_config"]["temporal_nodes"] == 300
-        assert body["diagnostics"]["search_config"]["max_results"] == 96
+        assert body["diagnostics"]["search_config"]["max_results"] == 88
         assert body["context"]
 
 
@@ -268,7 +268,7 @@ async def test_http_admission_uses_selected_config_limits(
 
 async def test_openapi_search_contracts_exclude_profile_selection(client) -> None:
     schemas = (await client.get("/openapi.json")).json()["components"]["schemas"]
-    assert schemas["RecallLevel"]["enum"] == ["fast", "normal"]
+    assert schemas["RecallLevel"]["enum"] == ["fast", "normal", "deep"]
     for name in ("RecallRequest", "SearchRequest", "SearchManyRequest"):
         assert "include_profile" not in schemas[name]["properties"]
         assert "max_context_tokens" not in schemas[name]["properties"]
@@ -290,7 +290,7 @@ async def test_openapi_search_contracts_exclude_profile_selection(client) -> Non
         ("/v1/users/scope/decompose-and-search", {"query": "q"}),
     ],
 )
-@pytest.mark.parametrize("level", ["deep", "mid"])
+@pytest.mark.parametrize("level", ["mid"])
 async def test_http_rejects_removed_modes_before_retrieval(tmp_path, path, payload, level) -> None:
     class AdmissionRuntime:
         def authenticate(self, secret):
@@ -332,9 +332,19 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["limits"]["chunk"]["ingestion"]["max_estimated_tokens"] == 4096
     assert "recall" not in payload["limits"]["chunk"]
     assert "context" not in payload["limits"]
-    assert payload["limits"]["search"]["partial_match_gate"] == "user_fact_exchange"
-    assert payload["limits"]["search"]["fast"]["context_max_tokens"] == 18000
-    assert payload["limits"]["search"]["normal"]["context_max_tokens"] == 24000
+    search = payload["limits"]["search"]
+    assert search["partial_match_gate"] == "user_fact_exchange"
+    assert search["causal_graph"] is False
+    assert search["fact_source_bodies"] == "required"
+    for mode, budget, graph in (
+        ("fast", 8000, "off"),
+        ("normal", 16000, "light"),
+        ("deep", 24000, "light"),
+    ):
+        assert {"causal_graph", "fact_source_bodies"}.isdisjoint(search[mode])
+        assert search[mode]["context_max_tokens"] == budget
+        assert search[mode]["entity_semantic_graph"] == graph
+        assert payload["features"][f"{mode}_recall"] is True
     assert payload["features"]["source_lifecycle"] is True
     assert payload["features"]["recorded_debug"] is True
     assert payload["features"]["portable_export"] is True
@@ -343,8 +353,6 @@ async def test_capabilities_publish_limits_without_secrets(client) -> None:
     assert payload["limits"]["model"]["attempt_timeout_seconds"] == 600
     assert payload["limits"]["user"]["max_chats"] == 1000
     assert payload["features"]["python_sdk"] is False
-    assert all(payload["features"][f"{mode}_recall"] is True for mode in ("fast", "normal"))
-    assert "deep_recall" not in payload["features"]
     assert payload["features"]["batch_recall"] is True
     assert payload["features"]["planner"] is False
     assert "api_key" not in response.text.lower()
@@ -415,11 +423,13 @@ async def test_search_many_http_returns_ordered_query_outcomes() -> None:
     ]
 
 
-async def test_decompose_http_returns_plan_and_fallback_state() -> None:
+@pytest.mark.parametrize("level", ["normal", "deep"])
+async def test_decompose_http_returns_plan_and_fallback_state(level) -> None:
     class Runtime:
         def decompose_and_search(self, actor, user_id, body):
             assert user_id == "lin"
             assert body.query == "city and style"
+            assert body.recall_level == level
             return {
                 "status": "ok",
                 "plan": {"queries": ["city", "style"]},
@@ -434,7 +444,7 @@ async def test_decompose_http_returns_plan_and_fallback_state() -> None:
     ) as client:
         response = await client.post(
             "/v1/users/lin/decompose-and-search",
-            json={"query": "city and style"},
+            json={"query": "city and style", "recall_level": level},
             headers={"Authorization": "Bearer synthetic"},
         )
 

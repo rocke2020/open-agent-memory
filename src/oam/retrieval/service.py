@@ -14,7 +14,7 @@ import httpx
 import psycopg
 
 from oam.auth.credentials import AuthorizedUser
-from oam.config import FastSearchTier, NormalSearchTier, OAMConfig
+from oam.config import NormalSearchTier, OAMConfig
 from oam.contracts.search import SearchRequest, TimeBasis
 from oam.quotes import unique_quote
 from oam.retrieval.algorithms import (
@@ -146,7 +146,7 @@ class RecallService:
         tier = request.search_tier(self.config)
         settings = request.search_settings(self.config)
         graph = tier.entity_semantic_graph
-        causal_graph = tier.causal_graph
+        causal_graph = settings.causal_graph
         deadline = started + getattr(self.config.recall, f"{mode}_deadline_seconds")
         if deadline_at is not None:
             if deadline_at.utcoffset() is None:
@@ -299,7 +299,7 @@ class RecallService:
                 if row["kind"] == "fact"
                 and row["score"] >= self.config.search.graph_seed_min_similarity
             )[: self.config.search.graph_seed_max]
-            if (graph != "off" or causal_graph) and (seeds or mode == "normal"):
+            if (graph != "off" or causal_graph) and (seeds or mode != "fast"):
                 expansion = stage(
                     "graph",
                     lambda: (
@@ -532,9 +532,7 @@ class RecallService:
         hydrated_passages = {row["unit_id"]: row for row in hydrated if row["kind"] == "passage"}
         context_limit = request.context_limit(self.config)
         chunks = request.include.chunks
-        fact_source_bodies = (
-            tier.fact_source_bodies if isinstance(tier, FastSearchTier) and chunks else "required"
-        )
+        fact_source_bodies = settings.fact_source_bodies if chunks else "required"
         admission_source_bodies = (
             "required" if fact_source_bodies == "assistant_deduplicated" else fact_source_bodies
         )
@@ -1212,7 +1210,7 @@ class RecallService:
             source_passages = []
             optional_context = {}
         packing_started = time.monotonic()
-        items, budget_omissions, admitted_roots, oversized_single_fact = assemble_context(
+        items, budget_omissions, admitted_roots, _ = assemble_context(
             packing_candidates,
             source_passages,
             context_max_tokens=context_limit,
@@ -1269,7 +1267,7 @@ class RecallService:
         items = bundle_items(admitted_roots, fact_source_bodies=admission_source_bodies)
         context = render_context(items)
         context_tokens = context_token_count(context)
-        while context_tokens > context_limit and admitted_roots and not oversized_single_fact:
+        while context_tokens > context_limit and admitted_roots:
             removed = admitted_roots.pop()
             budget_omissions.append(removed[0]["unit_id"])
             items = bundle_items(admitted_roots, fact_source_bodies=admission_source_bodies)
@@ -1295,7 +1293,7 @@ class RecallService:
         context_budget = {
             "limit": context_limit,
             "used": context_tokens,
-            "oversized_single_fact": oversized_single_fact,
+            "oversized_single_fact": False,
             "overrun_tokens": max(0, context_tokens - context_limit),
             "include_chunks": chunks,
             **(
@@ -1356,6 +1354,8 @@ class RecallService:
                     "partial_match_gate": settings.partial_match_gate,
                     "adjacent_user_context": settings.adjacent_user_context,
                     "adjacent_user_context_max_chars": settings.adjacent_user_context_max_chars,
+                    "causal_graph": causal_graph,
+                    "fact_source_bodies": settings.fact_source_bodies,
                 },
                 "graph": graph,
                 "causal_graph": causal_graph,

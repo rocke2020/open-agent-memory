@@ -18,9 +18,9 @@ export function createOamMcpServer(client: OamClient): McpServer {
       inputSchema: {
         query: z.string().min(1).describe('The question or topic to retrieve evidence for.'),
         recall_level: z
-          .enum(['fast', 'normal'])
+          .enum(['fast', 'normal', 'deep'])
           .default('fast')
-          .describe('Use fast for pre-agent retrieval; normal for deeper agent-initiated search.'),
+          .describe('Default context caps are 8k for fast, 16k for normal, and 24k for deep.'),
         include_chunks: z
           .boolean()
           .default(true)

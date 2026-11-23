@@ -18,7 +18,11 @@ def evidence_rows():
 
 
 @pytest.mark.parametrize("independent", [False, True])
-def test_ranked_fact_bodies_require_a_standalone_original_root(evidence_rows, independent):
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("configured_policy", ["required", "ranked"])
+def test_ranked_fact_bodies_require_a_standalone_original_root(
+    evidence_rows, independent, mode, configured_policy, tmp_path
+):
     class Repository(SourceRepository):
         def lexical(self, query, limit):
             nodes = ["fact", "original"] if independent else ["fact"]
@@ -29,16 +33,26 @@ def test_ranked_fact_bodies_require_a_standalone_original_root(evidence_rows, in
         def _repository(self, authority, request, deadline):
             yield Repository(request, self.rows, {})
 
-    fast = CONFIG.search.fast.model_copy(update={"fact_source_bodies": "ranked"})
-    config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={"fast": fast})})
+    operator = tmp_path / "ranked.yaml"
+    operator.write_text(
+        f'search:\n  fact_source_bodies: {configured_policy}\n  partial_match_gate: "off"\n'
+    )
+    config = load_config(operator).config
     result = Service(evidence_rows, config=config).search(
-        object(), SearchRequest(query="Which workshop did I miss?", recall_level="fast")
+        object(),
+        SearchRequest(
+            query="Which workshop did I miss?",
+            recall_level=mode,
+            overrides={"fact_source_bodies": "ranked"} if configured_policy == "required" else {},
+        ),
     )
     assert [row["unit_id"] for row in result["items"]] == (
         ["fact", "original"] if independent else ["fact"]
     )
     assert result["items"][0]["citations"] == evidence_rows[0]["citations"]
     assert result["context_tokens"] == context_token_count(result["context"])
+    assert result["diagnostics"]["search_config"]["fact_source_bodies"] == "ranked"
+    assert result["diagnostics"]["context_budget"]["fact_source_bodies"] == "ranked"
 
 
 @pytest.mark.parametrize("invalid", ["quote", "locator"])
@@ -57,8 +71,8 @@ def test_ranked_fact_sources_still_validate_complete_persisted_support(evidence_
         span["quote"] = "This text never occurred."
     else:
         span["message_id"] = "wrong-message"
-    fast = CONFIG.search.fast.model_copy(update={"fact_source_bodies": "ranked"})
-    config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={"fast": fast})})
+    search = CONFIG.search.model_copy(update={"fact_source_bodies": "ranked"})
+    config = CONFIG.model_copy(update={"search": search})
     result = Service(evidence_rows, config=config).search(
         object(), SearchRequest(query="Which workshop did I miss?", recall_level="fast")
     )
@@ -134,8 +148,8 @@ def test_ranked_fact_policy_does_not_admit_unvalidated_fact_or_chunks_when_disab
 
 def test_ranked_fact_policy_is_explicit_config_and_rejects_unknown_values(tmp_path):
     override = tmp_path / "ranked.yaml"
-    override.write_text("search:\n  fast:\n    fact_source_bodies: ranked\n")
-    assert load_config(override).config.search.fast.fact_source_bodies == "ranked"
-    override.write_text("search:\n  fast:\n    fact_source_bodies: invalid\n")
+    override.write_text("search:\n  fact_source_bodies: ranked\n")
+    assert load_config(override).config.search.fact_source_bodies == "ranked"
+    override.write_text("search:\n  fact_source_bodies: invalid\n")
     with pytest.raises(ConfigurationError):
         load_config(override)

@@ -118,8 +118,8 @@ def test_batch_and_planner_inherit_mode_graph_config(
 
     path = tmp_path / "oam.yaml"
     path.write_text(
-        f'search:\n  {mode}:\n    entity_semantic_graph: "{graph}"\n'
-        f"    causal_graph: {str(graph != 'off').lower()}\n"
+        f"search:\n  causal_graph: {str(graph != 'off').lower()}\n"
+        f'  {mode}:\n    entity_semantic_graph: "{graph}"\n'
     )
     config = load_config(path).config
     service = GraphService(config=config)
@@ -238,8 +238,8 @@ def test_mode_graph_config_controls_final_context(tmp_path: Path, caplog, mode, 
     caplog.set_level("INFO", logger="oam.retrieval.service")
     path = tmp_path / "oam.yaml"
     path.write_text(
-        f'search:\n  {mode}:\n    entity_semantic_graph: "{graph}"\n'
-        f"    causal_graph: {str(graph != 'off').lower()}\n"
+        f"search:\n  causal_graph: {str(graph != 'off').lower()}\n"
+        f'  {mode}:\n    entity_semantic_graph: "{graph}"\n'
     )
     service = GraphService(config=load_config(path).config)
     result = service.search(
@@ -283,7 +283,7 @@ def test_canonical_graph_defaults_reach_final_context(mode):
 )
 def test_fast_request_boolean_overrides_configured_full_graph(tmp_path: Path, override, expected):
     path = tmp_path / "oam.yaml"
-    path.write_text("search:\n  fast:\n    entity_semantic_graph: full\n    causal_graph: true\n")
+    path.write_text("search:\n  causal_graph: true\n  fast:\n    entity_semantic_graph: full\n")
     service = GraphService(config=load_config(path).config)
     result = service.search(
         AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
@@ -315,8 +315,8 @@ def test_disabled_fast_keeps_direct_context_and_original_dense_cap(options):
 
 
 def test_enabled_fast_delivers_two_supported_causes_in_final_context():
-    tier = CONFIG.search.fast.model_copy(update={"causal_graph": True})
-    config = CONFIG.model_copy(update={"search": CONFIG.search.model_copy(update={"fast": tier})})
+    search = CONFIG.search.model_copy(update={"causal_graph": True})
+    config = CONFIG.model_copy(update={"search": search})
     service = CausalService(config=config)
     result = service.search(
         object(),

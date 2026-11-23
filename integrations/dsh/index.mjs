@@ -156,9 +156,9 @@ export function apply(ctx, input = {}) {
       pending.add(task);
     }
   });
-  ctx.inject(['tools'], inner => inner.tools.register({name:'memory_search', description:'Search the configured user memory for cited evidence.', parameters:{type:'object',properties:{query:{type:'string'},recall_level:{type:'string',enum:['fast','normal']}},required:['query'],additionalProperties:false}, output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]}, async execute(args, exec) {
+  ctx.inject(['tools'], inner => inner.tools.register({name:'memory_search', description:'Search the configured user memory for cited evidence.', parameters:{type:'object',properties:{query:{type:'string'},recall_level:{type:'string',enum:['fast','normal','deep']}},required:['query'],additionalProperties:false}, output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]}, async execute(args, exec) {
     if (closed || skip(exec?.agent?.session)) return 'Memory search unavailable for this session.';
-    if (typeof args.query !== 'string' || !args.query.trim() || !['fast','normal'].includes(args.recall_level ?? 'normal')) return 'Invalid memory search request.';
+    if (typeof args.query !== 'string' || !args.query.trim() || !['fast','normal','deep'].includes(args.recall_level ?? 'normal')) return 'Invalid memory search request.';
     try { const context = await recall(args.query, args.recall_level ?? 'normal', exec.signal, true); return context ? wrap(context) : 'No matching memory.'; } catch (error) { log('warn', 'search failed'); throw new Error('Memory search unavailable.'); }
   }}, {when: ({agent}) => !closed && !skip(agent?.session)}));
   ctx.inject(['tools'], inner => inner.tools.register({

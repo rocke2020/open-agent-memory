@@ -101,7 +101,7 @@ The Inspector lets you browse retained sources, inspect recalled memories and ci
 
 OAM preserves original conversations (**L0**), extracts source-backed facts (**L1**), and builds supported Insights across related facts (**L2**). A stored, refreshable User Profile (**L3**) helps the agent personalize its behavior. Text, HTML, PDF and image **Resources** remain separate evidence and can be retrieved alongside learned memory.
 
-Recall supports **fast** and **normal** modes and returns cited context without generating the final answer. The default context limits are 18,000 and 24,000 tokens respectively. Your agent decides how to use that evidence and owns its final answer and total input budget.
+Recall supports **fast**, **normal** and **deep** modes and returns cited context without generating the final answer. The default context limits are 8,000, 16,000 and 24,000 tokens respectively. Normal is the default mode. Your agent decides how to use that evidence and owns its final answer and total input budget.
 
 [Memory and retrieval design](docs/indexing-retrieval.md) · [Architecture](docs/architecture.md) · [Configuration](configs/README.md)
 

@@ -1,4 +1,4 @@
-"""Shared search configuration selects whole-query lexical scores for both modes."""
+"""Whole-query lexical scores honor the selected recall preset."""
 
 import pytest
 
@@ -12,6 +12,7 @@ from oam.retrieval.repository import RecallRepository
     [
         ("fast", "observatory maintenance", [], 0),
         ("normal", "observatory maintenance", [], 2),
+        ("deep", "observatory maintenance", [], 2),
         (None, "observatory maintenance", [], 0),
         ("normal", "can", [{"entity_id": "named-entity", "name_text": "can"}], 0),
     ],

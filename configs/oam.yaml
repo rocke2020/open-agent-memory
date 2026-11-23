@@ -78,9 +78,9 @@ search:
   query_concurrency: 2
   # Rank-fusion denominator offset: each arm contributes weight / (rrf_k + rank).
   rrf_k: 60
-  # Fast and normal rank one full-text candidate list. per_term fuses term lists.
+  # Rank one full-text candidate list in every preset. per_term fuses term lists.
   lexical_ranking: whole_query
-  # Shared by fast and normal. "off" disables the partial-match filter.
+  # Shared by all recall presets. "off" disables the partial-match filter.
   # In a matched 13-question Fast test, filtering weaker conversation matches
   # with user_fact_exchange reduced rendered context tokens by 34.1% versus "off".
   # user_fact_exchange keeps direct dense, strict lexical, lexical user originals,
@@ -93,6 +93,12 @@ search:
   adjacent_user_context: true
   # Per-neighbor character cap. Keep the previous passage's tail or the next passage's head.
   adjacent_user_context_max_chars: 1000
+  # Shared outgoing effect-to-cause traversal, including within temporal retrieval.
+  # Independent of the selected mode's entity_semantic_graph.
+  causal_graph: false
+  # Shared context packing policy when original chunks are requested.
+  # required packs the complete supporting passages with each admitted fact.
+  fact_source_bodies: required
   # Rank ordinary full-text matches with owner-local BM25 and positional cover density.
   # Use fts to select cover density alone.
   lexical_ranker: bm25
@@ -103,12 +109,12 @@ search:
   # Supported query entities increase lexical relevance by at most this fraction.
   # Zero skips the stored-name lookup; names alone never outrank positive relevance.
   query_entity_boost: 0.5
-  # Only normal uses these arm weights; fast uses equal fusion weights.
+  # Normal and deep use these arm weights. Fast uses equal fusion weights.
   normal_arm_weights:
     lexical: 1.0
     dense: 1.0
     # Enabled entity_semantic_graph and causal_graph paths automatically feed one combined graph arm.
-    # This weight applies once to that arm during normal-mode rank fusion.
+    # Apply this weight once to the combined graph arm.
     # A low weight still boosts hits corroborated by other arms.
     # 0.1 is a heuristic default, not a validated optimum.
     graph: 0.1
@@ -141,7 +147,7 @@ search:
   ann_scan_max_tuples: 20000
   # Per mode: channel_candidates caps each arm; fused_candidates caps rank fusion.
   # temporal_nodes caps temporal traversal, including seeds, independently of max_results.
-  # Fast and normal are configurable presets; their values can be overridden independently.
+  # Set each preset independently. context_max_tokens caps the complete rendered context.
   # source_seed_results caps fact/original seeds and recovered user originals.
   # It also bounds dense reply witnesses independently of max_results.
   # max_results caps each learned-text and original-text pool independently.
@@ -150,22 +156,28 @@ search:
   # "off": no entity or semantic graph expansion. Quote "off" in YAML.
   # light: entity graph expansion through shared entity IDs (including aliases).
   # full: entity graph expansion plus stored semantic-link expansion.
-  # causal_graph independently enables outgoing effect-to-cause traversal, including within temporal retrieval, even when entity_semantic_graph is "off".
   # Direct dense semantic search and lexical entity-name matching remain independent.
   fast:
-    context_max_tokens: 18000
+    context_max_tokens: 8000
     entity_semantic_graph: "off"
-    causal_graph: false
     channel_candidates: 64
     fused_candidates: 128
-    temporal_nodes: 96
-    fact_source_bodies: required
+    temporal_nodes: 64
     source_seed_results: 36
-    max_results: 96
+    max_results: 88
   normal:
+    context_max_tokens: 16000
+    entity_semantic_graph: light
+    channel_candidates: 64
+    fused_candidates: 128
+    temporal_nodes: 200
+    # Caps candidates sent to the optional model reranker.
+    rerank_candidates: 48
+    source_seed_results: 36
+    max_results: 128
+  deep:
     context_max_tokens: 24000
     entity_semantic_graph: light
-    causal_graph: false
     channel_candidates: 64
     fused_candidates: 154
     temporal_nodes: 300
@@ -175,7 +187,7 @@ search:
     max_results: 154
 
 index:
-  # Extract and store explicit causal links; recall opts in independently per mode.
+  # Extract and store explicit causal links. search.causal_graph controls recall separately.
   enable_causal_graph: false
   # Maximum UTF-8 bytes for both the original entity name and its normalized lookup key.
   entity_name_max_bytes: 1024
@@ -230,6 +242,8 @@ recall:
   fast_deadline_seconds: 3
   # Maximum normal-search duration; caller and trusted-turn deadlines may shorten it.
   normal_deadline_seconds: 5
+  # Maximum deep-search duration; caller and trusted-turn deadlines may shorten it.
+  deep_deadline_seconds: 5
 
 profile:
   enabled: true
@@ -430,5 +444,5 @@ models:
     api_key_env: OAM_EMBEDDING_KEY
     # Declared capabilities; embedding roles require embeddings.
     capabilities: [embeddings]
-  # Optional reranker for normal recall.
+  # Optional reranker for normal and deep recall.
   reranker: null

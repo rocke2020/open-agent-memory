@@ -100,7 +100,6 @@ class ExtractionConfig(FrozenModel):
 class SearchTier(FrozenModel):
     context_max_tokens: PositiveInt
     entity_semantic_graph: Literal["off", "light", "full"]
-    causal_graph: bool
     channel_candidates: PositiveInt
     personal_evidence_candidates: NonNegativeInt = 0
     fused_candidates: PositiveInt
@@ -113,12 +112,6 @@ class SearchTier(FrozenModel):
         if self.max_results > self.fused_candidates:
             raise ValueError("max_results cannot exceed fused_candidates")
         return self
-
-
-class FastSearchTier(SearchTier):
-    fact_source_bodies: Literal[
-        "required", "ranked", "ranked_deduplicated", "assistant_deduplicated"
-    ] = "required"
 
 
 class NormalSearchTier(SearchTier):
@@ -147,6 +140,10 @@ class SearchConfig(FrozenModel):
     partial_match_gate: Literal["off", "user_fact_exchange"]
     adjacent_user_context: bool
     adjacent_user_context_max_chars: int = Field(gt=0, strict=True)
+    causal_graph: bool
+    fact_source_bodies: Literal[
+        "required", "ranked", "ranked_deduplicated", "assistant_deduplicated"
+    ]
     lexical_ranker: Literal["bm25", "fts"]
     fts_rank_weights: tuple[float, float, float, float]
     query_entity_boost: float = Field(ge=0, le=1)
@@ -164,8 +161,9 @@ class SearchConfig(FrozenModel):
     temporal_semantic_floor: float = Field(ge=0, le=1)
     ann_iterative_scan: Literal["strict_order"]
     ann_scan_max_tuples: PositiveInt
-    fast: FastSearchTier
+    fast: SearchTier
     normal: NormalSearchTier
+    deep: NormalSearchTier
 
     @field_validator("fts_rank_weights")
     @classmethod
@@ -179,6 +177,7 @@ class RecallConfig(FrozenModel):
     turn_deadline_seconds: PositiveFloat
     fast_deadline_seconds: PositiveFloat
     normal_deadline_seconds: PositiveFloat
+    deep_deadline_seconds: PositiveFloat
 
 
 class ChunkConfig(FrozenModel):

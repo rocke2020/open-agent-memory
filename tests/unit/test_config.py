@@ -11,7 +11,10 @@ from oam.config import ConfigurationError, load_config
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
-@pytest.mark.parametrize("mode,other,unchanged", [("fast", "normal", 300), ("normal", "fast", 96)])
+@pytest.mark.parametrize(
+    "mode,other,unchanged",
+    [("fast", "normal", 200), ("normal", "deep", 300), ("deep", "fast", 64)],
+)
 def test_temporal_traversal_budget_override_is_independent_per_mode(
     tmp_path, mode, other, unchanged
 ):
@@ -24,7 +27,7 @@ def test_temporal_traversal_budget_override_is_independent_per_mode(
     assert getattr(search, other).temporal_nodes == unchanged
 
 
-@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("mode", ["fast", "normal", "deep"])
 @pytest.mark.parametrize("invalid", [0, -1, 1.5])
 def test_temporal_traversal_budget_rejects_invalid_values(tmp_path, mode, invalid):
     path = tmp_path / "override.yaml"
@@ -48,6 +51,8 @@ def test_removed_shared_temporal_budget_is_rejected(tmp_path):
         ("partial_match_gate", "off"),
         ("adjacent_user_context", False),
         ("adjacent_user_context_max_chars", 1000),
+        ("causal_graph", False),
+        ("fact_source_bodies", "required"),
     ],
 )
 def test_legacy_preset_search_setting_requires_moving_to_shared_key(tmp_path, mode, key, value):
@@ -76,18 +81,12 @@ def test_index_causal_extraction_switch_is_owned_by_canonical_yaml():
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
-def test_recall_causal_switch_is_independent_of_entity_graph_mode(mode):
-    from oam.config import FastSearchTier, NormalSearchTier
-
-    values = yaml.safe_load((REPOSITORY_ROOT / "configs/oam.yaml").read_text())["search"][mode]
-    tier_type = FastSearchTier if mode == "fast" else NormalSearchTier
-    disabled = tier_type.model_validate(values)
-    enabled = tier_type.model_validate(
-        {**values, "causal_graph": True, "entity_semantic_graph": "off"}
-    )
-    assert disabled.causal_graph is False
-    assert enabled.causal_graph is True
-    assert enabled.entity_semantic_graph == "off"
+def test_recall_causal_switch_is_independent_of_entity_graph_mode(mode, tmp_path):
+    path = tmp_path / "causal.yaml"
+    path.write_text(f'search:\n  causal_graph: true\n  {mode}:\n    entity_semantic_graph: "off"\n')
+    search = load_config(path).config.search
+    assert search.causal_graph is True
+    assert getattr(search, mode).entity_semantic_graph == "off"
 
 
 def test_fts_rank_weights_reject_values_outside_postgres_range() -> None:
@@ -267,14 +266,21 @@ def test_canonical_config_freezes_every_shared_runtime_limit() -> None:
     assert config.search.entity_candidates_per_entity == 200
     assert config.search.ann_iterative_scan == "strict_order"
     assert config.search.ann_scan_max_tuples == 20_000
-    assert (
-        config.search.normal.channel_candidates,
-        config.search.normal.fused_candidates,
-        config.search.normal.source_seed_results,
-        config.search.normal.max_results,
-    ) == (64, 154, 36, 154)
-    assert config.search.fast.context_max_tokens == 18000
-    assert config.search.normal.context_max_tokens == 24000
+    assert [
+        (
+            tier.context_max_tokens,
+            tier.channel_candidates,
+            tier.fused_candidates,
+            tier.temporal_nodes,
+            tier.source_seed_results,
+            tier.max_results,
+        )
+        for tier in (config.search.fast, config.search.normal, config.search.deep)
+    ] == [
+        (8000, 64, 128, 64, 36, 88),
+        (16000, 64, 128, 200, 36, 128),
+        (24000, 64, 154, 300, 36, 154),
+    ]
     assert "context" not in type(config).model_fields
     assert "recall" not in type(config.chunk).model_fields
     assert config.profile.max_response_tokens == 18000

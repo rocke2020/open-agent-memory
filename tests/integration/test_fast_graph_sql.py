@@ -18,14 +18,7 @@ pytestmark = pytest.mark.integration
 
 def causal_config(config):
     return config.model_copy(
-        update={
-            "search": config.search.model_copy(
-                update={
-                    mode: getattr(config.search, mode).model_copy(update={"causal_graph": True})
-                    for mode in ("fast", "normal")
-                }
-            )
-        }
+        update={"search": config.search.model_copy(update={"causal_graph": True})}
     )
 
 
@@ -113,11 +106,7 @@ def test_fast_opt_in_recovers_graph_only_cause_with_cited_final_context(recall_d
     )
     for enabled in (False, True):
         selected = config.model_copy(
-            update={
-                "search": config.search.model_copy(
-                    update={"fast": config.search.fast.model_copy(update={"causal_graph": enabled})}
-                )
-            }
+            update={"search": config.search.model_copy(update={"causal_graph": enabled})}
         )
         service = RecallService(
             selected,
@@ -160,8 +149,8 @@ def test_configured_graph_selection_reaches_real_sql_context(
     history(connection, authority)
     path = tmp_path / "oam.yaml"
     path.write_text(
-        f'search:\n  {mode}:\n    entity_semantic_graph: "{graph}"\n'
-        f"    causal_graph: {str(graph != 'off').lower()}\n    channel_candidates: 1\n"
+        f"search:\n  causal_graph: {str(graph != 'off').lower()}\n"
+        f'  {mode}:\n    entity_semantic_graph: "{graph}"\n    channel_candidates: 1\n'
     )
     config = load_config(path).config
     service = RecallService(
@@ -306,15 +295,7 @@ async def test_public_http_fast_graph_option_reaches_real_sql_context(core_datab
         for enabled in (False, True):
             selected = app.state.runtime.config
             app.state.runtime.config = selected.model_copy(
-                update={
-                    "search": selected.search.model_copy(
-                        update={
-                            "fast": selected.search.fast.model_copy(
-                                update={"causal_graph": enabled}
-                            )
-                        }
-                    )
-                }
+                update={"search": selected.search.model_copy(update={"causal_graph": enabled})}
             )
             response = await client.post(
                 "/v1/recall",

@@ -71,9 +71,10 @@ def test_trusted_turn_requires_shared_repository() -> None:
         coordinator.admit(RecallLevel.FAST, trusted_turn_key="turn-1")
 
 
-def test_normal_uses_its_selected_cap_and_later_react_call_has_fresh_budget(tmp_path) -> None:
+@pytest.mark.parametrize("level", ["normal", "deep"])
+def test_level_uses_its_selected_cap_and_later_call_has_fresh_budget(tmp_path, level) -> None:
     path = tmp_path / "operator.yaml"
-    path.write_text("recall:\n  normal_deadline_seconds: 2\n")
+    path.write_text(f"recall:\n  {level}_deadline_seconds: 2\n")
     config = load_config(path).config.recall
     started = datetime(2026, 9, 22, tzinfo=UTC)
     clock = MutableClock(started)
@@ -81,7 +82,7 @@ def test_normal_uses_its_selected_cap_and_later_react_call_has_fresh_budget(tmp_
     coordinator.admit(RecallLevel.FAST)
     clock.now += timedelta(seconds=30)
 
-    admitted = coordinator.admit(RecallLevel.NORMAL)
+    admitted = coordinator.admit(RecallLevel(level))
 
     assert admitted.deadline_at == started + timedelta(seconds=32)
     assert admitted.remaining_seconds == 2

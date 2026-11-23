@@ -11,7 +11,8 @@ import pytest
 from test_inspector_ui import WEB, QuietHandler, playwright
 
 
-def test_insights_entities_and_memory_connections(tmp_path):
+@pytest.mark.parametrize("recall_level", ["fast", "normal", "deep"])
+def test_insights_entities_and_memory_connections(tmp_path, recall_level):
     try:
         with urlopen("http://127.0.0.1:9222/json/version", timeout=5) as response:
             websocket_url = json.load(response)["webSocketDebuggerUrl"]
@@ -269,7 +270,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 assert not errors
                 page.get_by_role("button", name="Retrieve", exact=True).click()
                 page.locator("#query").fill("What connects Alice to Atlas?")
-                page.get_by_label("Retrieval mode", exact=True).select_option("normal")
+                page.get_by_label("Retrieval mode", exact=True).select_option(recall_level)
                 page.locator("#search-form button").click()
                 page.locator("#detail").get_by_text(
                     "Alice joined Atlas [1].", exact=True
@@ -278,7 +279,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                     {
                         "user_id": "alice",
                         "query": "What connects Alice to Atlas?",
-                        "recall_level": "normal",
+                        "recall_level": recall_level,
                         "allow_partial": True,
                     }
                 ]
@@ -303,7 +304,7 @@ def test_insights_entities_and_memory_connections(tmp_path):
                 )
                 assert page.locator("#list-title").inner_text() == "Retrieved evidence"
                 assert page.locator("#query").input_value() == "What connects Alice to Atlas?"
-                assert page.locator("#recall-level").input_value() == "normal"
+                assert page.locator("#recall-level").input_value() == recall_level
                 assert page.locator("#list-summary").inner_text() == "2 shown"
                 assert page.locator("#item-list").inner_text() == retrieved_items
                 assert (

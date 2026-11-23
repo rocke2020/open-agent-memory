@@ -544,7 +544,7 @@ def bundle_items(bundles: list[list[dict]], *, fact_source_bodies: str = "requir
         if (
             owner is not None
             and item["time_evidence"] == originals[owner]["time_evidence"]
-            and not _render_aliases(item)
+            and not item.get("paths")
         ):
             # The renderer already places the source at this FACT's group slot.
             # Retain that relevance position when replacing the derived text.
@@ -624,12 +624,6 @@ def assemble_context(
     candidate_ids = {item["unit_id"] for item in candidates}
     optional_ids: set[str] = set()
     fact_support_keys: set[str] = set()
-    eligible_facts = {
-        item["unit_id"]
-        for item in candidates
-        if item["kind"] == "fact" and item["unit_id"] in groups
-    }
-    oversized_single_fact = False
     renderer = _ContextRenderer()
 
     def selection(group):
@@ -668,26 +662,13 @@ def assemble_context(
             if include_chunks or row["kind"] not in ORIGINAL_KINDS
         ]
         tentative, pools_fit, tokens_fit = selection(representation)
-        if not pools_fit:
+        if not pools_fit or not tokens_fit:
             omissions.append(identity)
             continue
-        if not tokens_fit:
-            if (
-                context_max_tokens > 0
-                and not admitted
-                and item["kind"] == "fact"
-                and eligible_facts == {identity}
-            ):
-                oversized_single_fact = True
-            else:
-                omissions.append(identity)
-                continue
         admitted.append(representation)
         if support_key is not None:
             fact_support_keys.add(support_key)
         selected = tentative
-        if oversized_single_fact:
-            break
         if item["kind"] == "fact" and include_chunks and fact_source_bodies == "required":
             selected_by_id = {row["unit_id"]: row for row in selected}
             for neighbor in (optional_context or {}).get(identity, []):
@@ -700,4 +681,4 @@ def assemble_context(
                     selected = tentative
                     selected_by_id[neighbor["unit_id"]] = neighbor
                     optional_ids.add(neighbor["unit_id"])
-    return selected, omissions, admitted, oversized_single_fact
+    return selected, omissions, admitted, False

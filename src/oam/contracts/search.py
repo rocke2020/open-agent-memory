@@ -23,6 +23,8 @@ _SHARED_SEARCH_OVERRIDES = frozenset(
         "partial_match_gate",
         "adjacent_user_context",
         "adjacent_user_context_max_chars",
+        "causal_graph",
+        "fact_source_bodies",
     }
 )
 
@@ -34,6 +36,7 @@ class FrozenContract(BaseModel):
 class RecallLevel(StrEnum):
     FAST = "fast"
     NORMAL = "normal"
+    DEEP = "deep"
 
 
 class TimeBasis(StrEnum):
@@ -67,9 +70,10 @@ class SearchOutputOptions(FrozenContract):
     overrides: dict[str, JsonValue] = Field(
         default_factory=dict,
         description=(
-            "Request-only overrides for fields of the selected search.fast or search.normal "
-            "preset and the shared lexical_ranking, partial_match_gate, adjacent_user_context, and "
-            "adjacent_user_context_max_chars settings. Omitted fields inherit configuration; "
+            "Request-only overrides for fields of the selected fast, normal, or deep search "
+            "preset and the shared lexical_ranking, partial_match_gate, adjacent_user_context, "
+            "adjacent_user_context_max_chars, causal_graph, and fact_source_bodies settings. "
+            "Omitted fields inherit configuration; "
             "merged values use the same validators. "
             'For example, {"temporal_nodes": 300} changes traversal without changing max_results.'
         ),

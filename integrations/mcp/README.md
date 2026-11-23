@@ -82,9 +82,11 @@ Other MCP clients use the same stdio command, arguments, and environment variabl
 
 ## Tools
 
+Recall exposes the server's Fast, Normal and Deep presets, with default context limits of 8,000, 16,000 and 24,000 tokens. The MCP tool defaults to Fast. Choose `normal` or `deep` for a larger retrieval budget.
+
 | Tool | OAM call | Input | Returns |
 |---|---|---|---|
-| `memory_recall` | `POST /v1/recall` | `query`; optional `recall_level` (`fast` default or `normal`), `include_chunks` (default true), `detail` (`context` default or `full`) | Rendered `context` with citations and `trace_id`; `full` adds typed `items` and diagnostics |
+| `memory_recall` | `POST /v1/recall` | `query`; optional `recall_level` (`fast` default, `normal`, or `deep`), `include_chunks` (default true), `detail` (`context` default or `full`) | Rendered `context` with citations and `trace_id`; `full` adds typed `items` and diagnostics |
 | `memory_add` | `POST /v1/retain` | `content`; optional timezone-aware `event_time`, `learning_eligible` (default true), `idempotency_key` | Durable operation ID and source ID |
 | `memory_add_document` | `POST /v1/users/{user_id}/resources` | `document_id`, `update_mode`, exactly one of `text` or `url` plus `media_type`, and optional `idempotency_key` | Source receipt and operation state |
 | `memory_operation` | `GET /v1/users/{user_id}/operations/{operation_id}` | `operation_id` | Readiness, stage state, and safe failure details |

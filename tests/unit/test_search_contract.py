@@ -16,12 +16,32 @@ def test_search_overrides_customize_selected_preset_without_mutating_defaults():
     tier = request.search_tier(config)
 
     assert tier.temporal_nodes == 300
-    assert tier.max_results == 96
+    assert tier.max_results == 88
     assert tier.entity_semantic_graph == "off"
-    assert config.search.fast.temporal_nodes == 96
+    assert config.search.fast.temporal_nodes == 64
     assert (
-        SearchRequest(query="events", recall_level="fast").search_tier(config).temporal_nodes == 96
+        SearchRequest(query="events", recall_level="fast").search_tier(config).temporal_nodes == 64
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "graph"), [("fast", "off"), ("normal", "light"), ("deep", "light")]
+)
+def test_recall_overrides_shared_policies_without_changing_entity_graph(mode, graph):
+    config = load_config("configs/oam.yaml").config
+    request = SearchRequest(
+        query="events",
+        recall_level=mode,
+        overrides={"causal_graph": True, "fact_source_bodies": "ranked"},
+    )
+
+    request.validate_limits(config)
+
+    assert request.search_settings(config).causal_graph is True
+    assert request.search_settings(config).fact_source_bodies == "ranked"
+    assert request.search_tier(config).entity_semantic_graph == graph
+    assert config.search.causal_graph is False
+    assert config.search.fact_source_bodies == "required"
 
 
 @pytest.mark.parametrize(
@@ -34,6 +54,8 @@ def test_search_overrides_customize_selected_preset_without_mutating_defaults():
         {"lexical_ranking": "invalid"},
         {"lexical_ranking": None},
         {"adjacent_user_context_max_chars": True},
+        {"causal_graph": "invalid"},
+        {"fact_source_bodies": "invalid"},
         {"rerank_candidates": 2},
         {"rerank_min_score": 0.5},
     ],
@@ -87,10 +109,9 @@ def test_search_defaults_to_normal_without_profile_selection() -> None:
         (SearchManyRequest, {"queries": ["q"]}),
     ],
 )
-@pytest.mark.parametrize("level", ["deep", "mid"])
-def test_search_rejects_removed_recall_modes(request_type, query, level) -> None:
-    with pytest.raises(ValidationError, match="Input should be 'fast' or 'normal'"):
-        request_type(**query, recall_level=level)
+def test_search_rejects_removed_recall_mode(request_type, query) -> None:
+    with pytest.raises(ValidationError, match="Input should be 'fast', 'normal' or 'deep'"):
+        request_type(**query, recall_level="mid")
 
 
 @pytest.mark.parametrize("profile_selection", [True, False])

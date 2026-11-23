@@ -158,13 +158,11 @@ def test_existing_fact_policies_keep_the_derived_fact(mode):
     [
         ("fast", True, ["original"]),
         ("fast", False, ["fact"]),
-        ("normal", True, ["fact", "original", "second_event"]),
+        ("normal", True, ["original"]),
         ("normal", False, ["fact"]),
     ],
 )
-def test_source_dedup_survives_final_rebuild_only_for_enabled_fast_chunks(
-    recall_level, chunks, expected
-):
+def test_source_dedup_survives_final_rebuild_when_chunks_enabled(recall_level, chunks, expected):
     class Repository(SourceRepository):
         def lexical(self, query, limit):
             return [{"unit_id": "fact"}, {"unit_id": "original"}]
@@ -176,7 +174,7 @@ def test_source_dedup_survives_final_rebuild_only_for_enabled_fast_chunks(
 
     rows = test_source_context.evidence_rows.__wrapped__()
     values = CONFIG.model_dump(mode="json")
-    values["search"]["fast"]["fact_source_bodies"] = "ranked_deduplicated"
+    values["search"]["fact_source_bodies"] = "ranked_deduplicated"
     result = Service(rows, config=type(CONFIG).model_validate(values)).search(
         object(),
         SearchRequest(
@@ -187,11 +185,11 @@ def test_source_dedup_survives_final_rebuild_only_for_enabled_fast_chunks(
     )
     assert [r["unit_id"] for r in result["items"]] == expected
     assert result["context_tokens"] == context_token_count(result["context"])
-    if recall_level == "fast" and chunks:
+    if chunks:
         assert result["diagnostics"]["context_budget"]["source_deduplicated_fact_ids"] == ["fact"]
 
 
 def test_dedup_config_is_resolved_from_operator_yaml(tmp_path):
     path = tmp_path / "source-dedup.yaml"
-    path.write_text("search:\n  fast:\n    fact_source_bodies: ranked_deduplicated\n")
-    assert load_config(path).config.search.fast.fact_source_bodies == "ranked_deduplicated"
+    path.write_text("search:\n  fact_source_bodies: ranked_deduplicated\n")
+    assert load_config(path).config.search.fact_source_bodies == "ranked_deduplicated"

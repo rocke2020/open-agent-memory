@@ -150,6 +150,19 @@ test('memory_add retains one explicit message with mapped time and eligibility',
   });
 });
 
+test('memory_recall forwards deep mode and returns its complete cited context', async () => {
+  const fake = fakeClient();
+  await withServer(fake, async (client) => {
+    const result = await client.callTool({
+      name: 'memory_recall',
+      arguments: { query: 'What changed across the project?', recall_level: 'deep', detail: 'full' },
+    });
+    assert.equal(result.isError ?? false, false);
+    assert.deepEqual(payload(result), recallResult);
+    assert.equal(fake.calls[0].input.recallLevel, 'deep');
+  });
+});
+
 test('write tools pass a caller-provided idempotency key', async () => {
   const fake = fakeClient();
   await withServer(fake, async (client) => {

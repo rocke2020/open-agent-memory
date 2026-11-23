@@ -69,18 +69,21 @@ test('recall sends the fast cited-context contract by default', async () => {
   });
 });
 
-test('recall passes normal mode and chunk omission', async () => {
-  queue(200, { context: 'evidence', context_tokens: 1, items: [] });
+for (const recallLevel of ['normal', 'deep']) {
+  test(`recall passes ${recallLevel} mode and consumes cited context with chunks omitted`, async () => {
+    queue(200, { context: '[1] Project evidence.', context_tokens: 6, items: [] });
 
-  await client().recall({ query: 'status', recallLevel: 'normal', includeChunks: false });
+    const result = await client().recall({ query: 'status', recallLevel, includeChunks: false });
 
-  assert.deepEqual(requests[0].body, {
-    user_id: 'u1',
-    query: 'status',
-    recall_level: 'normal',
-    include: { chunks: false },
+    assert.equal(result.context, '[1] Project evidence.');
+    assert.deepEqual(requests[0].body, {
+      user_id: 'u1',
+      query: 'status',
+      recall_level: recallLevel,
+      include: { chunks: false },
+    });
   });
-});
+}
 
 test('add sends one eligible user message with an idempotency key', async () => {
   queue(202, { operation_id: 'op_1', source_id: 'src_1', readiness: { accepted: true } });

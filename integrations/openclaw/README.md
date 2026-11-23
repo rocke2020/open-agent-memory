@@ -71,7 +71,7 @@ For each recurring job, a host-reported run status (`ok`, `error`, or `skipped`)
 
 Each request has a stable content-derived idempotency key and validates its OAM acceptance receipt. Reconciliation stops when its host snapshot is cancelled. There is no local queue or automatic retry. Capture and skip logs identify the job and outcome without credentials or content. Acceptance does not prove indexing or recall readiness. Enabling capture does not grant cron sessions access to personal recall or removal tools, and it does not delete previously stored reports.
 
-Set `maxContextTokens` to the service’s largest recall context limit when the agent can accommodate it; the default is 1024 and the maximum is 32768. The plugin checks the complete returned `context_tokens` against its `maxContextTokens` host limit. Citations, metadata and required originals can take a valid server result above that limit; automatic recall then omits the result and explicit search reports an error instead of injecting oversized context.
+Automatic recall selects `fast`. The `memory_search` tool defaults to `normal` and accepts `fast`, `normal`, or `deep`. Their service context limits default to 8,000, 16,000 and 24,000 tokens. Set `maxContextTokens` to at least 24,000 to consume complete Deep results when the agent can accommodate them. This host limit defaults to 1,024 and has a maximum of 32,768. The plugin checks the complete returned `context_tokens`, including citations, metadata and originals, against this limit. A response above the host limit is omitted during automatic recall and returned as an error during explicit search. The host limit validates responses after retrieval.
 
 ## Response and evidence boundaries
 

@@ -183,26 +183,24 @@ def test_fact_and_source_share_total_and_deduplicate(evidence_rows):
     assert result["context_tokens"] <= 2048
 
 
-@pytest.mark.parametrize("mode", ["fast", "normal"])
-def test_only_fact_retains_its_full_oversized_bundle(evidence_rows, mode):
+@pytest.mark.parametrize("mode", ["fast", "normal", "deep"])
+@pytest.mark.parametrize("has_smaller_root", [False, True])
+def test_only_fact_omits_its_oversized_bundle(evidence_rows, mode, has_smaller_root):
     fact, original = deepcopy(evidence_rows[0]), deepcopy(evidence_rows[2])
     original["text"] += " Background." * 1100
-    result = ranked_service([fact, original], mode).search(
+    rows = [fact, original, evidence_rows[3]] if has_smaller_root else [fact, original]
+    result = ranked_service(rows, mode).search(
         object(), SearchRequest(query="workshop", recall_level=mode)
     )
-    assert {item["unit_id"] for item in result["items"]} == {"fact", "original"}
-    assert (
-        next(item for item in result["items"] if item["kind"] == "passage")["text"]
-        == original["text"]
+    assert [item["unit_id"] for item in result["items"]] == (
+        ["second_event"] if has_smaller_root else []
     )
-    assert result["context_tokens"] > 2048
-    assert result["diagnostics"]["context_budget"]["oversized_single_fact"] is True
-    assert (
-        result["diagnostics"]["context_budget"]["overrun_tokens"] == result["context_tokens"] - 2048
-    )
+    assert 0 <= result["context_tokens"] <= 2048
+    assert result["diagnostics"]["context_budget"]["oversized_single_fact"] is False
+    assert result["diagnostics"]["context_budget"]["overrun_tokens"] == 0
 
 
-def test_two_oversized_facts_have_no_singleton_exception(evidence_rows):
+def test_two_oversized_facts_are_both_omitted(evidence_rows):
     fact, original = deepcopy(evidence_rows[0]), deepcopy(evidence_rows[2])
     second = {**deepcopy(fact), "unit_id": "fact2"}
     original["text"] += " Background." * 1100
@@ -212,14 +210,14 @@ def test_two_oversized_facts_have_no_singleton_exception(evidence_rows):
     assert result["items"] == []
 
 
-def test_zero_internal_share_has_no_singleton_exception(evidence_rows):
+def test_zero_internal_share_returns_empty_context(evidence_rows):
     request = SearchRequest(query="workshop")
     request._context_max_tokens = 0
     result = ranked_service([evidence_rows[0], evidence_rows[2]]).search(object(), request)
     assert result["items"] == []
 
 
-@pytest.mark.parametrize("mode,expected_count", [("fast", 5), ("normal", 6)])
+@pytest.mark.parametrize("mode,expected_count", [("fast", 2), ("normal", 4), ("deep", 6)])
 def test_native_mode_ceiling_controls_actual_original_admission(
     evidence_rows, mode, expected_count
 ):
@@ -240,7 +238,7 @@ def test_native_mode_ceiling_controls_actual_original_admission(
     assert result["diagnostics"]["context_budget"]["oversized_single_fact"] is False
 
 
-@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("mode", ["fast", "normal", "deep"])
 async def test_http_uses_real_recall_packing_and_batch_shares(
     evidence_rows, mode, tmp_path, caplog
 ):

@@ -39,6 +39,14 @@ def test_user_and_unknown_supported_facts_are_never_deduplicated(role):
     ]
 
 
+@pytest.mark.parametrize("policy", ["ranked_deduplicated", "assistant_deduplicated"])
+def test_original_cannot_replace_a_fact_with_a_retrieval_path(policy):
+    claim, owner = pair()
+    claim["paths"] = [{"arm": "graph", "nodes": ["seed", claim["unit_id"]], "score": 0.7}]
+
+    assert bundle_items([[claim, owner]], fact_source_bodies=policy) == [claim, owner]
+
+
 @pytest.mark.parametrize(
     "guard",
     [
@@ -140,18 +148,16 @@ def service_fixture():
     [
         ("fast", True, ["original", "second_event"]),
         ("fast", False, ["fact"]),
-        ("normal", True, ["fact", "original", "second_event"]),
+        ("normal", True, ["original", "second_event"]),
         ("normal", False, ["fact"]),
     ],
 )
-def test_service_projection_preserves_required_source_tail_and_only_runs_for_fast_chunks(
-    level, chunks, want
-):
+def test_service_projection_preserves_required_source_tail_when_chunks_enabled(level, chunks, want):
     from oam.contracts.search import SearchRequest
 
     Service, rows, config = service_fixture()
     values = config.model_dump(mode="json")
-    values["search"]["fast"]["fact_source_bodies"] = "assistant_deduplicated"
+    values["search"]["fact_source_bodies"] = "assistant_deduplicated"
     result = Service(rows, config=type(config).model_validate(values)).search(
         object(),
         SearchRequest(
@@ -160,7 +166,7 @@ def test_service_projection_preserves_required_source_tail_and_only_runs_for_fas
     )
     assert [r["unit_id"] for r in result["items"]] == want
     assert result["context_tokens"] == context_token_count(result["context"])
-    if level == "fast" and chunks:
+    if chunks:
         assert rows[2]["text"] in result["context"]
         assert rows[3]["text"] in result["context"]
         assert result["diagnostics"]["context_budget"]["assistant_deduplicated_fact_ids"] == [
@@ -172,8 +178,8 @@ def test_operator_yaml_enables_assistant_fact_deduplication(tmp_path):
     from oam.config import load_config
 
     path = tmp_path / "assistant-facts.yaml"
-    path.write_text("search:\n  fast:\n    fact_source_bodies: assistant_deduplicated\n")
-    assert load_config(path).config.search.fast.fact_source_bodies == "assistant_deduplicated"
+    path.write_text("search:\n  fact_source_bodies: assistant_deduplicated\n")
+    assert load_config(path).config.search.fact_source_bodies == "assistant_deduplicated"
 
 
 def test_projection_never_refills_required_budget_omissions():
@@ -206,11 +212,8 @@ def test_projection_never_refills_required_budget_omissions():
     for policy in ("required", "assistant_deduplicated"):
         values = config.model_dump(mode="json")
         values["search"]["partial_match_gate"] = "user_fact_exchange"
-        values["search"]["fast"].update(
-            context_max_tokens=300,
-            fact_source_bodies=policy,
-            source_seed_results=1,
-        )
+        values["search"]["fact_source_bodies"] = policy
+        values["search"]["fast"].update(context_max_tokens=300, source_seed_results=1)
         result = Service(rows, config=type(config).model_validate(values)).search(
             object(), SearchRequest(query="Which reservation?", recall_level="fast")
         )
@@ -249,7 +252,7 @@ def test_final_insight_invalidation_preserves_independent_original_and_cleans_pa
             locator = c.get("span", c)
             locator.update(role="assistant", message_index=0)
     values = CONFIG.model_dump(mode="json")
-    values["search"]["fast"]["fact_source_bodies"] = "assistant_deduplicated"
+    values["search"]["fact_source_bodies"] = "assistant_deduplicated"
     result = InsightService(rows, config=type(CONFIG).model_validate(values)).search(
         object(), SearchRequest(query="batch implementation", recall_level="fast")
     )

@@ -26,6 +26,9 @@ def test_batch_shares_one_budget_and_runs_two_queries_concurrently() -> None:
 
     def search_one(request, deadline_at):
         barrier.wait(timeout=2)
+        settings = request.search_settings(config)
+        assert settings.causal_graph is True
+        assert settings.fact_source_bodies == "ranked"
         with lock:
             calls.append((request.query, request.context_limit(config), deadline_at))
         return {
@@ -41,6 +44,7 @@ def test_batch_shares_one_budget_and_runs_two_queries_concurrently() -> None:
         SearchManyRequest(
             queries=["current city", "preferred style"],
             recall_level="fast",
+            overrides={"causal_graph": True, "fact_source_bodies": "ranked"},
         ),
         search_one,
     )
@@ -50,8 +54,8 @@ def test_batch_shares_one_budget_and_runs_two_queries_concurrently() -> None:
         "current city",
         "preferred style",
     ]
-    assert response["context_tokens"] == 18000
-    assert sorted(budget for _, budget, _ in calls) == [9000, 9000]
+    assert response["context_tokens"] == 8000
+    assert sorted(budget for _, budget, _ in calls) == [4000, 4000]
     assert len({deadline for _, _, deadline in calls}) == 1
     assert response["diagnostics"]["generative_calls"] == 0
 
@@ -164,7 +168,7 @@ def test_batch_resolves_mode_default_before_splitting() -> None:
         SearchManyRequest(queries=["one", "two"]),
         search_one,
     )
-    assert calls == [(12000, True), (12000, True)]
+    assert calls == [(8000, True), (8000, True)]
 
 
 def test_invalid_later_batch_query_dispatches_nothing() -> None:
@@ -397,7 +401,12 @@ def test_database_runtime_authorizes_batch_once_before_search(monkeypatch) -> No
     assert sorted(searched) == ["current city", "preferred style"]
 
 
-def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "mode,expected_shares", [("normal", (5334, 5333, 5333)), ("deep", (8000, 8000, 8000))]
+)
+def test_delegated_search_uses_one_valid_plan_and_exposes_usage(
+    tmp_path: Path, mode: str, expected_shares: tuple[int, int, int]
+) -> None:
     from oam.api.search import decompose_and_search
 
     config = _planner_config(tmp_path)
@@ -422,6 +431,9 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
 
     def search_one(request, deadline_at):
         searched.append((request.query, deadline_at, request.time_basis))
+        settings = request.search_settings(config)
+        assert settings.causal_graph is True
+        assert settings.fact_source_bodies == "ranked"
         budgets[request.query] = (request.context_limit(config), request.include.chunks)
         return {
             "items": [],
@@ -437,7 +449,9 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
             config,
             SearchRequest(
                 query="Lin city and response style",
+                recall_level=mode,
                 include={"chunks": False},
+                overrides={"causal_graph": True, "fact_source_bodies": "ranked"},
                 time_basis="event",
                 time_window={"start": "2026-06-01T00:00:00Z", "end": "2026-07-01T00:00:00Z"},
             ),
@@ -455,9 +469,9 @@ def test_delegated_search_uses_one_valid_plan_and_exposes_usage(tmp_path: Path) 
     assert len({deadline for _, deadline, _ in searched}) == 1
     assert all(basis.value == "event" for _, _, basis in searched)
     assert budgets == {
-        "Lin city and response style": (8000, False),
-        "Lin city": (8000, False),
-        "Lin response style": (8000, False),
+        "Lin city and response style": (expected_shares[0], False),
+        "Lin city": (expected_shares[1], False),
+        "Lin response style": (expected_shares[2], False),
     }
     assert result["planner"]["status"] == "used"
     assert result["planner"]["calls"] == 1

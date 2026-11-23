@@ -48,13 +48,7 @@ def test_readonly_ordinary_sql_honors_independent_graph_controls(monkeypatch, mo
         pytest.skip("requires an explicitly isolated PostgreSQL database")
     config = load_config(default_config_path()).config
     config = config.model_copy(
-        update={
-            "search": config.search.model_copy(
-                update={
-                    mode: getattr(config.search, mode).model_copy(update={"causal_graph": causal})
-                }
-            )
-        }
+        update={"search": config.search.model_copy(update={"causal_graph": causal})}
     )
     authority = AuthorizedUser("key", "tenant", "reader", "scope", frozenset({"memory:read"}))
     with psycopg.connect(dsn) as connection:

@@ -20,8 +20,8 @@ from oam.retrieval.service import RecallService
 def configuration(tmp_path, mode, graph, causal):
     path = tmp_path / "independent.yaml"
     path.write_text(
-        f'search:\n  {mode}:\n    entity_semantic_graph: "{graph}"\n'
-        f"    causal_graph: {str(causal).lower()}\n"
+        f"search:\n  causal_graph: {str(causal).lower()}\n"
+        f'  {mode}:\n    entity_semantic_graph: "{graph}"\n'
     )
     return load_config(path).config
 
@@ -90,6 +90,7 @@ def test_independent_controls_reach_the_actual_answer_context(tmp_path, mode, gr
     assert {item["unit_id"] for item in result["items"]} == expected
     assert result["diagnostics"]["graph"] == graph
     assert result["diagnostics"]["causal_graph"] is causal
+    assert result["diagnostics"]["search_config"]["causal_graph"] is causal
     assert ("graph" in result["diagnostics"]["executed_arms"]) is (graph != "off" or causal)
 
 
@@ -159,10 +160,10 @@ def test_temporal_search_keeps_temporal_edges_and_optionally_causal_edges(tmp_pa
         {"target": [{"arm": "temporal", "nodes": ["seed", "target"], "edge_ids": ["edge"]}]},
         (1.0,),
     )
-    assert all("temporal_links" in sql for sql in repository.statements if "edge_id" in sql)
-    assert all(
-        ("FROM unit_links" in sql) is causal for sql in repository.statements if "edge_id" in sql
-    )
+    edge_statements = [sql for sql in repository.statements if "edge_id" in sql]
+    assert len(edge_statements) == 2
+    assert all("temporal_links" in sql for sql in edge_statements)
+    assert all(("FROM unit_links" in sql) is causal for sql in edge_statements)
 
 
 @pytest.mark.parametrize("entities", [False, True])
@@ -190,10 +191,9 @@ def test_disabled_graph_branches_are_absent_from_sql(tmp_path, entities, causal)
 
 def selected_config(mode, causal):
     config = load_config(default_config_path()).config
-    tier = getattr(config.search, mode).model_copy(
-        update={"entity_semantic_graph": "off", "causal_graph": causal}
-    )
-    return config.model_copy(update={"search": config.search.model_copy(update={mode: tier})})
+    tier = getattr(config.search, mode).model_copy(update={"entity_semantic_graph": "off"})
+    search = config.search.model_copy(update={mode: tier, "causal_graph": causal})
+    return config.model_copy(update={"search": search})
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
@@ -239,17 +239,22 @@ class CausalOnlyRepository(CausalRepository):
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
-def test_causal_only_recall_can_run_with_entity_graph_off(mode):
+def test_causal_override_enables_causal_only_recall_with_entity_graph_off(mode):
     class Service(CausalService):
         @contextmanager
         def _repository(self, authority, request, deadline):
             yield CausalOnlyRepository(request, self.calls)
 
-    config = selected_config(mode, True)
+    config = selected_config(mode, False)
     service = Service(config=config)
     result = service.search(
         AuthorizedUser("test", "tenant", "principal", "user", frozenset()),
-        SearchRequest(query="why move", recall_level=mode, include={"chunks": False}),
+        SearchRequest(
+            query="why move",
+            recall_level=mode,
+            include={"chunks": False},
+            overrides={"causal_graph": True},
+        ),
     )
     assert {"effect", "cause", "origin"} <= {item["unit_id"] for item in result["items"]}
     assert result["diagnostics"]["graph"] == "off"

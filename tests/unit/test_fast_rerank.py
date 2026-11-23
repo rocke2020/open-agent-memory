@@ -96,9 +96,14 @@ class DistinctService(DatedService):
             ["new", "old"],
             [("Apple harvest was good.", "The newer apple harvest was excellent.")],
         ),
+        (
+            "deep",
+            ["new", "old"],
+            [("Apple harvest was good.", "The newer apple harvest was excellent.")],
+        ),
     ],
 )
-def test_configured_reranker_runs_only_in_normal(mode, selected, expected_documents):
+def test_configured_reranker_runs_in_normal_and_deep(mode, selected, expected_documents):
     documents_scored = []
 
     class Scorer(EmbeddingOnly):

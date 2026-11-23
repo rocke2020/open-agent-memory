@@ -65,11 +65,7 @@ def test_temporal_topk_filters_before_caps_and_orders_ties_across_directions(
         pytest.skip("requires an explicitly isolated PostgreSQL database")
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     config = config.model_copy(
-        update={
-            "search": config.search.model_copy(
-                update={"normal": config.search.normal.model_copy(update={"causal_graph": causal})}
-            )
-        }
+        update={"search": config.search.model_copy(update={"causal_graph": causal})}
     )
     authority = AuthorizedUser("key", "tenant", "reader", "scope", frozenset({"memory:read"}))
     request = SearchRequest(

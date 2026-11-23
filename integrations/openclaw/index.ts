@@ -320,14 +320,14 @@ const plugin = {
             type: 'object', additionalProperties: false, required: ['query'],
             properties: {
               query: { type: 'string', minLength: 1 },
-              recall_level: { type: 'string', enum: ['fast', 'normal'] },
+              recall_level: { type: 'string', enum: ['fast', 'normal', 'deep'] },
             },
           },
           async execute(_toolCallId, params, signal) {
             try {
               ctx.assertInvocationCurrent();
               const query = params?.query?.trim();
-              if (!query || !['fast', 'normal'].includes(params.recall_level ?? 'normal')) {
+              if (!query || !['fast', 'normal', 'deep'].includes(params.recall_level ?? 'normal')) {
                 throw new Error('invalid search request');
               }
               const result = await request(config, '/v1/recall', recallBody(config, query, params.recall_level ?? 'normal'), TOOL_RECALL_TIMEOUT_MS, undefined, signal);

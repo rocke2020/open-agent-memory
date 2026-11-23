@@ -1220,10 +1220,10 @@ def test_normal_follows_causal_direction_without_expanding_l2_siblings(recall_da
         )
     add_insight(connection, authority, "plan", ("move", "cheap"))
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
-    tier = getattr(config.search, mode).model_copy(
-        update={"channel_candidates": 1, "causal_graph": True}
+    tier = getattr(config.search, mode).model_copy(update={"channel_candidates": 1})
+    config = config.model_copy(
+        update={"search": config.search.model_copy(update={mode: tier, "causal_graph": True})}
     )
-    config = config.model_copy(update={"search": config.search.model_copy(update={mode: tier})})
     service = RecallService(
         config,
         TransactionPool(connection),

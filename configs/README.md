@@ -17,9 +17,9 @@ A retrieval **arm** produces a ranked candidate list. Direct dense retrieval fin
 | Direct dense search | Query to indexed evidence | `query → matching evidence` |
 | Semantic-link expansion | Retrieved seed fact to another fact | `query → seed fact → stored semantic neighbor` |
 
-Basic direct dense semantic search is always enabled in both `fast` and `normal`, independently of the graph expansion settings. Semantic-link expansion is an optional additional retrieval step: it can recover useful indirect evidence, but a fact can resemble a seed without answering the original query and introduce nearby-topic noise.
+Basic direct dense semantic search is always enabled in `fast`, `normal` and `deep`, independently of the graph expansion settings. Semantic-link expansion is an optional additional retrieval step: it can recover useful indirect evidence, but a fact can resemble a seed without answering the original query and introduce nearby-topic noise.
 
-`search.fast.entity_semantic_graph` and `search.normal.entity_semantic_graph` select entity and semantic expansion independently for each recall mode:
+`search.fast.entity_semantic_graph`, `search.normal.entity_semantic_graph` and `search.deep.entity_semantic_graph` select entity and semantic expansion independently for each recall mode:
 
 | `entity_semantic_graph` value | Entity and alias expansion | Stored semantic-link expansion |
 |---|---|---|
@@ -42,7 +42,7 @@ Causal links represent explicit effect-to-cause relationships, stored as `caused
 | Relationship | Similar meaning; no causal assertion. | A source explicitly states that an effect has a particular cause. |
 | Link creation | Embedding similarity between facts. | Model extraction and validation of source-supported `caused_by` fields. |
 | Traversal | Both directions, one hop from a seed fact. | Outgoing effect → cause, up to two hops. |
-| Recall control | Per-mode `entity_semantic_graph: full`. | Per-mode `causal_graph: true`, independently of `entity_semantic_graph`. |
+| Recall control | Per-mode `entity_semantic_graph: full`. | Shared `search.causal_graph: true`, independently of `entity_semantic_graph`. |
 
 For the source statement "I postponed moving because my rent increased," causal expansion can follow `postponed moving → rent increased`. Semantic expansion might connect the moving fact to another fact about looking for an apartment. The latter is related information, not an established cause. Chronology, co-mention and similarity alone cannot create a causal link.
 
@@ -51,10 +51,9 @@ The causal switches separate link creation from link consumption:
 | Setting | Stage | Effect when `true` |
 |---|---|---|
 | `index.enable_causal_graph` | Indexing | Extract and store validated causal links. |
-| `search.fast.causal_graph` | Fast recall | Follow existing outgoing causal links. |
-| `search.normal.causal_graph` | Normal recall | Follow existing outgoing causal links. |
+| `search.causal_graph` | Fast, Normal and Deep recall | Follow existing outgoing causal links. |
 
-Recall follows outgoing causal paths for up to two hops; `search.relation_hops` supports only `2`. The per-mode causal switch also controls causal edges used in temporal retrieval. Disabling it preserves ordinary temporal links and date handling.
+Recall follows outgoing causal paths for up to two hops. `search.relation_hops` supports only `2`. The shared `search.causal_graph` switch also controls causal edges used in temporal retrieval. Disabling it preserves ordinary temporal links and date handling.
 
 These switches are independent. `entity_semantic_graph: "off"` with `causal_graph: true` enables causal-only graph expansion. Enabling causal indexing does not enable causal recall, and enabling causal recall does not create missing links. Recall can consume previously stored causal links even while causal indexing is disabled. Changing only recall switches requires no reindexing; changing the indexing switch changes the extraction recipe and does not retroactively populate old facts.
 
@@ -62,15 +61,15 @@ With causal indexing disabled, extraction retains supported facts, entities, tem
 
 ## 3. Graph fusion weight
 
-`search.normal_arm_weights.graph` weights the combined graph arm during normal-mode rank fusion. Entity, semantic and causal neighbors that are enabled contribute to this one arm; they do not receive three separate fusion votes. The weight does not enable any expansion path.
+`search.normal_arm_weights.graph` weights the combined graph arm during Normal and Deep rank fusion. Entity, semantic and causal neighbors that are enabled contribute to this one arm; they do not receive three separate fusion votes. The weight does not enable any expansion path.
 
-Each executed arm contributes `weight / (search.rrf_k + rank)` for a candidate, with ranks starting at 1. The current normal weights are `1.0` for lexical, dense and temporal, and `0.1` for graph. At the same rank, the graph vote is one tenth of a direct dense or lexical vote. A candidate found in multiple arms receives their summed votes. Optional normal-mode reranking happens afterward.
+Each executed arm contributes `weight / (search.rrf_k + rank)` for a candidate, with ranks starting at 1. The shared Normal and Deep weights are `1.0` for lexical, dense and temporal, and `0.1` for graph. At the same rank, the graph vote is one tenth of a direct dense or lexical vote. A candidate found in multiple arms receives their summed votes. Optional Normal and Deep reranking happens afterward.
 
 Fast recall uses equal arm weights, including when graph expansion is enabled; it does not use `normal_arm_weights`. Fast always skips model reranking. A graph weight of `0.1` is neither a similarity threshold nor a 10% result quota.
 
-`search.lexical_ranker` defaults to `bm25` for fast and normal recall. It ranks ordinary full-text matches with owner-local BM25 plus twice the positional cover-density score. Set it to `fts` to use cover density alone. Both settings use `search.fts_rank_weights` for content, caption, heading and title. The same ranking mode and candidate limits apply in either setting, and PostgreSQL maintains the BM25 projection for either setting. [Indexing and retrieval](../docs/indexing-retrieval.md#6-candidate-retrieval-and-ranking)
+`search.lexical_ranker` defaults to `bm25` for all three recall modes. It ranks ordinary full-text matches with owner-local BM25 plus twice the positional cover-density score. Set it to `fts` to use cover density alone. Both settings use `search.fts_rank_weights` for content, caption, heading and title. The same ranking mode and candidate limits apply in either setting, and PostgreSQL maintains the BM25 projection for either setting. [Indexing and retrieval](../docs/indexing-retrieval.md#6-candidate-retrieval-and-ranking)
 
-`search.lexical_ranking` defaults to `whole_query` for both modes. It ranks one list of lexical candidates matching any selected query term. Set `per_term` to rank a list per term and fuse those lists. Both modes also enable adjacent user context with a cap of 1,000 characters per optional neighboring passage. In an older operator YAML, remove these three keys from the `fast` and `normal` presets and place any shared overrides directly under `search`. The request `overrides` object accepts all three keys.
+`search.lexical_ranking` defaults to `whole_query` for all three modes. It ranks one list of lexical candidates matching any selected query term. Set `per_term` to rank a list per term and fuse those lists. All three modes also enable adjacent user context with a cap of 1,000 characters per optional neighboring passage. These three settings are shared under `search`, and the request `overrides` object accepts them.
 
 ```yaml
 search:
@@ -106,44 +105,62 @@ The design priority is accurate answers from relevant, source-backed context wit
 - **Agent memory:** retrieve relevant, source-backed evidence within context and latency budgets.
 - **ReAct loop:** decide whether the task needs causal reasoning or additional evidence, then make targeted follow-up calls.
 
-1. Retrieve the initial evidence through `fast` or `normal`; basic direct dense semantic search remains enabled.
+1. Retrieve the initial evidence through `fast`, `normal` or `deep`; basic direct dense semantic search remains enabled.
 2. If an important cause is missing or ambiguous, issue a targeted follow-up recall query and inspect the supporting source evidence.
 3. Build the explanation from supported reasons, preserving uncertainty where the sources establish only chronology or correlation.
 
-Today the public recall request lets the agent choose `fast` or `normal` and refine its query. `causal_graph` remains an operator configuration setting with no per-request override; selecting normal or asking a "why" question does not enable causal graph traversal. Agent-directed investigation therefore uses additional ordinary searches and source-based reasoning under the current API.
+An agent can choose any recall mode and set `overrides.causal_graph: true` on a targeted follow-up request to traverse stored causal links. The shared operator setting supplies the default when the request omits the override.
 
 The intended benefits are less irrelevant context and fewer unnecessary context tokens while protecting answer accuracy and recall latency. Whether the agent needs further causal investigation depends on the actual task and belongs to the agent's workflow.
 
 ## 5. Defaults and example
 
-The checked-in defaults enable entity expansion only in normal recall:
+Fast, Normal and Deep use the following numeric presets. Normal is the default when a recall request omits its mode. Each context ceiling counts the complete rendered evidence. A complete group that exceeds the remaining budget is skipped, and smaller later groups can still fit.
+
+| Mode | Context tokens | Channel candidates | Fused candidates | Temporal nodes | Source seeds | Results per pool |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Fast | 8,000 | 64 | 128 | 64 | 36 | 88 |
+| Normal | 16,000 | 64 | 128 | 200 | 36 | 128 |
+| Deep | 24,000 | 64 | 154 | 300 | 36 | 154 |
+
+The canonical direct-recall deadlines are 3 seconds for Fast and 5 seconds for Normal and Deep. Batch and planned recall split one selected context total across their child searches. Valid numeric preset overrides in operator YAML take precedence over the defaults. Recall-only preset changes preserve the indexed generation. [Operator configuration](../docs/operations.md#1-configuration)
+
+The historical BEAM-10M result used the former Normal 24k recipe with FTS ranking. Reproduction requires its pinned mode settings and product revision. The 16k/24k paired evidence does not establish native BM25 performance under the current defaults. Native BM25 BEAM verification remains pending.
+
+Normal and Deep enable entity expansion by default. Fast uses its direct retrieval path.
 
 | Mode | `entity_semantic_graph` | `causal_graph` | Enabled graph expansion |
 |---|---|---|---|
 | `fast` | `"off"` | `false` | None, unless overridden by the request. |
 | `normal` | `light` | `false` | Entity and alias only. |
+| `deep` | `light` | `false` | Entity and alias only. |
 
-The following fragment shows the current normal-mode graph settings and causal indexing default from [oam.yaml](oam.yaml):
+The defaults configure the recall policies under `search` and the entity graph separately for each mode. [Default configuration](oam.yaml)
 
 ```yaml
 index:
   enable_causal_graph: false
 
 search:
+  causal_graph: false
+  fact_source_bodies: required
   normal_arm_weights:
     graph: 0.1
+  fast:
+    entity_semantic_graph: "off"
   normal:
     entity_semantic_graph: light
-    causal_graph: false
+  deep:
+    entity_semantic_graph: light
 ```
 
-Normal recall uses entity and alias expansion with a graph fusion weight of `0.1`. Semantic-link expansion, causal traversal and causal extraction are disabled. Basic direct dense semantic search is always enabled in both modes. To disable all graph expansion in either mode, set both its `entity_semantic_graph: "off"` and `causal_graph: false`.
+Normal and Deep use entity and alias expansion with a graph fusion weight of `0.1`. Semantic-link expansion, causal traversal and causal extraction are disabled. Basic direct dense semantic search is always enabled in all three modes. To disable graph expansion for a mode, use `entity_semantic_graph: "off"` for that mode and `search.causal_graph: false` for all three modes.
 
 Recall diagnostics report the selected `entity_semantic_graph` value as `graph`, alongside `causal_graph` and `executed_arms`; inspect them to distinguish a configured path from an arm that actually ran. Implementation references: [recall service](../src/oam/retrieval/service.py), [graph repository](../src/oam/retrieval/repository.py), [semantic-link construction](../src/oam/indexing/links.py), [extraction](../src/oam/indexing/extraction.py) and [configuration schema](../src/oam/config.py).
 
 ### 5.1. Partial-match gate
 
-Fast and normal share `search.partial_match_gate`. The default `user_fact_exchange` filters weaker conversation matches before context assembly. The value `"off"` disables that filter. Both values are available in either recall mode. Use `overrides.partial_match_gate` to select a value for a single request. [Default configuration](oam.yaml)
+Fast, Normal and Deep share `search.partial_match_gate`. The default `user_fact_exchange` filters weaker conversation matches before context assembly. The value `"off"` disables that filter. Both values are available in any recall mode. Use `overrides.partial_match_gate` to select a value for a single request. [Default configuration](oam.yaml)
 
 Suppose the query is “Did I pay for the workshop?” A lower-ranked assistant reply about registration can match the word “workshop.” If the reply has only a partial lexical match and dense retrieval found no fact citing the exact preceding user message in the same conversation revision, the gate can drop it. This leaves room for payment evidence. Filtering a derived fact can also save the space its required source passages would occupy.
 
@@ -151,34 +168,34 @@ An indirectly matched assistant original can qualify through the exchange when t
 
 In an earlier matched 13-question Fast comparison, enabling it reduced rendered context tokens by 34.1% and retained 12 of 16 tracked evidence passages, up from 9 of 16. Mean retrieval latency was roughly the same at 410 ms with the gate enabled and 412 ms with it off. For an individual request, check `diagnostics.local_context.gate_status` and `diagnostics.local_context.filtered_roots` to see whether the gate ran and how many candidates it removed.
 
-## 6. Fast source bodies and Normal reranking
+## 6. Source bodies and reranking
 
-Fast additionally supports the experimental `search.fast.fact_source_bodies` policy. `required` is the default and includes each admitted fact's complete source bodies when chunks are enabled. `ranked` validates the same complete persisted sources and retains complete facts, genuine citation quotes and provenance, but full bodies must compete as standalone eligible original roots after existing recovery and local selection. Citation-owner expansion, source-only detail and attached optional neighbors do not independently insert bodies. Complete Insight groups, normal recall and `include.chunks:false` retain their existing behavior. A useful unquoted detail in a support-only original can be lost; validate the policy on the workload before adoption. Deduplication uses complete validated support.
+Fast, Normal and Deep share `search.fact_source_bodies`. Use `overrides.fact_source_bodies` to choose a policy for one request. `required` is the default and includes each admitted fact's complete source bodies when chunks are enabled. `ranked` validates the same complete persisted sources and retains complete facts, genuine citation quotes and provenance, but full bodies must compete as standalone eligible original roots after existing recovery and local selection. Citation-owner expansion, source-only detail and attached optional neighbors do not independently insert bodies. Complete Insight groups retain their required support. With `include.chunks: false`, recall omits full originals regardless of this setting. Deduplication uses complete validated support.
 
-Fast also accepts the experimental `fact_source_bodies: assistant_deduplicated` policy. It completes ordinary required admission, lifecycle checks and token trimming first, then removes only nontruncated assistant-supported facts that have an exact complete selected source with identical time evidence and no lost alias information. Every original, user/mixed/unknown-supported fact and required Insight member remains. It preserves admission and item order, adds no replacement roots, and falls back to the full required rendering if exact tokens grow. Normal recall, disabled chunks and the default required policy retain their existing behavior. Removed fact IDs appear in `diagnostics.context_budget.assistant_deduplicated_fact_ids`; this experimental policy has no general accuracy guarantee.
+All three modes accept the experimental `fact_source_bodies: assistant_deduplicated` policy. It completes ordinary required admission, lifecycle checks and token trimming first, then removes only nontruncated assistant-supported facts that have an exact complete selected source with identical time evidence and no retrieval path on the fact. Every original, user/mixed/unknown-supported fact and required Insight member remains. It preserves admission and item order, adds no replacement roots, and falls back to the full required rendering if exact tokens grow. Removed fact IDs appear in `diagnostics.context_budget.assistant_deduplicated_fact_ids`; this experimental policy has no general accuracy guarantee.
 
-The additional experimental value `ranked_deduplicated` uses the same ranked admission and replaces an ordinary fact with its complete selected original only when its exact source locator and unique quotes validate, all time evidence matches, and no alias witness is lost. Excerpts and truncated originals cannot replace facts. The original keeps its existing source-group relevance position and complete text; unmatched facts and required Insight support remain. Deduplication frees rendered-token space but reserves the original learned/original pool slots. `diagnostics.context_budget.source_deduplicated_fact_ids` records replaced facts. This policy has no measured accuracy guarantee.
+The additional experimental value `ranked_deduplicated` uses the same ranked admission and replaces an ordinary fact with its complete selected original only when its exact source locator and unique quotes validate, all time evidence matches, and the fact carries no retrieval path. Excerpts and truncated originals cannot replace facts. The original keeps its existing source-group relevance position and complete text; unmatched facts and required Insight support remain. Deduplication frees rendered-token space but reserves the original learned/original pool slots. `diagnostics.context_budget.source_deduplicated_fact_ids` records replaced facts. This policy has no measured accuracy guarantee.
 
-Normal can use an optional `models.reranker` with the `rerank` capability to score fused candidate texts before context assembly. `search.normal.rerank_candidates` defaults to 48. A null cap sends the full bounded fused list. Keep the model binding null to use fused relevance order. Fast skips model reranking. On upgrade, remove `search.fast.rerank_candidates` and `search.fast.rerank_min_score` from operator YAML and remove the corresponding keys from Fast request overrides.
+Normal and Deep can use an optional `models.reranker` with the `rerank` capability to score fused candidate texts before context assembly. Their per-preset `rerank_candidates` values both default to 48. A null cap sends the full bounded fused list. Keep the model binding null to use fused relevance order. Fast skips model reranking. Reranker candidate limits belong to Normal and Deep.
 
 ## 7. Temporal traversal budgets and request overrides
 
-Fast and normal are configurable presets. `search.fast.temporal_nodes` defaults to 96 and `search.normal.temporal_nodes` to 300. Each is a positive traversal budget counting seeds and subsequently visited nodes; direct temporal matches and final result pools have separate admission. `max_results` does not clamp this budget.
+Fast, Normal and Deep are configurable presets. `search.fast.temporal_nodes`, `search.normal.temporal_nodes` and `search.deep.temporal_nodes` default to 64, 200 and 300. Each positive traversal budget counts seeds and subsequently visited nodes. Direct temporal matches and final result pools have separate admission. `max_results` does not clamp this budget.
 
 To give fast the same traversal budget as the normal default, use this operator override:
 
 ```yaml
 search:
   fast:
-    temporal_nodes: 300
+    temporal_nodes: 200
 ```
 
-For one recall request, use `"recall_level": "fast", "overrides": {"temporal_nodes": 300}`. Other selected-preset fields can be overridden in the same object; unspecified fields inherit the configured preset. Existing validation applies to the merged values, including candidate-cap relationships. Explicit supported nulls clear optional fields. Unknown fields and invalid combinations fail before retrieval I/O. The legacy non-null `fast_graph` option takes precedence over `overrides.entity_semantic_graph`. Direct, batch and planned recall preserve overrides; the response reports the effective preset and shared recall settings in `diagnostics.search_config`.
+For one recall request, use `"recall_level": "fast", "overrides": {"temporal_nodes": 200}`. The same object accepts other selected-preset fields and shared settings such as `causal_graph` and `fact_source_bodies`. Unspecified fields inherit configuration. Existing validation applies to the merged values, including candidate-cap relationships. Explicit supported nulls clear optional fields. Unknown fields and invalid combinations fail before retrieval I/O. The legacy non-null `fast_graph` option takes precedence over `overrides.entity_semantic_graph`. Direct, batch and planned recall preserve overrides; the response reports the effective preset and shared recall settings in `diagnostics.search_config`.
 
-The former shared `search.temporal_nodes` key is removed. To preserve an old shared value N, move it to `search.normal.temporal_nodes` and set `search.fast.temporal_nodes` to the smaller of N and the old fast `max_results`. New configurations can set either traversal budget independently of result limits. This recall-only change requires no reindexing.
+Each preset owns its temporal traversal budget independently of its result limits. Changing these recall limits preserves existing indexed content.
 
 ## 8. Personal evidence candidates
 
-Set `search.fast.personal_evidence_candidates` or `search.normal.personal_evidence_candidates` to a positive count to search user passages backed by active L1 preferences and experiences. The default is zero. The count is capped by `channel_candidates`, and search runs the additional channel when `include.chunks` is true and the query embedding is available. The returned passages compete under the selected mode's ordinary context budget.
+Set `personal_evidence_candidates` in `search.fast`, `search.normal` or `search.deep` to a positive count to search user passages backed by active L1 preferences and experiences. The default is zero. The count is capped by `channel_candidates`, and search runs the additional channel when `include.chunks` is true and the query embedding is available. The returned passages compete under the selected mode's ordinary context budget.
 
 For one normal recall request, set `"include": {"chunks": true}, "overrides": {"personal_evidence_candidates": 16}`. When novel passages enter fusion, the recall trace shows a `personal_evidence` arm. This option reuses the existing embedding, stored support and search indexes. [API reference](../docs/api.md#3-retain-and-recall)

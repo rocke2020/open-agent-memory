@@ -61,7 +61,7 @@ def graph_repository(monkeypatch):
                 update={
                     "entity_candidates_per_entity": 1,
                     "links_per_seed": 1,
-                    "normal": config.search.normal.model_copy(update={"causal_graph": True}),
+                    "causal_graph": True,
                 }
             )
         }

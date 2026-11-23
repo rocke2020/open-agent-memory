@@ -15,7 +15,7 @@ export interface OamClientOptions {
 
 export interface RecallInput {
   query: string;
-  recallLevel?: 'fast' | 'normal';
+  recallLevel?: 'fast' | 'normal' | 'deep';
   includeChunks?: boolean;
 }
 
