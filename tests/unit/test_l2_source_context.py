@@ -247,7 +247,7 @@ def test_insight_has_no_singleton_fact_overshoot_exception():
         }
     )
     result = InsightService(config=config).search(
-        object(), SearchRequest(query="batch implementation")
+        object(), SearchRequest(query="batch implementation", recall_level="normal")
     )
     assert result["items"] == []
     assert result["diagnostics"]["l2_source_expansion"][0]["status"] == "budget_omitted"

@@ -1,5 +1,7 @@
 # Open Agent Memory MCP Server
 
+[Documentation](../../docs/README.md) · [简体中文](README_CN.md)
+
 ## Overview
 
 This package is a thin Model Context Protocol (MCP) server for Open Agent Memory (OAM). It runs as a local stdio process started by an MCP client such as Claude Code, Cursor, or Codex, and calls the OAM HTTP API of an existing deployment. It adds no hosted service, database, queue, or listening port.
@@ -20,13 +22,28 @@ The wrapper supports only `api_key` mode. `dev` mode and forged `trusted` header
 
 ## Installation
 
-Install the published npm package:
+Choose the installation for your OAM service. The 0.0.2 archive supports all three recall modes with OAM 0.2.1. The npm package remains available for Fast and Normal.
+
+### Release archive installation
+
+Download `rocke-dong-oam-mcp-0.0.2.tgz` and `SHA256SUMS` from the [OAM v0.2.1 release](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.2.1). In the download directory, verify the checksum for the archive. Then run it with your environment configured as described below.
 
 ```bash
-npx -y @rocke-dong/oam-mcp
+grep '  rocke-dong-oam-mcp-0\.0\.2\.tgz$' SHA256SUMS | shasum -a 256 -c &&
+npx -y --package=/absolute/path/rocke-dong-oam-mcp-0.0.2.tgz oam-mcp
 ```
 
-To build and run from source instead:
+### npm installation
+
+The published npm version is 0.0.1. The MCP registry manifest `server.json` points to that version.
+
+```bash
+npx -y @rocke-dong/oam-mcp@0.0.1
+```
+
+### Source installation
+
+To build and run from source, use these commands in this directory.
 
 ```bash
 npm install
@@ -50,24 +67,24 @@ The MCP client may store these environment values in its own configuration. Prot
 
 ## Client Configuration
 
-Claude Code, after setting the three environment variables above in your shell:
+Use the archive's absolute path in your MCP client configuration. Keep the archive at that location so the client can start the process again. For Claude Code, first set the three environment variables above in your shell.
 
 ```bash
 claude mcp add oam \
   -e "OAM_BASE_URL=$OAM_BASE_URL" \
   -e "OAM_USER_ID=$OAM_USER_ID" \
   -e "OAM_USER_API_KEY=$OAM_USER_API_KEY" \
-  -- npx -y @rocke-dong/oam-mcp
+  -- npx -y --package=/absolute/path/rocke-dong-oam-mcp-0.0.2.tgz oam-mcp
 ```
 
-Cursor, using `~/.cursor/mcp.json`:
+For Cursor, edit `~/.cursor/mcp.json`.
 
 ```json
 {
   "mcpServers": {
     "oam": {
       "command": "npx",
-      "args": ["-y", "@rocke-dong/oam-mcp"],
+      "args": ["-y", "--package=/absolute/path/rocke-dong-oam-mcp-0.0.2.tgz", "oam-mcp"],
       "env": {
         "OAM_BASE_URL": "http://127.0.0.1:17333",
         "OAM_USER_ID": "your-user-id",
@@ -78,17 +95,17 @@ Cursor, using `~/.cursor/mcp.json`:
 }
 ```
 
-Other MCP clients use the same stdio command, arguments, and environment variables.
+Other MCP clients use the same stdio command, arguments, and environment variables. To use the npm release, replace the archive argument and `oam-mcp` with `@rocke-dong/oam-mcp@0.0.1`.
 
 ## Tools
 
-Recall exposes the server's Fast, Normal and Deep presets, with default context limits of 8,000, 16,000 and 24,000 tokens. The MCP tool defaults to Fast. Choose `normal` or `deep` for a larger retrieval budget.
+`memory_recall` sends `fast` when `recall_level` is omitted, independently of the OAM service's default for direct HTTP callers. MCP 0.0.2 accepts `fast`, `normal`, and `deep`. Deep requires OAM 0.2.1 or another server version with Deep support. The published npm package 0.0.1 accepts `fast` and `normal`. OAM 0.2.1 presets Fast, Normal and Deep default to 8,000, 16,000 and 24,000 context tokens respectively.
 
 | Tool | OAM call | Input | Returns |
 |---|---|---|---|
-| `memory_recall` | `POST /v1/recall` | `query`; optional `recall_level` (`fast` default, `normal`, or `deep`), `include_chunks` (default true), `detail` (`context` default or `full`) | Rendered `context` with citations and `trace_id`; `full` adds typed `items` and diagnostics |
+| `memory_recall` | `POST /v1/recall` | `query`; optional `recall_level` (`fast` by default, `normal`, or `deep` on MCP 0.0.2 with a compatible service), `include_chunks` (default true), `detail` (`context` by default or `full`) | Rendered `context` with citations and `trace_id`; `full` adds typed `items` and diagnostics |
 | `memory_add` | `POST /v1/retain` | `content`; optional timezone-aware `event_time`, `learning_eligible` (default true), `idempotency_key` | Durable operation ID and source ID |
-| `memory_add_document` | `POST /v1/users/{user_id}/resources` | `document_id`, `update_mode`, exactly one of `text` or `url` plus `media_type`, and optional `idempotency_key` | Source receipt and operation state |
+| `memory_add_document` | `POST /v1/users/{user_id}/resources` | `document_id`, `update_mode`, either `text` alone or `url` with `media_type`, and optional `idempotency_key` | Source receipt and operation state |
 | `memory_operation` | `GET /v1/users/{user_id}/operations/{operation_id}` | `operation_id` | Readiness, stage state, and safe failure details |
 | `memory_profile` | `GET /v1/users/{user_id}/profile` | None | Stored Profile content, references, and freshness; never generates |
 | `memory_remove` | `DELETE /v1/users/{user_id}/memories/{id}` or `/insights/{id}` | `memory_id`, `memory_type` (`basic` or `insight`) | Removal operation receipt |
@@ -97,7 +114,7 @@ Recall exposes the server's Fast, Normal and Deep presets, with default context 
 
 Both write tools accept an optional `idempotency_key`. Keys must be 1-200 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, `:`, or `-`; omit the key to generate one. Pass the same key when retrying the same logical write so OAM reuses the original receipt instead of duplicating the interaction or document revision. Without a key, the wrapper generates a new one for every invocation, so a retry becomes a new logical request.
 
-`memory_recall` defaults to `fast` because it is the pre-agent retrieval mode. `detail: "full"` returns the complete recall JSON, including typed items and diagnostics; the default returns the rendered context, token count, tokenizer identity, trace ID, and item count.
+Fast is the pre-agent retrieval mode. With `detail: "full"`, `memory_recall` returns the complete recall JSON, including typed items and diagnostics. By default it returns the rendered context, token count, tokenizer identity, trace ID, and item count.
 
 ## Behavior and Security
 

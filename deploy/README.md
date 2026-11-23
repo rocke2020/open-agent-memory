@@ -1,5 +1,7 @@
 # Run OAM with Docker Compose
 
+[Documentation](../docs/README.md) · [简体中文](README_CN.md)
+
 ## Overview
 
 OAM uses one non-root image for the API, Memory Inspector, worker and operator commands, with PostgreSQL/pgvector as its only persistent service. The image installs the locked Python dependencies and packaged configuration/migrations. The default topology publishes the API only on loopback. The replica topology adds a local reverse proxy, two APIs and two workers over the same database. This is a local application-recovery simulation, not proof of physical multi-host or database resilience.
@@ -8,14 +10,14 @@ For a first installation, [Your first useful memory](../docs/start-here.md) conn
 
 ## 1. Prepare configuration
 
-Use the versioned multi-architecture image from the repository root. See the [release record](../docs/releases/0.2.0.md) for artifact verification and publication status:
+Pull the v0.2.1 multi-architecture image from the repository root. See the [release record](../docs/releases/0.2.1.md) for artifact verification and publication status:
 
 ```bash
-docker pull ghcr.io/rocke2020/open-agent-memory:0.2.0
+docker pull ghcr.io/rocke2020/open-agent-memory:0.2.1
 cp deploy/.env.example deploy/.env
 ```
 
-The example selects that release image through `OAM_IMAGE`. To build from source instead, run `docker build -t oam:0.2.0-candidate .` and set `OAM_IMAGE=oam:0.2.0-candidate` in `deploy/.env`.
+The example selects that release image through `OAM_IMAGE`. To build from source instead, run `docker build -t oam:0.2.1-candidate .` and set `OAM_IMAGE=oam:0.2.1-candidate` in `deploy/.env`.
 
 Fill `deploy/.env` with independent random hexadecimal database passwords, a random root API key, and the configured generation/embedding endpoint, credential and model triplets. Generate each secret separately, for example with `openssl rand -hex 24`. Hexadecimal passwords avoid URI-escaping ambiguity in the example DSNs. The file is ignored by Git; keep it private. The root key manages users and cannot directly access their personal memory. Runtime services receive separate non-superuser API, queue and content credentials, not the database administrator password.
 
@@ -37,6 +39,21 @@ Migration uses operator authority and initializes the root credential. The role 
 
 Open `http://127.0.0.1:17333/ui/`. Use an administrator/root key to create a user through `POST /v1/users`, then connect the Inspector using the returned user key; see [administration](../docs/api.md#2-administration) and [operations](../docs/operations.md). Run the [retain → readiness → recall example](../docs/quickstart.md) to check your first cited memory. Change `OAM_HTTP_PORT` before starting if the port is occupied.
 
+### Upgrade from v0.2.0
+
+Keep the existing PostgreSQL volume and private `deploy/.env`. Set `OAM_IMAGE=ghcr.io/rocke2020/open-agent-memory:0.2.1` in that file. Before restarting with a custom operator YAML, update the shared recall settings using the [configuration upgrade](../docs/operations.md#upgrading-an-operator-yaml).
+
+Schedule a write maintenance window for migration 0040. It backfills the BM25 projection from stored lexical fields without model calls. Run the following from the repository root. If migration fails, inspect the error before starting the upgraded API and workers. [Migration details](../docs/operations.md#3-bootstrap-and-credentials)
+
+```bash
+docker compose --env-file deploy/.env -f deploy/compose.yaml pull migrate api worker
+docker compose --env-file deploy/.env -f deploy/compose.yaml stop api worker
+docker compose --env-file deploy/.env -f deploy/compose.yaml run migrate
+docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api worker
+```
+
+For a replica deployment, include `-f deploy/compose.replicas.yaml` in each command and include `gateway` in the final `up` command. After restart, check authorized recall and its citation against a previously indexed source.
+
 ## 3. Simulate replicas
 
 Initialize the database as above, then use both Compose files consistently:
@@ -54,8 +71,8 @@ Keep at least one healthy API and worker available during rolling replacement. S
 The Dockerfile pins its multi-architecture Python base by digest. Update that digest deliberately and rerun both architecture checks when changing the base. On a Mac with Docker emulation enabled:
 
 ```bash
-docker buildx build --platform linux/arm64 --load -t oam:0.2.0-arm64 .
-docker buildx build --platform linux/amd64 --load -t oam:0.2.0-amd64 .
+docker buildx build --platform linux/arm64 --load -t oam:0.2.1-arm64 .
+docker buildx build --platform linux/amd64 --load -t oam:0.2.1-amd64 .
 ```
 
 Record which checks ran natively or under emulation. The manual candidate workflow exports an OCI archive without publishing it. A local image ID, an OCI manifest digest and a published registry digest are different identities; record the one actually tested. Candidate evidence and the opt-in public HTTP probe are described in [release evidence](../docs/release-evidence.md). Source visibility, release uploads, registry publication and release-triggering pushes remain manual release actions after content review.

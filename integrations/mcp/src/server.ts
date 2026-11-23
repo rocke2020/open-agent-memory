@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { OamApiError } from './oam-client.ts';
 import type { AddDocumentInput, JsonObject, OamClient } from './oam-client.ts';
 
-const SERVER_VERSION = '0.0.1';
+const SERVER_VERSION = '0.0.2';
 
 export function createOamMcpServer(client: OamClient): McpServer {
   const server = new McpServer({ name: 'oam-mcp', version: SERVER_VERSION });

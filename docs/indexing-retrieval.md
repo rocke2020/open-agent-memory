@@ -1,10 +1,12 @@
 # Indexing and retrieval
 
+[Documentation](README.md) · [简体中文](zh/indexing-retrieval.md)
+
 ## Overview
 
 OAM preserves eligible interaction originals, learns individually supported records, consolidates supported Insights, and returns cited context to a caller that owns the final answer. Documents remain a separate Evidence pool. PostgreSQL stores originals, projections, policy, operations and worker ownership; stateless APIs and durable workers share that authority.
 
-This document describes the release design for indexing and recall. Runtime contracts remain in [API](api.md), operator settings in [configuration](../configs/README.md), and verification boundaries in [acceptance](acceptance.md).
+This document describes indexing and recall in v0.2.1. Runtime contracts remain in [API](api.md), operator settings in [configuration](../configs/README.md), and verification boundaries in [acceptance](acceptance.md).
 
 ## 1. Representations and ownership
 
@@ -45,7 +47,7 @@ Source: [source worker](../src/oam/workers/index_source.py), [indexing](../src/o
 
 L2 is a required supported representation whose purpose is useful memory, not exhaustive rewriting of every L1 fact. Consolidation reads existing L1 and can be enabled after L1 indexing without extracting the same originals again. Ready sources enter a fixed per-user consolidation window with a default duration of 24 hours. An isolated functional fixture can shorten the window without changing the default.
 
-The configured seed policy selects bounded eligible L1 inputs. The model returns supported candidate changes or a valid no-Insight result; malformed, empty, refused and failed output remain separate outcomes. Publication validates current support and revisions, preserves stable Insight identity where an update applies, and records its descriptive subtype. Mechanical support IDs are grounding checks; paraphrases of one event do not establish independent recurrence.
+The configured seed policy selects bounded eligible L1 inputs. The lexical part of existing-Insight target lookup uses per-term FTS within the current index generation. The public recall ranker setting does not change this lookup. [Insight target lookup](../src/oam/indexing/consolidation.py) The model returns supported candidate changes or a valid no-Insight result; malformed, empty, refused and failed output remain separate outcomes. Publication validates current support and revisions, preserves stable Insight identity where an update applies, and records its descriptive subtype. Mechanical support IDs are grounding checks; paraphrases of one event do not establish independent recurrence.
 
 Every published Insight has a concise, human-readable title naming its enduring subject. CREATE and UPDATE provide a nonblank title of at most 120 characters; an update normally preserves the previous title, changing it only when supported evidence changes or clarifies the subject. Occurrence dates, delivery histories and temporary status belong in the body unless they identify the subject itself. Ordinary support-only updates preserve the title exactly. A full repair after support removal generates its title from surviving evidence and may rename the subject. The title is stored with the search unit's presentation metadata and returned by memory inspection and export; the separate retrieval label retains its existing embedding role. Existing records reuse their saved subject label, or a bounded content preview when no label exists, without generation or reindexing.
 
@@ -77,6 +79,8 @@ Source: [resources](../src/oam/resources/), [Profiles](../src/oam/profiles/).
 
 ## 6. Candidate retrieval and ranking
 
+The API resolves the effective recall mode before validating mode-specific overrides, choosing budgets, decomposing a planned request or dispatching retrieval. An explicit `recall_level` wins. If the field is omitted, `search.default_recall_level` selects `fast`, `normal` or `deep`. The canonical YAML and request schema declare Fast as the fallback. Direct, batch and planned recall use the same precedence. The Inspector sends its selected mode explicitly and initially selects Fast. The MCP, OpenClaw and DSH archives for v0.2.1 also send Fast for omitted tool modes. [Recall handlers](../src/oam/api/search.py) · [Request contract](../src/oam/contracts/search.py) · [Default configuration](../configs/oam.yaml)
+
 Recall validates one absolute deadline and keeps the complete original query for semantic embedding. Explicit date windows take precedence over deterministic query-time interpretation. A date window affects temporal ranking; evidence discovered through another eligible arm remains eligible outside that window. Source and tenant/user policy are hard exclusions.
 
 Fast, Normal and Deep share one pipeline with dense candidates, one lexical arm and optional temporal and personal evidence arms. Each mode independently configures `entity_semantic_graph`. The value `"off"` disables entity and semantic graph expansion, `light` expands through shared entity IDs, and `full` also follows stored semantic links. Fast defaults to `"off"`. Normal and Deep default to `light`. All three modes use `search.causal_graph` to control outgoing causal traversal independently of entity expansion. It defaults to `false`. Reciprocal rank fusion combines the executed arms before any configured reranking. [Configuration guide](../configs/README.md#1-graph-expansion-modes) · [Recall service](../src/oam/retrieval/service.py)
@@ -99,9 +103,9 @@ Within the selected source revisions, supplemental user-original recovery materi
 
 Fast, Normal and Deep are configurable presets. Each preset owns a `temporal_nodes` traversal budget, including seeds and subsequently visited nodes, with defaults of 64 for Fast, 200 for Normal and 300 for Deep. It is independent of `max_results`, which caps each final result pool; direct temporal matches are admitted separately from traversal. A request-level `overrides` object can replace selected preset fields and shared recall settings. For example, `{"recall_level":"fast","overrides":{"temporal_nodes":300}}` sets Fast's traversal budget to 300. The existing configuration validators check merged values before retrieval I/O. Direct, batch and planned recall preserve these values through SQL retrieval, optional scoring and context assembly; batch context sharing uses the overridden total. `diagnostics.search_config` records the effective preset and shared overrides. See the [configuration guide](../configs/README.md#7-temporal-traversal-budgets-and-request-overrides).
 
-### Upcoming release: owner-local BM25 and shared recall settings
+### Owner-local BM25 and shared recall settings
 
-The upcoming release uses PostgreSQL full-text matching and ranks ordinary matches with field-weighted BM25 plus twice the PostgreSQL cover-density score. BM25 weights terms by how uncommon they are in the owner's index and accounts for document length. Cover density favors matches with query terms close together. Strict full and primary matches keep precedence. Protected quoted phrases and identifiers use exact literal matching, and function-word-only queries use the existing FTS fallback. Fast, Normal and Deep default to `search.lexical_ranking: whole_query`, which ranks a single candidate list. Configure `per_term` to rank and fuse separate term lists. [Lexical implementation](../src/oam/retrieval/repository.py)
+Recall uses PostgreSQL full-text matching and ranks ordinary matches with field-weighted BM25 plus twice the PostgreSQL cover-density score. BM25 weights terms by how uncommon they are in the owner's index and accounts for document length. Cover density favors matches with query terms close together. Strict full and primary matches keep precedence. Protected quoted phrases and identifiers use exact literal matching, and function-word-only queries use the existing FTS fallback. Fast, Normal and Deep default to `search.lexical_ranking: whole_query`, which ranks a single candidate list. Configure `per_term` to rank and fuse separate term lists. [Lexical implementation](../src/oam/retrieval/repository.py)
 
 BM25 statistics count the physically indexed units for one tenant and user. PostgreSQL updates the affected postings and statistics in the same transaction as each lexical insertion, replacement or physical deletion. Scores use current statistics at read time. Withdrawn or superseded sources are immediately excluded by recall eligibility and leave the statistics at physical cleanup. Migration 0040 populates the projection from stored lexical fields without rerunning extraction or embeddings. [Lexical projection migration](../migrations/0040_bm25.sql)
 
@@ -123,7 +127,7 @@ Rank roots by relevance before recency and admit complete groups in relevance or
 
 Repeated identical complete temporal metadata may share context-local `Time Tn: ...` definitions and `Time: Tn` references. Source-time inheritance is applied first. Text bodies, citations, temporal roles, event ranges, precision and timezone information remain intact; structured items retain their original metadata. Sharing is used only when the complete rendered string, including definitions, costs fewer context tokens than the existing rendering. The definitions count toward the same context budget.
 
-Canonical Fast, Normal and Deep totals are 8,000, 16,000 and 24,000 tokens. Normal is the default when a request omits `recall_level`. `context_tokens` counts the complete returned rendering with local `o200k_base`; it is not provider-billed usage or an exact count for every answer model. Hosts budget their complete model input separately. Plugins reject or omit a response whose complete context exceeds their host cap rather than clipping it.
+Canonical Fast, Normal and Deep totals are 8,000, 16,000 and 24,000 tokens. `context_tokens` counts the complete returned rendering with local `o200k_base`. Hosts budget their complete model input separately using their answer model's tokenizer. Plugins reject or omit a response whose complete context exceeds their host cap rather than clipping it.
 
 `include.chunks: false` omits full original bodies while retaining eligible learned content and genuine citations. With chunks enabled, required owner support precedes optional neighboring originals. A bounded supplemental excerpt preserves source identity and does not authorize further expansion. A later complete original replaces an excerpt only when its complete rendering fits.
 

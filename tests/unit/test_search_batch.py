@@ -115,7 +115,7 @@ def test_batch_splits_total_in_stable_order_without_erasing_zero_share() -> None
     config = config.model_copy(
         update={
             "search": config.search.model_copy(
-                update={"normal": config.search.normal.model_copy(update={"context_max_tokens": 2})}
+                update={"fast": config.search.fast.model_copy(update={"context_max_tokens": 2})}
             )
         }
     )
@@ -168,7 +168,7 @@ def test_batch_resolves_mode_default_before_splitting() -> None:
         SearchManyRequest(queries=["one", "two"]),
         search_one,
     )
-    assert calls == [(8000, True), (8000, True)]
+    assert calls == [(4000, True), (4000, True)]
 
 
 def test_invalid_later_batch_query_dispatches_nothing() -> None:

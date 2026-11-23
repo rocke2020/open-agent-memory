@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -66,7 +66,13 @@ class SearchIncludeOptions(FrozenContract):
 
 
 class SearchOutputOptions(FrozenContract):
-    recall_level: RecallLevel = RecallLevel.NORMAL
+    recall_level: RecallLevel = Field(
+        default=RecallLevel.FAST,
+        description=(
+            "Recall preset. When omitted, uses search.default_recall_level from configuration "
+            "(fast by default). An explicit value takes precedence."
+        ),
+    )
     overrides: dict[str, JsonValue] = Field(
         default_factory=dict,
         description=(
@@ -93,9 +99,12 @@ class SearchOutputOptions(FrozenContract):
 
     @model_validator(mode="after")
     def require_fast_for_graph_option(self) -> "SearchOutputOptions":
+        self._validate_fast_graph()
+        return self
+
+    def _validate_fast_graph(self) -> None:
         if self.fast_graph and self.recall_level != RecallLevel.FAST:
             raise ValueError("fast_graph requires recall_level=fast")
-        return self
 
     @field_validator("deadline_at")
     @classmethod
@@ -104,9 +113,18 @@ class SearchOutputOptions(FrozenContract):
             raise ValueError("deadline_at must be timezone-aware")
         return value
 
+    def resolve_defaults(self, config: OAMConfig) -> Self:
+        if "recall_level" in self.model_fields_set:
+            return self
+        return self.model_copy(
+            update={"recall_level": RecallLevel(config.search.default_recall_level)}
+        )
+
     def validate_limits(self, config: OAMConfig) -> None:
-        self.search_settings(config)
-        self.search_tier(config)
+        resolved = self.resolve_defaults(config)
+        resolved._validate_fast_graph()
+        resolved.search_settings(config)
+        resolved.search_tier(config)
 
     def search_settings(self, config: OAMConfig) -> SearchConfig:
         shared_overrides = {
@@ -117,7 +135,7 @@ class SearchOutputOptions(FrozenContract):
         return SearchConfig.model_validate({**config.search.model_dump(), **shared_overrides})
 
     def search_tier(self, config: OAMConfig) -> SearchTier:
-        mode = self.recall_level.value
+        mode = self.resolve_defaults(config).recall_level.value
         tier = getattr(config.search, mode)
         tier_overrides = {
             key: value

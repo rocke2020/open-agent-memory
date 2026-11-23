@@ -1,5 +1,7 @@
 # Personal and custom Profiles
 
+[Documentation](README.md) · [简体中文](zh/profiles.md)
+
 ## Overview
 
 OAM stores one personal Profile per user. It can be refreshed explicitly or through an optional automatic-refresh policy. A separate API generates a custom view, such as a work profile, and returns it without saving its instruction or generated content. Ordinary recall remains non-generative and separate from both Profile APIs.

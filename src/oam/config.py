@@ -132,6 +132,7 @@ class NormalArmWeights(FrozenModel):
 
 
 class SearchConfig(FrozenModel):
+    default_recall_level: Literal["fast", "normal", "deep"]
     max_query_tokens: PositiveInt
     max_queries: PositiveInt
     query_concurrency: PositiveInt

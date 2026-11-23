@@ -327,10 +327,10 @@ const plugin = {
             try {
               ctx.assertInvocationCurrent();
               const query = params?.query?.trim();
-              if (!query || !['fast', 'normal', 'deep'].includes(params.recall_level ?? 'normal')) {
+              if (!query || !['fast', 'normal', 'deep'].includes(params.recall_level ?? 'fast')) {
                 throw new Error('invalid search request');
               }
-              const result = await request(config, '/v1/recall', recallBody(config, query, params.recall_level ?? 'normal'), TOOL_RECALL_TIMEOUT_MS, undefined, signal);
+              const result = await request(config, '/v1/recall', recallBody(config, query, params.recall_level ?? 'fast'), TOOL_RECALL_TIMEOUT_MS, undefined, signal);
               ctx.assertInvocationCurrent();
               const context = checkedRecall(result, config.maxContextTokens);
               return { content: [{ type: 'text', text: context ? memoryContext(context) : 'No matching memory.' }] };

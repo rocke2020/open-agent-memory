@@ -1,5 +1,7 @@
 # Retain, wait for readiness and recall
 
+[Documentation](README.md) · [简体中文](zh/quickstart.md)
+
 ## Overview
 
 This example stores one conversation, waits for its learned memory and links to become ready, then retrieves cited context through the public HTTP API. Recall returns evidence for your agent; your agent generates the final answer.
@@ -94,6 +96,6 @@ Copy this block into the same Bash session. It writes a synthetic preference to 
 
 The ready operation reports `status: "succeeded"`, `readiness.memory_ready: true` and `readiness.links_ready: true`. The returned `context` should contain the vegetarian-food, train-travel and concise-plan preferences. Check each item's `citations` for its source identity, revision, locator and supporting quote. Existing memories in the selected collection may also appear when relevant.
 
-This is phase-one readiness. It does not wait for delayed L2 Insights or generate a User Profile. Fast recall performs no generative model calls; indexing and query embedding use your configured endpoints. Exact token usage, latency and model quality depend on that deployment.
+This is phase-one readiness. It does not wait for delayed L2 Insights or generate a User Profile. The example explicitly selects Fast. You can omit the mode to use the server's `search.default_recall_level`, which defaults to Fast. Recall performs no generative model calls; indexing and query embedding use your configured endpoints. Exact token usage, latency and model quality depend on that deployment.
 
 The polling deadline is three minutes, with a bounded final HTTP request. If it expires, inspect or keep polling the printed operation URL; the accepted work continues. Preserve the same request body and `Idempotency-Key` when resolving an ambiguous retain response. Running the entire block again creates a new request rather than resuming the old one. Model or worker failures appear on the operation; use the [operation API](api.md#3-retain-and-recall) to inspect them before retrying.

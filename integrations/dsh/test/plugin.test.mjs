@@ -229,7 +229,7 @@ test('oversized recall is omitted and a failed backend does not block the turn',
   } finally {await new Promise(resolve=>server.close(resolve));}
 });
 
-test('explicit deep recall consumes complete cited context within its configured host budget', async () => {
+for (const level of [undefined, 'normal', 'deep']) test(`recall mode ${level ?? 'omitted'} consumes complete cited context within its configured host budget`, async () => {
   const requests = [];
   const context = '[1] Complete project history. '.repeat(2000);
   const server = createServer(async (request, response) => {
@@ -251,11 +251,11 @@ test('explicit deep recall consumes complete cited context within its configured
     };
     apply(ctx, { baseUrl: `http://127.0.0.1:${server.address().port}`, userId: 'u1', apiKey: 'test-key', maxContextTokens: 24000 });
     const search = tools.find(tool => tool.name === 'memory_search');
-    const result = await search.execute({ query: 'Project history', recall_level: 'deep' }, {
+    const result = await search.execute({ query: 'Project history', ...(level ? { recall_level: level } : {}) }, {
       agent: { session: { header: { id: 'main' } } }, signal: new AbortController().signal,
     });
     assert.ok(result.includes(context.trim()));
-    assert.equal(requests[0].recall_level, 'deep');
+    assert.equal(requests[0].recall_level, level ?? 'fast');
     assert.deepEqual(search.parameters.properties.recall_level.enum, ['fast', 'normal', 'deep']);
   } finally {
     await dispose?.();

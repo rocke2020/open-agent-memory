@@ -1,5 +1,7 @@
 # Open Agent Memory Acceptance
 
+English · [简体中文](zh/acceptance.md)
+
 ## Overview
 
 Release claims require fail-capable evidence through the real public path. Unit tests prove deterministic policy, integration tests prove PostgreSQL/provider boundaries, and a small authorized end-to-end run proves the inspectable artifact; one layer never substitutes for another.
@@ -94,12 +96,14 @@ Verify that automatic Profile triggers default off. Exercise authorized policy r
 
 Verify recall override inheritance, validation and propagation through direct, batch and planned requests. Confirm the temporal budget operates independently of the result cap and personal evidence remains opt-in and subject to chunk eligibility, context and deadline limits. Verify recorded BEAM-10M scores against the pinned evidence. Those saved results measure the evaluated pipeline documented in [benchmarks](benchmarks.md#3-beam-10m).
 
-## 12. Upcoming release changes to recall
+## 12. v0.2.1 changed-surface checks
 
 Verify migration 0040 from populated migration 0039 data and confirm append, lexical replacement and physical deletion update exact owner-local postings and scores in the same transaction. Check that foreign writes leave an owner's scores unchanged. Preserve full-text and literal matching, source eligibility and context limits when switching between BM25 and FTS. Exercise the shared ranking mode and adjacent user context settings through direct, batch and planned recall. Verify that Fast skips model reranking when a scorer is configured and that Normal and Deep can score their bounded candidate lists and report permitted scoring degradation. [Upgrade procedure](operations.md#3-bootstrap-and-credentials)
 
 ### Three-tier recall
 
-Verify Fast, Normal and Deep through direct, batch and planned recall, preserving the requested spelling through each public client. Confirm context defaults of 8k, 16k and 24k, graph defaults of off, light and light, Normal as the omitted-mode default, and rejection of unknown modes. Test operator overlays that omit Deep, request overrides, legacy Fast graph precedence and per-child context allocations. Confirm Normal and Deep share lexical normalization, fusion weights and optional reranking while using their own numeric limits and deadlines. Recompute each complete returned context and verify that the packer omits a sole oversized L1 fact and returns an empty context for zero child allocations. Inspect exact source bodies and citations in the consumed result.
+Verify that the bundled Inspector and each MCP, OpenClaw and DSH release archive send Fast explicitly by default and preserve supported explicit tool modes. Verify each archive by its own package version.
+
+Verify Fast, Normal and Deep through direct, batch and planned recall, preserving the requested spelling through each public client. Confirm context defaults of 8k, 16k and 24k, graph defaults of off, light and light, Fast as the canonical omitted-mode default, alternate YAML defaults of Normal and Deep, explicit request modes taking precedence, and rejection of unknown modes. Test operator overlays that omit Deep, request overrides, legacy Fast graph precedence and per-child context allocations. Confirm Normal and Deep share lexical normalization, fusion weights and optional reranking while using their own numeric limits and deadlines. Recompute each complete returned context and verify that the packer omits a sole oversized L1 fact and returns an empty context for zero child allocations. Inspect exact source bodies and citations in the consumed result.
 
 Verify the shared `fact_source_bodies` policies in all three modes against exact source and citation evidence. `required` includes complete support by default. `ranked` admits owner bodies through their own eligible roots. `ranked_deduplicated` replaces supported redundant facts with already-selected complete originals. `assistant_deduplicated` first applies ordinary admission, then removes only qualifying redundant assistant-supported facts. Protect unmatched facts, time evidence, retrieval paths, required Insight members, pool caps and chunks-disabled behavior. Check diagnostics for omissions.

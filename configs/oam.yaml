@@ -70,6 +70,8 @@ extraction:
   reference_max_input_tokens: 2048
 
 search:
+  # Used when recall_level is omitted; explicit request modes take precedence.
+  default_recall_level: fast
   # Per-query limit measured with the local token estimate.
   max_query_tokens: 512
   # Maximum queries in a batch or generated decomposition plan.

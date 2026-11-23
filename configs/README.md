@@ -1,10 +1,12 @@
 # OAM configuration
 
-[English](README.md) | [简体中文](README_CN.md)
+[Documentation](../docs/README.md) · English · [简体中文](README_CN.md)
 
 ## Overview
 
 [oam.yaml](oam.yaml) is the authoritative public behavior configuration. This guide explains how graph expansion, causal indexing and recall weights interact. See [operations](../docs/operations.md) for model bindings, environment variables and service startup.
+
+Use these settings in v0.2.1. If upgrading an existing operator YAML, see the [configuration upgrade](../docs/operations.md#upgrading-an-operator-yaml).
 
 ## 1. Graph expansion modes
 
@@ -115,7 +117,7 @@ The intended benefits are less irrelevant context and fewer unnecessary context 
 
 ## 5. Defaults and example
 
-Fast, Normal and Deep use the following numeric presets. Normal is the default when a recall request omits its mode. Each context ceiling counts the complete rendered evidence. A complete group that exceeds the remaining budget is skipped, and smaller later groups can still fit.
+Fast, Normal and Deep use the following numeric presets. For a request that omits `recall_level`, `search.default_recall_level` selects `fast`, `normal` or `deep`. Canonical YAML sets it to `fast`. An explicit `recall_level` takes precedence. Each context ceiling counts the complete rendered evidence. A complete group that exceeds the remaining budget is skipped, and smaller later groups can still fit.
 
 | Mode | Context tokens | Channel candidates | Fused candidates | Temporal nodes | Source seeds | Results per pool |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -142,6 +144,7 @@ index:
   enable_causal_graph: false
 
 search:
+  default_recall_level: fast
   causal_graph: false
   fact_source_bodies: required
   normal_arm_weights:
@@ -190,7 +193,7 @@ search:
     temporal_nodes: 200
 ```
 
-For one recall request, use `"recall_level": "fast", "overrides": {"temporal_nodes": 200}`. The same object accepts other selected-preset fields and shared settings such as `causal_graph` and `fact_source_bodies`. Unspecified fields inherit configuration. Existing validation applies to the merged values, including candidate-cap relationships. Explicit supported nulls clear optional fields. Unknown fields and invalid combinations fail before retrieval I/O. The legacy non-null `fast_graph` option takes precedence over `overrides.entity_semantic_graph`. Direct, batch and planned recall preserve overrides; the response reports the effective preset and shared recall settings in `diagnostics.search_config`.
+For one recall request, use `"recall_level": "fast", "overrides": {"temporal_nodes": 200}`. The same object accepts other selected-preset fields and shared settings such as `causal_graph` and `fact_source_bodies`. Unspecified fields inherit configuration. Existing validation applies to the merged values, including candidate-cap relationships. Explicit supported nulls clear optional fields. Unknown fields and invalid combinations fail before retrieval I/O. In Fast, the legacy non-null `fast_graph` option takes precedence over `overrides.entity_semantic_graph`. Direct, batch and planned recall preserve overrides; the response reports the effective preset and shared recall settings in `diagnostics.search_config`.
 
 Each preset owns its temporal traversal budget independently of its result limits. Changing these recall limits preserves existing indexed content.
 
@@ -198,4 +201,4 @@ Each preset owns its temporal traversal budget independently of its result limit
 
 Set `personal_evidence_candidates` in `search.fast`, `search.normal` or `search.deep` to a positive count to search user passages backed by active L1 preferences and experiences. The default is zero. The count is capped by `channel_candidates`, and search runs the additional channel when `include.chunks` is true and the query embedding is available. The returned passages compete under the selected mode's ordinary context budget.
 
-For one normal recall request, set `"include": {"chunks": true}, "overrides": {"personal_evidence_candidates": 16}`. When novel passages enter fusion, the recall trace shows a `personal_evidence` arm. This option reuses the existing embedding, stored support and search indexes. [API reference](../docs/api.md#3-retain-and-recall)
+For one recall request, set `"include": {"chunks": true}, "overrides": {"personal_evidence_candidates": 16}`. When novel passages enter fusion, the recall trace shows a `personal_evidence` arm. This option reuses the existing embedding, stored support and search indexes. [API reference](../docs/api.md#3-retain-and-recall)

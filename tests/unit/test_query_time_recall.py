@@ -119,6 +119,32 @@ class DatedService(RecallService):
         yield DatedRepository(request)
 
 
+@pytest.mark.parametrize(
+    "configured,explicit,expected,budget",
+    [
+        ("fast", None, "fast", 8000),
+        ("deep", None, "deep", 24000),
+        ("normal", "fast", "fast", 8000),
+        ("fast", "normal", "normal", 16000),
+    ],
+)
+def test_direct_recall_uses_resolved_mode_for_retrieval_and_context(
+    configured, explicit, expected, budget
+):
+    config = CONFIG.model_copy(
+        update={"search": CONFIG.search.model_copy(update={"default_recall_level": configured})}
+    )
+    options = {} if explicit is None else {"recall_level": explicit}
+    result = DatedService(config, None, EmbeddingOnly(), generation_id="generation").search(
+        object(), SearchRequest(query="Apple harvest", **options)
+    )
+
+    assert result["diagnostics"]["recall_level"] == expected
+    assert result["diagnostics"]["context_budget"]["limit"] == budget
+    assert result["context"]
+    assert result["context_tokens"] <= budget
+
+
 @pytest.mark.parametrize("mode", ["fast", "normal"])
 @pytest.mark.parametrize("source", ["config", "request"])
 @pytest.mark.parametrize(

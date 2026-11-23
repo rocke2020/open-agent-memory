@@ -1,5 +1,7 @@
 # OAM runtime prompts
 
+English · [简体中文](zh/prompts.md)
+
 ## Overview
 
 OAM keeps its authored model instructions in the packaged UTF-8 text files linked below. The runtime reads these files when their modules are imported. Review and edit the text files directly, then restart the relevant processes to load changes. Request-specific source text, references and custom Profile instructions are assembled separately as input data.

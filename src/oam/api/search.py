@@ -35,6 +35,7 @@ def search_many(
     request: SearchManyRequest,
     search_one: SearchOne,
 ) -> dict:
+    request = request.resolve_defaults(config)
     _validate_batch(config, request)
     deadline = _deadline(request, config.request.batch_deadline_seconds)
     return _run_batch(config, request, search_one, deadline)
@@ -46,6 +47,7 @@ def decompose_and_search(
     search_one: SearchOne,
     models,
 ) -> dict:
+    request = request.resolve_defaults(config)
     request.validate_limits(config)
     _validate_queries(config, [request.query])
     if config.models.binding_for("planner") is None:

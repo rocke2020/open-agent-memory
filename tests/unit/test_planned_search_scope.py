@@ -50,6 +50,43 @@ def empty_result(request, deadline):
 
 
 @pytest.mark.parametrize("planned", [False, True])
+@pytest.mark.parametrize(
+    "configured,explicit,expected,budget",
+    [
+        ("fast", None, "fast", 8000),
+        ("deep", None, "deep", 24000),
+        ("normal", "fast", "fast", 8000),
+        ("fast", "normal", "normal", 16000),
+    ],
+)
+def test_search_resolves_mode_before_allocating_child_context(
+    tmp_path, planned, configured, explicit, expected, budget
+):
+    path = tmp_path / "default-mode.yaml"
+    path.write_text(f"search:\n  default_recall_level: {configured}\n")
+    base = planner_config()
+    config = load_config(path).config.model_copy(update={"models": base.models})
+    seen = []
+
+    def search_one(request, deadline):
+        seen.append((request.recall_level.value, request.context_limit(config)))
+        return empty_result(request, deadline)
+
+    options = {} if explicit is None else {"recall_level": explicit}
+    if planned:
+        result = decompose_and_search(
+            config, SearchRequest(query="one", **options), search_one, Planner(["two"])
+        )
+    else:
+        result = search_many(
+            config, SearchManyRequest(queries=["one", "two"], **options), search_one
+        )
+
+    assert seen == [(expected, budget // 2), (expected, budget // 2)]
+    assert result["diagnostics"]["recall_level"] == expected
+
+
+@pytest.mark.parametrize("planned", [False, True])
 def test_search_children_preserve_preset_overrides_and_share_overridden_context(planned):
     config = planner_config()
     seen = []

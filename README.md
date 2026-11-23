@@ -2,9 +2,9 @@
 
 **Useful memory for everyday AI agents.**
 
-[English](README.md) | [中文](README_CN.md) | [日本語](README_JA.md)
+[English](README.md) | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
-[Get started](#quick-start) · [Performance](#performance--accuracy) · [Integrations](#connect-your-agent) · [Documentation](docs/indexing-retrieval.md) · [Releases](https://github.com/rocke2020/open-agent-memory/releases)
+[Get started](#quick-start) · [Performance](#performance--accuracy) · [Integrations](#connect-your-agent) · [Documentation](docs/README.md) · [Releases](https://github.com/rocke2020/open-agent-memory/releases)
 
 Open Agent Memory (OAM) is a fully open-source memory engine for AI agents. It remembers useful facts, preferences and experiences across conversations, then retrieves relevant evidence with citations when your agent needs it.
 
@@ -70,7 +70,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml run api preflight -
 docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api worker
 ```
 
-Stop if a command fails and resolve the reported error before continuing. The Compose file selects the **v0.2.0** image for Linux AMD64 or ARM64. See the [deployment guide](deploy/README.md) for ports, model servers on your host, source builds and replica setup.
+Stop if a command fails and resolve the reported error before continuing. The Compose file selects the **v0.2.1** image for Linux AMD64 or ARM64. See the [deployment guide](deploy/README.md) for ports, model servers on your host, source builds and replica setup.
 
 ### 3. Store and recall your first memory
 
@@ -86,9 +86,9 @@ Start the service and create a user key first. Client packages connect to OAM; t
 
 | Agent or application | Integration |
 | --- | --- |
-| Claude Code or Cursor | [MCP server and client configuration](integrations/mcp/README.md#client-configuration), Node.js 22+ |
-| OpenClaw | [Plugin installation](integrations/openclaw/README.md#npm-installation), with automatic recall and eligible capture |
-| DeepSeek Harness (DSH) | [DSH plugin](integrations/dsh/README.md) |
+| Claude Code or Cursor | [MCP server and client configuration](integrations/mcp/README.md#release-archive-installation), Node.js 22+ |
+| OpenClaw | [Plugin installation](integrations/openclaw/README.md#release-archive-installation), with automatic recall and eligible capture |
+| DeepSeek Harness (DSH) | [DSH plugin](integrations/dsh/README.md#release-archive-installation) |
 | Your own application | [Copyable HTTP example](docs/quickstart.md) and [API reference](docs/api.md) |
 
 ## See What Your Agent Remembers
@@ -101,26 +101,26 @@ The Inspector lets you browse retained sources, inspect recalled memories and ci
 
 OAM preserves original conversations (**L0**), extracts source-backed facts (**L1**), and builds supported Insights across related facts (**L2**). A stored, refreshable User Profile (**L3**) helps the agent personalize its behavior. Text, HTML, PDF and image **Resources** remain separate evidence and can be retrieved alongside learned memory.
 
-Recall supports **fast**, **normal** and **deep** modes and returns cited context without generating the final answer. The default context limits are 8,000, 16,000 and 24,000 tokens respectively. Normal is the default mode. Your agent decides how to use that evidence and owns its final answer and total input budget.
+Recall defaults to **Fast** and returns cited context for your agent to use. Fast, Normal and Deep have default context limits of **8,000**, **16,000** and **24,000** tokens. Set `search.default_recall_level` in YAML to `fast`, `normal` or `deep` for API requests that omit `recall_level`. An explicit request mode takes precedence.
 
 [Memory and retrieval design](docs/indexing-retrieval.md) · [Architecture](docs/architecture.md) · [Configuration](configs/README.md)
 
-## v0.2.0
+## v0.2.1
 
-**Updated BEAM-10M evaluation.** OAM earns 78.23% mean rubric credit versus Hindsight's published 64.08%, with 25 more passes across 200 questions and 9.85% fewer saved context tokens. This recorded comparison uses the same evaluation protocol with different models and memory pipelines. [Results and method](docs/benchmarks.md#3-beam-10m)
+v0.2.1 adds the configurable Fast default, three recall presets and native BM25 ranking. The English and Simplified Chinese documentation now covers the same setup, integration and operations paths.
 
-The release adds scheduled personal Profile refresh, custom Profiles generated on demand, and Insight consolidation across sources in a shared user window. Recall adds per-request preset overrides and optional personal-evidence selection.
-
-See the [release notes](docs/releases/0.2.0.md) for verification and publication status. OpenClaw and DSH are independently versioned at 0.0.2. MCP is at 0.0.1.
+See the [release notes](docs/releases/0.2.1.md) for upgrade instructions, verification scope and downloads. Agent integrations have independent versions.
 
 ## Documentation & Development
+
+Browse the [English documentation](docs/README.md) or [Simplified Chinese documentation](docs/zh/README.md).
 
 | Goal | Guide |
 | --- | --- |
 | Deploy or upgrade OAM | [Docker Compose](deploy/README.md) |
 | Store and recall through HTTP | [Quickstart](docs/quickstart.md) · [API reference](docs/api.md) |
 | Configure providers and operate the service | [Operations](docs/operations.md) |
-| Understand verified behavior and limits | [Acceptance](docs/acceptance.md) · [Release notes](docs/releases/0.2.0.md) |
+| Understand verified behavior and limits | [Acceptance](docs/acceptance.md) · [Release notes](docs/releases/0.2.1.md) |
 | Build, test or contribute | [Contributing](CONTRIBUTING.md) · [Release procedure](docs/releasing.md) |
 
 Future work includes smoother onboarding, lower indexing and answer-context token usage, and shared Resource ownership. The Python SDK, hosted service, database high availability and OIDC/LDAP support remain future work. Share setup and retrieval feedback in [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1).

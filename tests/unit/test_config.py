@@ -11,6 +11,14 @@ from oam.config import ConfigurationError, load_config
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+@pytest.mark.parametrize("invalid", ["mid", "unknown", None])
+def test_invalid_default_recall_level_is_rejected(tmp_path, invalid):
+    path = tmp_path / "override.yaml"
+    path.write_text(yaml.safe_dump({"search": {"default_recall_level": invalid}}))
+    with pytest.raises(ConfigurationError, match=r"search\.default_recall_level"):
+        load_config(path)
+
+
 @pytest.mark.parametrize(
     "mode,other,unchanged",
     [("fast", "normal", 200), ("normal", "deep", 300), ("deep", "fast", 64)],
@@ -348,25 +356,30 @@ def test_partial_config_inherits_canonical_yaml_in_a_fresh_process(tmp_path: Pat
     config_directory.mkdir()
     (config_directory / "oam.yaml").write_text(yaml.safe_dump(base))
     override = tmp_path / "operator.yaml"
-    override.write_text("search:\n  fast:\n    max_results: 19\n    context_max_tokens: 203\n")
+    override.write_text(
+        "search:\n  default_recall_level: deep\n  fast:\n"
+        "    max_results: 19\n    context_max_tokens: 203\n"
+    )
 
     output = subprocess.check_output(
         [
             sys.executable,
             "-c",
-            "from oam.config import load_config; import sys; "
+            "from oam.config import load_config; "
+            "from oam.contracts.search import SearchRequest; import sys; "
             "c = load_config(sys.argv[1]).config; "
             "print(c.resource.max_bytes, c.search.fast.fused_candidates, "
             "c.search.fast.max_results, c.chunk.ingestion.target_estimated_tokens, "
             "c.search.normal.context_max_tokens, c.search.fast.context_max_tokens, "
-            "c.index.insight_consolidation_delay_hours)",
+            "c.index.insight_consolidation_delay_hours, "
+            "SearchRequest(query='events').context_limit(c))",
             str(override),
         ],
         cwd=tmp_path,
         text=True,
     )
 
-    assert output.strip() == "12345 128 19 37 101 203 48.0"
+    assert output.strip() == "12345 128 19 37 101 203 48.0 24000"
 
 
 def test_missing_canonical_numeric_limit_is_not_filled_by_python(

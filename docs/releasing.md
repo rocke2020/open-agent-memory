@@ -1,21 +1,23 @@
 # Preparing and publishing a release
 
+English · [简体中文](zh/releasing.md)
+
 ## Overview
 
-Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The current product release target is 0.2.0; its [release record](releases/0.2.0.md) records source verification and defers publication evidence to the GitHub Release artifacts. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
+Product releases version the Python distribution, CLI, server image and GitHub source tag together. The product version is owned by `pyproject.toml`; `uv.lock` records the resolved distribution. The procedure below uses 0.2.1 as the release example. Its [release record](releases/0.2.1.md) describes verification and links to the release artifacts. Release preparation verifies the current code and its artifacts; publication requires the maintainer's instruction to release that version.
 
-Integration packages have independent versions: OpenClaw 0.0.2, MCP 0.0.1 and DSH 0.0.2. Reuse their existing published archives when their package code is unchanged; do not republish an existing npm version or advance package versions solely because the product version changes. Preserve earlier product tags, images and release records.
+Integration packages have independent versions. Build new versioned archives for changed clients and reuse the existing archives for unchanged clients. GitHub Release archives can be installed directly. npm publication is a separate channel. Preserve earlier product tags, images and release records.
 
 ## 1. Review release notes and documentation
 
 Every new product version in `pyproject.toml` requires a release record at `docs/releases/<version>.md`, one file per version. See the [initial release notes](releases/0.0.1.md). Its **Changes** and **Upgrade** sections tell users what was added, changed or fixed, any compatibility or migration actions, and known limitations. Reuse both sections as the GitHub Release notes. Keep historical release records unchanged; a version bump alone does not justify changing historical version references or independently versioned plugin packages.
 
-After setting the intended version, stage the intended new files so the scanner includes them, then generate a draft against the previous product tag. For example, when preparing `0.0.2` from `v0.0.1`:
+After setting the intended version, stage the intended new files so the scanner includes them, then generate a draft against the previous product tag. For example, to draft a 0.2.1 review from v0.2.0, write the scanner output to a temporary file.
 
 ```bash
-mkdir -p docs/releases
-python tools/check_release_docs.py --base v0.0.1 --prepare > docs/releases/0.0.2.md
-git diff v0.0.1 -- src configs migrations deploy integrations pyproject.toml
+mkdir -p tmp
+python tools/check_release_docs.py --base v0.2.0 --prepare > tmp/release-0.2.1-draft.md
+git diff v0.2.0 -- src configs migrations deploy integrations pyproject.toml
 ```
 
 The scanner inventories every tracked Markdown, reStructuredText and AsciiDoc file, including translations, nested integration guides and repository instructions. It lists changed files since the previous product tag. Compare every document's claims, examples, commands and configuration with the changed code and its consumers. Update affected documents, then regenerate the draft after the final code and documentation edits. Fill in the release notes and replace every pending entry with one of these results and a concrete explanation, citing relevant source paths where useful:
@@ -28,7 +30,7 @@ The scanner inventories every tracked Markdown, reStructuredText and AsciiDoc fi
 Run the checker before building or publishing the release:
 
 ```bash
-python tools/check_release_docs.py --base v0.1.0
+python tools/check_release_docs.py --base v0.2.0
 ```
 
 The checker rejects missing release notes, pending or omitted document reviews, an `updated` claim without a document change, and reviews made stale by changes to tracked file contents. The current release record is excluded from its own fingerprint so completing the notes does not invalidate the review. New files must be staged before drafting; removed documents leave the current inventory. The **Base** field records the previous product tag's commit; **Scope** fingerprints the reviewed tracked inputs. Missing Git history or tags fails the check; fetch full history and tags first. No models or external services are called, and the checker never edits files.
@@ -54,27 +56,27 @@ npm --prefix integrations/dsh test
 
 Default pytest can skip database/browser cases when their explicitly isolated infrastructure is absent. Record enabled and skipped checks separately. For 0.2.0, apply migrations 0038 and 0039 to an isolated v0.1.0 database and verify that existing indexes remain usable. Exercise Profile policy and custom generation, shared Insight windows, and recall overrides against the [changed-surface criteria](acceptance.md#11-v020-changed-surface-checks).
 
-Apply the [changed-surface criteria for the upcoming release](acceptance.md#12-upcoming-release-changes-to-recall) and verify the [migration 0040 upgrade](operations.md#3-bootstrap-and-credentials) on existing indexed data. For the historical v0.1.0 release, use its [tagged acceptance criteria](https://github.com/rocke2020/open-agent-memory/blob/v0.1.0/docs/acceptance.md#10-v010-changed-surface-checks) and [upgrade instructions](releases/0.1.0.md#upgrade).
+For v0.2.1, apply the [changed-surface criteria](acceptance.md#12-v021-changed-surface-checks) and verify the [migration 0040 upgrade](operations.md#3-bootstrap-and-credentials) on existing indexed data. For the historical v0.1.0 release, use its [tagged acceptance criteria](https://github.com/rocke2020/open-agent-memory/blob/v0.1.0/docs/acceptance.md#10-v010-changed-surface-checks) and [upgrade instructions](releases/0.1.0.md#upgrade).
 
 Use a task-owned PostgreSQL/pgvector instance and synthetic users for release checks. Never select persistent personal/evaluation databases. Keep historical benchmark evidence unchanged; a release smoke test is not a fresh LME-500 or BEAM-10M evaluation. [Acceptance](acceptance.md) and the version's release record define the measured scope and outstanding limits.
 
 ## 3. Prepare artifacts
 
-Build the Python distribution and both supported container architectures from the verified source:
+Build the Python distribution and both supported container architectures from the verified source. For a new release, substitute its intended version for the example `0.2.1` image tags.
 
 ```bash
 uv build
 mkdir -p dist/plugins
-docker buildx build --platform linux/arm64 --load -t oam:0.2.0-arm64 .
-docker buildx build --platform linux/amd64 --load -t oam:0.2.0-amd64 .
+docker buildx build --platform linux/arm64 --load -t oam:0.2.1-arm64 .
+docker buildx build --platform linux/amd64 --load -t oam:0.2.1-amd64 .
 ```
 
-For unchanged, already-published integrations, download the exact registry archives and compare their runtime contents with the reviewed source:
+After installing the integration build dependencies, package changed clients from the verified source. The v0.2.1 release uses these three archives.
 
 ```bash
-npm pack @rocke-dong/oam-openclaw@0.0.2 --pack-destination dist/plugins
-npm pack @rocke-dong/oam-mcp@0.0.1 --pack-destination dist/plugins
-npm pack @rocke-dong/oam-dsh@0.0.2 --pack-destination dist/plugins
+npm pack ./integrations/openclaw --pack-destination dist/plugins
+npm pack ./integrations/mcp --pack-destination dist/plugins
+npm pack ./integrations/dsh --pack-destination dist/plugins
 ```
 
 Record source commit, archive checksums, native versus emulated checks and immutable image identities. A local image ID does not prove a published registry digest. Verify installed Python/CLI metadata, packaged configuration/migrations and Inspector assets. Against an isolated candidate image, exercise authorized API input, readiness and cited recall, the changed Profile, Insight and recall surfaces, and the relevant native integration paths. Bound any provider calls and retain actual usage and failures separately from deterministic tests.
@@ -85,18 +87,18 @@ The opt-in `tests/release/verify_candidate.py` command uses the bounded syntheti
 
 After committing the verified source, create the new annotated product tag at that exact commit and run the documentation gate against the previous product release. Do not move an existing tag. Create a source archive from the new tag and checksums for the reviewed distribution, source and plugin archives. Attach those artifacts and sanitized verification evidence to the GitHub Release, using the release record's Changes and Upgrade sections as its notes.
 
-Publish the multi-architecture image from that same source:
+Publish the multi-architecture image from that same source. The example shows the 0.2.1 tags. For a new release, use its corresponding exact version tags and moving aliases.
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rocke2020/open-agent-memory:0.2.0 \
-  -t ghcr.io/rocke2020/open-agent-memory:v0.2.0 \
+  -t ghcr.io/rocke2020/open-agent-memory:0.2.1 \
+  -t ghcr.io/rocke2020/open-agent-memory:v0.2.1 \
   -t ghcr.io/rocke2020/open-agent-memory:0.2 \
   -t ghcr.io/rocke2020/open-agent-memory:0 \
   -t ghcr.io/rocke2020/open-agent-memory:latest --push .
 ```
 
-Verify that the version tags and moving aliases resolve to the published reviewed manifest. Existing npm versions are reused rather than published again. GitHub source/image publication and any separate package publication have distinct results and must be reported separately.
+Verify that the version tags and moving aliases resolve to the published reviewed manifest. For unchanged clients, fetch and verify their existing archives. Keep existing npm versions immutable. GitHub source/image publication and any separate package publication have distinct results and must be reported separately.
 
 ## 5. Check public downloads
 

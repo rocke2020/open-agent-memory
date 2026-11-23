@@ -1,5 +1,7 @@
 # Memory Web UI
 
+[Documentation](README.md) · [简体中文](zh/memory-web-ui.md)
+
 ## Overview
 
 Memory Inspector is the user-memory web UI bundled with the OAM API. Start the API, then open `http://127.0.0.1:17333/ui/` in a browser. It uses the same public API and user permissions as other clients; there is no separate web server or UI account.
@@ -37,7 +39,7 @@ The compact header contains the OAM logo, current collection, language selector 
 
 Memories, Insights and Resources automatically select and open the first available item when entered. Refreshing or loading more keeps the current selection while it remains in the list; an empty collection shows an explicit empty state. **Entities** opens as a list, with **Relationships** available for exploring connections.
 
-The **Retrieve** mode selector offers Fast, Normal and Deep. Their default rendered-context ceilings are 8,000, 16,000 and 24,000 tokens. Fast is selected initially. Each request returns evidence and citations for the selected mode.
+The **Retrieve** mode selector offers Fast, Normal and Deep. Their default rendered-context ceilings are 8,000, 16,000 and 24,000 tokens. Fast is selected initially. The Inspector sends the selected mode explicitly, so its selection takes precedence over the server default. Each request returns evidence and citations for that mode.
 
 Every Insight has a concise title naming its enduring subject, shown in the list and detail heading with the subtype beneath the list title. Titles normally stay stable as the body gains new events or status; synthesis can revise a title when evidence changes or clarifies the subject. The complete Insight text, canonical ID, revision and supporting sources remain in the details. Existing records receive a title from their saved subject label or a bounded content preview. Browsing does not generate or rewrite content.
 

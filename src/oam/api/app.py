@@ -1101,6 +1101,7 @@ def _register_reserved_routes(
 
     @app.post("/v1/recall", tags=["Recall"])
     def search(request: Request, body: RecallRequest) -> dict:
+        body = body.resolve_defaults(config)
         _validate_limits(body, config)
         return _content_call(
             lambda: _require_runtime(runtime).search(request.state.actor, body.user_id, body)
@@ -1108,6 +1109,7 @@ def _register_reserved_routes(
 
     @app.post("/v1/users/{user_id}/search-many", tags=["Recall"])
     async def search_many(request: Request, user_id: str, body: SearchManyRequest) -> dict:
+        body = body.resolve_defaults(config)
         _validate_limits(body, config)
         return await run_in_threadpool(
             lambda: _content_call(
@@ -1117,6 +1119,7 @@ def _register_reserved_routes(
 
     @app.post("/v1/users/{user_id}/decompose-and-search", tags=["Recall"])
     async def decompose_and_search(request: Request, user_id: str, body: SearchRequest) -> dict:
+        body = body.resolve_defaults(config)
         _validate_limits(body, config)
         return await run_in_threadpool(
             lambda: _content_call(

@@ -1,41 +1,45 @@
 # Open Agent Memory for OpenClaw
 
+[Documentation](../../docs/README.md) · [简体中文](README_CN.md)
+
 ## Overview
 
 This plugin connects one OAM user to owner-authorized local WebChat sessions of one selected OpenClaw agent and explicitly approved direct conversations for that agent. `targetAgentId` defaults to `main`; it is separate from OAM's `userId`. OAM must already be running in `api_key` mode with a user-scoped key. The plugin adds fast automatic recall, capture of a completed keyed human turn, and the `memory_search` and `memory_remove` tools.
 
+## Release archive installation
+
+Install OpenClaw plugin 0.0.3 from the [OAM v0.2.1 release](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.2.1) to use Fast, Normal, and Deep with OAM 0.2.1. Download `rocke-dong-oam-openclaw-0.0.3.tgz` and `SHA256SUMS` from that release. In the download directory, verify the archive before installing.
+
+```bash
+grep '  rocke-dong-oam-openclaw-0\.0\.3\.tgz$' SHA256SUMS | shasum -a 256 -c &&
+openclaw plugins install ./rocke-dong-oam-openclaw-0.0.3.tgz --force --accept-capabilities
+```
+
+The install command reports the plugin directory. Use that path to configure your existing OAM user.
+
+```bash
+node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
+```
+
+Read the setup and admission rules below before starting the Gateway. To remove the package, use `openclaw plugins uninstall oam-openclaw` and restore the previous memory slot.
+
 ## npm installation
 
-Install the versioned package from the public npm registry with OpenClaw and configure the existing OAM user:
+The public npm package remains at 0.0.2 with Fast and Normal support. It uses Normal when an explicit search omits the mode. No npm login is required to install it. Use the installation directory reported by OpenClaw for the setup command.
 
 ```bash
 openclaw plugins install npm:@rocke-dong/oam-openclaw@0.0.2 --force --accept-capabilities
 node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
 ```
 
-The install command reports the plugin directory. No npm login is required for users installing the public package. Source and archive checks are separate from verification of the actual published package.
-
 ## ClawHub installation
 
-The OpenClaw community registry publishes this plugin as `@rocke2020/oam-openclaw`; the host plugin ID remains `oam-openclaw`, while the npm package name is `@rocke-dong/oam-openclaw`. Install the latest community package and run the same setup:
+The OpenClaw community registry publishes this plugin as `@rocke2020/oam-openclaw`. The host plugin ID is `oam-openclaw`, and the npm package name is `@rocke-dong/oam-openclaw`. Check the community package page for its version and security-scan status before installing. For the 0.0.3 package covered here, use the release archive.
 
 ```bash
 openclaw plugins install clawhub:@rocke2020/oam-openclaw --force --accept-capabilities
 node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
 ```
-
-The registry package is community-published, not official. Check its package page for the current security-scan status before installing; the npm package remains the canonical distribution.
-
-## v0.0.1 release archive installation
-
-The v0.0.1 archives remain available for reproducibility. Download `rocke-dong-oam-openclaw-0.0.1.tgz`, `rocke-dong-oam-dsh-0.0.1.tgz` and `SHA256SUMS` from the same OAM GitHub Release. Verify the checksums in that download directory with `shasum -a 256 -c SHA256SUMS`. No npm account or registry publication is required. The host may still need network access for its own dependencies.
-
-```bash
-openclaw plugins install ./rocke-dong-oam-openclaw-0.0.1.tgz --force --accept-capabilities
-node '<installed-plugin-directory>/setup.mjs' --user-id '<oam-user-id>'
-```
-
-The install command reports the plugin directory; substitute that path above. Read the setup and admission rules below before starting the Gateway. To remove the package, use `openclaw plugins uninstall oam-openclaw` and restore the previous memory slot.
 
 ## Source installation
 
@@ -71,7 +75,11 @@ For each recurring job, a host-reported run status (`ok`, `error`, or `skipped`)
 
 Each request has a stable content-derived idempotency key and validates its OAM acceptance receipt. Reconciliation stops when its host snapshot is cancelled. There is no local queue or automatic retry. Capture and skip logs identify the job and outcome without credentials or content. Acceptance does not prove indexing or recall readiness. Enabling capture does not grant cron sessions access to personal recall or removal tools, and it does not delete previously stored reports.
 
-Automatic recall selects `fast`. The `memory_search` tool defaults to `normal` and accepts `fast`, `normal`, or `deep`. Their service context limits default to 8,000, 16,000 and 24,000 tokens. Set `maxContextTokens` to at least 24,000 to consume complete Deep results when the agent can accommodate them. This host limit defaults to 1,024 and has a maximum of 32,768. The plugin checks the complete returned `context_tokens`, including citations, metadata and originals, against this limit. A response above the host limit is omitted during automatic recall and returned as an error during explicit search. The host limit validates responses after retrieval.
+## Recall and context limits
+
+Automatic recall selects `fast`. When a call to `memory_search` omits `recall_level`, plugin 0.0.3 sends `fast` and the npm package 0.0.2 sends `normal`. Plugin 0.0.3 accepts `fast`, `normal`, and `deep`. Deep requires OAM 0.2.1 or another server version with Deep support. OAM 0.2.1 presets Fast, Normal and Deep default to 8,000, 16,000 and 24,000 context tokens respectively.
+
+Set `maxContextTokens` to at least 24,000 to consume complete Deep results at the default service limit when the agent can accommodate them. This host limit defaults to 1,024 and has a maximum of 32,768. The plugin checks the complete returned `context_tokens`, including citations, metadata and originals, against this limit. A response above the host limit is omitted during automatic recall and returned as an error during explicit search. The host limit validates responses after retrieval.
 
 ## Response and evidence boundaries
 

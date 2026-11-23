@@ -1,10 +1,12 @@
 # OAM 配置
 
-[English](README.md) | [简体中文](README_CN.md)
+[中文文档](../docs/zh/README.md) · [English](README.md)
 
 ## 概述
 
-[oam.yaml](oam.yaml) 是公开行为配置的权威来源。本文说明图扩展、因果索引和召回权重之间的关系。模型绑定、环境变量和服务启动方式见[运维文档](../docs/operations.md)。
+[oam.yaml](oam.yaml) 是公开行为配置的权威来源。本文说明图扩展、因果索引和召回权重之间的关系。模型绑定、环境变量和服务启动方式见[运维文档](../docs/zh/operations.md)。
+
+下列设置适用于 v0.2.1。已有运维 YAML 的升级步骤见[升级运维 YAML](../docs/zh/operations.md#升级运维-yaml)。
 
 ## 1. 图扩展模式
 
@@ -31,7 +33,7 @@
 
 实体图扩展和语义图扩展可按需配置，不必始终同时启用。在 YAML 中必须给 `"off"` 加引号。设置 `entity_semantic_graph: "off"` 后，仍保留直接向量检索、词法检索及其配置的实体名加权，以及适用时间窗口时的时间检索。
 
-仅适用于 fast 的请求字段 `fast_graph` 可以覆盖配置选择：`true` 选择 `light`，`false` 选择 `"off"`，省略或设为 null 则继承 YAML 值。它不覆盖因果遍历。参见[召回 API](../docs/api.md#recall)。
+仅适用于 fast 的请求字段 `fast_graph` 可以覆盖配置选择：`true` 选择 `light`，`false` 选择 `"off"`，省略或设为 null 则继承 YAML 值。它不覆盖因果遍历。参见[召回 API](../docs/zh/api.md#召回)。
 
 ## 2. 独立的因果控制
 
@@ -67,7 +69,7 @@
 
 Fast 召回为各通道使用相同权重，即使启用了图扩展也是如此。Fast 始终跳过模型重排。图权重 `0.1` 既不是相似度阈值，也不表示图结果占 10% 的配额。
 
-`search.lexical_ranker` 对三种召回模式默认使用 `bm25`，以用户范围内的 BM25 得分加上两倍的词项邻近度得分（cover density）对普通全文匹配排序。设置为 `fts` 时仅使用词项邻近度。两种设置都通过 `search.fts_rank_weights` 配置正文、图注、标题层级和文档标题的权重，并沿用相同的排序模式和候选上限。PostgreSQL 在两种设置下都会维护 BM25 索引数据。[索引与检索](../docs/indexing-retrieval.md#6-candidate-retrieval-and-ranking)
+`search.lexical_ranker` 对三种召回模式默认使用 `bm25`，以用户范围内的 BM25 得分加上两倍的词项邻近度得分（cover density）对普通全文匹配排序。设置为 `fts` 时仅使用词项邻近度。两种设置都通过 `search.fts_rank_weights` 配置正文、图注、标题层级和文档标题的权重，并沿用相同的排序模式和候选上限。PostgreSQL 在两种设置下都会维护 BM25 索引数据。[索引与检索](../docs/zh/indexing-retrieval.md#6-候选检索与排序)
 
 `search.lexical_ranking` 对三种召回模式均默认为 `whole_query`，将命中任一所选查询词项的候选统一排序。设为 `per_term` 时，每个词项分别排序后再融合。三种模式也默认启用相邻用户上下文，每段可选相邻原文最多保留 1,000 个字符。这三个字段共用于 `search` 下。单次请求的 `overrides` 对象也可以覆盖这三个字段。
 
@@ -80,7 +82,7 @@ search:
 
 ## 4. 为什么已测试的配置关闭语义图扩展和因果扩展
 
-LME-500 的 8k Fast FTS+BM25 和 18k Normal FTS 评测均关闭图扩展。已记录的 BEAM-10M 评测保留实体及别名扩展。三组评测均关闭语义链接扩展和因果扩展。[评测配置](../docs/benchmarks.md)
+LME-500 的 8k Fast FTS+BM25 和 18k Normal FTS 评测均关闭图扩展。已记录的 BEAM-10M 评测保留实体及别名扩展。三组评测均关闭语义链接扩展和因果扩展。[评测配置](../docs/zh/benchmarks.md)
 
 | 评测负载 | 召回模式 | `entity_semantic_graph` | `causal_graph` | 使用的图扩展 |
 |---|---|---|---|---|
@@ -115,7 +117,7 @@ LME-500 的 8k Fast FTS+BM25 和 18k Normal FTS 评测均关闭图扩展。已�
 
 ## 5. 默认值与示例
 
-Fast、Normal 和 Deep 使用下表中的数值预设。召回请求省略模式时使用 Normal。上下文上限统计完整渲染后的证据。完整证据组超出剩余预算时会被跳过，后续较小的组仍可进入上下文。
+Fast、Normal 和 Deep 使用下表中的数值预设。请求省略 `recall_level` 时，运维配置的 `search.default_recall_level` 选择 `fast`、`normal` 或 `deep`，默认是 `fast`。请求显式指定的 `recall_level` 优先。上下文上限统计完整渲染后的证据。完整证据组超出剩余预算时会被跳过，后续较小的组仍可进入上下文。
 
 | 模式 | 上下文 tokens | 通道候选 | 融合候选 | 时间节点 | 来源种子 | 每个结果池上限 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -123,7 +125,7 @@ Fast、Normal 和 Deep 使用下表中的数值预设。召回请求省略模式
 | Normal | 16,000 | 64 | 128 | 200 | 36 | 128 |
 | Deep | 24,000 | 64 | 154 | 300 | 36 | 154 |
 
-单次直接召回的默认截止时间为 Fast 3 秒、Normal 和 Deep 5 秒。批量和规划召回将所选模式的一份上下文预算分给各个子查询。运维 YAML 中通过校验的预设数值优先于默认值。仅修改召回预设不会改变索引代次。[运维配置](../docs/operations.md#1-configuration)
+单次直接召回的默认截止时间为 Fast 3 秒、Normal 和 Deep 5 秒。批量和规划召回将所选模式的一份上下文预算分给各个子查询。运维 YAML 中通过校验的预设数值优先于默认值。仅修改召回预设不会改变索引代次。[运维配置](../docs/zh/operations.md#1-配置)
 
 历史 BEAM-10M 结果使用原 Normal 24k 配置和 FTS 排序。复现时需固定其模式配置和产品版本。16k/24k 配对结果不能证明当前默认配置下的原生 BM25 性能。原生 BM25 BEAM 验证仍待完成。
 
@@ -142,6 +144,7 @@ index:
   enable_causal_graph: false
 
 search:
+  default_recall_level: fast
   causal_graph: false
   fact_source_bodies: required
   normal_arm_weights:
@@ -190,6 +193,12 @@ search:
     temporal_nodes: 200
 ```
 
-单次召回可传入 `"recall_level": "fast", "overrides": {"temporal_nodes": 200}`。同一对象也可覆盖所选预设的其他字段及 `causal_graph`、`fact_source_bodies` 等共用设置。未指定字段继承配置。合并后的值复用现有校验，包括候选上限关系；支持 null 的字段可显式清空。未知字段或无效组合会在检索 I/O 前被拒绝。旧的非 null `fast_graph` 选项优先于 `overrides.entity_semantic_graph`。直接、批量和规划召回均保留覆盖值。响应的 `diagnostics.search_config` 记录生效预设和共享召回设置。
+单次召回可传入 `"recall_level": "fast", "overrides": {"temporal_nodes": 200}`。同一对象也可覆盖所选预设的其他字段及 `causal_graph`、`fact_source_bodies` 等共用设置。未指定字段继承配置。合并后的值复用现有校验，包括候选上限关系；支持 null 的字段可显式清空。未知字段或无效组合会在检索 I/O 前被拒绝。在 Fast 中，旧的非 null `fast_graph` 选项优先于 `overrides.entity_semantic_graph`。直接、批量和规划召回均保留覆盖值。响应的 `diagnostics.search_config` 记录生效预设和共享召回设置。
 
 每种预设独立拥有时间遍历预算和结果限制。修改这些召回限制后，既有索引内容继续可用。
+
+## 8. 个人证据候选
+
+在 `search.fast`、`search.normal` 或 `search.deep` 中，将 `personal_evidence_candidates` 设为正数，可检索当前有效 L1 偏好或经历所引用的用户原始段落。默认值是 0，候选数受 `channel_candidates` 上限约束。启用 `include.chunks` 且存在查询向量时才执行额外通道。返回段落与其他证据在所选模式的普通上下文预算下竞争。
+
+单次请求可使用 `"include": {"chunks": true}, "overrides": {"personal_evidence_candidates": 16}`。当新段落进入融合时，召回跟踪会显示 `personal_evidence` 通道。该选项复用既有查询向量、存储支持和搜索索引。[API 参考](../docs/zh/api.md#3-保存与召回)

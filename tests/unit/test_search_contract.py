@@ -90,15 +90,39 @@ def test_legacy_fast_graph_takes_precedence_over_preset_override(fast_graph, gra
     assert request.search_tier(config).entity_semantic_graph == graph
 
 
-def test_search_defaults_to_normal_without_profile_selection() -> None:
+def test_search_defaults_to_fast_without_profile_selection() -> None:
     request = SearchRequest(query="What changed?")
     batch = SearchManyRequest(queries=["What changed?"])
 
-    assert request.recall_level.value == "normal"
-    assert batch.recall_level.value == "normal"
+    config = load_config("configs/oam.yaml").config
+    assert request.context_limit(config) == 8000
+    assert batch.context_limit(config) == 8000
+    assert request.recall_level.value == "fast"
+    assert batch.recall_level.value == "fast"
     assert request.allow_partial is False
     assert "include_profile" not in SearchRequest.model_json_schema()["properties"]
     assert "include_profile" not in SearchManyRequest.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize("mode,budget", [("normal", 16000), ("deep", 24000)])
+def test_omitted_mode_uses_operator_default_but_explicit_mode_wins(tmp_path, mode, budget):
+    path = tmp_path / "default-mode.yaml"
+    path.write_text(f"search:\n  default_recall_level: {mode}\n")
+    config = load_config(path).config
+
+    assert SearchRequest(query="events").context_limit(config) == budget
+    assert SearchManyRequest(queries=["events"]).context_limit(config) == budget
+    assert SearchRequest(query="events", recall_level="fast").context_limit(config) == 8000
+
+
+def test_legacy_fast_graph_is_validated_against_resolved_default(tmp_path):
+    path = tmp_path / "default-mode.yaml"
+    path.write_text("search:\n  default_recall_level: normal\n")
+    config = load_config(path).config
+    request = SearchRequest(query="events", fast_graph=True)
+
+    with pytest.raises(ValueError, match="fast_graph requires recall_level=fast"):
+        request.validate_limits(config)
 
 
 @pytest.mark.parametrize(

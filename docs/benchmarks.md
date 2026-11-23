@@ -1,5 +1,7 @@
 # Open Agent Memory evaluation results
 
+[Documentation](README.md) · [简体中文](zh/benchmarks.md)
+
 ## Overview
 
 On **LongMemEval S**, OAM's 8k Fast run with full-text search (FTS) and BM25 scored **95.2% (476/500)** with **7,989.54 mean saved context tokens**. The completed 18k Normal FTS run scored **95.6% (478/500)** with **11,375.12 mean tokens**. The 8k run used **29.8% less context on average**. Hindsight's published result was **94.6% (473/500)** with **43,124.55 mean tokens**. Each score and context mean covers all 500 questions. [Hindsight's pinned AMB result](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
@@ -56,7 +58,7 @@ The November 17 archive recorded **476/500** with 497 judged contexts and three 
 | Prompt policy | Exact AMB answer and category-specific judge prompts at `7021c59c3497d1dd08d61f12fa4629be983fcfb1` |
 | Judgment parsing | First usable explicit boolean, including inline `correct=false`; valid No judgments are retained |
 | Recall | Normal; L1; chunks included; graph, Insights, Profile and reranker disabled |
-| Context limit | 18,000 tokens, a pinned evaluation override; the current product Normal default is 16,000 |
+| Context limit | 18,000 tokens, a pinned evaluation override; the v0.2.1 Normal default is 16,000 |
 | Candidate selection | Whole query; 64 per channel, 128 fused, 36 source seeds, at most 96 learned items and 96 original bodies |
 | Source formatting | User-fact exchanges; adjacent user evidence enabled, 1,000-character bound |
 | Deadline | 5 seconds |

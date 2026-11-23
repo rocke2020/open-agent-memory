@@ -137,17 +137,18 @@ def main() -> None:
             assert time.monotonic() < deadline, "No positive persisted L2 Insight"
             time.sleep(1)
         save(out / "insights.json", insights)
-        for mode in ("fast", "normal"):
+        for mode in ("fast", "normal", "deep", None):
+            query = {
+                "user_id": user,
+                "query": (
+                    "How does Mira prefer instructions for clinical pharmacist discharge reviews?"
+                ),
+            }
+            if mode is not None:
+                query["recall_level"] = mode
             response = client.post(
                 "/v1/recall",
-                json={
-                    "user_id": user,
-                    "query": (
-                        "How does Mira prefer instructions for clinical pharmacist "
-                        "discharge reviews?"
-                    ),
-                    "recall_level": mode,
-                },
+                json=query,
             )
             assert response.status_code == 200, response.text
             recalled = response.json()
@@ -155,7 +156,17 @@ def main() -> None:
             assert recalled["diagnostics"]["generative_calls"] == 0
             assert any(item["kind"] == "insight" for item in recalled["items"])
             assert all(item.get("citations") for item in recalled["items"])
-            save(out / f"recall-{mode}.json", recalled)
+            selected = mode or "fast"
+            assert recalled["diagnostics"]["recall_level"] == selected
+            assert (
+                recalled["diagnostics"]["context_budget"]["limit"]
+                == {
+                    "fast": 8000,
+                    "normal": 16000,
+                    "deep": 24000,
+                }[selected]
+            )
+            save(out / f"recall-{mode or 'default'}.json", recalled)
         response = client.post(f"/v1/users/{user}/profile/refresh", json={})
         assert response.status_code in {200, 202}, response.text
         if response.status_code == 202:
@@ -252,7 +263,7 @@ def main() -> None:
             },
         )
         print(
-            "PASS: public candidate L0/L1/L2, fast/normal recall, Profile reuse, "
+            "PASS: public candidate L0/L1/L2, fast/normal/deep and default recall, Profile reuse, "
             "HTML/PDF/PNG and joint recall; ten requests served by both API replicas"
         )
 

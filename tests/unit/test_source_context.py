@@ -443,7 +443,7 @@ def test_unique_time_and_graph_evidence_remain_on_the_fact(evidence_rows, unique
     path = {"arm": "graph", "nodes": ["seed", "fact"]}
     paths = {"fact": [path]} if unique_evidence == "path" else {}
     result = SourceService(evidence_rows, graph_paths=paths).search(
-        object(), SearchRequest(include={"chunks": True}, query="workshops")
+        object(), SearchRequest(include={"chunks": True}, query="workshops", recall_level="normal")
     )
     fact = next(row for row in result["items"] if row["unit_id"] == "fact")
     original = next(row for row in result["items"] if row["unit_id"] == "original")
@@ -526,7 +526,10 @@ def test_multiple_facts_share_one_source_without_losing_metadata(evidence_rows):
     before = deepcopy(evidence_rows)
     path = {"arm": "graph", "relation": "causal", "nodes": ["fact", "shift"]}
     result = SourceService(evidence_rows, graph_paths={"shift": [path]}).search(
-        object(), SearchRequest(include={"chunks": True}, query="What happened at the workshop?")
+        object(),
+        SearchRequest(
+            include={"chunks": True}, query="What happened at the workshop?", recall_level="normal"
+        ),
     )
 
     assert evidence_rows == before

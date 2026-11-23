@@ -1,6 +1,6 @@
 {
   "name": "@rocke-dong/oam-openclaw",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Open Agent Memory plugin for OpenClaw",
   "repository": {
     "type": "git",
@@ -26,6 +26,7 @@
     "dist/index.js",
     "openclaw.plugin.json",
     "README.md",
+    "README_CN.md",
     "LICENSE"
   ],
   "openclaw": {

@@ -1,10 +1,22 @@
 # OAM for DeepSeek Harness
 
+[Documentation](../../docs/README.md) · [简体中文](README_CN.md)
+
+## Overview
+
 This personal memory plugin uses the OAM HTTP API to recall cited context for human turns and retain human text after completed turns. Use it only in a DSH profile accessible to the owner of the configured OAM user. It excludes subagents. OAM must already be running and processing operations.
 
 When the DSH schedule service is available, the plugin observes named recurring jobs and retains concise definitions, changes, removals, and the latest acknowledged delivery. It excludes prompts, generated output and one-time tasks. A delivery means the scheduler persisted a message to the session; it does not prove the job completed. The profile is the ownership boundary because the catalog has no owner or maintenance classification. A private file under `DSH_HOME` (default `~/.dsh`) preserves each job's current definition observation and timestamp so unchanged snapshots reuse their idempotency key after restart. The catalog exposes only the latest receipt; intermediate deliveries missed while stopped are not recovered. Failed captures are logged, not queued.
 
-Set `OAM_DSH_URL`, `OAM_DSH_USER_ID` and `OAM_DSH_API_KEY` in the DSH process environment. Use an HTTPS origin or a loopback HTTP origin and a user-scoped key. Install this package in the desired DSH profile using the host's plugin manager and restart or reload that profile. Automatic recall uses Fast. The `memory_search` tool defaults to Normal and accepts `fast`, `normal`, and `deep`, whose service context limits default to 8,000, 16,000 and 24,000 tokens. Set `maxContextTokens` to at least 24,000 to consume complete Deep responses when the host can accommodate them. The model can use `memory_remove` for explicit user removal requests. The server's complete context must fit the plugin's `maxContextTokens` configuration (default 18000); oversized results are omitted, with a warning, rather than truncated. Failed capture is logged and is not queued for retry.
+Set `OAM_DSH_URL`, `OAM_DSH_USER_ID` and `OAM_DSH_API_KEY` in the DSH process environment. Use an HTTPS origin or a loopback HTTP origin and a user-scoped key. Install this package in the desired DSH profile using the host's plugin manager and restart or reload that profile. The model can use `memory_remove` for explicit user removal requests.
+
+## Recall and context limits
+
+Automatic recall selects `fast`. When a call to `memory_search` omits `recall_level`, plugin 0.0.3 sends `fast` and the npm package 0.0.2 sends `normal`. Plugin 0.0.3 accepts `fast`, `normal`, and `deep`. Deep requires OAM 0.2.1 or another server version with Deep support. OAM 0.2.1 presets Fast, Normal and Deep default to 8,000, 16,000 and 24,000 context tokens respectively.
+
+Set `maxContextTokens` to at least 24,000 to consume complete Deep responses at the default service limit when the host can accommodate them. The server's complete context must fit the plugin's `maxContextTokens` configuration (default 18,000). Oversized automatic recall results are omitted with a warning, and explicit searches return an error. The plugin never truncates a returned context.
+
+## Verification
 
 Run `npm test` for local HTTP-boundary tests. A live integration requires a separate completed turn, OAM operation readiness, and cited recall in a fresh DSH session; installation or local tests do not prove that path.
 
@@ -14,22 +26,23 @@ For an explicit user removal request, call `memory_remove` with exactly one `mem
 
 Completed turns containing a native `memory_remove` tool call or an invocation of this plugin's removal tool retain the original human text and timestamp with `learning_eligible: false`, including failed attempts. Assistant and tool output remain outside capture; later ordinary turns remain eligible. Candidate and confirmation turns without a removal invocation are not classified by this plugin. It does not infer removal intent from arbitrary natural-language text.
 
+## Release archive installation
+
+Install DSH plugin 0.0.3 from the [OAM v0.2.1 release](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.2.1) to use Fast, Normal, and Deep with OAM 0.2.1. Download `rocke-dong-oam-dsh-0.0.3.tgz` and `SHA256SUMS` from that release. In the download directory, verify the archive before installing. DSH may need network access for its own profile dependencies.
+
+```bash
+grep '  rocke-dong-oam-dsh-0\.0\.3\.tgz$' SHA256SUMS | shasum -a 256 -c &&
+dsh plugin --profile headless add /absolute/path/rocke-dong-oam-dsh-0.0.3.tgz
+```
+
+Select the owner-only profile you intend to use, supply the three environment variables above to that DSH process, and restart the profile. Keep the archive available because the profile's package manager may reference its local path. Use `dsh plugin --profile headless remove @rocke-dong/oam-dsh` to remove it. The package contains the plugin entrypoint and profile patch. Provide a separate running OAM service.
+
 ## npm installation
 
-Install the independently published 0.0.2 package in the owner-only DSH profile to use exact memory and Insight removal.
+The public npm package remains at 0.0.2 with Fast and Normal support and exact memory and Insight removal. It uses Normal when an explicit search omits the mode. Install it in the owner-only DSH profile.
 
 ```bash
 dsh plugin --profile headless add @rocke-dong/oam-dsh@0.0.2
 ```
 
-No npm login is required for users installing the public package. Supply the OAM environment variables above, then restart or reload that profile. If an earlier local `@rocke2020/oam-dsh` package is installed, remove that package through the same profile's plugin manager before adding the renamed package. Source and archive checks are separate from verification of the actual published package.
-
-## Release archive installation
-
-Download `rocke-dong-oam-dsh-0.0.2.tgz` and `SHA256SUMS` from the same OAM GitHub Release and run `shasum -a 256 -c SHA256SUMS` in that directory. No npm account or registry publication is required. DSH may need network access for its own profile dependencies.
-
-```bash
-dsh plugin --profile headless add /absolute/path/rocke-dong-oam-dsh-0.0.2.tgz
-```
-
-Select the owner-only profile you intend to use, supply the three environment variables above to that DSH process, and restart the profile. Keep the archive available because the profile's package manager may reference its local path. Use `dsh plugin --profile headless remove @rocke-dong/oam-dsh` to remove it. The package contains the plugin entrypoint and profile patch; it does not include or start OAM.
+No npm login is required to install the public package. Supply the OAM environment variables above, then restart or reload that profile. If an earlier local `@rocke2020/oam-dsh` package is installed, remove that package through the same profile's plugin manager before adding the renamed package.

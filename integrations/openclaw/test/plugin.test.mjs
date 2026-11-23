@@ -908,7 +908,7 @@ test('local control recall suppression preserves owner admission and frozen capt
   assert.equal(requests.length, 0);
 });
 
-test('explicit search uses the fixed user and defaults to normal recall', async () => {
+test('explicit search uses the fixed user and defaults to fast recall', async () => {
   requests.length = 0;
   const { tool } = await installedPlugin();
   const search = tool.create({
@@ -919,7 +919,7 @@ test('explicit search uses the fixed user and defaults to normal recall', async 
   assert.match(result.content[0].text, /Lin prefers concise answers/);
   assert.deepEqual(requests.map(({ path }) => path), ['/v1/recall']);
   assert.equal(requests[0].body.user_id, 'u1');
-  assert.equal(requests[0].body.recall_level, 'normal');
+  assert.equal(requests[0].body.recall_level, 'fast');
   assert.equal('max_tokens' in requests[0].body, false);
   assert.equal('max_context_tokens' in requests[0].body, false);
   assert.equal(requests[0].body.query, 'Lin preference');

@@ -2,9 +2,9 @@
 
 **日常の AI エージェントに、役立つメモリを。**
 
-[English](README.md) | [中文](README_CN.md) | [日本語](README_JA.md)
+[English](README.md) | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
-[はじめに](#はじめに) · [性能](#パフォーマンスと精度) · [エージェント連携](#エージェントを接続する) · [ドキュメント](docs/indexing-retrieval.md) · [リリース](https://github.com/rocke2020/open-agent-memory/releases)
+[はじめに](#はじめに) · [性能](#パフォーマンスと精度) · [エージェント連携](#エージェントを接続する) · [ドキュメント（英語）](docs/README.md) · [リリース](https://github.com/rocke2020/open-agent-memory/releases)
 
 Open Agent Memory（OAM）は、AI エージェント向けの完全にオープンソースのメモリエンジンです。会話をまたいで有用な事実、好み、経験を記憶し、エージェントが必要とするときに、関連する証拠を出典付きで取り出します。
 
@@ -70,7 +70,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml run api preflight -
 docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api worker
 ```
 
-コマンドが失敗した場合は、そこで止めてエラーを解決してから続けてください。Compose ファイルは Linux AMD64 または ARM64 向けの **v0.2.0** イメージを選択します。ポート、ホスト上のモデルサーバー、ソースからのビルド、レプリカ構成は[デプロイガイド](deploy/README.md)を参照してください。
+コマンドが失敗した場合は、そこで止めてエラーを解決してから続けてください。Compose ファイルは Linux AMD64 または ARM64 向けの **v0.2.1** イメージを選択します。ポート、ホスト上のモデルサーバー、ソースからのビルド、レプリカ構成は[デプロイガイド](deploy/README.md)を参照してください。
 
 ### 3. 最初のメモリを保存して検索する
 
@@ -86,9 +86,9 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --wait api wo
 
 | エージェント・アプリケーション | 接続方法 |
 | --- | --- |
-| Claude Code または Cursor | [MCP サーバーとクライアント設定](integrations/mcp/README.md#client-configuration)、Node.js 22+ |
-| OpenClaw | [プラグインのインストール](integrations/openclaw/README.md#npm-installation)、自動検索と対象コンテンツの自動保存に対応 |
-| DeepSeek Harness（DSH） | [DSH プラグイン](integrations/dsh/README.md) |
+| Claude Code または Cursor | [MCP サーバーとクライアント設定](integrations/mcp/README.md#release-archive-installation)、Node.js 22+ |
+| OpenClaw | [プラグインのインストール](integrations/openclaw/README.md#release-archive-installation)、自動検索と対象コンテンツの自動保存に対応 |
+| DeepSeek Harness（DSH） | [DSH プラグイン](integrations/dsh/README.md#release-archive-installation) |
 | 独自アプリケーション | [コピーして使える HTTP の例](docs/quickstart.md)と [API リファレンス](docs/api.md) |
 
 ## エージェントの記憶を確認する
@@ -101,17 +101,15 @@ Inspector では、保存した出典の閲覧、検索したメモリと出典�
 
 OAM は元の会話（**L0**）を保持し、出典に裏付けられた事実（**L1**）を抽出し、関連する事実から根拠のある Insights（**L2**）を作成します。更新可能な保存済みの User Profile（**L3**）は、エージェントの振る舞いの個人化に役立ちます。テキスト、HTML、PDF、画像の **Resources** は独立した証拠として保持し、学習メモリとともに検索できます。
 
-検索は **fast**、**normal**、**deep** モードをサポートし、最終回答は生成せず、出典付きコンテキストを返します。コンテキスト上限の既定値は、それぞれ 8,000、16,000、24,000 トークンです。既定のモードは Normal です。証拠の使い方、最終回答、入力全体の予算はエージェントが管理します。
+検索の既定モードは **Fast** で、エージェントが使う出典付きコンテキストを返します。Fast、Normal、Deep の既定上限はそれぞれ **8,000**、**16,000**、**24,000** トークンです。API リクエストで `recall_level` が省略された場合のモードは、YAML の `search.default_recall_level` に `fast`、`normal`、`deep` のいずれかを指定して変更できます。リクエストで明示したモードが優先されます。
 
 [メモリと検索の設計](docs/indexing-retrieval.md) · [アーキテクチャ](docs/architecture.md) · [設定](configs/README.md)
 
-## v0.2.0
+## v0.2.1
 
-**BEAM-10M 評価を更新。** OAM のルーブリックスコア平均は 78.23% で、Hindsight の公開結果は 64.08% でした。200 問のうち OAM は 25 問多く合格し、保存コンテキストのトークン数は 9.85% 少なくなりました。評価手順は共通で、モデルとメモリ処理はそれぞれの構成を使用しています。[結果と評価方法](docs/benchmarks.md#3-beam-10m)
+v0.2.1 では、設定可能な Fast の既定モード、3 種類の検索プリセット、ネイティブの BM25 順位付けが利用できます。英語と簡体字中国語のドキュメントに、導入、連携、運用の手順を掲載しています。
 
-個人 Profile の定期更新、オンデマンドのカスタム Profile 生成、ユーザーごとの固定時間枠での複数ソースをまたぐ Insight 統合を追加しました。検索プリセットはリクエスト単位で上書きでき、個人の嗜好や経験に関する証拠検索を任意で有効にできます。
-
-検証と公開の状況は[リリースノート](docs/releases/0.2.0.md)を参照してください。OpenClaw と DSH の独立したバージョンは 0.0.2、MCP は 0.0.1 です。
+アップグレード手順、検証範囲、ダウンロードについては[リリースノート](docs/releases/0.2.1.md)を参照してください。エージェント連携パッケージは独立したバージョンを持ちます。
 
 ## ドキュメントと開発
 
@@ -120,7 +118,7 @@ OAM は元の会話（**L0**）を保持し、出典に裏付けられた事実�
 | OAM のデプロイ・アップグレード | [Docker Compose](deploy/README.md) |
 | HTTP での保存と検索 | [クイックスタート](docs/quickstart.md) · [API リファレンス](docs/api.md) |
 | プロバイダー設定とサービス運用 | [運用](docs/operations.md) |
-| 検証済みの動作と制約の確認 | [受け入れ要件](docs/acceptance.md) · [リリースノート](docs/releases/0.2.0.md) |
+| 検証済みの動作と制約の確認 | [受け入れ要件](docs/acceptance.md) · [リリースノート](docs/releases/0.2.1.md) |
 | ビルド・テスト・開発への参加 | [貢献ガイド](CONTRIBUTING.md) · [リリース手順](docs/releasing.md) |
 
 今後は、導入体験の改善、インデックス作成と回答コンテキストのトークン削減、Resources の共有所有権に取り組む予定です。Python SDK、ホスティングサービス、データベースの高可用性、OIDC/LDAP 対応は今後の対象です。設定や検索に関するフィードバックは [Discussions](https://github.com/rocke2020/open-agent-memory/discussions/1) で共有してください。

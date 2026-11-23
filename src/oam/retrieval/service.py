@@ -137,6 +137,7 @@ class RecallService:
         return result
 
     def _search(self, authority, request, *, deadline_at, sql_phase: ExitStack) -> dict:
+        request = request.resolve_defaults(self.config)
         request.validate_limits(self.config)
         if estimated_tokens(estimate_units(request.query)) > self.config.search.max_query_tokens:
             raise ValueError("query exceeds configured token limit")

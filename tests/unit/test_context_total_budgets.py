@@ -64,7 +64,7 @@ def test_removed_fact_budget_is_rejected():
         SearchRequest(query="launch", max_tokens=100)
 
 
-def ranked_service(rows, mode="normal", budget=2048, **tier_options):
+def ranked_service(rows, mode="fast", budget=2048, **tier_options):
     class RankedRepository(SourceRepository):
         def lexical(self, query, limit):
             return [{"unit_id": row["unit_id"]} for row in rows][:limit]

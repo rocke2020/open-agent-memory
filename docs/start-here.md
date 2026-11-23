@@ -1,8 +1,10 @@
 # Your first useful memory
 
+[Documentation](README.md) · [简体中文](zh/start-here.md)
+
 ## Overview
 
-Run OAM, store a small preference, retrieve it with citations, then use it in a fresh agent session. OAM supplies evidence; your agent generates the answer. This guide uses the versioned self-hosted image and a synthetic example, so you do not need to upload a private conversation. See the [release record](releases/0.2.0.md) for artifact verification and publication status.
+Run OAM, store a small preference, retrieve it with citations, then use it in a fresh agent session. OAM supplies evidence; your agent generates the answer. This guide uses the v0.2.1 self-hosted image and a synthetic example, so you do not need to upload a private conversation. See the [release record](releases/0.2.1.md) for artifact verification and publication status.
 
 ![Illustrative workflow: keep a preference, recall it in a new session, and inspect its original source.](assets/memory-across-sessions.svg)
 
@@ -17,7 +19,7 @@ Clone the repository, pull the versioned Linux AMD64/ARM64 image, and create you
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory.git
 cd open-agent-memory
-docker pull ghcr.io/rocke2020/open-agent-memory:0.2.0
+docker pull ghcr.io/rocke2020/open-agent-memory:0.2.1
 cp deploy/.env.example deploy/.env
 ```
 
@@ -93,9 +95,9 @@ Choose the client you already use. Every route connects to the service and user 
 
 | Your client | Next step | How memory enters the session |
 | --- | --- | --- |
-| Claude Code or Cursor with MCP | [MCP client configuration](../integrations/mcp/README.md#client-configuration) | Tools retrieve evidence on request; the wrapper does not automatically capture every conversation |
-| OpenClaw | [Plugin installation](../integrations/openclaw/README.md#npm-installation) | Configured automatic recall and eligible capture, plus explicit memory tools |
-| DeepSeek Harness | [DSH plugin guide](../integrations/dsh/README.md) | Plugin recall and capture under the documented host rules |
+| Claude Code or Cursor with MCP | [MCP client configuration](../integrations/mcp/README.md#release-archive-installation) | Tools retrieve evidence on request; the wrapper does not automatically capture every conversation |
+| OpenClaw | [Plugin installation](../integrations/openclaw/README.md#release-archive-installation) | Configured automatic recall and eligible capture, plus explicit memory tools |
+| DeepSeek Harness | [DSH plugin guide](../integrations/dsh/README.md#release-archive-installation) | Plugin recall and capture under the documented host rules |
 | Your own agent over HTTP | [Retain and recall API](api.md#3-retain-and-recall) | Your application retrieves context before answering and retains eligible human input afterward |
 
 For MCP, start a new client session after configuring the server. Ask: **“Use OAM memory to check my preferences, then suggest a concise weekend travel plan. Cite the evidence you used.”** Do not paste the preference message into that session. Confirm that the client calls `memory_recall`, the returned evidence reaches the agent, and the recommendation reflects the stored preferences. Follow its source reference in the Inspector. A correct answer without an observed recall is not evidence that the integration used OAM.

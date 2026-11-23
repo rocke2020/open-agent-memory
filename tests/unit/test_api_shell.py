@@ -270,6 +270,7 @@ async def test_openapi_search_contracts_exclude_profile_selection(client) -> Non
     schemas = (await client.get("/openapi.json")).json()["components"]["schemas"]
     assert schemas["RecallLevel"]["enum"] == ["fast", "normal", "deep"]
     for name in ("RecallRequest", "SearchRequest", "SearchManyRequest"):
+        assert schemas[name]["properties"]["recall_level"]["default"] == "fast"
         assert "include_profile" not in schemas[name]["properties"]
         assert "max_context_tokens" not in schemas[name]["properties"]
         assert "max_tokens" not in schemas[name]["properties"]
@@ -280,6 +281,55 @@ async def test_openapi_search_contracts_exclude_profile_selection(client) -> Non
         "type": "boolean",
     }
     assert "RecalledChunkOptions" not in schemas
+
+
+@pytest.mark.parametrize(
+    "configured,explicit,expected,budget",
+    [
+        (None, None, "fast", 8000),
+        ("deep", None, "deep", 24000),
+        ("normal", "fast", "fast", 8000),
+        ("fast", "normal", "normal", 16000),
+    ],
+)
+@pytest.mark.parametrize(
+    "path,payload",
+    [
+        ("/v1/recall", {"user_id": "scope", "query": "Apple harvest"}),
+        ("/v1/users/scope/search-many", {"queries": ["Apple harvest"]}),
+        ("/v1/users/scope/decompose-and-search", {"query": "Apple harvest"}),
+    ],
+)
+async def test_http_resolves_default_recall_level(
+    tmp_path, path, payload, configured, explicit, expected, budget
+):
+    from oam.config import load_config
+
+    config_path = tmp_path / "default-mode.yaml"
+    config_path.write_text(
+        "{}\n" if configured is None else f"search:\n  default_recall_level: {configured}\n"
+    )
+    config = load_config(config_path).config
+
+    class Runtime:
+        def search(self, actor, user_id, request):
+            return {"mode": request.recall_level.value, "budget": request.context_limit(config)}
+
+        search_many = search
+        decompose_and_search = search
+
+    app = create_app(config_path, runtime=Runtime())
+    if explicit is not None:
+        payload = {**payload, "recall_level": explicit}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        response = await http.post(
+            path, json=payload, headers={"Authorization": "Bearer synthetic"}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"mode": expected, "budget": budget}
 
 
 @pytest.mark.parametrize(

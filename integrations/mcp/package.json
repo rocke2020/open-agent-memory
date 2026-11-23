@@ -1,6 +1,6 @@
 {
   "name": "@rocke-dong/oam-mcp",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "mcpName": "io.github.rocke2020/oam",
   "description": "Self-hosted OAM memory with cited recall over your existing deployment",
   "repository": {
@@ -17,6 +17,7 @@
   "files": [
     "dist",
     "README.md",
+    "README_CN.md",
     "LICENSE",
     "THIRD_PARTY.md"
   ],

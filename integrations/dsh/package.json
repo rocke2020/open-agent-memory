@@ -1,6 +1,6 @@
 {
   "name": "@rocke-dong/oam-dsh",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
   "exports": {
     ".": "./index.mjs",
@@ -19,6 +19,7 @@
     "index.mjs",
     "cordis.patch.yml",
     "README.md",
+    "README_CN.md",
     "LICENSE"
   ],
   "publishConfig": {
