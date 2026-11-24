@@ -4,6 +4,8 @@
 
 [English](README.md) | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
+[![Open Agent Memory MCP server](https://glama.ai/mcp/servers/rocke2020/open-agent-memory/badges/score.svg)](https://glama.ai/mcp/servers/rocke2020/open-agent-memory)
+
 [Get started](#quick-start) · [Performance](#performance--accuracy) · [Integrations](#connect-your-agent) · [Documentation](docs/README.md) · [Releases](https://github.com/rocke2020/open-agent-memory/releases)
 
 Open Agent Memory (OAM) is a fully open-source memory engine for AI agents. It remembers useful facts, preferences and experiences across conversations, then retrieves relevant evidence with citations when your agent needs it.
