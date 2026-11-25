@@ -1087,7 +1087,10 @@ async def test_public_url_evidence_fetches_once_and_reuses_the_stored_original(
 
 
 @pytest.mark.parametrize("failure_kind", ("invalid", "timeout"))
-async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, failure_kind):
+@pytest.mark.parametrize(("native_page", "vision_page"), ((1, 2), (2, 1)))
+async def test_partial_pdf_page_requires_explicit_partial_recall(
+    core_database, failure_kind, native_page, vision_page
+):
     from oam.config import load_config
     from oam.models.runtime import ModelOutputError, Usage
     from oam.workers.index_source import process_one
@@ -1103,8 +1106,10 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
 
     dsn, _, headers = core_database
     writer = PdfWriter()
-    writer.append(BytesIO((BILINGUAL / "en-native.pdf").read_bytes()))
-    writer.append(BytesIO((BILINGUAL / "en-scanned.pdf").read_bytes()))
+    native = BILINGUAL / "en-native.pdf"
+    scanned = BILINGUAL / "en-scanned.pdf"
+    for page in (native, scanned) if native_page == 1 else (scanned, native):
+        writer.append(BytesIO(page.read_bytes()))
     output = BytesIO()
     writer.write(output)
     original = output.getvalue()
@@ -1146,7 +1151,7 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
         assert recalled.status_code == 200, recalled.text
         assert "Glucose 92 mg/dL" in recalled.json()["context"]
         assert recalled.json()["diagnostics"]["partial"] is True
-        assert recalled.json()["items"][0]["citations"][0]["page"] == 1
+        assert recalled.json()["items"][0]["citations"][0]["page"] == native_page
         operation = await client.get(
             f"/v1/users/scope/operations/{uploaded.json()['operation_id']}"
         )
@@ -1165,13 +1170,69 @@ async def test_partial_pdf_page_requires_explicit_partial_recall(core_database, 
             "(SELECT work_unit_id FROM work_units WHERE tenant_id=%s)",
             (core_database[1],),
         ).fetchone()
-        assert attempt == ("failed", "vision:pdf:page:0002", "vision:pdf:page:0002")
+        failed_stage = f"vision:pdf:page:{vision_page:04d}"
+        assert attempt == ("failed", failed_stage, failed_stage)
         work = connection.execute(
             "SELECT status,attempts_remaining FROM work_units WHERE tenant_id=%s "
             "AND operation_id=%s AND stage='index_source'",
             (core_database[1], uploaded.json()["operation_id"]),
         ).fetchone()
         assert work == ("failed_terminal" if failure_kind == "invalid" else "queued", 2)
+
+
+async def test_resource_without_abstract_binding_completes_and_is_recalled(core_database, tmp_path):
+    from oam.config import load_config
+    from oam.workers.index_source import process_one
+
+    dsn, _, headers = core_database
+    path = tmp_path / "resources.yaml"
+    path.write_text(
+        "resource:\n  generate_abstract: false\nmodels:\n  reasoning_effort:\n    abstract: null\n"
+    )
+    config = load_config(path).config
+    assert config.models.binding_for("abstract") is None
+    app = create_app(path)
+    models = SyntheticIndexModels()
+    evidence = "The sealed backup must be retained for seven years."
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client,
+    ):
+        await use_created_user_key(client, "scope")
+        uploaded = await client.post(
+            "/v1/users/scope/resources",
+            headers={"Idempotency-Key": "abstract-disabled"},
+            json={
+                "input_type": "document",
+                "document_id": "abstract-disabled",
+                "update_mode": "replace",
+                "text": evidence,
+            },
+        )
+        assert uploaded.status_code == 202, uploaded.text
+        assert process_one(
+            config,
+            make_conninfo(dsn, options="-c role=oam_queue"),
+            make_conninfo(dsn, options="-c role=oam_content"),
+            models=models,
+            worker_id="resource-worker",
+        )
+        operation = (
+            await client.get(f"/v1/users/scope/operations/{uploaded.json()['operation_id']}")
+        ).json()
+        assert operation["status"] == "succeeded"
+        assert operation["readiness"]["source_searchable"] is True
+        assert operation["stage_state"]["parse_coverage"] == "complete"
+        assert operation["stage_state"]["abstract_state"] == "skipped"
+        assert operation["stage_state"]["abstract_coverage"] == "none"
+        app.state.runtime.models = models
+        recalled = await client.post("/v1/recall", json={"user_id": "scope", "query": evidence})
+        assert recalled.status_code == 200, recalled.text
+        assert evidence in recalled.json()["context"]
+        assert recalled.json()["items"][0]["citations"][0]["document_id"] == "abstract-disabled"
+        assert models.generation_calls == []
 
 
 async def test_chat_and_html_report_share_one_cited_recall_budget(core_database):

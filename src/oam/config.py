@@ -51,6 +51,7 @@ class TokenizerConfig(FrozenModel):
 
 
 class ResourceConfig(FrozenModel):
+    generate_abstract: StrictBool = True
     max_output_tokens: PositiveInt
     max_bytes: PositiveInt
     url_fetch_timeout_seconds: PositiveInt
@@ -523,6 +524,8 @@ class OAMConfig(FrozenModel):
 
     def required_model_roles(self) -> frozenset[str]:
         roles = set(REQUIRED_MODEL_ROLES)
+        if not self.resource.generate_abstract:
+            roles.discard("abstract")
         if not self.index.insights_enabled:
             roles.discard("insights")
         if not self.profile.enabled:

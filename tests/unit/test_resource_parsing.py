@@ -31,7 +31,7 @@ def _limits(**overrides: int) -> ResourceConfig:
         "max_total_pixels": 150,
     }
     values.update(overrides)
-    return ResourceConfig(**values)
+    return ResourceConfig.model_validate(values)
 
 
 def _image_bytes(width: int, height: int, image_format: str = "PNG") -> bytes:

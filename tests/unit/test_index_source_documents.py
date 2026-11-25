@@ -718,12 +718,13 @@ def test_abstract_failure_keeps_passages_searchable_with_failed_abstract_state()
     assert [unit["text"] for unit in store.units] == ["Glucose 92 mg/dL"]
 
 
-def test_later_scanned_pdf_page_failure_preserves_earlier_page_as_partial():
+@pytest.mark.parametrize("native_page", [1, 2])
+def test_scanned_pdf_page_failure_preserves_native_page_as_partial(native_page):
     native = (MEDICAL_FIXTURES / "bilingual/en-native.pdf").read_bytes()
     scanned = (MEDICAL_FIXTURES / "bilingual/en-scanned.pdf").read_bytes()
     writer = PdfWriter()
-    writer.append(BytesIO(native))
-    writer.append(BytesIO(scanned))
+    for original in (native, scanned) if native_page == 1 else (scanned, native):
+        writer.append(BytesIO(original))
     combined = BytesIO()
     writer.write(combined)
     store = MemoryStore(content=combined.getvalue(), media_type="application/pdf")
@@ -732,10 +733,36 @@ def test_later_scanned_pdf_page_failure_preserves_earlier_page_as_partial():
         index_source._resource(store, LocalModels(fail_vision=True))
 
     assert any("Glucose 92 mg/dL" in unit["text"] for unit in store.units)
-    assert all(unit["locator"]["page"] == 1 for unit in store.units)
+    assert {unit["locator"]["page"] for unit in store.units} == {native_page}
     assert store.stages["source_searchable"] is True
     assert store.stages["parse_coverage"] == "partial"
     assert store.stages["abstract_state"] == "pending"
+
+
+def test_pdf_vision_failure_keeps_error_when_annotated_block_is_unavailable(monkeypatch):
+    from oam.contracts.resources import ResourceTemporalAnnotation
+
+    writer = PdfWriter()
+    for filename in ("en-scanned.pdf", "en-native.pdf"):
+        writer.append(BytesIO((MEDICAL_FIXTURES / "bilingual" / filename).read_bytes()))
+    combined = BytesIO()
+    writer.write(combined)
+    store = MemoryStore(content=combined.getvalue(), media_type="application/pdf")
+    annotation = ResourceTemporalAnnotation(
+        locator="pdf:page:0001:block:0001",
+        role="date_reference",
+        start="2026-10-07T00:00:00Z",
+        end="2026-10-08T00:00:00Z",
+        quote="Subject SYN-001",
+    )
+    metadata = store.resource_metadata().model_copy(update={"temporal_annotations": [annotation]})
+    monkeypatch.setattr(store, "resource_metadata", lambda: metadata)
+
+    with pytest.raises(RuntimeError, match="vision model unavailable"):
+        index_source._resource(store, LocalModels(fail_vision=True))
+
+    assert store.stages["failed_stage"] == "vision:pdf:page:0001"
+    assert store.units == []
 
 
 def test_interaction_locator_keeps_original_message_order_and_internal_id(monkeypatch):
@@ -1366,3 +1393,71 @@ def test_worker_indexes_new_resource_in_existing_namespace_after_recipe_change(m
         unit["text"] == "A source remains indexable after an upgrade." for unit in store.units
     )
     assert store.generation_id == "existing-user-namespace"
+
+
+def test_resource_can_skip_abstract_without_skipping_searchable_evidence():
+    from oam.config import ResourceConfig
+    from oam.indexing.identity import index_generation
+
+    store = MemoryStore(content=b"Full original document evidence.")
+    original_identity = index_generation(store.config, {})
+    resource = ResourceConfig.model_validate(
+        {**store.config.resource.model_dump(), "generate_abstract": False}
+    )
+    store.config = store.config.model_copy(update={"resource": resource})
+    models = LocalModels()
+
+    index_source._resource(store, models)
+
+    assert models.generated_roles == []
+    assert models.embedded == ["Full original document evidence."]
+    assert store.stages["source_searchable"] is True
+    assert store.stages["parse_coverage"] == "complete"
+    assert store.stages["abstract_state"] == "skipped"
+    assert store.stages["abstract_coverage"] == "none"
+    assert index_generation(store.config, {}) == original_identity
+
+
+def test_worker_finishes_resource_with_intentionally_skipped_abstract(monkeypatch):
+    store = MemoryStore(content=b"Searchable evidence without derivative metadata.")
+    store.config = store.config.model_copy(
+        update={"resource": store.config.resource.model_copy(update={"generate_abstract": False})}
+    )
+    connection = SimpleNamespace(cursor=lambda: None)
+
+    @contextmanager
+    def connect(*args, **kwargs):
+        yield connection
+
+    monkeypatch.setattr(index_source.psycopg, "connect", connect)
+    monkeypatch.setattr(
+        index_source, "claim_one", lambda *args, **kwargs: SimpleNamespace(stage="index_source")
+    )
+    monkeypatch.setattr(index_source, "IndexStore", lambda *args, **kwargs: store)
+    models = LocalModels()
+
+    assert index_source.process_one(
+        store.config, "queue", "content", models=models, worker_id="worker"
+    )
+    assert store.finished
+    assert store.stages["abstract_state"] == "skipped"
+    assert store.stages["parse_coverage"] == "complete"
+    assert models.generated_roles == []
+
+
+def test_skipping_abstract_preserves_required_pdf_vision():
+    store = MemoryStore(
+        content=(MEDICAL_FIXTURES / "bilingual/en-scanned.pdf").read_bytes(),
+        media_type="application/pdf",
+    )
+    store.config = store.config.model_copy(
+        update={"resource": store.config.resource.model_copy(update={"generate_abstract": False})}
+    )
+    models = LocalModels()
+
+    index_source._resource(store, models)
+
+    assert models.generated_roles == ["extraction"]
+    assert store.stages["abstract_state"] == "skipped"
+    assert store.stages["parse_coverage"] == "complete"
+    assert store.units and models.embedded

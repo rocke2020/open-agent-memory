@@ -695,9 +695,10 @@ def _resource(store, models):
         )
     elif original.media_type is ResourceMediaType.PDF:
         pages = inspect_pdf(original, store.config.resource)
-        blocks = []
-        rendered_pixels = 0
+        native_blocks_by_page: dict[int, list[ParsedBlock]] = {}
         for page in pages:
+            native_blocks: list[ParsedBlock] = []
+            native_blocks_by_page[page.page_number] = native_blocks
             if page.text:
                 page_span = {
                     "page": page.page_number,
@@ -706,7 +707,7 @@ def _resource(store, models):
                 if page.locator in annotated_locators:
                     # Caller quotes address the original flattened whole-page representation.
                     text = re.sub(r"\s+", " ", page.text).strip()
-                    blocks.append(ParsedBlock(locator=page.locator, text=text))
+                    native_blocks.append(ParsedBlock(locator=page.locator, text=text))
                     spans[page.locator] = {
                         **page_span,
                         "parse_revision": LEGACY_RESOURCE_PARSE_REVISION,
@@ -740,15 +741,19 @@ def _resource(store, models):
                             if len(chunks) == 1
                             else f"{page.locator}:span:{chunk.start}:{chunk.end}"
                         )
-                        blocks.append(ParsedBlock(locator=locator, text=chunk.text))
+                        native_blocks.append(ParsedBlock(locator=locator, text=chunk.text))
                         spans[locator] = {
                             **page_span,
                             "parse_revision": PDF_NATIVE_PARSE_REVISION,
                             "start": chunk.start,
                             "end": chunk.end,
                         }
-                if not page.needs_vision:
-                    continue
+        blocks = []
+        rendered_pixels = 0
+        for page in pages:
+            blocks.extend(native_blocks_by_page[page.page_number])
+            if not page.needs_vision or processing_error is not None:
+                continue
             vision_stage = None
             try:
                 image, pixels = render_page(
@@ -787,7 +792,7 @@ def _resource(store, models):
             except Exception as error:
                 processing_error = error
                 processing_error_stage = vision_stage
-                break
+                continue
             for block in visual_blocks:
                 if page.text and _native_contains_visual_observation(page.text, block.text):
                     continue
@@ -833,7 +838,11 @@ def _resource(store, models):
     current_blocks = {block.locator: block.text for block in blocks}
     if any(current_blocks.get(locator) != text for locator, text in saved_passages.items()):
         raise ResourceParseError("published Resource passages differ from the current parse")
-    metadata.validate_source_quotes({block.locator: block.text for block in blocks})
+    if processing_error is not None and not annotated_locators.issubset(current_blocks):
+        if processing_error_stage is not None:
+            store.mark_deferred_failure_stage(processing_error_stage)
+        raise processing_error
+    metadata.validate_source_quotes(current_blocks)
     evidence_id = stable_id(
         "resource_evidence",
         store.generation_id,
@@ -934,6 +943,9 @@ def _resource(store, models):
     with store.transaction() as connection:
         store.guard(connection)
         store.readiness(connection, parse_coverage="complete")
+        if not store.config.resource.generate_abstract:
+            store.readiness(connection, abstract_state="skipped", abstract_coverage="none")
+            return
     texts = _select_abstract_passages(
         [{"locator": block.locator, "text": block.text} for block in blocks],
         store.config.extraction.max_input_tokens,

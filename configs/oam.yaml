@@ -3,6 +3,8 @@
 contract_version: "0.0.1"
 
 resource:
+  # Generate optional abstract metadata in each Resource indexing operation.
+  generate_abstract: true
   # Resource abstracts and vision keep a separate completion budget from learned-memory extraction.
   max_output_tokens: 4096
   # Maximum original file size per Resource: 100 MB, combined when there are multiple images.

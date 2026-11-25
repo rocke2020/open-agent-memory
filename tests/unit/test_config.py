@@ -480,3 +480,11 @@ def test_pool_acquire_timeout_rejects_non_finite_value(tmp_path):
     path.write_text("database:\n  pool_acquire_timeout_seconds: .inf\n")
     with pytest.raises(ConfigurationError, match="pool_acquire_timeout_seconds"):
         load_config(path)
+
+
+def test_disabled_resource_abstract_does_not_require_abstract_model():
+    config = load_config(REPOSITORY_ROOT / "configs/oam.yaml").config
+    config = config.model_copy(
+        update={"resource": config.resource.model_copy(update={"generate_abstract": False})}
+    )
+    assert "abstract" not in config.required_model_roles()

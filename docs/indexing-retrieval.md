@@ -69,7 +69,9 @@ Implementation references: [window admission](../src/oam/indexing/scheduling.py)
 
 ## 5. Evidence and Profile paths
 
-Evidence accepts declared text or supported HTML/PDF/image originals, preserves their exact bytes in PostgreSQL, extracts passages with page/region/block locators, and generates an eligible cited abstract. Native PDF extraction and document vision are distinct paths with visible readiness and failures. Original-byte preservation does not imply perfect OCR or abstract quality.
+Evidence accepts declared text or supported HTML/PDF/image originals, preserves their exact bytes in PostgreSQL, and extracts passages with page, region or block locators. Complete parsing generates cited abstract metadata by default. Operators can disable abstract generation for new indexing operations with `resource.generate_abstract`. The operation records `abstract_state=skipped` and completes with searchable passages.
+
+The worker collects native text from every PDF page before it attempts selected pages with vision. After a vision failure, validated native passages can remain searchable, including text from later pages. Strict recall rejects requests while the user has an active PDF with `parse_coverage=partial`. Callers can request available cited passages with `allow_partial=true`. If vision fails before producing a block required to validate a caller annotation, the worker retains the vision error and withholds new passages until their annotations can be validated.
 
 Evidence joins ordinary retrieval without entering L1/L2/L3. Resource revisions use expected-version checks; deletion immediately excludes all versions and schedules storage cleanup. Profile Data have their own registered exact-field mapping and lifecycle.
 
