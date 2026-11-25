@@ -12,6 +12,7 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from importlib.resources import files
+from itertools import islice
 from uuid import uuid4
 
 import psycopg
@@ -34,11 +35,16 @@ from oam.indexing.grouping import (
     group_envelope,
     plan_extraction_groups,
 )
-from oam.indexing.identity import INDEX_RECIPE, index_generation
+from oam.indexing.identity import (
+    INDEX_RECIPE,
+    PLAIN_TEXT_OPENING_GENERATION_PREFIX,
+    PLAIN_TEXT_OPENING_WORDS,
+    index_generation,
+)
 from oam.indexing.references import eligible_reference_ids, freeze_extraction_references
-from oam.indexing.store import IndexStore, stable_id
+from oam.indexing.store import IndexStore, input_digest, stable_id
 from oam.models.embedding_inputs import configured_embedding_admission
-from oam.models.runtime import retryable_model_http_error
+from oam.models.runtime import ModelOutputError, retryable_model_http_error
 from oam.workers.claims import claim_one
 
 ABSTRACT_SYSTEM = (
@@ -653,6 +659,75 @@ def _index_interaction(config, store, models, request):
     return fact_ids, extraction_diagnostics
 
 
+def _text_resource_embedding_batch(store, models, batch):
+    members = [(passage_id, digest) for passage_id, digest, _ in batch]
+    texts = tuple(text for _, _, text in batch)
+
+    def embed():
+        result = models.embed(texts, timeout_seconds=store.config.model.attempt_timeout_seconds)
+        if len(result.vectors) != len(members):
+            raise ModelOutputError("Resource embedding batch length mismatch", usage=result.usage)
+        return {**result.model_dump(mode="json"), "resource_passages": members}
+
+    stage = "passage:" + stable_id("resource_batch", members)
+    return store.checkpoint(stage, texts, embed)["vectors"]
+
+
+def _text_resource_vectors(store, models, passages, source_text):
+    cached = {}
+    for stage, digest, output in store.resource_embedding_checkpoints():
+        members = output.get("resource_passages")
+        if members is None:
+            passage_id = stage.removeprefix("passage:").split(":recipe=", 1)[0]
+            members = [(passage_id, digest.hex())]
+        for (passage_id, text_digest), vector in zip(members, output["vectors"], strict=True):
+            cached.setdefault((passage_id, text_digest), vector)
+
+    admission = _embedding_admission(store.config, models)
+    max_items = min(
+        PASSAGE_EMBED_BATCH_SIZE, admission.max_request_items or PASSAGE_EMBED_BATCH_SIZE
+    )
+    max_tokens = admission.max_request_tokens
+    input_limit = min(
+        (limit for limit in (admission.max_input_tokens, max_tokens) if limit is not None),
+        default=None,
+    )
+    opening = ""
+    # Admission keeps the owner's saved generation when runtime settings change.
+    if store.generation_id.startswith(PLAIN_TEXT_OPENING_GENERATION_PREFIX):
+        words = islice(re.finditer(r"\S+", source_text), PLAIN_TEXT_OPENING_WORDS)
+        opening = " ".join(word.group() for word in words) + "\n\n"
+        if input_limit is not None and admission.counter.count(opening) >= input_limit:
+            opening = ""
+    batch = []
+    batch_tokens = 0
+    for passage_id, block in passages:
+        text = block.text
+        if opening:
+            text = opening + text
+            if input_limit is not None:
+                text = admission.counter.truncate(text, input_limit)
+                if not text[len(opening) :].strip():
+                    text = block.text
+        digest = input_digest(text).hex()
+        saved = cached.get((passage_id, digest))
+        tokens = admission.counter.count(text) if max_tokens is not None and saved is None else 0
+        if batch and (
+            saved is not None
+            or len(batch) == max_items
+            or (max_tokens is not None and batch_tokens + tokens > max_tokens)
+        ):
+            yield from _text_resource_embedding_batch(store, models, batch)
+            batch, batch_tokens = [], 0
+        if saved is not None:
+            yield saved
+        else:
+            batch.append((passage_id, digest, text))
+            batch_tokens += tokens
+    if batch:
+        yield from _text_resource_embedding_batch(store, models, batch)
+
+
 def _resource(store, models):
     from oam.contracts.resources import ResourceMediaType
     from oam.resources.html import parse_html
@@ -849,15 +924,25 @@ def _resource(store, models):
         store.source["source_id"],
         store.source["source_version"],
     )
-    for ordinal, block in enumerate(blocks):
-        passage_id = stable_id("resource_passage", evidence_id, block.locator)
-        vector = store.checkpoint(
-            "passage:" + passage_id,
-            block.text,
-            lambda text=block.text: models.embed(
-                (text,), timeout_seconds=store.config.model.attempt_timeout_seconds
-            ),
-        )
+    passages = [
+        (stable_id("resource_passage", evidence_id, block.locator), block) for block in blocks
+    ]
+    text_vectors = (
+        _text_resource_vectors(store, models, passages, source_text)
+        if original.media_type is ResourceMediaType.TEXT
+        else None
+    )
+    for ordinal, (passage_id, block) in enumerate(passages):
+        if text_vectors is None:
+            vector = store.checkpoint(
+                "passage:" + passage_id,
+                block.text,
+                lambda text=block.text: models.embed(
+                    (text,), timeout_seconds=store.config.model.attempt_timeout_seconds
+                ),
+            )["vectors"][0]
+        else:
+            vector = next(text_vectors)
         locator = {
             "source_id": store.source["source_id"],
             "source_version": store.source["source_version"],
@@ -903,7 +988,7 @@ def _resource(store, models):
                 unit_id=passage_id,
                 kind="resource_passage",
                 text=block.text,
-                vector=vector["vectors"][0],
+                vector=vector,
                 locator=locator,
                 evidence_id=evidence_id,
                 passage_id=passage_id,

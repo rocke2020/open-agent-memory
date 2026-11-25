@@ -12,6 +12,8 @@ from oam.tokens import ESTIMATOR
 
 INDEX_RECIPE = "oam-source-fact-insight-v39"
 RESOURCE_VISION_RECIPE = "oam-vision-downscale-v1"
+PLAIN_TEXT_OPENING_WORDS = 40
+PLAIN_TEXT_OPENING_GENERATION_PREFIX = "gen_opening_v1_"
 INSIGHT_RETRIEVAL_RECIPE = "oam-incremental-insight-v3"
 INSIGHT_MODEL_RECIPE = "oam-insight-model-v1"
 
@@ -82,6 +84,10 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
         ),
         "roles": roles,
     }
+    generation_prefix = "gen_"
+    if config.resource.plain_text_embedding_opening:
+        identity["plain_text_embedding"] = f"source-opening-{PLAIN_TEXT_OPENING_WORDS}-words-v1"
+        generation_prefix = PLAIN_TEXT_OPENING_GENERATION_PREFIX
     admission = configured_embedding_admission(config, environment)
     ingestion_counter = admission.counter.identity
     limits = [
@@ -104,7 +110,7 @@ def index_generation(config: OAMConfig, environment: Mapping[str, str]) -> str:
     if config.index.insights_enabled:
         identity["insight_retrieval_recipe"] = INSIGHT_RETRIEVAL_RECIPE
     return (
-        "gen_"
+        generation_prefix
         + hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

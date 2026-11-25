@@ -181,6 +181,10 @@ The additional experimental value `ranked_deduplicated` uses the same ranked adm
 
 Normal and Deep can use an optional `models.reranker` with the `rerank` capability to score fused candidate texts before context assembly. Their per-preset `rerank_candidates` values both default to 48. A null cap sends the full bounded fused list. Keep the model binding null to use fused relevance order. Fast skips model reranking. Reranker candidate limits belong to Normal and Deep.
 
+In development after v0.2.1, `search.resource_document_guidance` defaults to `false`. When enabled, Normal recall can find additional clauses within selected plain-text Resources, then attach adjacent eligible passages within the context budget. The guided path requires a reranker, requested chunks and no time window. Its candidate list must consist of eligible plain-text Resource passages. This retrieval setting can use an existing index.
+
+The independent `resource.plain_text_embedding_opening` setting defaults to `false`. It selects whether a newly initialized index embeds each plain-text passage with the first 40 words of its document. Existing indexes retain their admitted recipe when the runtime setting changes. Enable the setting on a fresh index after upgrading the API and every worker that processes its sources. Returned passage text and citations continue to use original evidence.
+
 ## 7. Temporal traversal budgets and request overrides
 
 Fast, Normal and Deep are configurable presets. `search.fast.temporal_nodes`, `search.normal.temporal_nodes` and `search.deep.temporal_nodes` default to 64, 200 and 300. Each positive traversal budget counts seeds and subsequently visited nodes. Direct temporal matches and final result pools have separate admission. `max_results` does not clamp this budget.

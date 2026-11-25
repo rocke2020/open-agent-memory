@@ -5,6 +5,8 @@ contract_version: "0.0.1"
 resource:
   # Generate optional abstract metadata in each Resource indexing operation.
   generate_abstract: true
+  # For new index generations, add the original document opening to plain-text embedding inputs.
+  plain_text_embedding_opening: false
   # Resource abstracts and vision keep a separate completion budget from learned-memory extraction.
   max_output_tokens: 4096
   # Maximum original file size per Resource: 100 MB, combined when there are multiple images.
@@ -84,6 +86,8 @@ search:
   rrf_k: 60
   # Rank one full-text candidate list in every preset. per_term fuses term lists.
   lexical_ranking: whole_query
+  # In Normal recall with a reranker, add source-focused text Resource candidates and their context.
+  resource_document_guidance: false
   # Shared by all recall presets. "off" disables the partial-match filter.
   # In a matched 13-question Fast test, filtering weaker conversation matches
   # with user_fact_exchange reduced rendered context tokens by 34.1% versus "off".

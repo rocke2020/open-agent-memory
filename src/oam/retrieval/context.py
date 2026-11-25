@@ -604,6 +604,43 @@ def represent_group(group: list[dict], *, fact_source_bodies: str = "required") 
     return group
 
 
+def _resource_window(item, neighbors, consumed):
+    citation = item["citations"][0]
+    source = citation["source_id"], citation["source_version"]
+    block = str(citation.get("block", ""))
+    ordinal = block.removeprefix("text:")
+    if not block.startswith("text:") or not ordinal.isdecimal():
+        return None
+    by_block = {
+        row["citations"][0].get("block"): row
+        for row in neighbors
+        if row["unit_id"] not in consumed
+        and len(row["citations"]) == 1
+        and (row["citations"][0]["source_id"], row["citations"][0]["source_version"]) == source
+        and row["time_evidence"] == item["time_evidence"]
+    }
+    if by_block.get(block, {}).get("unit_id") != item["unit_id"]:
+        return None
+    first = last = int(ordinal)
+    while f"text:{first - 1}" in by_block:
+        first -= 1
+    while f"text:{last + 1}" in by_block:
+        last += 1
+    if first == last:
+        return None
+    members = [by_block[f"text:{index}"] for index in range(first, last + 1)]
+    ids = [row["unit_id"] for row in members]
+    return {
+        **item,
+        "text": "\n\n".join(row["text"] for row in members),
+        "citations": [row["citations"][0] for row in members],
+        "paths": [
+            *item.get("paths", ()),
+            {"arm": "resource_window", "relation": "adjacent_passage", "nodes": ids},
+        ],
+    }
+
+
 def assemble_context(
     candidates: list[dict],
     source_passages: list[dict],
@@ -613,6 +650,7 @@ def assemble_context(
     max_results: int,
     evidence_groups: list[list[dict]] | None = None,
     optional_context: dict[str, list[dict]] | None = None,
+    resource_windows: dict[str, list[dict]] | None = None,
     fact_source_bodies: str = "required",
 ) -> tuple[list[dict], list[str], list[list[dict]], bool]:
     """Admit complete representations in root relevance order under one rendered cap."""
@@ -624,6 +662,9 @@ def assemble_context(
     candidate_ids = {item["unit_id"] for item in candidates}
     optional_ids: set[str] = set()
     fact_support_keys: set[str] = set()
+    consumed_resources: set[str] = set()
+    # Keep attempted groups alive while the renderer caches item blocks by identity.
+    attempted_resource_windows: list[dict] = []
     renderer = _ContextRenderer()
 
     def selection(group):
@@ -641,12 +682,28 @@ def assemble_context(
 
     for item in [*candidates, *(source_passages if fact_source_bodies == "required" else [])]:
         identity = item["unit_id"]
-        if identity in considered or (identity in optional_ids and identity not in candidate_ids):
+        if (
+            identity in considered
+            or identity in consumed_resources
+            or (identity in optional_ids and identity not in candidate_ids)
+        ):
             continue
         considered.add(identity)
         if item["kind"] in ORIGINAL_KINDS:
             if not include_chunks:
                 continue
+            if resource_windows and item["kind"] == "resource_passage" and item["citations"]:
+                window = _resource_window(
+                    item, resource_windows.get(identity, []), consumed_resources
+                )
+                if window is not None:
+                    attempted_resource_windows.append(window)
+                    tentative, pools_fit, tokens_fit = selection([window])
+                    if pools_fit and tokens_fit:
+                        admitted.append([window])
+                        selected = tentative
+                        consumed_resources.update(window["paths"][-1]["nodes"])
+                        continue
             group = [item]
         else:
             group = groups.get(identity)
@@ -666,6 +723,8 @@ def assemble_context(
             omissions.append(identity)
             continue
         admitted.append(representation)
+        if resource_windows and item["kind"] == "resource_passage":
+            consumed_resources.add(identity)
         if support_key is not None:
             fact_support_keys.add(support_key)
         selected = tentative

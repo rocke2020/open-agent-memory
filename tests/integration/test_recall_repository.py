@@ -990,6 +990,7 @@ def test_readiness_selects_current_operations_without_rescanning_each_history(re
     assert repository.user_state() == {
         "index_generation_id": "generation",
         "policy_epoch": 0,
+        "accepted_seq": 0,
         "parse_partial": True,
         "readiness": "partial",
     }

@@ -74,6 +74,7 @@ class TraceRepository:
                 item_id for ids in decisions.get("arms", {}).values() for item_id in ids
             }
             candidate_ids.update(item["unit_id"] for item in result.get("items", []))
+            candidate_ids.update(decisions.get("resource_rerank_ids", ()))
             candidate_ids.update(recorded_path_nodes(result))
             if candidate_ids:
                 rows = connection.execute(

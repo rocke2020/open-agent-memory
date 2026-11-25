@@ -139,6 +139,7 @@ def affected_trace_ids(rows, removed_unit_ids, removed_support_ids=()):
     for row in rows:
         trace_id, decisions = row[:2]
         candidates = set(decisions.get("result_ids", ()))
+        candidates.update(decisions.get("resource_rerank_ids", ()))
         for arm_ids in decisions.get("arms", {}).values():
             candidates.update(arm_ids)
         candidates.update(recorded_path_nodes(row[2] or {}) if len(row) > 2 else ())

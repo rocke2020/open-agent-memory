@@ -250,6 +250,22 @@ class IndexStore:
             raise StaleIndexWork("published Resource passage has no locator")
         return dict(rows)
 
+    def resource_embedding_checkpoints(self):
+        with self.transaction() as connection:
+            self.guard(connection)
+            return connection.execute(
+                "SELECT stage_key,input_digest,output FROM index_stage_results "
+                "WHERE tenant_id=%s AND user_id=%s AND source_id=%s AND source_version=%s "
+                "AND generation_id=%s AND starts_with(stage_key,'passage:resource_') "
+                "ORDER BY strpos(stage_key,':recipe=')>0,created_at,stage_key,input_digest",
+                (
+                    *self.key,
+                    self.source["source_id"],
+                    self.source["source_version"],
+                    self.generation_id,
+                ),
+            ).fetchall()
+
     @contextmanager
     def transaction(self, *, nonblocking_read=False, deadline=None):
         if nonblocking_read and self.pool is None:

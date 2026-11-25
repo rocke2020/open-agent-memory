@@ -52,6 +52,7 @@ class TokenizerConfig(FrozenModel):
 
 class ResourceConfig(FrozenModel):
     generate_abstract: StrictBool = True
+    plain_text_embedding_opening: StrictBool = False
     max_output_tokens: PositiveInt
     max_bytes: PositiveInt
     url_fetch_timeout_seconds: PositiveInt
@@ -139,6 +140,7 @@ class SearchConfig(FrozenModel):
     query_concurrency: PositiveInt
     rrf_k: PositiveInt
     lexical_ranking: Literal["per_term", "whole_query"]
+    resource_document_guidance: bool = False
     partial_match_gate: Literal["off", "user_fact_exchange"]
     adjacent_user_context: bool
     adjacent_user_context_max_chars: int = Field(gt=0, strict=True)

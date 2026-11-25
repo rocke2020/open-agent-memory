@@ -84,6 +84,11 @@ def test_per_term_lexical_materializes_term_matches_instead_of_search_vectors(
     query = connection.statements[-1]
     assert "lexical_terms AS MATERIALIZED" in query
     assert "AS matched_term_orders" in query
+    # Keep the physical vector indexable for the initial search, then read a local copy
+    # for each term; a toasted vector fetched once per query token multiplies buffer reads.
+    assert "u.lexical_bilingual @@ q.candidate" in query
+    assert "score_vector.value @@ t.term" in query
+    assert "score_vector.value @@ q.primary" in query
     assert "t.term_order = ANY(u.matched_term_orders)" in query
     assert "u.lexical_bilingual AS lexical_bilingual" not in query
     assert connection.parameters[-1]["limit"] == 64

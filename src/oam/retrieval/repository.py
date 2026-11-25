@@ -32,6 +32,7 @@ from oam.db.entity_eligibility import (
     ENTITY_PROJECTIONS_FROM_SEED_ENTITIES,
 )
 from oam.indexing.entity_names import normalize_entity_text
+from oam.retrieval import resource_sql
 from oam.retrieval.algorithms import (
     GraphEdge,
     TemporalEdge,
@@ -217,6 +218,37 @@ def _informative_terms(terms: tuple[tuple[str, str], ...]) -> tuple[tuple[str, s
         for configuration, word in terms
         if configuration != "english" or word not in _QUERY_FUNCTION_WORDS
     )
+
+
+def _resource_query_parameters(query: str) -> dict[str, str]:
+    terms = _informative_terms(query_terms(query).candidates)
+    return {
+        language: " ".join(word for config, word in terms if config == language)
+        for language in ("english", "simple")
+    }
+
+
+def has_literal_anchor(query: str) -> bool:
+    return _ANCHOR.search(query) is not None
+
+
+def _anchor_predicate(query: str) -> tuple[str, dict[str, object]]:
+    matches = _ANCHOR.findall(query)
+    phrases = [quoted.casefold() for quoted, _ in matches if quoted]
+    identifiers = [
+        f"(^|[^[:alnum:]_-]){re.escape(identifier)}($|[^[:alnum:]_-])"
+        for _, identifier in matches
+        if identifier
+    ]
+    predicates = []
+    parameters: dict[str, object] = {"identifiers": identifiers}
+    for index, phrase in enumerate(phrases):
+        key = f"anchor_phrase_{index}"
+        parameters[key] = phrase
+        predicates.append(f"strpos(lower(u.content_text),%({key})s)>0")
+    if identifiers:
+        predicates.append("u.content_text ~* ANY(%(identifiers)s::text[])")
+    return " OR ".join(predicates), parameters
 
 
 def _tsquery(terms: tuple[tuple[str, str], ...], operator: str, parameters: dict, name: str):
@@ -427,7 +459,7 @@ class RecallRepository:
     def user_state(self) -> dict:
         rows = self._execute(
             "WITH active_user AS MATERIALIZED ("
-            "SELECT tenant_id,user_id,index_generation_id,policy_epoch FROM users "
+            "SELECT tenant_id,user_id,index_generation_id,policy_epoch,accepted_seq FROM users "
             "WHERE tenant_id=%s AND user_id=%s AND state='active'), "
             "current_sources AS MATERIALIZED ("
             "SELECT s.tenant_id,s.user_id,s.source_id,s.active_version "
@@ -449,7 +481,7 @@ class RecallRepository:
             "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
             "ORDER BY o.tenant_id,o.user_id,o.source_id,o.source_version,"
             "o.created_at DESC,o.operation_id DESC) "
-            "SELECT sc.index_generation_id,sc.policy_epoch,"
+            "SELECT sc.index_generation_id,sc.policy_epoch,sc.accepted_seq,"
             "COALESCE(bool_or(base.stage_state->>'parse_coverage'='partial'),false) "
             "AS parse_partial,CASE "
             "WHEN bool_or(base.status IN ('partial_failed','failed_terminal','cancelled') "
@@ -462,7 +494,7 @@ class RecallRepository:
             "LEFT JOIN latest_operations base ON "
             "(base.tenant_id,base.user_id,base.source_id,base.source_version)="
             "(s.tenant_id,s.user_id,s.source_id,s.active_version) "
-            "GROUP BY sc.index_generation_id,sc.policy_epoch",
+            "GROUP BY sc.index_generation_id,sc.policy_epoch,sc.accepted_seq",
             (self.authority.tenant_id, self.authority.user_id),
         )
         if not rows:
@@ -508,7 +540,7 @@ class RecallRepository:
 
     def lexical(self, query: str, limit: int) -> list[dict]:
         # Protected literals are ranked by anchors, including their query remainder.
-        if _ANCHOR.search(query):
+        if has_literal_anchor(query):
             return []
         entity_names = (
             self._query_entity_names(query) if self.config.search.query_entity_boost else []
@@ -601,8 +633,17 @@ class RecallRepository:
                 hits_predicate = f"({hits_predicate} OR {entity_match})"
             else:
                 hits_predicate = "true"
+        score_vector = lexical_vector
+        if not whole_query:
+            # Concatenating an empty tsvector preserves its positions and weights, while
+            # materializing one detoasted value for all comparisons on this physical hit.
+            hits_source += (
+                f" CROSS JOIN LATERAL (SELECT {lexical_vector} || ''::tsvector AS value "
+                "OFFSET 0) score_vector"
+            )
+            score_vector = "score_vector.value"
         cover_density = (
-            f"ts_rank_cd(%(weights)s::float4[],{lexical_vector},q.candidate,%(normalization)s)"
+            f"ts_rank_cd(%(weights)s::float4[],{score_vector},q.candidate,%(normalization)s)"
         )
         partial_score = f"coalesce(bm.score,0) + 2.0 * {cover_density}" if bm25 else cover_density
         score = "u.partial_score*(1+%(entity_boost)s*u.entity_match::int)"
@@ -621,7 +662,7 @@ class RecallRepository:
             # Keep the hit rows small when each term scans them.
             term_matches = (
                 "ARRAY(SELECT t.term_order FROM lexical_terms t "
-                f"WHERE {lexical_vector} @@ t.term) AS matched_term_orders,"
+                f"WHERE {score_vector} @@ t.term) AS matched_term_orders,"
             )
         hits_sql = (
             "WITH queries AS (SELECT "
@@ -632,8 +673,8 @@ class RecallRepository:
             "u.insight_id,u.insight_revision,u.generation_id,"
             f"{term_matches}u.mentioned_at,"
             f"{partial_score} AS partial_score,"
-            f"{lexical_vector} @@ q.full AS full_match,"
-            f"{lexical_vector} @@ q.primary AS primary_match,"
+            f"{score_vector} @@ q.full AS full_match,"
+            f"{score_vector} @@ q.primary AS primary_match,"
             f"({entity_match}) AS entity_match "
             f"FROM {hits_source},queries q WHERE "
             "u.tenant_id=current_setting('oam.tenant_id',true) "
@@ -722,23 +763,12 @@ class RecallRepository:
         return [*selected, *tail[: max(0, limit - len(selected))]]
 
     def anchors(self, query: str, limit: int) -> list[dict]:
-        matches = _ANCHOR.findall(query)
-        phrases = [quoted.casefold() for quoted, _ in matches if quoted]
-        identifiers = [
-            f"(^|[^[:alnum:]_-]){re.escape(identifier)}($|[^[:alnum:]_-])"
-            for _, identifier in matches
-            if identifier
-        ]
-        if not phrases and not identifiers:
+        predicate, parameters = _anchor_predicate(query)
+        if not predicate:
             return []
         terms = query_terms(_ANCHOR.sub(" ", query))
         candidates = _informative_terms(terms.candidates)
-        parameters = {
-            "phrases": phrases,
-            "identifiers": identifiers,
-            "limit": limit,
-            "weights": list(self.config.search.fts_rank_weights),
-        }
+        parameters.update(limit=limit, weights=list(self.config.search.fts_rank_weights))
         relevance_order = ""
         if candidates:
             candidate, primary, full, term_queries = _rank_queries(terms, parameters)
@@ -749,13 +779,15 @@ class RecallRepository:
                 "WHERE u.lexical_bilingual @@ t.term) DESC,"
                 f"ts_rank_cd(%(weights)s::float4[],u.lexical_bilingual,{candidate}) DESC,"
             )
+        # Check source/support eligibility only for scoped literal matches, before the result cap.
         return self._execute(
-            self._eligible() + "SELECT unit_id,1.0 AS score FROM filtered u WHERE EXISTS ("
-            "SELECT 1 FROM unnest(%(phrases)s::text[]) p "
-            "WHERE strpos(lower(u.content_text),p)>0) OR EXISTS ("
-            "SELECT 1 FROM unnest(%(identifiers)s::text[]) i "
-            "WHERE u.content_text ~* i) "
-            "ORDER BY "
+            self._eligible()
+            + ", physical_matches AS MATERIALIZED (SELECT u.tenant_id,u.user_id,u.unit_id "
+            "FROM search_units u WHERE (u.tenant_id,u.user_id)=(%(ann_tenant)s,%(ann_user)s) "
+            f"AND ({predicate})) "
+            "SELECT u.unit_id,1.0 AS score FROM physical_matches p CROSS JOIN LATERAL ("
+            "SELECT u.* FROM filtered u WHERE (u.tenant_id,u.user_id,u.unit_id)="
+            "(p.tenant_id,p.user_id,p.unit_id) OFFSET 0) u ORDER BY "
             + relevance_order
             + "u.mentioned_at DESC NULLS LAST,u.unit_id LIMIT %(limit)s",
             parameters,
@@ -942,6 +974,78 @@ class RecallRepository:
             "ORDER BY u.source_id,u.source_version,u.ordinal,u.unit_id",
             {"source_ids": list(source_ids)},
         )
+
+    def resource_only_plain_text(self, generation_id: str) -> bool:
+        """Check the current searchable source roles before an optional concurrent read."""
+        rows = self._execute(resource_sql.ONLY_PLAIN_TEXT, {"generation": generation_id})
+        return bool(rows[0]["only_plain_text"])
+
+    def resource_first_passage_anchor(self, query: str, generation_id: str) -> bool:
+        """Confirm a literal match in an eligible first passage before speculative ranking."""
+        predicate, parameters = _anchor_predicate(query)
+        if not predicate or not generation_id:
+            return False
+        rows = self._execute(
+            resource_sql.FIRST_PASSAGE_ANCHOR.format(predicate=predicate),
+            {**parameters, "generation": generation_id},
+        )
+        return bool(rows[0]["matched"])
+
+    def resource_document_rank(self, query: str, generation_id: str, limit: int) -> list[str]:
+        """Rank text sources by passage term frequencies and original byte lengths."""
+        terms = _resource_query_parameters(query)
+        if limit <= 0 or not generation_id or not any(terms.values()):
+            return []
+        rows = self._execute(
+            resource_sql.DOCUMENT_RANK, {**terms, "generation": generation_id, "limit": limit}
+        )
+        return [row["source_id"] for row in rows]
+
+    def resource_clause_rank(
+        self, query: str, generation_id: str, source_ids: Sequence[str], limit: int
+    ) -> dict[str, list[str]]:
+        """Rank up to limit passages independently in each supplied current text Resource."""
+        terms = _resource_query_parameters(query)
+        if not source_ids or limit <= 0 or not generation_id or not any(terms.values()):
+            return {}
+        rows = self._execute(
+            resource_sql.CLAUSE_RANK,
+            {**terms, "generation": generation_id, "source_ids": list(source_ids), "limit": limit},
+        )
+        ranked: dict[str, list[str]] = defaultdict(list)
+        for row in rows:
+            ranked[row["source_id"]].append(row["unit_id"])
+        return dict(ranked)
+
+    def resource_source_openings(
+        self, unit_ids: Sequence[str], generation_id: str
+    ) -> dict[str, tuple[str, str]]:
+        """Resolve each eligible unit to its original source ID and first 160 characters."""
+        if not unit_ids or not generation_id:
+            return {}
+        rows = self._execute(
+            resource_sql.OPENINGS, {"generation": generation_id, "ids": list(unit_ids)}
+        )
+        return {row["unit_id"]: (row["source_id"], row["opening"]) for row in rows}
+
+    def resource_neighbors(
+        self, unit_ids: Sequence[str], generation_id: str
+    ) -> dict[str, list[str]]:
+        """Return each current seed and its nearby source passages in original order."""
+        if not unit_ids or not generation_id:
+            return {}
+        rows = self._execute(
+            resource_sql.NEIGHBORS,
+            {
+                "generation": generation_id,
+                "ids": list(unit_ids),
+                "radius": resource_sql.NEIGHBOR_RADIUS,
+            },
+        )
+        around: dict[str, list[str]] = defaultdict(list)
+        for row in rows:
+            around[row["seed_id"]].append(row["unit_id"])
+        return dict(around)
 
     def source_user_passage_ids(
         self,

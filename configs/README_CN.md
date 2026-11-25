@@ -181,6 +181,10 @@ Fast、Normal 和 Deep 共用 `search.fact_source_bodies`。可通过 `overrides
 
 Normal 和 Deep 可配置具有 `rerank` 能力的 `models.reranker`，在组装上下文前对融合后的候选文本评分。两者各自的 `rerank_candidates` 均默认为 48。上限设为 null 时，对融合后的有界候选列表全部评分。模型绑定设为 null 时按融合相关性排序。Fast 跳过模型重排。重排候选上限由 Normal 和 Deep 各自配置。
 
+v0.2.1 之后的开发版本将 `search.resource_document_guidance` 默认设为 `false`。开启后，Normal 召回可在选定的纯文本 Resource 内补充相关段落，并在上下文预算内附加符合条件的相邻段落。该路径要求已配置重排模型、请求包含 chunks、请求无时间窗口，且候选均为符合条件的纯文本 Resource 段落。此检索选项可使用现有索引。
+
+独立配置 `resource.plain_text_embedding_opening` 默认为 `false`，控制新建索引是否将原文开头的前 40 个词与各纯文本段落一起送入向量模型。运行配置改变后，已有索引继续使用创建时的方案。升级 API 和处理该索引的全部 worker 后，可在新建索引上开启此配置。返回的段落及引用仍使用原始证据。
+
 ## 7. 时间遍历预算与请求覆盖
 
 Fast、Normal 和 Deep 是可自定义的配置预设。`search.fast.temporal_nodes`、`search.normal.temporal_nodes` 和 `search.deep.temporal_nodes` 分别默认为 64、200 和 300。该正整数预算统计时间遍历的种子节点和后续访问节点；直接时间匹配与最终结果池分别控制。`max_results` 不会限制此遍历预算。

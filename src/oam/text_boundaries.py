@@ -8,7 +8,8 @@ _PUNCTUATION_BOUNDARY = regex.compile(r"""(?P<marks>\p{Terminal_Punctuation}+)[\
 # The distinct Greek question mark terminates a sentence despite its Unicode
 # canonical equivalence to an ordinary semicolon, which remains a clause break.
 _SENTENCE_TERMINAL = regex.compile(r"[\p{Sentence_Terminal}\u037e]")
-_PRECEDING_WORD = regex.compile(r"[\p{L}.]+$")
+# Start at the punctuation boundary so a late period does not rescan the source prefix.
+_PRECEDING_WORD = regex.compile(r"[\p{L}.]+$", regex.REVERSE)
 _INITIALS = regex.compile(r"(?:[A-Za-z]\.)*[A-Za-z]")
 _ABBREVIATIONS = frozenset({"dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc"})
 

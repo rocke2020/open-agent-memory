@@ -15,7 +15,11 @@ from pypdf import PdfWriter
 
 from oam.config import ModelsConfig, load_config
 from oam.contracts.resources import EvidenceResourceCreate
+from oam.indexing.identity import index_generation
+from oam.indexing.store import input_digest, stable_id
+from oam.models.embedding_inputs import EmbeddingAdmission
 from oam.models.runtime import EmbeddingResult, ModelOutputError, ModelResult, Usage
+from oam.tokens import TokenCounter
 from oam.workers import index_source
 
 MEDICAL_FIXTURES = Path(__file__).parents[2] / "conformance/fixtures/medical"
@@ -46,6 +50,7 @@ class MemoryStore:
         self.stages = {}
         self.completed_stages = []
         self.finished = False
+        self.embedding_receipts = []
 
     @contextmanager
     def transaction(self):
@@ -69,13 +74,19 @@ class MemoryStore:
     def resource_passages(self):
         return {}
 
+    def resource_embedding_checkpoints(self):
+        return list(self.embedding_receipts)
+
     def check_retry_claim(self):
         raise AssertionError("document fixture does not expect overflow retries")
 
     def checkpoint(self, stage, inputs, produce):
         result = produce()
         self.completed_stages.append(stage)
-        return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+        output = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+        if stage.startswith("passage:resource_"):
+            self.embedding_receipts.append((stage, input_digest(inputs), output))
+        return output
 
     def insert_unit(self, connection, **unit):
         self.units.append(unit)
@@ -231,6 +242,219 @@ def test_plain_text_resource_preserves_exact_chunks_and_document_revision(blank_
     assert evidence_values
     assert all(parameters[-1] == original for parameters in evidence_values)
     assert store.stages["abstract_state"] == "current"
+
+
+@pytest.fixture
+def text_embedding_batches():
+    passages = ("alpha.\n\n", "beta.\n\n", "gamma.\n\n", "delta.")
+    store = MemoryStore(content="".join(passages).encode())
+    store.config = store.config.model_copy(
+        update={
+            "chunk": store.config.chunk.model_copy(
+                update={
+                    "ingestion": store.config.chunk.ingestion.model_copy(
+                        update={"target_estimated_tokens": 5, "max_estimated_tokens": 9}
+                    )
+                }
+            ),
+            "resource": store.config.resource.model_copy(update={"generate_abstract": False}),
+        }
+    )
+
+    class BatchModels(LocalModels):
+        def __init__(self, max_items, max_tokens=15):
+            super().__init__()
+            self.calls = []
+            self.embedding_admission = EmbeddingAdmission(
+                TokenCounter("character-fixture", len), 9, max_tokens, max_items, False
+            )
+
+        def embed(self, texts, **kwargs):
+            self.embedding_admission.validate(texts)
+            self.calls.append(texts)
+            return EmbeddingResult(
+                vectors=tuple((float(ord(text[0])), 1.0) for text in texts), usage=Usage()
+            )
+
+    return store, passages, BatchModels
+
+
+@pytest.mark.parametrize("max_items,expected_sizes", [(3, [2, 2]), (1, [1, 1, 1, 1])])
+def test_text_resource_embeddings_batch_under_provider_limits(
+    text_embedding_batches, max_items, expected_sizes
+):
+    store, passages, models_type = text_embedding_batches
+    models = models_type(max_items)
+
+    index_source._resource(store, models)
+
+    assert [len(call) for call in models.calls] == expected_sizes
+    assert [unit["text"] for unit in store.units] == list(passages)
+    assert [unit["vector"] for unit in store.units] == [[97, 1], [98, 1], [103, 1], [100, 1]]
+    assert store.stages["abstract_state"] == "skipped"
+
+
+def test_text_resource_batch_reuses_recipe_qualified_singleton(text_embedding_batches):
+    store, passages, models_type = text_embedding_batches
+    evidence_id = stable_id("resource_evidence", "generation", "document", 3)
+    first_id = stable_id("resource_passage", evidence_id, "text:0")
+    store.embedding_receipts.append(
+        (
+            f"passage:{first_id}:recipe=legacy",
+            input_digest(passages[0]),
+            {"vectors": [[10, 1]], "usage": {}},
+        )
+    )
+    models = models_type(1)
+
+    index_source._resource(store, models)
+
+    assert models.calls == [(text,) for text in passages[1:]]
+    assert store.units[0]["vector"] == [10, 1]
+
+
+@pytest.mark.parametrize(
+    "item_limit,request_limit,retained_body",
+    [(86, 200, "  tai"), (200, 86, "  tai"), (81, 200, None), (200, 82, None)],
+)
+def test_plain_text_opening_bounds_provider_input_and_reuses_its_digest(
+    item_limit, request_limit, retained_body
+):
+    first = "\t".join(["x"] * 40) + "\n\n"
+    body = "  tail punctuation remains evidence."
+    store = MemoryStore(content=(first + body).encode())
+    passages = {"text:0": first[:40], "text:1": first[40:], "text:2": body}
+    store.resource_passages = lambda: passages
+    store.config = store.config.model_copy(
+        update={
+            "resource": store.config.resource.model_copy(
+                update={"plain_text_embedding_opening": True}
+            )
+        }
+    )
+    store.generation_id = index_generation(store.config, {})
+    admission = EmbeddingAdmission(
+        TokenCounter("character-fixture", len, lambda text, limit: text[:limit]),
+        item_limit,
+        request_limit,
+        2,
+        False,
+    )
+    models = LocalModels()
+    models.embedding_admission = admission
+    index_source._resource(store, models)
+
+    expected = body if retained_body is None else " ".join(["x"] * 40) + "\n\n" + retained_body
+    assert models.embedded[-1] == expected
+    assert [unit["text"] for unit in store.units] == list(passages.values())
+    assert [unit["locator"]["block"] for unit in store.units] == list(passages)
+    digests = dict(
+        pair for _, _, receipt in store.embedding_receipts for pair in receipt["resource_passages"]
+    )
+    assert digests[store.units[-1]["unit_id"]] == input_digest(expected).hex()
+    resumed = LocalModels()
+    resumed.embedding_admission = admission
+    index_source._resource(store, resumed)
+    assert resumed.embedded == []
+
+
+def test_plain_text_opening_changes_only_the_enabled_index_generation(tmp_path, monkeypatch):
+    monkeypatch.setattr("oam.indexing.identity.INDEX_RECIPE", "oam-source-fact-insight-v39")
+    config = MemoryStore(content=b"original").config
+    legacy = "gen_021fa876afbd8157b2d0e07b28ce303bd00df04437fe72976bbc63d0f45b37dd"
+    assert index_generation(config, {}) == legacy
+    enabled = config.model_copy(
+        update={
+            "resource": config.resource.model_copy(update={"plain_text_embedding_opening": True})
+        }
+    )
+    assert index_generation(enabled, {}) != legacy
+    for value, expected in [("false", legacy), ("true", index_generation(enabled, {}))]:
+        path = tmp_path / "recipe.yaml"
+        path.write_text(f"resource:\n  plain_text_embedding_opening: {value}\n")
+        loaded = load_config(path).config.model_copy(update={"models": ModelsConfig()})
+        assert index_generation(loaded, {}) == expected
+
+
+@pytest.mark.parametrize("admitted_opening", [False, True])
+def test_text_resource_embedding_recipe_follows_admitted_generation(admitted_opening):
+    body = "A clause names the party."
+    store = MemoryStore(content=body.encode())
+    admitted_config = store.config.model_copy(
+        update={
+            "resource": store.config.resource.model_copy(
+                update={"plain_text_embedding_opening": admitted_opening}
+            )
+        }
+    )
+    store.generation_id = index_generation(admitted_config, {})
+    store.config = store.config.model_copy(
+        update={
+            "resource": store.config.resource.model_copy(
+                update={"plain_text_embedding_opening": not admitted_opening}
+            )
+        }
+    )
+    models = LocalModels()
+
+    index_source._resource(store, models)
+
+    assert models.embedded == [f"{body}\n\n{body}" if admitted_opening else body]
+    assert [unit["text"] for unit in store.units] == [body]
+
+
+def test_plain_text_opening_keeps_complete_small_inputs_and_html_body():
+    for media_type, content, expected in [
+        ("text/plain", "\tTitle\n  And body. ", "Title And body.\n\n\tTitle\n  And body. "),
+        ("text/html", "<p>A body.</p>", "A body."),
+    ]:
+        store = MemoryStore(content=content.encode(), media_type=media_type)
+        store.config = store.config.model_copy(
+            update={
+                "resource": store.config.resource.model_copy(
+                    update={"plain_text_embedding_opening": True}
+                )
+            }
+        )
+        store.generation_id = index_generation(store.config, {})
+        models = LocalModels()
+        index_source._resource(store, models)
+        assert models.embedded == [expected]
+
+
+@pytest.mark.parametrize("published", [0, 1])
+def test_text_resource_retry_reuses_legacy_and_batch_embeddings_after_regrouping(
+    text_embedding_batches, published, monkeypatch
+):
+    store, passages, models_type = text_embedding_batches
+    evidence_id = stable_id("resource_evidence", "generation", "document", 3)
+    first_id = stable_id("resource_passage", evidence_id, "text:0")
+    if published:
+        store.embedding_receipts.append(
+            (f"passage:{first_id}", input_digest(passages[0]), {"vectors": [[10, 1]], "usage": {}})
+        )
+
+    insert = store.insert_unit
+
+    def interrupt_publication(connection, **unit):
+        if len(store.units) == published:
+            raise RuntimeError("simulated interruption after embedding checkpoint")
+        return insert(connection, **unit)
+
+    with monkeypatch.context() as failed:
+        failed.setattr(store, "insert_unit", interrupt_publication)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            index_source._resource(store, models_type(2))
+
+    saved_passages = {unit["locator"]["block"]: unit["text"] for unit in store.units}
+    monkeypatch.setattr(store, "resource_passages", lambda: saved_passages)
+    store.units.clear()
+    resumed = models_type(1)
+    index_source._resource(store, resumed)
+
+    assert resumed.calls == ([(passages[3],)] if published else [(passages[2],), (passages[3],)])
+    assert [unit["text"] for unit in store.units] == list(passages)
+    assert store.units[0]["vector"] == ([10, 1] if published else [97, 1])
 
 
 def test_partial_text_resource_preserves_published_chunks_after_limit_change():

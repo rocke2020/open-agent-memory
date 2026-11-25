@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
+from itertools import zip_longest
 from uuid import uuid4
 
 import httpx
@@ -38,15 +39,77 @@ from oam.retrieval.context import (
 )
 from oam.retrieval.local_context import local_evidence_ids
 from oam.retrieval.query_time import infer_query_time
-from oam.retrieval.repository import RecallRepository
+from oam.retrieval.repository import RecallRepository, has_literal_anchor
 from oam.tokens import estimate_units, estimated_tokens
 
 SUPPORT_COMPANION_LIMIT = 16
 RELATED_SOURCE_WINDOW_OFFSETS = (0, 1, -1, 2, -2, 3)
+# Speculation may borrow an idle SQL connection without queuing behind required recall work.
+RESOURCE_PREFETCH_CHECKOUT_SECONDS = 0.01
 
 
 class RecallUnavailable(RuntimeError):
     """The configured current index cannot satisfy this recall operation."""
+
+
+def _plain_text_resource(item):
+    return (
+        item["kind"] == "resource_passage"
+        and item["origin"] == "evidence"
+        and len(item["citations"]) == 1
+        and str(item["citations"][0].get("block", "")).startswith("text:")
+    )
+
+
+def _resource_rerank_slate(read, query, generation, arms, global_ids, limit):
+    lexical, dense = arms.get("lexical", ()), arms.get("dense", ())
+    openings = read(
+        "resource_source_openings", tuple(dict.fromkeys((*lexical, *dense))), generation
+    )
+
+    def sources(ids):
+        return tuple(dict.fromkeys(openings[unit_id][0] for unit_id in ids if unit_id in openings))[
+            :3
+        ]
+
+    lexical_sources, dense_sources = sources(lexical), sources(dense)
+    selected_sources = dense_sources
+    if lexical_sources:
+        documents = read("resource_document_rank", query, generation, 3)
+        selected_sources = tuple(
+            dict.fromkeys(
+                source
+                for ordered in zip_longest(documents, dense_sources, lexical_sources)
+                for source in ordered
+                if source is not None
+            )
+        )[:3]
+
+    clauses = read("resource_clause_rank", query, generation, selected_sources, limit)
+    focused = [iter(clauses[source]) for source in selected_sources if clauses.get(source)]
+    supplement = (
+        unit_id
+        for ordered in zip_longest(*focused[:1], *focused)
+        for unit_id in ordered
+        if unit_id is not None
+    )
+    # Reserve one third of the reranker inputs for global passage search.
+    needed = tuple(dict.fromkeys((*global_ids[: (limit + 2) // 3], *supplement, *global_ids)))[
+        :limit
+    ]
+    rows = read("hydrate", needed)
+    openings = read("resource_source_openings", tuple(row["unit_id"] for row in rows), generation)
+    if not rows or any(
+        not _plain_text_resource(row)
+        or row["unit_id"] not in openings
+        or openings[row["unit_id"]][0] != row["citations"][0]["source_id"]
+        for row in rows
+    ):
+        return None
+    return rows, tuple(
+        f"Source opening: {openings[row['unit_id']][1].strip()}\nPassage: {row['text']}"
+        for row in rows
+    )
 
 
 class RecallService:
@@ -57,9 +120,12 @@ class RecallService:
         self.generation_id = generation_id
 
     @contextmanager
-    def _repository(self, authority, request, deadline):
+    def _repository(self, authority, request, deadline, *, checkout_timeout=None):
+        remaining = _remaining(deadline)
         with (
-            self.pool.connection(timeout=_remaining(deadline)) as connection,
+            self.pool.connection(
+                timeout=remaining if checkout_timeout is None else min(remaining, checkout_timeout)
+            ) as connection,
             connection.transaction(),
         ):
             yield RecallRepository(
@@ -74,6 +140,57 @@ class RecallService:
                     and request.time_window is None
                 ),
             )
+
+    def _prefetch_document_rank(
+        self, authority, request, deadline, generation, text_future, timing
+    ):
+        started = time.monotonic()
+        rank_started = None
+        try:
+            with self._repository(
+                authority, request, deadline, checkout_timeout=RESOURCE_PREFETCH_CHECKOUT_SECONDS
+            ) as repository:
+                if not repository.resource_only_plain_text(generation) or text_future.done():
+                    return None
+                if has_literal_anchor(request.query):
+                    witness_started = time.monotonic()
+                    try:
+                        matched = repository.resource_first_passage_anchor(
+                            request.query, generation
+                        )
+                    finally:
+                        timing["resource_first_passage_anchor"] = (
+                            time.monotonic() - witness_started
+                        ) * 1000
+                    if not matched or text_future.done():
+                        return None
+                rank_started = time.monotonic()
+                return repository.resource_document_rank(request.query, generation, 3)
+        except (PermissionError, TimeoutError, psycopg.errors.QueryCanceled):
+            raise
+        except (RuntimeError, ValueError, psycopg.Error) as error:
+            # A missed checkout/preflight leaves the ordinary path intact. Only a consumer
+            # of a failed rank should apply the existing guidance stage's failure policy.
+            return error if rank_started is not None else None
+        finally:
+            finished = time.monotonic()
+            preflight_end = finished if rank_started is None else rank_started
+            timing["resource_rank_preflight"] = (preflight_end - started) * 1000
+            if rank_started is not None:
+                timing["resource_document_rank"] = (finished - rank_started) * 1000
+
+    def _prefetch_neighbor_ids(self, authority, request, deadline, generation, unit_ids):
+        started = time.monotonic()
+        try:
+            with self._repository(
+                authority, request, deadline, checkout_timeout=RESOURCE_PREFETCH_CHECKOUT_SECONDS
+            ) as repository:
+                neighbors = repository.resource_neighbors(unit_ids, generation)
+        except (PermissionError, TimeoutError, psycopg.errors.QueryCanceled):
+            raise
+        except (RuntimeError, ValueError, psycopg.Error):
+            neighbors = None  # Optional read unavailable. The consumer uses its normal lookup.
+        return neighbors, (time.monotonic() - started) * 1000
 
     def search(
         self,
@@ -239,6 +356,15 @@ class RecallService:
         if initial_index_state["parse_partial"] and not request.allow_partial:
             raise RecallUnavailable("PDF parse is incomplete; set allow_partial to read it")
 
+        resource_guidance = (
+            mode == "normal"
+            and self.config.models.reranker is not None
+            and settings.resource_document_guidance
+            and request.include.chunks
+            and request.time_window is None
+        )
+        prefetched_rank = None
+
         def text_arms():
             return (
                 stage("fts", lambda: read("lexical", request.query, tier.channel_candidates)) or [],
@@ -255,6 +381,15 @@ class RecallService:
                 "embedding",
                 lambda: self.models.embed((embedding_query,), timeout_seconds=_remaining(deadline)),
             )
+            if (
+                resource_guidance
+                and embedding is not None
+                and self.pool is not None
+                and not text_future.done()
+            ):
+                prefetched_rank = self._prefetch_document_rank(
+                    authority, request, deadline, generation_id, text_future, timing
+                )
             lexical, anchors = text_future.result(timeout=_remaining(deadline))
         sql_phase_ready = True
         arms["lexical"] = tuple(
@@ -465,9 +600,11 @@ class RecallService:
             )
 
         rerank_scores = None
+        resource_rerank_ids = None
+        neighbor_future = None
 
         def final_order():
-            identifiers = fused_ids()
+            identifiers = resource_rerank_ids if resource_rerank_ids is not None else fused_ids()
             if rerank_scores is not None:
                 identifiers = tuple(
                     sorted(
@@ -477,22 +614,77 @@ class RecallService:
                 )
             return identifiers
 
+        def read_resource(method, *args):
+            if method == "resource_document_rank" and prefetched_rank is not None:
+                if isinstance(prefetched_rank, Exception):
+                    raise prefetched_rank
+                return prefetched_rank
+            began = time.monotonic()
+            try:
+                return read(method, *args)
+            finally:
+                name = "resource_slate_hydration" if method == "hydrate" else method
+                timing[name] = timing.get(name, 0) + (time.monotonic() - began) * 1000
+
         if isinstance(tier, NormalSearchTier) and self.config.models.reranker is not None:
             validate_paths()
-            rows = read("hydrate", fused_ids())[: tier.rerank_candidates]
+            global_ids = fused_ids()
+            rows = read("hydrate", global_ids)[: tier.rerank_candidates]
             if rows:
+                guided = None
+                if resource_guidance and all(_plain_text_resource(row) for row in rows):
+                    guided = stage(
+                        "resource_document_guidance",
+                        lambda: _resource_rerank_slate(
+                            read_resource,
+                            request.query,
+                            generation_id,
+                            arms,
+                            global_ids,
+                            tier.rerank_candidates or len(rows),
+                        ),
+                    )
+                if guided is None:
+                    documents = tuple(row["text"] for row in rows)
+                else:
+                    rows, documents = guided
+                slate_ids = tuple(row["unit_id"] for row in rows)
+                if (
+                    guided is not None
+                    and self.pool is not None
+                    and initial_index_state["readiness"] == "ready"
+                    and not initial_index_state["parse_partial"]
+                    and initial_index_state.get("accepted_seq") is not None
+                ):
+                    neighbor_executor = sql_phase.enter_context(
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="oam-recall-neighbors")
+                    )
+                    try:
+                        neighbor_future = neighbor_executor.submit(
+                            self._prefetch_neighbor_ids,
+                            authority,
+                            request,
+                            deadline,
+                            generation_id,
+                            slate_ids,
+                        )
+                    except RuntimeError:
+                        pass  # A worker could not start. The serial lookup remains available.
+                    else:
+                        # Cancel queued work before draining a running query under its SQL deadline.
+                        sql_phase.callback(neighbor_future.cancel)
                 scored = stage(
                     "rerank",
                     lambda: self.models.rerank(
                         request.query,
-                        tuple(row["text"] for row in rows),
+                        documents,
                         timeout_seconds=_remaining(deadline),
                     ),
                 )
                 if scored is not None:
-                    rerank_scores = dict(
-                        zip((row["unit_id"] for row in rows), scored.scores, strict=True)
-                    )
+                    rerank_scores = dict(zip(slate_ids, scored.scores, strict=True))
+                    if guided is not None:
+                        resource_rerank_ids = tuple(rerank_scores)
                     usage["rerank"] = scored.usage.model_dump(mode="json")
         validate_paths()
         final_ids = final_order()
@@ -510,6 +702,15 @@ class RecallService:
             raise RecallUnavailable("user generation changed during recall")
         if index_state["parse_partial"] and not request.allow_partial:
             raise RecallUnavailable("PDF parse became incomplete during recall")
+        if neighbor_future is not None and (
+            resource_rerank_ids is None
+            or index_state["readiness"] != "ready"
+            or index_state["parse_partial"]
+            or index_state.get("accepted_seq") != initial_index_state["accepted_seq"]
+            or index_state["policy_epoch"] != initial_index_state["policy_epoch"]
+        ):
+            neighbor_future.cancel()
+            neighbor_future = None
         gate_active = settings.partial_match_gate == "user_fact_exchange" and "dense" in executed
         independent_ids = (
             set(arms.get("dense", ()))
@@ -1210,6 +1411,33 @@ class RecallService:
         if admission_source_bodies != "required":
             source_passages = []
             optional_context = {}
+
+        def load_resource_windows(unit_ids):
+            neighbors = None
+            if neighbor_future is not None:
+                neighbors, timing["resource_neighbor_ids_prefetch"] = neighbor_future.result(
+                    timeout=_remaining(deadline)
+                )
+            if neighbors is None:
+                neighbors = read("resource_neighbors", unit_ids, generation_id)
+            by_unit_id = {
+                row["unit_id"]: row
+                for row in read(
+                    "hydrate",
+                    tuple(dict.fromkeys(unit for ids in neighbors.values() for unit in ids)),
+                )
+                if _plain_text_resource(row)
+            }
+            return {
+                root: [by_unit_id[unit] for unit in members if unit in by_unit_id]
+                for root, members in neighbors.items()
+            }
+
+        resource_windows = (
+            stage("resource_neighbors", lambda: load_resource_windows(resource_rerank_ids))
+            if resource_rerank_ids is not None
+            else None
+        )
         packing_started = time.monotonic()
         items, budget_omissions, admitted_roots, _ = assemble_context(
             packing_candidates,
@@ -1219,6 +1447,7 @@ class RecallService:
             max_results=tier.max_results,
             evidence_groups=evidence_groups,
             optional_context=optional_context,
+            resource_windows=resource_windows,
             fact_source_bodies=admission_source_bodies,
         )
         timing["context_packing"] = (time.monotonic() - packing_started) * 1000
@@ -1407,6 +1636,8 @@ class RecallService:
                         "graph",
                         "temporal",
                         "rerank",
+                        "resource_document_guidance",
+                        "resource_neighbors",
                         "source_user_originals",
                         "l2_source_expansion",
                         "local_context_selection",
@@ -1470,6 +1701,11 @@ class RecallService:
             "arms": {name: list(ids) for name, ids in arms.items()},
             "fusion": fusion,
             "rerank_scores": rerank_scores,
+            **(
+                {"resource_rerank_ids": list(resource_rerank_ids)}
+                if resource_rerank_ids is not None
+                else {}
+            ),
             "related_user_fact": related,
             "result_ids": [item["unit_id"] for item in items],
             "l2_source_expansion": l2_diagnostics,
