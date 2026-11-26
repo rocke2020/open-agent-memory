@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Barrier, BrokenBarrierError, Event
 from types import SimpleNamespace
 
 import pytest
@@ -517,6 +518,50 @@ def test_normal_keeps_temporal_rank_and_out_of_window_direct_evidence():
     ]
 
 
+@pytest.mark.parametrize("pool_size", [1, 2, 3])
+def test_normal_schedules_graph_and_temporal_reads_within_pool_limit(pool_size):
+    both_reads = Barrier(2, timeout=1)
+    graph_finished = Event()
+
+    class OverlapRepository(DatedRepository):
+        def dense(self, vector, limit):
+            return [{**row, "kind": "fact"} for row in super().dense(vector, limit)]
+
+        def ordinary(self, seeds, vector, **kwargs):
+            if pool_size == 3:
+                try:
+                    both_reads.wait()
+                except BrokenBarrierError:
+                    pytest.fail("graph and temporal reads did not overlap")
+            result = super().ordinary(seeds, vector, **kwargs)
+            graph_finished.set()
+            return result
+
+        def temporal_matches(self, unit_ids):
+            if pool_size == 3:
+                both_reads.wait()
+            else:
+                assert graph_finished.is_set(), "a small pool must run graph first"
+            return super().temporal_matches(unit_ids)
+
+    class OverlapService(DatedService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield OverlapRepository(request)
+
+    service = OverlapService(
+        CONFIG, SimpleNamespace(max_size=pool_size), EmbeddingOnly(), generation_id="generation"
+    )
+    result = service.search(
+        object(),
+        SearchRequest(query="apple harvest in 2025", recall_level="normal"),
+    )
+
+    assert [item["unit_id"] for item in result["items"]] == ["new", "old"]
+    assert result["diagnostics"]["executed_arms"] == ["lexical", "dense", "graph", "temporal"]
+    assert not result["diagnostics"]["degraded"]
+
+
 def test_ambiguous_query_retains_ordinary_recall_with_diagnostic():
     service = DatedService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
     request = SearchRequest(
@@ -663,8 +708,16 @@ def test_fast_temporal_deadline_cannot_report_complete_recall(monkeypatch):
 
 
 @pytest.mark.parametrize("allow_partial", [False, True])
-def test_normal_graph_failure_obeys_partial_policy(allow_partial):
+@pytest.mark.parametrize("windowed", [False, True])
+def test_normal_graph_failure_obeys_partial_policy(allow_partial, windowed):
+    temporal_started, temporal_released = Event(), Event()
+
     class FailedGraphRepository(DatedRepository):
+        used_for_temporal = False
+
+        def dense(self, vector, limit):
+            return [{**row, "kind": "fact"} for row in super().dense(vector, limit)]
+
         def ordinary(
             self,
             seeds,
@@ -674,25 +727,79 @@ def test_normal_graph_failure_obeys_partial_policy(allow_partial):
             include_entities=True,
             include_causal=True,
         ):
+            if windowed:
+                assert temporal_started.wait(timeout=1), "expected an active temporal read"
             raise RuntimeError("expansion failed")
+
+        def temporal_matches(self, unit_ids):
+            self.used_for_temporal = True
+            temporal_started.set()
+            raise ValueError("temporal expansion failed")
 
     class FailedGraphService(RecallService):
         @contextmanager
         def _repository(self, authority, request, deadline):
-            yield FailedGraphRepository(request)
+            repository = FailedGraphRepository(request)
+            try:
+                yield repository
+            finally:
+                if repository.used_for_temporal:
+                    temporal_released.set()
 
-    service = FailedGraphService(CONFIG, None, EmbeddingOnly(), generation_id="generation")
+    service = FailedGraphService(
+        CONFIG, SimpleNamespace(max_size=3), EmbeddingOnly(), generation_id="generation"
+    )
     request = SearchRequest(
-        include={"chunks": True}, query="apple", recall_level="normal", allow_partial=allow_partial
+        include={"chunks": True},
+        query="apple harvest in 2025" if windowed else "apple",
+        recall_level="normal",
+        allow_partial=allow_partial,
     )
     if allow_partial:
         result = service.search(object(), request)
         assert [item["unit_id"] for item in result["items"]] == ["old", "new"]
-        assert result["diagnostics"]["degraded"] == ["graph"]
+        expected_degraded = ["graph", "temporal"] if windowed else ["graph"]
+        assert result["diagnostics"]["degraded"] == expected_degraded
         assert result["diagnostics"]["executed_arms"] == ["lexical", "dense"]
     else:
         with pytest.raises(RecallUnavailable, match="graph stage failed"):
             service.search(object(), request)
+    assert temporal_released.is_set() == windowed
+
+
+def test_fatal_graph_error_stops_temporal_before_its_next_read(monkeypatch):
+    temporal_started, temporal_stopped, next_temporal_read = Event(), Event(), Event()
+    monkeypatch.setattr("oam.retrieval.service.Event", lambda: temporal_stopped, raising=False)
+
+    class InterruptedRepository(DatedRepository):
+        def dense(self, vector, limit):
+            return [{**row, "kind": "fact"} for row in super().dense(vector, limit)]
+
+        def ordinary(self, seeds, vector, **kwargs):
+            assert temporal_started.wait(timeout=1), "expected an active temporal read"
+            raise PermissionError("graph authorization changed")
+
+        def temporal_matches(self, unit_ids):
+            temporal_started.set()
+            temporal_stopped.wait(timeout=0.5)
+            return super().temporal_matches(unit_ids)
+
+        def temporal_nodes(self, unit_ids, vector):
+            next_temporal_read.set()
+            return super().temporal_nodes(unit_ids, vector)
+
+    class InterruptedService(DatedService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield InterruptedRepository(request)
+
+    service = InterruptedService(
+        CONFIG, SimpleNamespace(max_size=3), EmbeddingOnly(), generation_id="generation"
+    )
+    request = SearchRequest(query="apple harvest in 2025", recall_level="normal")
+    with pytest.raises(PermissionError, match="graph authorization changed"):
+        service.search(object(), request)
+    assert not next_temporal_read.is_set()
 
 
 class SupportedFactsRepository(DatedRepository):
@@ -967,6 +1074,12 @@ def test_personal_evidence_reaches_context_when_requested(mode, count, chunks):
             "2024-08-01 to 2024-10-22",
         ),
         (
+            "Track shipments FROM October 2024 UNTIL December 2024",
+            "2024-10-01T00:00:00+00:00",
+            "2025-01-01T00:00:00+00:00",
+            "October 2024 UNTIL December 2024",
+        ),
+        (
             "Purchases between July 2024 and September 2024",
             "2024-07-01T00:00:00+00:00",
             "2024-10-01T00:00:00+00:00",
@@ -1029,16 +1142,21 @@ def test_calendar_range_computes_both_local_boundaries_across_dst():
     [
         "Compare 2024-07-01 and 2024-07-29",
         "Compare 2024-07-01 to 2024-07-29",
+        "Compare 2024-07-01 till 2024-07-29",
+        "Open on 2024-07-01 until 2024-07-29",
         "2024-10-22 to October 2024",
         "Travel on 2024-07-01 or 2024-07-29",
         "From 2024-07-29 to 2024-07-01",
+        "From 2024-07-29 until 2024-07-01",
         "From 2024-08 to 2024-07",
         "From 2024-07-01 to 2024-07-29, compared with 2025-01-01",
         "Between 2024-07-01 and 2024-07-29 or 2024-08-01",
         "2024年7月1日から2024年7月29日の予定",
         "2024-07-01T10:00Z to 2024-07-01T11:00Z",
         "2024-07-01T10:00Z to 2024-07-01T10:00Z",
+        "From 2024-07-01 till 2024-07-29T10:00Z",
         "last month to this month",
+        "From last month until this month",
     ],
 )
 def test_unrelated_or_unsupported_ranges_do_not_create_a_window(query):
@@ -1049,8 +1167,9 @@ def test_unrelated_or_unsupported_ranges_do_not_create_a_window(query):
 
 
 @pytest.mark.parametrize("mode", ["fast", "normal"])
-def test_calendar_range_recall_preserves_query_and_outside_evidence(mode):
-    query = "Apple harvest from 2025-09-01 to 2025-09-30"
+@pytest.mark.parametrize("connector", ["to", "till", "until"])
+def test_calendar_range_recall_preserves_query_and_outside_evidence(mode, connector):
+    query = f"Apple harvest from 2025-09-01 {connector} 2025-09-30"
 
     class RecordingEmbedding(EmbeddingOnly):
         def embed(self, texts, **kwargs):

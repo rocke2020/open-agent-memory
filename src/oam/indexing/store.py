@@ -33,6 +33,14 @@ MEMORY_REVISION = 1
 _INDEXING_CONNECTION_SLOTS: dict[tuple[str, int], BoundedSemaphore] = {}
 _INDEXING_CONNECTION_SLOTS_LOCK = Lock()
 OPPORTUNISTIC_POOL_TIMEOUT_SECONDS = 0.05
+# Migration 0041 records zero additional usage for a settled claim with no pending call.
+_EXPIRED_SOURCE_ZERO_USAGE = {
+    "coverage": "complete",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "reasoning_tokens": 0,
+}
 
 
 class StaleIndexWork(RuntimeError):
@@ -1023,6 +1031,7 @@ class IndexStore:
     def fail(self, error: Exception):
         from oam.indexing.extraction import ExtractionError, ExtractionInputTooLongError
         from oam.models.runtime import (
+            ModelDispatchUnavailable,
             ModelEmptyContentError,
             ModelOutputError,
             Usage,
@@ -1040,7 +1049,9 @@ class IndexStore:
         ):
             diagnostic["error_detail"] = str(error)
         known_usage = (
-            error.usage if isinstance(error, (ExtractionError, ModelOutputError)) else None
+            error.usage
+            if isinstance(error, (ExtractionError, ModelOutputError, ModelDispatchUnavailable))
+            else None
         )
         retryable_http = retryable_model_http_error(error)
         not_dispatched = (
@@ -1100,7 +1111,11 @@ class IndexStore:
                     known_usage = _sum_extraction_usage(
                         [getattr(value, "usage", None) for value in errors]
                     )
-                    if any(retryable_model_http_error(value) for value in errors):
+                    if any(
+                        retryable_model_http_error(value)
+                        and not isinstance(value, ModelDispatchUnavailable)
+                        for value in errors
+                    ):
                         known_usage = known_usage.model_copy(update={"coverage": "partial"})
                 retryable = all(
                     retryable_model_http_error(value)
@@ -1251,7 +1266,10 @@ class IndexStore:
         rows.extend(
             (stage, usage)
             for disposition, stage, usage in attempts
-            if disposition == "failed" and stage is not None and usage is not None
+            if disposition == "failed"
+            and stage is not None
+            and usage is not None
+            and usage != _EXPIRED_SOURCE_ZERO_USAGE
         )
         for stage, usage in rows:
             if stage.startswith(

@@ -1088,6 +1088,178 @@ def test_partial_interaction_reuses_published_passage_boundaries():
     assert "".join(unit["text"] for unit in store.units) == request.messages[0].content
 
 
+@pytest.mark.parametrize(
+    "group_max_estimated_output_tokens",
+    [300, 1200],
+    ids=["separate-original-groups", "partially-published-group"],
+)
+def test_resume_reuses_extraction_checkpoints_across_a_completed_passage(
+    group_max_estimated_output_tokens,
+):
+    from oam.contracts.evidence import EvidenceAppendRequest
+    from oam.indexing.extraction import Fact, FactExtraction
+
+    first = "Saved alpha. "
+    middle = "The retained middle passage was already indexed. " * 8
+    last = "Saved beta."
+    texts = (first, middle, last)
+    request = EvidenceAppendRequest(
+        source_id="document",
+        messages=[
+            {
+                "message_id": "statement",
+                "role": "user",
+                "content": "".join(texts),
+                "event_time": "2026-09-23T00:00:01Z",
+                "learning_eligible": True,
+            }
+        ],
+    )
+    evidence_id = index_source.stable_id("evidence", "generation", "document", 3, "statement")
+    passage_ids = [index_source.stable_id("passage", evidence_id, i) for i in range(3)]
+    published_id = "middle-fact"
+    retained = {
+        f"extract:{passage_ids[i]}": {
+            **FactExtraction(
+                facts=(Fact(output_index=0, text=text.strip(), quote=text.strip()),),
+                outcome="facts",
+                usage=Usage(),
+            ).model_dump(mode="json"),
+            "_passage_ids": [passage_ids[i]],
+        }
+        for i, text in ((0, first), (2, last))
+    }
+
+    class ResumingStore(MemoryStore):
+        def resume_source(self):
+            return (
+                {0: [(i, text, passage_ids[i]) for i, text in enumerate(texts)]},
+                {passage_ids[1]: {published_id}},
+                [],
+            )
+
+        def checkpoint(self, stage, inputs, produce):
+            if stage in retained:
+                assert inputs["text"] in (first, last)
+                return retained[stage]
+            return super().checkpoint(stage, inputs, produce)
+
+    store = ResumingStore(content=b"", input_role="interaction")
+    config = store.config.model_copy(
+        update={
+            "extraction": store.config.extraction.model_copy(
+                update={
+                    "group_max_estimated_output_tokens": group_max_estimated_output_tokens,
+                    "reference_max_facts": 0,
+                }
+            ),
+        }
+    )
+    models = LocalModels()
+    ids, _ = index_source._index_interaction(config, store, models, request)
+
+    assert {unit["text"] for unit in store.units if unit["kind"] == "fact"} == {
+        "Saved alpha.",
+        "Saved beta.",
+    }
+    assert published_id in ids
+    assert models.generated_roles == []
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_interaction_preserves_assistant_attribution_at_fact_publication(resume):
+    from oam.contracts.evidence import EvidenceAppendRequest
+    from oam.indexing.extraction import Fact, FactExtraction
+
+    texts = (
+        "Consider reserving 20 minutes for the demonstration.",
+        "I reserved 10 minutes for setup.",
+        "I reproduced the timeout with two workers.",
+    )
+    roles = ("assistant", "user", "assistant")
+    claims = (
+        "The user will spend 20 minutes on the demonstration.",
+        "The user reserved 10 minutes for setup.",
+        "The timeout was reproduced with two workers.",
+    )
+    request = EvidenceAppendRequest(
+        source_id="document",
+        messages=[
+            {
+                "message_id": f"message-{i}",
+                "role": role,
+                "content": message,
+                "event_time": "2026-09-23T00:00:01Z",
+                "learning_eligible": True,
+            }
+            for i, (role, message) in enumerate(zip(roles, texts, strict=True))
+        ],
+    )
+    passage_ids = [
+        index_source.stable_id(
+            "passage",
+            index_source.stable_id("evidence", "generation", "document", 3, f"message-{i}"),
+            0,
+        )
+        for i in range(len(texts))
+    ]
+    categories = ("preference", "experience", "fact")
+    model_facts = [
+        {"passage_id": f"p{i}", "text": text, "quote": quote, "category": category}
+        for i, (text, quote, category) in enumerate(zip(claims, texts, categories, strict=True))
+    ]
+    retained = FactExtraction(
+        facts=tuple(
+            Fact.model_validate({**fact, "passage_id": passage_ids[i], "output_index": i})
+            for i, fact in enumerate(model_facts)
+        ),
+        outcome="facts",
+        usage=Usage(),
+    ).model_dump(mode="json")
+
+    class InteractionStore(MemoryStore):
+        def checkpoint(self, stage, inputs, produce):
+            if resume and stage.startswith("extract:"):
+                assert len(inputs["passages"]) == 3
+                return {**retained, "_passage_ids": passage_ids}
+            return super().checkpoint(stage, inputs, produce)
+
+    class InteractionModels(LocalModels):
+        def generate(self, role, **kwargs):
+            assert not resume and role == "extraction"
+            self.generated_roles.append(role)
+            return ModelResult(
+                content=json.dumps({"outcome": "facts", "facts": model_facts}), usage=Usage()
+            )
+
+    store = InteractionStore(content=b"", input_role="interaction")
+    config = store.config.model_copy(
+        update={"extraction": store.config.extraction.model_copy(update={"reference_max_facts": 0})}
+    )
+    models = InteractionModels()
+    fact_ids, _ = index_source._index_interaction(config, store, models, request)
+
+    expected = [
+        "Assistant: Consider reserving 20 minutes for the demonstration.",
+        "The user reserved 10 minutes for setup.",
+        "Assistant: I reproduced the timeout with two workers.",
+    ]
+    units = [unit for unit in store.units if unit["kind"] == "fact"]
+    assert [unit["text"] for unit in units] == expected
+    assert [unit["locator"]["role"] for unit in units] == list(roles)
+    assert [unit["locator"]["quote"] for unit in units] == list(texts)
+    assert models.embedded[-3:] == expected
+    memories = [
+        args for query, args in store.statements if query.startswith("INSERT INTO memories")
+    ]
+    assert [(args[3], args[4]) for args in memories] == list(zip(expected, categories, strict=True))
+    assert fact_ids == [
+        index_source.stable_id("memory", passage_id, i, claims[i])
+        for i, passage_id in enumerate(passage_ids)
+    ]
+    assert models.generated_roles == ([] if resume else ["extraction"])
+
+
 @pytest.mark.parametrize("source_kind", ["interaction", "text", "native_pdf"])
 def test_existing_source_chunking_paths_prefer_embedding_counter(source_kind, monkeypatch):
     from oam.config import TokenizerConfig
@@ -1191,6 +1363,55 @@ def test_partial_interaction_does_not_extract_a_published_fact_again():
     assert store.stages["extraction_diagnostics"] == [diagnostic]
 
 
+@pytest.mark.parametrize("sibling", ["local_refusal", "paid_split", "unknown_response"])
+def test_concurrent_extraction_refusals_report_zero_only_for_local_failures(sibling):
+    from oam.contracts.evidence import EvidenceAppendRequest
+    from oam.indexing.budget import GenerationBudgetExceeded
+
+    request = EvidenceAppendRequest(
+        source_id="document",
+        messages=[
+            {
+                "message_id": text,
+                "role": "user",
+                "content": text,
+                "event_time": "2026-09-23T00:00:00Z",
+                "learning_eligible": True,
+            }
+            for text in ("First.", "Second.")
+        ],
+    )
+    store = MemoryStore(content=b"", input_role="interaction")
+    config = store.config.model_copy(
+        update={
+            "provider": store.config.provider.model_copy(update={"llm_concurrency": 2}),
+            "extraction": store.config.extraction.model_copy(
+                update={"group_max_passages": 1, "reference_max_facts": 0}
+            ),
+        }
+    )
+    rendezvous = threading.Barrier(2, timeout=3)
+
+    class RefusingModels(LocalModels):
+        def generate(self, role, **kwargs):
+            rendezvous.wait()
+            rejection = GenerationBudgetExceeded("source budget exhausted")
+            if json.loads(kwargs["user"])["center"]["text"] == "Second.":
+                if sibling == "unknown_response":
+                    raise ModelOutputError("missing provider response")
+                if sibling == "paid_split":
+                    rejection.usage = Usage(total_tokens=27, coverage="complete")
+            raise rejection
+
+    expected = GenerationBudgetExceeded if sibling == "local_refusal" else RuntimeError
+    with pytest.raises(expected) as caught:
+        index_source._index_interaction(config, store, RefusingModels(), request)
+    assert not rendezvous.broken
+    if sibling == "local_refusal":
+        assert caught.value.usage.total_tokens == 0
+        assert caught.value.usage.coverage == "complete"
+
+
 def test_fact_publication_persists_its_diagnostics_with_the_fact(monkeypatch):
     from oam.indexing.chunker import TextChunk
     from oam.indexing.extraction import Fact, FactExtraction
@@ -1217,6 +1438,7 @@ def test_fact_publication_persists_its_diagnostics_with_the_fact(monkeypatch):
         {"passage": (message, "evidence", {}, chunk)},
         result,
         ((1.0, 0.0),),
+        texts=("A stored fact.",),
         metadata=SimpleNamespace(source_created_at=None, source_updated_at=None),
         diagnostics=diagnostics,
     )

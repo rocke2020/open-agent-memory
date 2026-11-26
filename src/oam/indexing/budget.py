@@ -6,11 +6,17 @@ import json
 import os
 from typing import TYPE_CHECKING, Any, cast
 
+import psycopg
 from psycopg.types.json import Jsonb
 
 from oam.models.bindings import resolve_model_binding
 from oam.models.protocols import generation_request
-from oam.models.runtime import ModelOutputError, ModelResult, Usage
+from oam.models.runtime import (
+    UNDISPATCHED_USAGE,
+    ModelDispatchUnavailable,
+    ModelOutputError,
+    ModelResult,
+)
 
 if TYPE_CHECKING:
     from oam.indexing.store import IndexStore
@@ -20,16 +26,7 @@ class GenerationBudgetRejection(ModelOutputError):
     """A refused call costs zero; split retries may attach earlier paid-call usage."""
 
     def __init__(self, message: str):
-        super().__init__(
-            message,
-            usage=Usage(
-                input_tokens=0,
-                output_tokens=0,
-                total_tokens=0,
-                reasoning_tokens=0,
-                coverage="complete",
-            ),
-        )
+        super().__init__(message, usage=UNDISPATCHED_USAGE)
 
     @property
     def has_prior_generation_usage(self) -> bool:
@@ -89,10 +86,15 @@ class SourceBudgetModels:
         return getattr(self._models, name)
 
     def generate(self, role: str, **kwargs: Any) -> ModelResult:
-        self._reserve(role, kwargs)
-        return cast(ModelResult, self._models.generate(role, **kwargs))
+        reservation = self._reserve(role, kwargs)
+        try:
+            return cast(ModelResult, self._models.generate(role, **kwargs))
+        except ModelDispatchUnavailable:
+            if reservation is not None:
+                self._release_undispatched(role, *reservation)
+            raise
 
-    def _reserve(self, role: str, kwargs: dict[str, Any]) -> None:
+    def _reserve(self, role: str, kwargs: dict[str, Any]) -> tuple[str, int] | None:
         store = self._store
         rejected = False
         with store.transaction() as connection:
@@ -116,7 +118,7 @@ class SourceBudgetModels:
             if state is None:
                 limit = store.config.index.generation_token_budget
                 if limit is None:
-                    return
+                    return None
                 history = connection.execute(
                     "SELECT stage_key,usage FROM index_stage_results WHERE tenant_id=%s "
                     "AND user_id=%s AND source_id=%s AND source_version=%s AND generation_id=%s",
@@ -199,6 +201,44 @@ class SourceBudgetModels:
             raise GenerationBudgetExceeded(
                 "source generation token budget cannot cover the next call"
             )
+        return owner[0], allowance
+
+    def _release_undispatched(self, role: str, owner_id: str, allowance: int) -> None:
+        from oam.indexing.store import StaleIndexWork
+
+        store = self._store
+        budget = None
+        try:
+            with store.transaction() as connection:
+                store.guard(connection)
+                counter = (
+                    "(stage_state#>>'{index_generation_budget,reserved_upper_tokens}')::numeric"
+                )
+                updated = connection.execute(
+                    "UPDATE operations SET stage_state=jsonb_set(stage_state,"
+                    "'{index_generation_budget,reserved_upper_tokens}',"
+                    f"to_jsonb({counter}-%s),false),updated_at=clock_timestamp() "
+                    "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s "
+                    f"AND {counter}>=%s RETURNING stage_state->'index_generation_budget'",
+                    (allowance, *store.key, owner_id, allowance),
+                ).fetchone()
+            budget = updated[0] if updated is not None else None
+        except (StaleIndexWork, psycopg.Error, TimeoutError):
+            # A missing claim or uncertain commit must never trigger a second release.
+            pass
+        print(
+            json.dumps(
+                {
+                    "stage": "index_generation_budget",
+                    "operation_id": store.claim.operation_id,
+                    "role": role,
+                    "request_upper_tokens": allowance,
+                    "outcome": "released_without_dispatch" if budget else "release_unconfirmed",
+                    **(budget or {}),
+                }
+            ),
+            flush=True,
+        )
 
 
 def _batch_seed_weights(inputs: dict[str, Any]) -> dict[tuple[str, int], int]:

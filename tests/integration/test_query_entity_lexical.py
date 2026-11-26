@@ -151,6 +151,49 @@ def test_entity_hint_does_not_override_stronger_full_query_relevance(recall_data
     assert rows[0]["strict_match"] is True
 
 
+def test_entity_boost_reads_each_bm25_hit_once(recall_database, monkeypatch):
+    connection, authority = recall_database
+    config, _ = alias_history(connection, authority)
+    for index in range(32):
+        add_fact(connection, authority, f"note_{index}", f"Battery warranty note {index}.")
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 10)
+    execute = repository._execute
+    plan = None
+
+    def capture(query, parameters):
+        nonlocal plan
+        if "bm25_hits AS MATERIALIZED" in query:
+            analysis = execute("EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters)
+            plan = analysis[0]["QUERY PLAN"][0]["Plan"]
+        return execute(query, parameters)
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", ()):
+            yield from nodes(child)
+
+    monkeypatch.setattr(repository, "_execute", capture)
+    rows = repository.lexical("NR battery warranty", 40)
+    by_id = {row["unit_id"]: row for row in rows}
+    assert by_id["z_target"]["entity_match"] is True and by_id["z_target"]["score"] > 0
+    assert by_id["a_other"]["entity_match"] is False and by_id["a_other"]["score"] > 0
+    assert by_id["picnic"]["entity_match"] is True and by_id["picnic"]["score"] == 0
+    assert len(by_id) == len(rows)
+    assert plan is not None
+    operators = list(nodes(plan))
+    produced = next(
+        node["Actual Rows"] for node in operators if node.get("Subplan Name") == "CTE bm25_hits"
+    )
+    consumed = sum(
+        (node["Actual Rows"] + node.get("Rows Removed by Filter", 0)) * node["Actual Loops"]
+        for node in operators
+        if node.get("CTE Name") == "bm25_hits"
+    )
+    assert produced >= 32
+    assert consumed == produced
+
+
 def test_revoked_alias_support_no_longer_grants_entity_priority(recall_database):
     connection, authority = recall_database
     config, _ = alias_history(connection, authority)

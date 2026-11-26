@@ -7,15 +7,21 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from oam.config import OAMConfig
-from oam.db.eligibility import ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
 from oam.db.entity_eligibility import (
     ELIGIBLE_ENTITY_MEMBERSHIPS,
     ELIGIBLE_ENTITY_NAME_SUPPORT,
-    ENTITY_PROJECTIONS_FROM_FILTERED_FACTS,
+    ENTITY_PROJECTIONS_FROM_SEED_ENTITIES,
+    scoped_graph_facts,
 )
 from oam.indexing.entity_names import entity_name_key
 from oam.indexing.store import stable_id
 from oam.retrieval.fts import index_streams
+
+_CANONICAL_NAME_SUPPORT_EXISTS = (
+    f"EXISTS (SELECT 1 FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) binding "
+    "WHERE (binding.tenant_id,binding.user_id,binding.name_id)="
+    "(n.tenant_id,n.user_id,n.name_id) AND binding.support_kind='canonical')"
+)
 
 
 class EntityRepository:
@@ -30,7 +36,7 @@ class EntityRepository:
             "SELECT set_config('oam.tenant_id',%s,true),set_config('oam.user_id',%s,true)", key
         )
 
-    def _rows(self, sql: str, parameters: tuple = ()) -> list[dict[str, Any]]:
+    def _rows(self, sql: str, parameters: tuple | dict[str, Any] = ()) -> list[dict[str, Any]]:
         with self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(sql, parameters)
             return cursor.fetchall()
@@ -46,18 +52,24 @@ class EntityRepository:
         ]
         if not offered:
             return None
+        name_ids = [ref["name_id"] for ref in references if ref.get("name_id")] or None
         rows = self._rows(
-            f"SELECT DISTINCT binding.entity_id,binding.name_id,binding.name_kind FROM "
-            f"({ELIGIBLE_ENTITY_MEMBERSHIPS}) member JOIN ({ELIGIBLE_ENTITY_NAME_SUPPORT}) binding "
-            "USING(tenant_id,user_id,entity_id) WHERE member.unit_id=ANY(%s) "
-            "AND binding.name_key=%s "
-            "AND (%s::text[] IS NULL OR binding.name_id=ANY(%s)) "
-            "ORDER BY binding.entity_id,binding.name_id LIMIT 2",
+            "SELECT n.entity_id,n.name_id,n.name_kind FROM entity_names n "
+            "WHERE (n.tenant_id,n.user_id,n.name_key)=(%s,%s,%s) "
+            "AND (%s::text[] IS NULL OR n.name_id=ANY(%s)) "
+            f"AND EXISTS (SELECT 1 FROM ({ELIGIBLE_ENTITY_MEMBERSHIPS}) member "
+            "WHERE (member.tenant_id,member.user_id,member.entity_id)="
+            "(n.tenant_id,n.user_id,n.entity_id) AND member.unit_id=ANY(%s)) "
+            f"AND EXISTS (SELECT 1 FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) binding "
+            "WHERE (binding.tenant_id,binding.user_id,binding.name_id)="
+            "(n.tenant_id,n.user_id,n.name_id)) "
+            "ORDER BY n.entity_id,n.name_id LIMIT 2",
             (
-                offered,
+                *self.key,
                 self._name_key(name),
-                [ref["name_id"] for ref in references if ref.get("name_id")] or None,
-                [ref["name_id"] for ref in references if ref.get("name_id")] or None,
+                name_ids,
+                name_ids,
+                offered,
             ),
         )
         return rows[0] if len({row["entity_id"] for row in rows}) == 1 else None
@@ -84,10 +96,10 @@ class EntityRepository:
         if not ids:
             return {}
         rows = self._rows(
-            "WITH filtered AS MATERIALIZED (SELECT * FROM ("
-            + ELIGIBLE_UNITS_CANDIDATE_NO_INSIGHTS
-            + ") eligible WHERE kind='fact')"
-            + ENTITY_PROJECTIONS_FROM_FILTERED_FACTS
+            scoped_graph_facts(
+                include_semantic=False, include_causal=False, require_nonseed_fact=False
+            )
+            + ENTITY_PROJECTIONS_FROM_SEED_ENTITIES
             + " SELECT member.unit_id,names.name_text,names.quote,names.name_id,names.name_kind "
             "FROM memberships member CROSS JOIN LATERAL "
             "(SELECT distinct_names.* FROM (SELECT DISTINCT ON (binding.name_id) binding.* "
@@ -95,10 +107,14 @@ class EntityRepository:
             "WHERE (binding.tenant_id,binding.user_id,binding.entity_id)="
             "(member.tenant_id,member.user_id,member.entity_id) "
             "ORDER BY binding.name_id,binding.support_id) distinct_names "
-            "ORDER BY (distinct_names.name_id=ANY(%s)) DESC,distinct_names.name_id LIMIT %s) names "
-            "WHERE member.unit_id=ANY(%s) "
+            "ORDER BY (distinct_names.name_id=ANY(%(preferred)s)) DESC,distinct_names.name_id "
+            "LIMIT %(limit)s) names WHERE member.unit_id=ANY(%(seeds)s) "
             "ORDER BY member.unit_id,names.name_kind,names.name_id",
-            (list(preferred_name_ids), self.config.index.entity_search_names_per_entity, ids),
+            {
+                "seeds": ids,
+                "preferred": list(preferred_name_ids),
+                "limit": self.config.index.entity_search_names_per_entity,
+            },
         )
         output: dict[str, list[dict]] = {}
         for row in rows:
@@ -189,11 +205,11 @@ class EntityRepository:
         if row["canonical_key"] is not None:
             return
         family = self._rows(
-            "SELECT DISTINCT e.entity_id,e.canonical_name,e.canonical_key "
-            f"FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) n JOIN entity_units e "
-            "USING(tenant_id,user_id,entity_id) WHERE n.name_key=%s "
-            "AND n.support_kind='canonical' AND e.entity_id<>%s ORDER BY e.entity_id",
-            (base_key, entity_id),
+            "SELECT e.entity_id,e.canonical_name,e.canonical_key FROM entity_names n "
+            "JOIN entity_units e USING(tenant_id,user_id,entity_id) "
+            "WHERE (n.tenant_id,n.user_id,n.name_key)=(%s,%s,%s) AND n.entity_id<>%s "
+            f"AND {_CANONICAL_NAME_SUPPORT_EXISTS} ORDER BY e.entity_id",
+            (*self.key, base_key, entity_id),
         )
 
         def assign(target, base, numbered):
@@ -215,10 +231,11 @@ class EntityRepository:
                     (*self.key, key, target),
                 )
                 legacy = self._rows(
-                    f"SELECT 1 FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) n JOIN entity_units e "
+                    "SELECT 1 FROM entity_names n JOIN entity_units e "
                     "USING(tenant_id,user_id,entity_id) WHERE e.canonical_key IS NULL "
-                    "AND n.support_kind='canonical' AND n.name_key=%s AND e.entity_id<>%s LIMIT 1",
-                    (key, target),
+                    "AND (n.tenant_id,n.user_id,n.name_key)=(%s,%s,%s) "
+                    f"AND n.entity_id<>%s AND {_CANONICAL_NAME_SUPPORT_EXISTS} LIMIT 1",
+                    (*self.key, key, target),
                 )
                 if legacy:
                     suffix += 1
@@ -251,11 +268,16 @@ class EntityRepository:
         assign(entity_id, name, bool(family))
 
     def _exact(self, name: str) -> list[dict]:
+        # One eligible support establishes the name. Checking every repeated
+        # support would keep the owner's publication lock held unnecessarily.
         return self._rows(
-            "SELECT DISTINCT entity_id,name_id,name_kind FROM "
-            f"({ELIGIBLE_ENTITY_NAME_SUPPORT}) n WHERE n.name_key=%s "
-            "ORDER BY entity_id,name_id LIMIT %s",
-            (self._name_key(name), self.config.index.entity_resolution_candidates + 1),
+            "SELECT n.entity_id,n.name_id,n.name_kind FROM entity_names n "
+            "WHERE (n.tenant_id,n.user_id,n.name_key)=(%s,%s,%s) AND EXISTS ("
+            f"SELECT 1 FROM ({ELIGIBLE_ENTITY_NAME_SUPPORT}) binding "
+            "WHERE (binding.tenant_id,binding.user_id,binding.name_id)="
+            "(n.tenant_id,n.user_id,n.name_id)) "
+            "ORDER BY n.entity_id,n.name_id LIMIT %s",
+            (*self.key, self._name_key(name), self.config.index.entity_resolution_candidates + 1),
         )
 
     def _publish_resolved(self, memory_id, mentions, aliases, objects, candidates):

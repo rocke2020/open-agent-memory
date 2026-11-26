@@ -486,6 +486,40 @@ def test_graph_checks_fact_support_once_across_identity_projections(
     assert sum(membership_name_reads(plan) for plan in plans) == 0
 
 
+def test_graph_name_support_uses_the_scoped_fact_memory_index(recall_database, monkeypatch):
+    from test_entity_graph import alias_history
+
+    connection, authority = recall_database
+    repository, vector, _ = alias_history(connection, authority)
+    connection.execute("SET LOCAL ROLE oam_content")
+    # Exercise a nested lookup as PostgreSQL can choose for a large owner's graph.
+    for setting in ("seqscan", "bitmapscan", "hashjoin", "mergejoin"):
+        connection.execute(f"SET LOCAL enable_{setting}=off")
+    connection.execute("SET LOCAL join_collapse_limit=1")
+    plans = []
+    execute = repository._execute
+
+    def explain(query, parameters):
+        row = connection.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters).fetchone()
+        plans.append(row[0][0]["Plan"])
+        return execute(query, parameters)
+
+    def uses_scoped_memory_lookup(node):
+        return (
+            node.get("Index Name") == "search_units_fact_memory"
+            and "memory_id" in node.get("Index Cond", "")
+            and node.get("Actual Loops", 0) > 0
+        ) or any(uses_scoped_memory_lookup(child) for child in node.get("Plans", ()))
+
+    monkeypatch.setattr(repository, "_execute", explain)
+    ranks, paths = repository.ordinary(("seed",), vector, include_semantic=False)
+    assert "continuation" in ranks
+    assert paths["continuation"][0]["alias_witnesses"][0]["quote"] == (
+        "Nova Research, also called NR"
+    )
+    assert any(uses_scoped_memory_lookup(plan) for plan in plans)
+
+
 def test_fast_graph_projects_only_seed_entities_with_nonseed_alias_support(recall_database):
     from test_entity_graph import alias_history
 

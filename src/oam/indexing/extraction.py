@@ -28,7 +28,7 @@ from oam.contracts.evidence import MessageRole, TemporalAnnotation
 from oam.contracts.memory import MAX_INSIGHT_TITLE_CHARS, insight_title
 from oam.indexing.chunker import TextChunk, split_chunk_for_output_retry
 from oam.indexing.entity_names import entity_name_key
-from oam.models.runtime import ModelOutputTooLongError, RuntimeModels, Usage
+from oam.models.runtime import UNDISPATCHED_USAGE, ModelOutputTooLongError, RuntimeModels, Usage
 from oam.quotes import unique_quote
 from oam.tokens import UNITS_PER_TOKEN, cumulative_units, estimate_units, estimated_tokens
 
@@ -721,19 +721,22 @@ def retry_split_extractions(
 
 
 def _sum_extraction_usage(usages: list[Usage | None]) -> Usage:
+    reported = [usage for usage in usages if usage != UNDISPATCHED_USAGE]
+    if usages and not reported:
+        return UNDISPATCHED_USAGE
     fields = {}
     for field in ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens"):
-        values = [getattr(usage, field) for usage in usages if usage is not None]
+        values = [getattr(usage, field) for usage in reported if usage is not None]
         known = [value for value in values if value is not None]
         fields[field] = sum(known) if known else None
     for field in ("cached_input_tokens", "uncached_input_tokens", "cache_creation_input_tokens"):
-        values = [getattr(usage, field) if usage is not None else None for usage in usages]
+        values = [getattr(usage, field) if usage is not None else None for usage in reported]
         fields[field] = (
             sum(values) if values and all(value is not None for value in values) else None
         )
     fields["coverage"] = (
         "complete"
-        if all(usage is not None and usage.coverage == "complete" for usage in usages)
+        if all(usage is not None and usage.coverage == "complete" for usage in reported)
         else ("partial" if any(value is not None for value in fields.values()) else "unavailable")
     )
     return Usage.model_validate(fields)

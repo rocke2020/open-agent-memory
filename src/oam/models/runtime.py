@@ -53,10 +53,6 @@ class ModelEmptyContentError(ModelOutputError):
     """Generation stopped without visible content, a refusal or another output."""
 
 
-class ModelDispatchUnavailable(httpx.ConnectTimeout):
-    """Local model capacity expired before an HTTP request was sent."""
-
-
 class FrozenResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -72,6 +68,27 @@ class Usage(FrozenResult):
     total_tokens: int | None = None
     reasoning_tokens: int | None = None
     coverage: Literal["complete", "partial", "unavailable"] = "unavailable"
+
+
+# A local refusal adds no provider usage fields when combined with other calls.
+UNDISPATCHED_USAGE = Usage(
+    input_tokens=0,
+    cached_input_tokens=0,
+    uncached_input_tokens=0,
+    cache_creation_input_tokens=0,
+    output_tokens=0,
+    total_tokens=0,
+    reasoning_tokens=0,
+    coverage="complete",
+)
+
+
+class ModelDispatchUnavailable(httpx.ConnectTimeout):
+    """Local model capacity expired before an HTTP request was sent."""
+
+    def __init__(self, message: str, *, request: httpx.Request | None = None):
+        super().__init__(message, request=request)
+        self.usage = UNDISPATCHED_USAGE
 
 
 class ModelResult(FrozenResult):

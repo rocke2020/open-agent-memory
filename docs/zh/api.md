@@ -138,7 +138,7 @@ HTTPS 证据可用同一端点及 JSON `{"input_type":"document_url","document_i
 
 Normal 和 Deep 可用 `models.reranker` 根据原始查询为已加载正文的候选评分。各自 `rerank_candidates` 默认为 48，可单次覆盖，null 选择完整的有界融合列表。允许部分召回时，可降级保留融合相关性并在 `diagnostics.degraded` 标记 `rerank`。Fast 使用融合相关性。[重排设置](../../configs/README_CN.md#6-来源正文与重排)
 
-配对的可选 `time_basis` 与 `time_window` 显式覆盖查询日期解析。`time_basis` 支持 `event`、`referenced`、`mentioned`、`created`、`updated`，窗口 `start` 与 `end` 必须有时区且开始早于结束。半开窗口只改变时间排序，其他通道和最终接收可使用窗口外证据。若没有显式窗口，使用本次捕获的 UTC 参考时刻，或提供带时区的 `reference_time` 和 IANA `reference_timezone`。受支持的英语、中文和部分日语日期可在任一模式启用时间传播。两个绝对日历端点经 `to`、`between … and`、范围标点、到、至或 から … まで 连接时，半开区间包含最后的日、月或年，本地边界遵循夏令时。独立日期、反转端点、紧邻的 `compare`、`compared` 或 `comparing A to B` 及钟点或相对时间范围视为有歧义。裸 `A to B` 可作为范围，解析器不分类更广的自然语言比较意图。歧义、无效和不支持的隐式日期保留普通召回并报告诊断，非法显式窗口拒绝。权限来自用户绑定，无独立租户或集合选择器。
+配对的可选 `time_basis` 与 `time_window` 显式覆盖查询日期解析。`time_basis` 支持 `event`、`referenced`、`mentioned`、`created`、`updated`，窗口 `start` 与 `end` 必须有时区且开始早于结束。半开窗口只改变时间排序，其他通道和最终接收可使用窗口外证据。若没有显式窗口，使用本次捕获的 UTC 参考时刻，或提供带时区的 `reference_time` 和 IANA `reference_timezone`。受支持的英语、中文和部分日语日期可在任一模式启用时间传播。两个绝对日历端点经 `to`、`from … till/until …`、`between … and`、范围标点、到、至或 から … まで 连接时，半开区间包含最后的日、月或年，本地边界遵循夏令时。独立日期、反转端点、紧邻的 `compare`、`compared` 或 `comparing A to B` 及钟点或相对时间范围视为有歧义。裸 `A to B` 可作为范围，解析器不分类更广的自然语言比较意图。歧义、无效和不支持的隐式日期保留普通召回并报告诊断，非法显式窗口拒绝。权限来自用户绑定，无独立租户或集合选择器。
 
 批量将同一模式和时间选项用于每条调用方查询，无显式窗口时按共享冻结时刻分别解析。开始前校验 `search.max_queries` 和每条查询 token 上限。一个模式总额平均分配，余数分给前几条，未用预算不再分配。两条查询时 Fast、Normal、Deep 每条分别获得 4,000、8,000、12,000 tokens。每条继承 `include.chunks`，独立保留 `items`、完整 `context`、诊断和完整计数，只入选可放入份额的组。结果报告 `ok` 或 `partial`、按序索引、合计 `context_tokens` 以及各失败码。全部失败则请求不可用。期限到后运行中的子查询标为超时，排队查询取消，已运行的只读查询可在自身超时内完成。能力接口提供并发和共享期限。批量编排用 `request.batch_deadline_seconds`。
 

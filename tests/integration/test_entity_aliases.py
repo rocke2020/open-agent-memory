@@ -28,6 +28,7 @@ def test_reference_entity_projection_reuses_current_fact_support(recall_database
 
     connection, authority = recall_database
     recall, _, _ = alias_history(connection, authority)
+    add_fact(connection, authority, "unrelated", "The field report was filed on Monday.")
     repository = EntityRepository(
         connection,
         recall.config,

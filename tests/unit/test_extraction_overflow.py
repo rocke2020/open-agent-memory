@@ -320,6 +320,61 @@ def test_overflow_incomplete_usage_remains_partial():
     assert result.usage.coverage == "partial"
 
 
+@pytest.mark.parametrize("reject_for_budget", [False, True])
+@pytest.mark.parametrize(
+    "parent_fields",
+    [
+        {"input_tokens": 10, "coverage": "partial"},
+        {"input_tokens": 0, "coverage": "partial"},
+        {
+            "input_tokens": 20,
+            "output_tokens": 7,
+            "total_tokens": 27,
+            "cached_input_tokens": 12,
+            "uncached_input_tokens": 8,
+            "coverage": "complete",
+        },
+    ],
+)
+def test_local_split_refusal_preserves_reported_parent_usage(reject_for_budget, parent_fields):
+    from oam.indexing.budget import GenerationBudgetExceeded
+    from oam.indexing.extraction import retry_split_extractions
+    from oam.models.runtime import ModelDispatchUnavailable, ModelOutputTooLongError, Usage
+
+    error_type = GenerationBudgetExceeded if reject_for_budget else ModelDispatchUnavailable
+    parent_usage = Usage(**parent_fields)
+
+    def refuse():
+        raise error_type("before dispatch")
+
+    with pytest.raises(error_type) as failure:
+        retry_split_extractions(
+            (refuse, refuse), ModelOutputTooLongError("overflow", usage=parent_usage)
+        )
+
+    assert failure.value.usage == parent_usage
+
+
+def test_reloaded_local_refusal_preserves_provider_usage():
+    from oam.indexing.extraction import _sum_extraction_usage
+    from oam.models.runtime import ModelDispatchUnavailable, Usage
+
+    local = ModelDispatchUnavailable("before dispatch").usage
+    reloaded = Usage.model_validate_json(local.model_dump_json())
+    provider = Usage(
+        input_tokens=20,
+        output_tokens=7,
+        total_tokens=27,
+        cached_input_tokens=12,
+        uncached_input_tokens=8,
+        coverage="complete",
+    )
+
+    assert _sum_extraction_usage([reloaded, provider]) == provider
+    assert _sum_extraction_usage([reloaded, None]) == Usage()
+    assert _sum_extraction_usage([reloaded, reloaded]) == local
+
+
 def test_split_quotes_remain_unique_in_canonical_owner():
     repeated = "a" * 300 + ". "
     text = repeated * 2

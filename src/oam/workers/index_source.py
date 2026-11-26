@@ -12,7 +12,7 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from importlib.resources import files
-from itertools import islice
+from itertools import groupby, islice
 from uuid import uuid4
 
 import psycopg
@@ -20,8 +20,9 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from oam.config import OAMConfig
-from oam.contracts.evidence import EvidenceAppendRequest
+from oam.contracts.evidence import EvidenceAppendRequest, MessageRole
 from oam.governance.cleanup import cleanup_claim, cleanup_removal_claim
+from oam.indexing.budget import GenerationBudgetRejection
 from oam.indexing.chunker import resume_chunks
 from oam.indexing.extraction import (
     FactExtraction,
@@ -441,7 +442,14 @@ def _index_interaction(config, store, models, request):
         if failures:
             raise failures[0][1]
         for group_id, members, result in publishable:
-            texts = tuple(fact.text for fact in result.facts)
+            owners = {item[0]: (item[2], item[3], item[4], item[1]) for item in members}
+            first_passage_id = members[0][0]
+            texts = tuple(
+                f"Assistant: {fact.quote}"
+                if owners[fact.passage_id or first_passage_id][0].role == MessageRole.ASSISTANT
+                else fact.text
+                for fact in result.facts
+            )
             batch_id = stable_id("facts_batch", [group_id])
             embedded = checkpoint(
                 "facts_embed:" + batch_id,
@@ -453,9 +461,10 @@ def _index_interaction(config, store, models, request):
             fact_ids.extend(
                 _publish_facts(
                     store,
-                    {item[0]: (item[2], item[3], item[4], item[1]) for item in members},
+                    owners,
                     result,
                     embedded["vectors"],
+                    texts=texts,
                     metadata=request,
                     diagnostics=extraction_diagnostics,
                 )
@@ -513,12 +522,23 @@ def _index_interaction(config, store, models, request):
         )
         for item in prepared
     }
-    groups = plan_extraction_groups(
-        tuple(passage for identity, passage in by_passage.items() if identity not in saved_facts),
-        config,
-        request.reference_timezone,
-    )
-    ending_groups = {group[-1].passage_id: tuple(p.passage_id for p in group) for group in groups}
+    # Checkpoint keys include the original group membership. Removing completed passages
+    # before planning can change the boundaries of wholly unfinished groups.
+    groups = plan_extraction_groups(tuple(by_passage.values()), config, request.reference_timezone)
+    ending_groups = {}
+    for group in groups:
+        for completed, run in groupby(group, lambda passage: passage.passage_id in saved_facts):
+            if completed:
+                continue
+            pending = tuple(run)
+            pending_groups = (
+                (group,)
+                if len(pending) == len(group)
+                else plan_extraction_groups(pending, config, request.reference_timezone)
+            )
+            for pending_group in pending_groups:
+                ids = tuple(passage.passage_id for passage in pending_group)
+                ending_groups[ids[-1]] = ids
     published = {}
     extraction_executor = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix="oam-extract")
     try:
@@ -648,7 +668,11 @@ def _index_interaction(config, store, models, request):
         stage, failure = extraction_failures[0]
         store.mark_deferred_failure_stage(stage)
         if len(extraction_failures) > 1:
-            if all(retryable_model_http_error(error) for _, error in extraction_failures):
+            if all(retryable_model_http_error(error) for _, error in extraction_failures) or all(
+                isinstance(error, GenerationBudgetRejection)
+                and not error.has_prior_generation_usage
+                for _, error in extraction_failures
+            ):
                 raise failure from None
             raise RuntimeError(
                 "multiple indexing stages failed; usage coverage is partial"
@@ -1166,10 +1190,11 @@ def _visual_blocks(content: str, prefix: str, base_locator: dict):
     return tuple(blocks), spans
 
 
-def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
+def _publish_facts(store, owners, result, vectors, *, texts, metadata, diagnostics):
     from oam.indexing.entities import EntityRepository
 
     singleton_id = next(iter(owners))
+    # Keep identities tied to the extraction checkpoint used by resume_source().
     identifiers = {
         fact.output_index: stable_id(
             "memory", fact.passage_id or singleton_id, fact.output_index, fact.text
@@ -1201,7 +1226,7 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
             {target for fact in result.facts for target in fact.related_existing_ids}
         )
         eligible_ids = eligible_reference_ids(connection, store.generation_id, offered_ids)
-        for fact, vector in zip(result.facts, vectors, strict=True):
+        for fact, text, vector in zip(result.facts, texts, vectors, strict=True):
             passage_id = fact.passage_id or singleton_id
             message, evidence_id, locator, chunk = owners[passage_id]
             if any(target not in eligible_ids for target in fact.related_existing_ids):
@@ -1231,7 +1256,7 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                 (
                     *store.key,
                     memory_id,
-                    fact.text,
+                    text,
                     fact.category,
                     store.generation_id,
                     store.source["accepted_seq"],
@@ -1246,7 +1271,7 @@ def _publish_facts(store, owners, result, vectors, *, metadata, diagnostics):
                 connection,
                 unit_id=memory_id,
                 kind="fact",
-                text=fact.text,
+                text=text,
                 vector=vector,
                 locator=support_locator,
                 evidence_id=evidence_id,

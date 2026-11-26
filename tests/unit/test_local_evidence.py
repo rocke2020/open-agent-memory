@@ -931,6 +931,52 @@ def test_bounded_user_recovery_uses_independent_fact_sources_without_propagating
     assert result["diagnostics"]["local_context"]["selected_recovered_user_originals"] == 1
 
 
+@pytest.mark.parametrize("mode", ["fast", "normal"])
+@pytest.mark.parametrize("dense_match", [False, True])
+def test_assistant_fact_routes_to_user_original_only_with_both_search_matches(mode, dense_match):
+    support, existing = original("support", 8), original("existing", 0)
+    guide, booking = original("guide", 8, "assistant"), original("booking", 0)
+    for row in (guide, booking):
+        row["citations"][0]["source_id"] = "workshop"
+    booking["text"] = "I booked the woodworking class for Saturday."
+    existing["text"] = "I considered the watercolor class for Sunday."
+    user_fact, guide_fact = fact("user_fact", support), fact("guide_fact", guide)
+
+    class RecoveryRepository(SourceRepository):
+        def lexical(self, query, limit):
+            return [{"unit_id": "guide_fact", "strict_match": True}]
+
+        def dense(self, vector, limit):
+            results = [{"unit_id": "user_fact", "kind": "fact", "score": 0.8}]
+            return (
+                [{"unit_id": "guide_fact", "kind": "fact", "score": 0.9}, *results]
+                if dense_match
+                else results
+            )
+
+        def source_user_passage_ids(self, source_keys, vector, limit, excluded_ids):
+            ranked = {("workshop", 1): "booking", ("conversation", 1): "existing"}
+            return [
+                {"unit_id": ranked[key]} for key in source_keys if ranked[key] not in excluded_ids
+            ][:limit]
+
+    class RecoveryService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RecoveryRepository(request, self.rows, {})
+
+    config = GATED_CONFIG.model_copy(
+        update={"search": GATED_CONFIG.search.model_copy(update={"adjacent_user_context": False})}
+    )
+    result = RecoveryService(
+        [user_fact, guide_fact, support, existing, guide, booking], config=config
+    ).search(object(), SearchRequest(query="Which weekend class did I book?", recall_level=mode))
+
+    recovered, displaced = (booking, existing) if dense_match else (existing, booking)
+    assert recovered["text"] in result["context"]
+    assert displaced["text"] not in result["context"]
+
+
 @pytest.mark.parametrize("cached", [False, True])
 def test_late_companion_support_remains_recoverable_when_its_bundle_does_not_fit(cached):
     support = original("support", 8)

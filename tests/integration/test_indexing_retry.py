@@ -86,6 +86,19 @@ class ConnectTimeoutModels(IntermittentModels):
         return super().generate(role, **kwargs)
 
 
+class CachedUsageModels(SyntheticIndexModels):
+    def generate(self, role, **kwargs):
+        result = super().generate(role, **kwargs)
+        usage = result.usage.model_copy(
+            update={
+                "cached_input_tokens": 12,
+                "uncached_input_tokens": 8,
+                "cache_creation_input_tokens": 1,
+            }
+        )
+        return result.model_copy(update={"usage": usage})
+
+
 class CompletedInvalidModels(SyntheticIndexModels):
     def __init__(self, failed_role, usage):
         super().__init__()
@@ -561,6 +574,275 @@ def claimed_checkpoint_store(accepted_source):
         index_generation(config, os.environ),
     )
     return store, dsn
+
+
+@pytest.mark.parametrize(
+    "disposition", ["claimed", "claimed_after_checkpoint", "succeeded", "unknown_external_outcome"]
+)
+async def test_expired_final_direct_source_claim_settles_without_replaying_model_work(
+    accepted_source, disposition
+):
+    client, dsn, tenant, config, operation = accepted_source
+    store, _ = claimed_checkpoint_store(accepted_source)
+    checkpoint = {
+        "facts": [],
+        "usage": {
+            "coverage": "complete",
+            "input_tokens": 20,
+            "output_tokens": 10,
+            "total_tokens": 30,
+            "cached_input_tokens": 12,
+            "uncached_input_tokens": 8,
+            "cache_creation_input_tokens": 1,
+        },
+    }
+    store.checkpoint("extract:completed", {"source": "test"}, lambda: checkpoint)
+    with store.transaction() as connection:
+        store.guard(connection)
+        store.readiness(
+            connection,
+            source_searchable=True,
+            memory_ready=False,
+            **(
+                {"usage": {"coverage": "complete", "total_tokens": 10}}
+                if disposition == "unknown_external_outcome"
+                else {}
+            ),
+        )
+
+    queue_dsn = make_conninfo(dsn, options="-c role=oam_queue")
+
+    def scheduler_tick():
+        with psycopg.connect(queue_dsn) as queue:
+            queue.execute("SET LOCAL statement_timeout='2s'")
+            assert (
+                claim_one(
+                    queue.cursor(),
+                    worker_id="settler",
+                    attempt_id="settle-direct-source",
+                    lease_seconds=config.lease.seconds,
+                    user_concurrency=config.user.concurrency,
+                )
+                is None
+            )
+
+    with psycopg.connect(dsn) as db:
+        db.execute(
+            "UPDATE work_units SET attempts_remaining=0 WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        )
+        if disposition == "claimed":
+            db.execute(
+                "UPDATE attempts SET request_ref=NULL,response_ref=NULL "
+                "WHERE tenant_id=%s AND attempt_id=%s",
+                (tenant, store.claim.attempt_id),
+            )
+        elif disposition != "claimed_after_checkpoint":
+            db.execute(
+                "UPDATE attempts SET disposition=%s WHERE tenant_id=%s AND attempt_id=%s",
+                (disposition, tenant, store.claim.attempt_id),
+            )
+    scheduler_tick()
+    url = f"/v1/users/lin/operations/{operation}"
+    assert (await client.get(url)).json()["status"] == "processing"
+
+    with psycopg.connect(dsn) as db:
+        db.execute(
+            "UPDATE work_units SET lease_expires_at=clock_timestamp()-interval '1 second' "
+            "WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        )
+    if disposition == "claimed":
+        with psycopg.connect(dsn) as publisher:
+            publisher.execute(
+                "SELECT 1 FROM operations WHERE tenant_id=%s AND operation_id=%s FOR UPDATE",
+                (tenant, operation),
+            )
+            scheduler_tick()
+            assert (await client.get(url)).json()["status"] == "processing"
+    scheduler_tick()
+    scheduler_tick()
+
+    current = (await client.get(url)).json()
+    assert current["status"] == "partial"
+    assert current["stage_state"]["error"] == "SourceLeaseExhausted"
+    assert current["readiness"]["source_searchable"] and not current["readiness"]["memory_ready"]
+    assert current["usage"]["coverage"] == current["embedding_usage"]["coverage"] == "partial"
+    assert current["usage"].get("total_tokens") == (
+        10 if disposition == "unknown_external_outcome" else None
+    )
+    completed_ref = "extract:completed:" + input_digest({"source": "test"}).hex()
+    was_claimed = disposition.startswith("claimed")
+    with psycopg.connect(dsn) as db:
+        assert db.execute(
+            "SELECT w.status,a.disposition,a.request_ref,a.response_ref,a.usage "
+            "FROM work_units w JOIN attempts a "
+            "USING(tenant_id,user_id,work_unit_id) WHERE w.tenant_id=%s AND w.operation_id=%s",
+            (tenant, operation),
+        ).fetchall() == [
+            (
+                "failed_terminal",
+                "failed" if was_claimed else disposition,
+                "source_lease_exhausted" if disposition == "claimed" else completed_ref,
+                None if disposition == "claimed" else completed_ref,
+                {
+                    "coverage": "complete",
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "reasoning_tokens": 0,
+                }
+                if was_claimed
+                else None,
+            )
+        ]
+        assert db.execute(
+            "SELECT stage_key,output FROM index_stage_results WHERE tenant_id=%s", (tenant,)
+        ).fetchall() == [("extract:completed", checkpoint)]
+
+    retry = await client.post(url + "/retry", headers={"Idempotency-Key": "resume-expired-direct"})
+    if disposition == "unknown_external_outcome":
+        assert retry.status_code == 409
+        assert retry.json()["detail"]["code"] == "RetryRequiresReconciliation"
+    else:
+        assert retry.status_code == 201, retry.text
+        replacement = retry.json()["operation_id"]
+        assert replacement != operation
+        assert retry.json()["source_id"] == current["source_id"]
+        bounded = config.model_copy(
+            update={"index": config.index.model_copy(update={"generation_token_budget": 200_000})}
+        )
+        models = CachedUsageModels()
+        assert run_source(dsn, bounded, models)
+        ready = (await client.get(f"/v1/users/lin/operations/{replacement}")).json()
+        assert ready["status"] == "succeeded" and ready["readiness"]["links_ready"]
+        assert ready["usage"]["cached_input_tokens"] == 12 * (1 + len(models.generation_calls))
+        assert ready["usage"]["cache_creation_input_tokens"] == 1 + len(models.generation_calls)
+
+
+@pytest.mark.parametrize(("count", "split_tokens"), [(1, 0), (2, 0), (1, 27)])
+async def test_local_dispatch_refusal_can_retry_with_a_new_source_budget(
+    accepted_source, count, split_tokens
+):
+    from oam.indexing.extraction import retry_split_extractions
+    from oam.models.runtime import ModelDispatchUnavailable, ModelOutputTooLongError
+
+    client, dsn, tenant, config, operation = accepted_source
+    store, _ = claimed_checkpoint_store(accepted_source)
+    assert config.index.generation_token_budget is None
+
+    def refuse():
+        raise ModelDispatchUnavailable("local admission refused before dispatch")
+
+    def extract():
+        if split_tokens:
+            overflow = ModelOutputTooLongError(
+                "completed parent reached the output limit",
+                usage=Usage(
+                    input_tokens=20,
+                    output_tokens=7,
+                    total_tokens=split_tokens,
+                    cached_input_tokens=12,
+                    uncached_input_tokens=8,
+                    cache_creation_input_tokens=1,
+                    coverage="complete",
+                ),
+            )
+            return retry_split_extractions((refuse, refuse), overflow)
+        return refuse()
+
+    with psycopg.connect(dsn) as db:
+        db.execute(
+            "UPDATE work_units SET attempts_remaining=0 WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        )
+    for index in range(count):
+        with pytest.raises(ModelDispatchUnavailable) as refused:
+            store.checkpoint(f"extract:group-{index}", {"group": index}, extract)
+    store.fail(refused.value)
+
+    url = f"/v1/users/lin/operations/{operation}"
+    failed = (await client.get(url)).json()
+    assert failed["status"] == "partial"
+    assert failed["usage"]["coverage"] == "complete"
+    assert failed["usage"]["total_tokens"] == split_tokens
+
+    retry = await client.post(url + "/retry", headers={"Idempotency-Key": "apply-budget"})
+    assert retry.status_code == 201, retry.text
+    replacement = retry.json()["operation_id"]
+    bounded = config.model_copy(
+        update={"index": config.index.model_copy(update={"generation_token_budget": 200_000})}
+    )
+    models = CachedUsageModels()
+    assert run_source(dsn, bounded, models)
+    ready = (await client.get(f"/v1/users/lin/operations/{replacement}")).json()
+    assert ready["status"] == "succeeded" and ready["readiness"]["links_ready"]
+    calls = len(models.generation_calls) + bool(split_tokens)
+    assert ready["usage"]["cached_input_tokens"] == 12 * calls
+    assert ready["usage"]["uncached_input_tokens"] == 8 * calls
+    assert ready["usage"]["cache_creation_input_tokens"] == calls
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+async def test_source_budget_reuses_capacity_when_model_dispatch_never_starts(
+    accepted_source, overlap
+):
+    from oam.capacity import CapacityUnavailable
+    from oam.indexing.budget import GenerationBudgetExceeded, SourceBudgetModels
+    from oam.models.runtime import ModelDispatchUnavailable, RuntimeModels
+
+    store, _ = claimed_checkpoint_store(accepted_source)
+    store.config = store.config.model_copy(
+        update={
+            "index": store.config.index.model_copy(
+                update={"generation_token_budget": 2600 if overlap else 1300}
+            )
+        }
+    )
+    admission_waiting, reject_dispatch = Event(), Event()
+    started_requests = []
+
+    class DenyDispatch:
+        def acquire_model(self, *args, **kwargs):
+            admission_waiting.set()
+            assert reject_dispatch.wait(5), "test did not settle the pending admission"
+            raise CapacityUnavailable("local generation capacity exhausted")
+
+    def read_timeout(request):
+        started_requests.append(json.loads(request.content)["messages"][-1]["content"])
+        raise httpx.ReadTimeout("response outcome is unknown", request=request)
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as executor,
+        httpx.Client(transport=httpx.MockTransport(read_timeout)) as http,
+    ):
+        blocked = SourceBudgetModels(
+            store,
+            RuntimeModels(
+                store.config, os.environ, http, background=True, admission=DenyDispatch()
+            ),
+        )
+        models = SourceBudgetModels(
+            store, RuntimeModels(store.config, os.environ, http, background=True)
+        )
+        request = {"system": "s", "max_output_tokens": 1024, "timeout_seconds": 5}
+        undispatched = executor.submit(blocked.generate, "extraction", user="local", **request)
+        expected_requests = ["sibling"] if overlap else []
+        try:
+            assert admission_waiting.wait(5), "the first reservation did not reach local admission"
+            if overlap:
+                with pytest.raises(httpx.ReadTimeout):
+                    models.generate("extraction", user="sibling", **request)
+            assert started_requests == expected_requests
+        finally:
+            reject_dispatch.set()
+        with pytest.raises(ModelDispatchUnavailable):
+            undispatched.result(timeout=5)
+        with pytest.raises(httpx.ReadTimeout):
+            models.generate("extraction", user="retry", **request)
+        with pytest.raises(GenerationBudgetExceeded):
+            models.generate("extraction", user="retry again", **request)
+        assert started_requests == [*expected_requests, "retry"]
 
 
 @pytest.mark.parametrize("unresolved", [False, True])

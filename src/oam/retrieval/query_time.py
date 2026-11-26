@@ -246,6 +246,7 @@ def _parse_query_time(query: str, local_reference: datetime, zone: ZoneInfo) -> 
         connector = query[left[1] : right[0]].strip().casefold()
         prefix = query[: left[0]]
         interval = connector in {"to", "-", "–", "—", "~", "〜", "到", "至"}
+        interval |= connector in {"till", "until"} and bool(re.search(r"\bfrom\s*$", prefix, re.I))
         interval |= connector == "and" and bool(re.search(r"\bbetween\s*$", prefix, re.I))
         interval |= connector == "から" and query[right[1] :].lstrip().startswith("まで")
         if interval:

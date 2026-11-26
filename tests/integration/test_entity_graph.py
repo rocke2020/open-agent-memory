@@ -190,9 +190,6 @@ def test_partial_revalidation_keeps_other_graph_paths_and_independent_direct_hit
         )
 
     class ChangedAliasRepository(RecallRepository):
-        def lexical(self, query, limit):
-            return [{"unit_id": "continuation", "score": 1.0}]
-
         def anchors(self, query, limit):
             return []
 
@@ -217,7 +214,7 @@ def test_partial_revalidation_keeps_other_graph_paths_and_independent_direct_hit
 
     result = service.search(
         authority,
-        SearchRequest(query="research projects", recall_level="normal", allow_partial=True),
+        SearchRequest(query="joined", recall_level="normal", allow_partial=True),
     )
 
     by_id = {item["unit_id"]: item for item in result["items"]}

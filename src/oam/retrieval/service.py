@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from itertools import zip_longest
+from threading import Event
 from uuid import uuid4
 
 import httpx
@@ -435,97 +436,149 @@ class RecallService:
                 if row["kind"] == "fact"
                 and row["score"] >= self.config.search.graph_seed_min_similarity
             )[: self.config.search.graph_seed_max]
-            if (graph != "off" or causal_graph) and (seeds or mode != "fast"):
-                expansion = stage(
-                    "graph",
-                    lambda: (
-                        read(
-                            "fast_graph",
-                            seeds,
-                            vector,
-                            include_entities=graph != "off",
-                            include_causal=causal_graph,
-                        )
-                        if mode == "fast" and graph != "full"
-                        else read(
-                            "ordinary",
-                            seeds,
-                            vector,
-                            include_semantic=graph == "full",
-                            include_entities=graph != "off",
-                            include_causal=causal_graph,
-                        )
-                    ),
-                )
-                if expansion is not None:
-                    ranks, evidence = expansion
-                    arms["graph"] = ranks
-                    for node_id, node_paths in evidence.items():
-                        paths.setdefault(node_id, []).extend(node_paths)
-            if request.time_window:
+            graph_enabled = (graph != "off" or causal_graph) and (seeds or mode != "fast")
+            time_window = request.time_window
+            direct_arms = arms["dense"], arms["lexical"]
 
-                def temporal():
-                    window = TimeRange(request.time_window.start, request.time_window.end)
-                    node_limit = tier.temporal_nodes
-                    with self._repository(authority, request, deadline) as repository:
-                        direct_ids = tuple(
-                            item.node_id
-                            for item in reciprocal_rank_fusion(
-                                (arms["dense"], arms["lexical"]),
-                                rrf_k=self.config.search.rrf_k,
-                            )
-                        )
-                        matched = repository.temporal_matches(direct_ids)
-                        temporal_nodes = {
-                            node.node_id: node for node in repository.temporal_nodes(seeds, vector)
-                        }
-                        for node in repository.temporal_candidates(vector, tier.channel_candidates):
-                            temporal_nodes.setdefault(node.node_id, node)
-                        selected = select_temporal_seeds(
-                            tuple(temporal_nodes.values()),
-                            window=window,
-                            seed_limit=min(self.config.search.temporal_seed_max, node_limit),
-                            bucket_count=self.config.search.temporal_coverage_buckets,
-                        )
-                        recovered_seeds = tuple(
-                            node.node_id for node in selected if node.node_id not in matched
-                        )
-                        expansion = temporal_spread(
-                            selected,
-                            lambda nodes, limit: repository.temporal_neighbors_batch(
-                                nodes, vector, limit
-                            ),
-                            window=window,
-                            node_limit=node_limit,
-                            neighbor_limit=self.config.search.temporal_neighbors,
-                            deadline_reached=lambda: time.monotonic() >= deadline,
-                        )
-                        return tuple(dict.fromkeys((*matched, *recovered_seeds))), expansion
+            def temporal(cancelled: Event | None = None):
+                assert time_window is not None
+                window = TimeRange(time_window.start, time_window.end)
+                node_limit = tier.temporal_nodes
 
-                temporal_result = stage("temporal", temporal)
-                if temporal_result is not None:
-                    matched, expansion = temporal_result
-                    temporal_stop = expansion.stop_reason
-                    if expansion.stop_reason == "deadline":
-                        if not request.allow_partial:
-                            raise RecallUnavailable("temporal stage ended at deadline")
-                        degraded.append("temporal_deadline")
-                    arms["temporal"] = tuple(
-                        dict.fromkeys((*matched, *(hit.node_id for hit in expansion.discoveries)))
+                def check_cancelled():
+                    if cancelled is not None and cancelled.is_set():
+                        raise CancelledError
+
+                check_cancelled()
+                with self._repository(authority, request, deadline) as repository:
+                    direct_ids = tuple(
+                        item.node_id
+                        for item in reciprocal_rank_fusion(
+                            direct_arms, rrf_k=self.config.search.rrf_k
+                        )
                     )
-                    for node_id in matched:
-                        paths.setdefault(node_id, []).append(
-                            {"arm": "temporal", "relation": "time_match", "nodes": [node_id]}
+                    check_cancelled()
+                    matched = repository.temporal_matches(direct_ids)
+                    check_cancelled()
+                    temporal_nodes = {
+                        node.node_id: node for node in repository.temporal_nodes(seeds, vector)
+                    }
+                    check_cancelled()
+                    for node in repository.temporal_candidates(vector, tier.channel_candidates):
+                        temporal_nodes.setdefault(node.node_id, node)
+                    check_cancelled()
+                    selected = select_temporal_seeds(
+                        tuple(temporal_nodes.values()),
+                        window=window,
+                        seed_limit=min(self.config.search.temporal_seed_max, node_limit),
+                        bucket_count=self.config.search.temporal_coverage_buckets,
+                    )
+                    recovered_seeds = tuple(
+                        node.node_id for node in selected if node.node_id not in matched
+                    )
+
+                    def temporal_neighbors(nodes, limit):
+                        check_cancelled()
+                        return repository.temporal_neighbors_batch(nodes, vector, limit)
+
+                    expansion = temporal_spread(
+                        selected,
+                        temporal_neighbors,
+                        window=window,
+                        node_limit=node_limit,
+                        neighbor_limit=self.config.search.temporal_neighbors,
+                        deadline_reached=lambda: time.monotonic() >= deadline,
+                    )
+                    return tuple(dict.fromkeys((*matched, *recovered_seeds))), expansion
+
+            temporal_elapsed = None
+
+            def timed_temporal(cancelled: Event):
+                nonlocal temporal_elapsed
+                began = time.monotonic()
+                try:
+                    return temporal(cancelled)
+                finally:
+                    temporal_elapsed = (time.monotonic() - began) * 1000
+
+            with ExitStack() as expansion_reads:
+                temporal_future = None
+                if (
+                    graph_enabled
+                    and seeds
+                    and time_window is not None
+                    and mode == "normal"
+                    and getattr(self.pool, "max_size", 1) > 2
+                ):
+                    # Leave room for another borrower while both reads own a connection.
+                    executor = expansion_reads.enter_context(
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="oam-recall-temporal")
+                    )
+                    cancelled = Event()
+                    temporal_future = executor.submit(timed_temporal, cancelled)
+                    expansion_reads.callback(temporal_future.cancel)
+                    expansion_reads.callback(cancelled.set)
+                if graph_enabled:
+                    expansion = stage(
+                        "graph",
+                        lambda: (
+                            read(
+                                "fast_graph",
+                                seeds,
+                                vector,
+                                include_entities=graph != "off",
+                                include_causal=causal_graph,
+                            )
+                            if mode == "fast" and graph != "full"
+                            else read(
+                                "ordinary",
+                                seeds,
+                                vector,
+                                include_semantic=graph == "full",
+                                include_entities=graph != "off",
+                                include_causal=causal_graph,
+                            )
+                        ),
+                    )
+                    if expansion is not None:
+                        ranks, evidence = expansion
+                        arms["graph"] = ranks
+                        for node_id, node_paths in evidence.items():
+                            paths.setdefault(node_id, []).extend(node_paths)
+                if time_window is not None:
+                    if temporal_future is None:
+                        temporal_result = stage("temporal", temporal)
+                    else:
+                        temporal_result = stage(
+                            "temporal", lambda: temporal_future.result(timeout=_remaining(deadline))
                         )
-                    for hit in expansion.discoveries:
-                        paths.setdefault(hit.node_id, []).append(
-                            {
-                                "arm": "temporal",
-                                "nodes": list(hit.path),
-                                "edge_ids": list(hit.path_edge_ids),
-                                "score": hit.score,
-                            }
-                        )
+                        if temporal_elapsed is not None:
+                            timing["temporal"] = temporal_elapsed
+                else:
+                    temporal_result = None
+            if temporal_result is not None:
+                matched, expansion = temporal_result
+                temporal_stop = expansion.stop_reason
+                if expansion.stop_reason == "deadline":
+                    if not request.allow_partial:
+                        raise RecallUnavailable("temporal stage ended at deadline")
+                    degraded.append("temporal_deadline")
+                arms["temporal"] = tuple(
+                    dict.fromkeys((*matched, *(hit.node_id for hit in expansion.discoveries)))
+                )
+                for node_id in matched:
+                    paths.setdefault(node_id, []).append(
+                        {"arm": "temporal", "relation": "time_match", "nodes": [node_id]}
+                    )
+                for hit in expansion.discoveries:
+                    paths.setdefault(hit.node_id, []).append(
+                        {
+                            "arm": "temporal",
+                            "nodes": list(hit.path),
+                            "edge_ids": list(hit.path_edge_ids),
+                            "score": hit.score,
+                        }
+                    )
 
         def validate_paths():
             nonlocal paths
@@ -1065,10 +1118,27 @@ class RecallService:
                 )
             )
             if gate_active:
+                recovery_source_count = sum(
+                    key in recovery_anchors for key in discovery_source_keys
+                )
+                corroborated_ids = set(arms.get("lexical", ())).intersection(arms["dense"])
+                # A corroborated assistant fact can locate user originals in its source.
+                # Keep the existing source count and leave reply witnesses untouched.
+                for item in discovery_seed_items:
+                    if (
+                        item["kind"] != "fact"
+                        or item["origin"] != "memory"
+                        or item["unit_id"] not in corroborated_ids
+                    ):
+                        continue
+                    for citation in item["citations"]:
+                        if citation.get("span", {}).get("role") == "assistant":
+                            recovery_anchors.setdefault(
+                                (citation["source_id"], citation["source_version"]), item["unit_id"]
+                            )
                 discovery_source_keys = tuple(
                     key for key in discovery_source_keys if key in recovery_anchors
-                )
-                recovery_source_count = len(discovery_source_keys)
+                )[:recovery_source_count]
             if discovery_source_keys:
                 excluded_originals = tuple(hydrated_passages)
                 if gate_active:

@@ -23,6 +23,102 @@ def repository(connection, authority):
     )
 
 
+def name_support_reads(plan):
+    own = (
+        plan["Actual Rows"] * plan["Actual Loops"]
+        if plan.get("Relation Name") == "entity_name_support"
+        else 0
+    )
+    return own + sum(name_support_reads(child) for child in plan.get("Plans", ()))
+
+
+@pytest.mark.parametrize("lookup", ("exact", "family", "reference"))
+def test_name_lookup_does_not_scan_repeated_support(recall_database, monkeypatch, lookup):
+    connection, authority = recall_database
+    entities = repository(connection, authority)
+    quote = "Nightly maintenance ran successfully."
+    add_fact(connection, authority, "initial", quote)
+    entities.publish_fact("initial", ("Nightly maintenance",), quote)
+    identity = entities._exact("Nightly maintenance")[0]
+    for number in range(16):
+        memory_id = f"repeat-{number}"
+        add_fact(connection, authority, memory_id, quote)
+        entities._support(identity["name_id"], memory_id, quote)
+    if lookup == "family":
+        add_fact(connection, authority, "namesake", quote)
+
+    connection.execute("SET LOCAL ROLE oam_content")
+    read = entities._rows
+    support_rows = []
+
+    def explain(query, parameters):
+        if lookup != "family" or "e.canonical_name,e.canonical_key" in query:
+            plan = connection.execute(
+                "EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters
+            ).fetchone()
+            support_rows.append(name_support_reads(plan[0][0]["Plan"]))
+        return read(query, parameters)
+
+    monkeypatch.setattr(entities, "_rows", explain)
+    if lookup == "exact":
+        assert entities._exact("NIGHTLY maintenance") == [identity]
+    elif lookup == "family":
+        entities._new_identity("namesake", "Nightly maintenance", quote, object_key="distinct")
+        labels = connection.execute(
+            "SELECT canonical_name FROM entity_units ORDER BY canonical_name"
+        ).fetchall()
+        assert labels == [("Nightly maintenance-1",), ("Nightly maintenance-2",)]
+    else:
+        references = ({"name": "Nightly maintenance", "reference_id": "initial"},)
+        assert entities._reference("NIGHTLY maintenance", references) == identity
+    expected_support_reads = {"exact": 1, "family": 2, "reference": 4}
+    assert 0 < sum(support_rows) <= expected_support_reads[lookup]
+
+
+def test_legacy_name_lookup_skips_support_for_already_labelled_entity(recall_database, monkeypatch):
+    connection, authority = recall_database
+    entities = repository(connection, authority)
+    quote = "Nightly maintenance-1 ran successfully."
+    add_fact(connection, authority, "labelled", quote)
+    identity = entities._new_identity(
+        "labelled", "Nightly maintenance-1", quote, object_key="existing"
+    )
+    for number in range(16):
+        memory_id = f"repeat-{number}"
+        add_fact(connection, authority, memory_id, quote)
+        entities._support(identity["name_id"], memory_id, quote)
+    for memory_id in ("first", "second"):
+        add_fact(connection, authority, memory_id, "Nightly maintenance ran.")
+
+    connection.execute("SET LOCAL ROLE oam_content")
+    connection.execute("SET LOCAL join_collapse_limit=1")
+    read = entities._rows
+    legacy_support_reads = []
+
+    def explain(query, parameters):
+        if "e.canonical_key IS NULL" in query:
+            plan = connection.execute(
+                "EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters
+            ).fetchone()
+            legacy_support_reads.append(name_support_reads(plan[0][0]["Plan"]))
+        return read(query, parameters)
+
+    monkeypatch.setattr(entities, "_rows", explain)
+    for memory_id in ("first", "second"):
+        entities._new_identity(
+            memory_id, "Nightly maintenance", "Nightly maintenance ran.", object_key=memory_id
+        )
+    labels = connection.execute(
+        "SELECT canonical_name FROM entity_units ORDER BY canonical_name"
+    ).fetchall()
+    assert labels == [
+        ("Nightly maintenance-1",),
+        ("Nightly maintenance-2",),
+        ("Nightly maintenance-3",),
+    ]
+    assert legacy_support_reads and sum(legacy_support_reads) == 0
+
+
 def test_same_group_repeated_job_reuses_one_identity(recall_database):
     connection, authority = recall_database
     entities = repository(connection, authority)

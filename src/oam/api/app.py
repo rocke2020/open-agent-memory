@@ -1633,6 +1633,19 @@ def _operation_response(record: OperationRecord) -> OperationResponse:
         StoredOperationStatus.FAILED_TERMINAL: OperationStatus.FAILED,
         StoredOperationStatus.CANCELLED: OperationStatus.CANCELLED,
     }
+    stage_state = record.stage_state
+    if (
+        record.status == StoredOperationStatus.PARTIAL_FAILED
+        and stage_state.get("error") == "SourceLeaseExhausted"
+    ):
+        # The expired worker could not summarize its final checkpoints.
+        stage_state = {
+            **stage_state,
+            **{
+                field: {**stage_state.get(field, {}), "coverage": "partial"}
+                for field in ("usage", "embedding_usage")
+            },
+        }
     return OperationResponse(
         operation_id=record.operation_id,
         source_id=record.source_id,
@@ -1642,7 +1655,7 @@ def _operation_response(record: OperationRecord) -> OperationResponse:
         readiness=OperationReadiness(
             accepted=True,
             **{
-                name: bool(record.stage_state.get(name, False))
+                name: bool(stage_state.get(name, False))
                 for name in (
                     "source_searchable",
                     "memory_ready",
@@ -1653,7 +1666,7 @@ def _operation_response(record: OperationRecord) -> OperationResponse:
                 )
             },
         ),
-        stage_state=record.stage_state,
-        usage=record.stage_state.get("usage", {}),
-        embedding_usage=record.stage_state.get("embedding_usage", {}),
+        stage_state=stage_state,
+        usage=stage_state.get("usage", {}),
+        embedding_usage=stage_state.get("embedding_usage", {}),
     )
