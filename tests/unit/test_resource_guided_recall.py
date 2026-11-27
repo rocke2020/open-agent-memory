@@ -203,6 +203,28 @@ def test_resource_window_falls_back_to_seed_when_complete_window_does_not_fit():
     assert items == [seed]
 
 
+@pytest.mark.parametrize(
+    ("max_results", "expected", "omitted"),
+    [(1, ["first"], ["second"]), (2, ["first", "second"], [])],
+)
+def test_resource_windows_keep_earlier_results_and_share_cap(max_results, expected, omitted):
+    first = resource("first", "doc-a", 0, "First seed.")
+    first_neighbor = resource("first-neighbor", "doc-a", 1, "First continuation.")
+    second = resource("second", "doc-b", 0, "Second seed.")
+    second_neighbor = resource("second-neighbor", "doc-b", 1, "Second continuation.")
+    items, omissions, _, _ = assemble_context(
+        [first, second],
+        [],
+        context_max_tokens=4096,
+        include_chunks=True,
+        max_results=max_results,
+        resource_windows={"first": [first, first_neighbor], "second": [second, second_neighbor]},
+    )
+    assert [item["unit_id"] for item in items] == expected
+    assert [len(item["citations"]) for item in items] == [2] * len(expected)
+    assert omissions == omitted
+
+
 def test_resource_window_keeps_distinct_passage_time_evidence_separate():
     service = ResourceService(guidance=True)
     service.repo.rows["neighbor"]["time_evidence"] = [{"basis": "event", "start": "2024-01-01"}]

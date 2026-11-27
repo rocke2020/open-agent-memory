@@ -69,7 +69,7 @@ class MemoryStore:
         pass
 
     def resume_source(self):
-        return {}, {}, []
+        return {}, {}, [], []
 
     def resource_passages(self):
         return {}
@@ -1082,6 +1082,7 @@ def test_partial_interaction_reuses_published_passage_boundaries():
         },
         {},
         [],
+        [],
     )
     index_source._index_interaction(store.config, store, LocalModels(), request)
     assert [unit["text"] for unit in store.units[:2]] == ["甲乙", "丙丁戊己"]
@@ -1135,6 +1136,7 @@ def test_resume_reuses_extraction_checkpoints_across_a_completed_passage(
             return (
                 {0: [(i, text, passage_ids[i]) for i, text in enumerate(texts)]},
                 {passage_ids[1]: {published_id}},
+                [],
                 [],
             )
 
@@ -1353,6 +1355,7 @@ def test_partial_interaction_does_not_extract_a_published_fact_again():
         {0: [(0, "A stored fact.", passage_id)]},
         {passage_id: {"fact"}},
         [diagnostic],
+        [],
     )
     models = LocalModels()
     fact_ids, diagnostics = index_source._index_interaction(store.config, store, models, request)

@@ -1,7 +1,10 @@
 """Deterministic context rendering shared by recall and recorded replay."""
 
 import json
+import time
+from collections import Counter
 from datetime import datetime
+from itertools import combinations
 
 from oam.config import TokenizerConfig
 from oam.quotes import unique_quote
@@ -15,6 +18,7 @@ from oam.tokens import (
 CONTEXT_TOKENIZER = "o200k_base"
 _CONTEXT_COUNTER = resolve_counter(TokenizerConfig(type=CONTEXT_TOKENIZER))
 ORIGINAL_KINDS = frozenset({"passage", "resource_passage"})
+OPTIONAL_REPLACEMENT_CHECKS = 8
 
 
 def context_token_count(text: str) -> int:
@@ -652,6 +656,9 @@ def assemble_context(
     optional_context: dict[str, list[dict]] | None = None,
     resource_windows: dict[str, list[dict]] | None = None,
     fact_source_bodies: str = "required",
+    ranked_original_ids: frozenset[str] = frozenset(),
+    related_user_fact: tuple[str, str] | None = None,
+    deadline: float = float("inf"),
 ) -> tuple[list[dict], list[str], list[list[dict]], bool]:
     """Admit complete representations in root relevance order under one rendered cap."""
     groups = {group[0]["unit_id"]: group for group in evidence_groups or []}
@@ -667,14 +674,14 @@ def assemble_context(
     attempted_resource_windows: list[dict] = []
     renderer = _ContextRenderer()
 
-    def selection(group):
-        tentative = bundle_items([*admitted, group])
+    def selection(bundles):
+        tentative = bundle_items(bundles)
         originals = sum(row["kind"] in ORIGINAL_KINDS for row in tentative)
         pools_fit = originals <= max_results and len(tentative) - originals <= max_results
         # Reserve pool slots before deduplication, so removal of a source-owning
         # root cannot revive more FACTs than the configured pool permits.
         if fact_source_bodies == "ranked_deduplicated":
-            tentative = bundle_items([*admitted, group], fact_source_bodies=fact_source_bodies)
+            tentative = bundle_items(bundles, fact_source_bodies=fact_source_bodies)
         tokens_fit = (
             pools_fit and context_token_count(renderer.render(tentative)[0]) <= context_max_tokens
         )
@@ -698,7 +705,7 @@ def assemble_context(
                 )
                 if window is not None:
                     attempted_resource_windows.append(window)
-                    tentative, pools_fit, tokens_fit = selection([window])
+                    tentative, pools_fit, tokens_fit = selection([*admitted, [window]])
                     if pools_fit and tokens_fit:
                         admitted.append([window])
                         selected = tentative
@@ -718,7 +725,7 @@ def assemble_context(
             for row in represent_group(group, fact_source_bodies=fact_source_bodies)
             if include_chunks or row["kind"] not in ORIGINAL_KINDS
         ]
-        tentative, pools_fit, tokens_fit = selection(representation)
+        tentative, pools_fit, tokens_fit = selection([*admitted, representation])
         if not pools_fit or not tokens_fit:
             omissions.append(identity)
             continue
@@ -734,10 +741,103 @@ def assemble_context(
                 current = selected_by_id.get(neighbor["unit_id"])
                 if current is not None and ("excerpt" not in current or "excerpt" in neighbor):
                     continue
-                tentative, pools_fit, tokens_fit = selection([neighbor])
+                tentative, pools_fit, tokens_fit = selection([*admitted, [neighbor]])
                 if pools_fit and tokens_fit:
                     admitted.append([neighbor])
                     selected = tentative
                     selected_by_id[neighbor["unit_id"]] = neighbor
                     optional_ids.add(neighbor["unit_id"])
+    if (
+        not optional_ids
+        or fact_source_bodies != "required"
+        or (not ranked_original_ids and related_user_fact is None)
+    ):
+        return selected, omissions, admitted, False
+
+    ranks = {item["unit_id"]: rank for rank, item in enumerate(candidates)}
+
+    def exchange(target, max_slots, cutoff):
+        nonlocal selected, omissions, admitted
+        # An optional singleton must disappear completely without touching a ranked root.
+        target_ids = {row["unit_id"] for row in target}
+        occurrences = Counter(row["unit_id"] for group in admitted for row in group)
+        replaceable = optional_ids - ranks.keys() - target_ids
+        slots = [
+            index
+            for index, group in enumerate(admitted)
+            if len(group) == 1
+            and (unit_id := group[0]["unit_id"]) in replaceable
+            and occurrences[unit_id] == 1
+        ]
+        target_rank = ranks[target[0]["unit_id"]]
+        next_root = next(
+            (
+                i
+                for i, group in enumerate(admitted)
+                if ranks.get(group[0]["unit_id"], -1) > target_rank
+            ),
+            len(admitted),
+        )
+        latest = tuple(reversed(slots[-OPTIONAL_REPLACEMENT_CHECKS:]))
+        for count in range(1, max_slots + 1):
+            for removed in combinations(latest, count):
+                if time.monotonic() >= cutoff:
+                    return
+                proposed = [group for i, group in enumerate(admitted) if i not in removed]
+                proposed.insert(next_root - sum(i < next_root for i in removed), target)
+                items, _, tokens_fit = selection(proposed)
+                if tokens_fit:
+                    omissions = [unit_id for unit_id in omissions if unit_id not in target_ids]
+                    omissions.extend(admitted[i][0]["unit_id"] for i in removed)
+                    selected, admitted = items, proposed
+                    return
+
+    selected_ids = {item["unit_id"] for item in selected}
+    omitted_originals = ranked_original_ids.intersection(omissions).difference(selected_ids)
+    target_original = next(
+        (
+            item
+            for item in candidates
+            if item["unit_id"] in omitted_originals
+            and item["kind"] == "passage"
+            and item["origin"] == "memory"
+            and any(citation.get("role") == "user" for citation in item["citations"])
+        ),
+        None,
+    )
+    if target_original is not None:
+        exchange([target_original], 1, deadline)
+    if related_user_fact is not None:
+        seed_id, target_id = related_user_fact
+        seed = next(
+            (group[0] for group in admitted if group[0]["unit_id"] == seed_id),
+            None,
+        )
+        related = groups.get(target_id)
+        if (
+            seed is not None
+            and seed["kind"] == "fact"
+            and target_id in omissions
+            and not any(item["unit_id"] == target_id for item in selected)
+            and related
+            and related[0]["kind"] == "fact"
+            and len(related) > 1
+            and all(row["kind"] == "passage" for row in related[1:])
+        ):
+            target_fact = related[0]
+            citations = target_fact["citations"]
+            seed_sources = {
+                (c["source_id"], c["source_version"], c["passage_id"]) for c in seed["citations"]
+            }
+            if (
+                citations
+                and all(
+                    citation["span"].get("role") == "user"
+                    and (citation["source_id"], citation["source_version"], citation["passage_id"])
+                    not in seed_sources
+                    for citation in citations
+                )
+                and _fact_support_key(target_fact, related) not in fact_support_keys
+            ):
+                exchange(related, 2, deadline)
     return selected, omissions, admitted, False

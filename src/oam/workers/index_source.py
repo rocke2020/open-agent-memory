@@ -43,7 +43,13 @@ from oam.indexing.identity import (
     index_generation,
 )
 from oam.indexing.references import eligible_reference_ids, freeze_extraction_references
-from oam.indexing.store import IndexStore, input_digest, stable_id
+from oam.indexing.store import (
+    IndexStore,
+    SourceStageFailures,
+    extraction_group_id,
+    input_digest,
+    stable_id,
+)
 from oam.models.embedding_inputs import configured_embedding_admission
 from oam.models.runtime import ModelOutputError, retryable_model_http_error
 from oam.workers.claims import claim_one
@@ -306,7 +312,7 @@ def _read_inline_semantic_state(store):
 
 
 def _index_interaction(config, store, models, request):
-    saved_passages, saved_facts, extraction_diagnostics = store.resume_source()
+    saved_passages, saved_facts, extraction_diagnostics, unfinished = store.resume_source()
     if extraction_diagnostics:
         with store.transaction() as connection:
             store.guard(connection)
@@ -318,18 +324,14 @@ def _index_interaction(config, store, models, request):
     window = EXTRACTION_WINDOW_BATCHES * capacity
     current_stage = "extraction_pipeline"
 
-    def checkpoint(stage, inputs, produce):
+    def checkpoint(stage, inputs, produce, **options):
         nonlocal current_stage
         current_stage = stage
-        return store.checkpoint(stage, inputs, produce)
+        return store.checkpoint(stage, inputs, produce, **options)
 
     def submit_extraction(members):
         passages = tuple(by_passage[item[0]] for item in members)
-        group_id = (
-            members[0][0]
-            if len(members) == 1
-            else stable_id("extraction_group", [item[0] for item in members])
-        )
+        group_id = extraction_group_id([item[0] for item in members])
         if len(members) == 1:
             passage_id, chunk, message, _, _, extraction_input, vector = members[0]
             extraction_envelope(
@@ -398,6 +400,39 @@ def _index_interaction(config, store, models, request):
         if len(pending_extractions) >= window:
             publish_extractions(wait_for_one=True)
 
+    def publish_group(group_id, owners, result, *, replay=None, already_published=()):
+        first_passage_id = next(iter(owners))
+        texts = tuple(
+            f"Assistant: {fact.quote}"
+            if owners[fact.passage_id or first_passage_id][0].role == MessageRole.ASSISTANT
+            else fact.text
+            for fact in result.facts
+        )
+        # An overlapping result may add links between facts already restored by another group.
+        if replay is not None and replay.fact_ids <= already_published:
+            vectors = (None,) * len(texts)
+        else:
+            batch_id = stable_id("facts_batch", [group_id])
+            vectors = checkpoint(
+                "facts_embed:" + batch_id,
+                texts,
+                lambda: models.embed(texts, timeout_seconds=config.model.attempt_timeout_seconds),
+                **({"replay": replay} if replay is not None else {}),
+            )["vectors"]
+        published_ids = _publish_facts(
+            store,
+            owners,
+            result,
+            vectors,
+            texts=texts,
+            metadata=request,
+            diagnostics=extraction_diagnostics,
+            replay=replay,
+            already_published=already_published,
+        )
+        fact_ids.extend(published_ids)
+        return published_ids
+
     def publish_extractions(*, wait_for_one=False):
         if not pending_extractions:
             return
@@ -443,32 +478,17 @@ def _index_interaction(config, store, models, request):
             raise failures[0][1]
         for group_id, members, result in publishable:
             owners = {item[0]: (item[2], item[3], item[4], item[1]) for item in members}
-            first_passage_id = members[0][0]
-            texts = tuple(
-                f"Assistant: {fact.quote}"
-                if owners[fact.passage_id or first_passage_id][0].role == MessageRole.ASSISTANT
-                else fact.text
-                for fact in result.facts
-            )
-            batch_id = stable_id("facts_batch", [group_id])
-            embedded = checkpoint(
-                "facts_embed:" + batch_id,
-                texts,
-                lambda texts=texts: models.embed(
-                    texts, timeout_seconds=config.model.attempt_timeout_seconds
-                ),
-            )
-            fact_ids.extend(
-                _publish_facts(
-                    store,
-                    owners,
-                    result,
-                    embedded["vectors"],
-                    texts=texts,
-                    metadata=request,
-                    diagnostics=extraction_diagnostics,
-                )
-            )
+            publish_group(group_id, owners, result)
+
+    def passage_locator(message, message_index, passage_index):
+        return {
+            "source_id": store.source["source_id"],
+            "source_version": store.source["source_version"],
+            "message_id": message.message_id,
+            "message_index": message_index,
+            "role": message.role.value,
+            "passage_index": passage_index,
+        }
 
     prepared = []
     chunking_started = time.monotonic()
@@ -522,6 +542,27 @@ def _index_interaction(config, store, models, request):
         )
         for item in prepared
     }
+    if unfinished:
+        from oam.indexing.store import StaleIndexWork
+
+        prepared_owners = {
+            passage_id: (message, evidence_id, passage_locator(message, index, ordinal), chunk)
+            for passage_id, chunk, message, evidence_id, index, ordinal in prepared
+        }
+        active_ids = set(fact_ids)
+        for saved in unfinished:
+            if not set(saved.members) <= prepared_owners.keys():
+                raise StaleIndexWork("saved extraction passage is incompatible with its source")
+            owners = {passage: prepared_owners[passage] for passage in saved.members}
+            result = FactExtraction.model_validate(
+                {key: value for key, value in saved.output.items() if key != "_passage_ids"}
+            )
+            group_id = extraction_group_id(list(saved.members))
+            active_ids.update(
+                publish_group(group_id, owners, result, replay=saved, already_published=active_ids)
+            )
+            for passage in saved.members:
+                saved_facts.setdefault(passage, set())
     # Checkpoint keys include the original group membership. Removing completed passages
     # before planning can change the boundaries of wholly unfinished groups.
     groups = plan_extraction_groups(tuple(by_passage.values()), config, request.reference_timezone)
@@ -565,14 +606,7 @@ def _index_interaction(config, store, models, request):
             ), vector in zip(batch, embedded["vectors"], strict=True):
                 if passage_id in saved_facts:
                     continue
-                locator = {
-                    "source_id": store.source["source_id"],
-                    "source_version": store.source["source_version"],
-                    "message_id": message.message_id,
-                    "message_index": message_index,
-                    "role": message.role.value,
-                    "passage_index": passage_index,
-                }
+                locator = passage_locator(message, message_index, passage_index)
                 with store.transaction() as connection:
                     store.guard(connection)
                     connection.execute(
@@ -674,9 +708,7 @@ def _index_interaction(config, store, models, request):
                 for _, error in extraction_failures
             ):
                 raise failure from None
-            raise RuntimeError(
-                "multiple indexing stages failed; usage coverage is partial"
-            ) from failure
+            raise SourceStageFailures(tuple(error for _, error in extraction_failures)) from failure
         raise
     else:
         extraction_executor.shutdown(wait=True)
@@ -1190,7 +1222,18 @@ def _visual_blocks(content: str, prefix: str, base_locator: dict):
     return tuple(blocks), spans
 
 
-def _publish_facts(store, owners, result, vectors, *, texts, metadata, diagnostics):
+def _publish_facts(
+    store,
+    owners,
+    result,
+    vectors,
+    *,
+    texts,
+    metadata,
+    diagnostics,
+    replay=None,
+    already_published=(),
+):
     from oam.indexing.entities import EntityRepository
 
     singleton_id = next(iter(owners))
@@ -1201,6 +1244,7 @@ def _publish_facts(store, owners, result, vectors, *, texts, metadata, diagnosti
         )
         for fact in result.facts
     }
+    published_ids = []
     prepared_entities = {}
     if any(
         (fact.entities or fact.entity_aliases) and fact.entity_mentions is None
@@ -1222,11 +1266,16 @@ def _publish_facts(store, owners, result, vectors, *, texts, metadata, diagnosti
     objects = {}
     with store.transaction() as connection:
         store.guard(connection)
+        if replay is not None:
+            store.guard_extraction_replay(connection, replay)
         offered_ids = list(
             {target for fact in result.facts for target in fact.related_existing_ids}
         )
         eligible_ids = eligible_reference_ids(connection, store.generation_id, offered_ids)
         for fact, text, vector in zip(result.facts, texts, vectors, strict=True):
+            memory_id = identifiers[fact.output_index]
+            if memory_id in already_published:
+                continue
             passage_id = fact.passage_id or singleton_id
             message, evidence_id, locator, chunk = owners[passage_id]
             if any(target not in eligible_ids for target in fact.related_existing_ids):
@@ -1238,7 +1287,6 @@ def _publish_facts(store, owners, result, vectors, *, texts, metadata, diagnosti
                         "code": "ineligible_reference",
                     }
                 )
-            memory_id = identifiers[fact.output_index]
             excluded = connection.execute(
                 "SELECT 1 FROM memories WHERE tenant_id=%s AND user_id=%s AND memory_id=%s "
                 "AND lifecycle_state='excluded' UNION ALL SELECT 1 FROM operations "
@@ -1248,6 +1296,7 @@ def _publish_facts(store, owners, result, vectors, *, texts, metadata, diagnosti
             ).fetchone()
             if excluded:
                 continue
+            published_ids.append(memory_id)
             support_locator = {**locator, "passage_id": passage_id, "quote": fact.quote}
             connection.execute(
                 "INSERT INTO memories(tenant_id,user_id,memory_id,canonical_claim,assertion_kind,"
@@ -1382,7 +1431,7 @@ def _publish_facts(store, owners, result, vectors, *, texts, metadata, diagnosti
                     )
         if diagnostics:
             store.readiness(connection, extraction_diagnostics=diagnostics)
-    return list(identifiers.values())
+    return published_ids
 
 
 def _insights(store, models, new_fact_ids):

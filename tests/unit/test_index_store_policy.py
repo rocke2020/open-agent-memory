@@ -273,7 +273,7 @@ def test_legacy_recipe_qualified_checkpoint_remains_reusable():
 def test_resume_skips_every_passage_in_a_completed_extraction_group():
     from contextlib import contextmanager
 
-    from oam.indexing.store import stable_id
+    from oam.indexing.store import extraction_group_id, stable_id
 
     memory_id = stable_id("memory", "passage-a", 0, "First fact.")
 
@@ -293,7 +293,8 @@ def test_resume_skips_every_passage_in_a_completed_extraction_group():
                     "diagnostics": [],
                     "_passage_ids": ["passage-a", "passage-b"],
                 }
-                return SimpleNamespace(fetchall=lambda: [("extract:group", output)])
+                stage = "extract:" + extraction_group_id(output["_passage_ids"])
+                return SimpleNamespace(fetchall=lambda: [(stage, b"", output)])
             if "jsonb_array_elements_text" in query:
                 return SimpleNamespace(fetchall=lambda: [])
             return SimpleNamespace(fetchone=lambda: ([],))
@@ -305,9 +306,10 @@ def test_resume_skips_every_passage_in_a_completed_extraction_group():
     store = guarded_store("index_source")
     store.transaction = transaction
     store.guard = lambda connection: None
-    _, saved, _ = store.resume_source()
+    _, saved, _, unfinished = store.resume_source()
     assert saved["passage-a"] == {memory_id}
     assert saved["passage-b"] == set()
+    assert unfinished == []
 
 
 def test_completed_model_response_is_saved_before_policy_retry():
@@ -512,6 +514,89 @@ def test_uncached_success_cannot_be_settled_by_a_sibling_timeout(case):
     work_update = next(params for query, params in queries if query.startswith("UPDATE work_units"))
     assert work_update[0] is False
     assert not any(sql.startswith("UPDATE attempts") for sql, _ in queries)
+
+
+@pytest.mark.parametrize(
+    ("failure", "sibling", "retryable", "delay", "claims_remaining"),
+    [
+        (429, None, True, 180, False),
+        (503, None, True, 180, False),
+        (503, None, True, 180, True),
+        (400, None, False, None, False),
+        (503, "unknown", False, None, False),
+        (503, "read", False, None, False),
+        ("connect", None, True, 0, False),
+        ("read", None, False, None, False),
+        ("empty_output", None, True, 0, False),
+        ("invalid_output", None, True, 0, False),
+        ("nontransient_extraction", None, False, None, False),
+    ],
+)
+def test_source_model_failure_records_safe_retry_details(
+    failure, sibling, retryable, delay, claims_remaining
+):
+    from contextlib import contextmanager
+
+    import httpx
+
+    from oam.indexing.extraction import ExtractionError
+    from oam.models.runtime import ModelEmptyContentError, ModelOutputError, Usage
+
+    statements = []
+
+    class Connection:
+        def execute(self, sql, params=()):
+            statements.append((sql, params))
+            return SimpleNamespace(
+                fetchone=lambda: ("queued" if claims_remaining else "failed_terminal",)
+            )
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    request = httpx.Request("POST", "https://test.invalid/index?key=private")
+    usage = Usage(total_tokens=30, coverage="partial")
+    errors = {
+        "read": httpx.ReadTimeout("private timeout", request=request),
+        "connect": httpx.ConnectError("private connection error", request=request),
+        "empty_output": ModelEmptyContentError("no visible output", usage=usage),
+        "invalid_output": ModelOutputError("invalid output", usage=usage),
+        "nontransient_extraction": ExtractionError("deterministic failure", usage=usage),
+    }
+    status = failure if isinstance(failure, int) else None
+    if status is None:
+        error = errors[failure]
+    else:
+        response = httpx.Response(status, request=request, headers={"Retry-After": "180"})
+        error = httpx.HTTPStatusError(
+            "private provider message", request=request, response=response
+        )
+    store = guarded_store("index_source")
+    store.claim.attempt_id = "attempt"
+    store.transaction = transaction
+    store.summarize_usage = lambda connection: None
+    store._unsettled_model_stages = {"extract:failed"}
+    store._model_stage_failures = {"extract:failed": error}
+    if sibling:
+        store._unsettled_model_stages.add("extract:sibling")
+        if sibling in errors:
+            store._model_stage_failures["extract:sibling"] = errors[sibling]
+
+    store.fail(error)
+
+    state = next(params[1].obj for sql, params in statements if sql.startswith("UPDATE operations"))
+    assert state["error"] == type(error).__name__
+    if claims_remaining:
+        assert "model_failure" not in state
+        state = state["last_retry_error"]
+    assert state["model_failure"] == {
+        "http_status": status,
+        "retryable": retryable,
+        "retry_after_seconds": delay,
+    }
+    if sibling == "unknown":
+        assert not any(sql.startswith("UPDATE attempts") for sql, _ in statements)
 
 
 def test_failed_embedding_identity_survives_a_successful_sibling():

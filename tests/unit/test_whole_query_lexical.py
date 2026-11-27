@@ -52,6 +52,8 @@ def test_whole_query_returns_database_relevance_order(
         def _execute(self, sql, parameters=()):
             assert "lexical_terms AS MATERIALIZED" not in sql
             self.calls.append((sql, parameters))
+            if "ordinary AS MATERIALIZED" in sql:
+                return [{**row, "branch": 0} for row in rows]
             return rows
 
         def _query_entity_names(self, query):

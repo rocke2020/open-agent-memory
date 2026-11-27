@@ -499,6 +499,14 @@ class RecallRepository:
             candidate = primary = full = _tsquery(candidates, "&&", parameters, "fallback")
         lexical_vector = "u.lexical" if fallback else "u.lexical_bilingual"
         bm25 = not fallback and self.config.search.lexical_ranker == "bm25"
+        rank_user_originals = (
+            bm25
+            and whole_query
+            and request is not None
+            and request.recall_level.value == "normal"
+            and request.include.chunks
+            and limit > 1
+        )
         bm25_prefix = _bm25_candidate_ctes(candidates) if bm25 else ""
         bm25_score = "bm.score"
         entity_prefix = ""
@@ -586,6 +594,12 @@ class RecallRepository:
                 "ARRAY(SELECT t.term_order FROM lexical_terms t "
                 f"WHERE {score_vector} @@ t.term) AS matched_term_orders,"
             )
+        user_original = (
+            "(u.kind='passage' AND u.origin='memory' AND u.locator->>'role'='user') "
+            "AS user_original,"
+            if rank_user_originals
+            else ""
+        )
         hits_sql = (
             "WITH queries AS (SELECT "
             f"{candidate} AS candidate,{primary} AS primary,{full} AS full)"
@@ -593,7 +607,7 @@ class RecallRepository:
             "(SELECT u.tenant_id,u.user_id,u.unit_id,u.kind,u.origin,"
             "u.source_id,u.source_version,u.evidence_id,u.passage_id,u.memory_id,"
             "u.insight_id,u.insight_revision,u.generation_id,"
-            f"{term_matches}u.mentioned_at,"
+            f"{term_matches}u.mentioned_at,{user_original}"
             f"{partial_score} AS partial_score,"
             f"{score_vector} @@ q.full AS full_match,"
             f"{score_vector} @@ q.primary AS primary_match,"
@@ -604,15 +618,54 @@ class RecallRepository:
             f"AND {self.lexical_candidate_predicate} AND {hits_predicate})"
         )
         if whole_query:
-            return self._execute(
+            order = (
+                "u.full_match DESC,u.primary_match DESC,score DESC,"
+                "u.mentioned_at DESC NULLS LAST,u.unit_id"
+            )
+            ordered = (
                 hits_sql + f", ordered AS (SELECT u.*,{score} AS score FROM hits u "
-                "ORDER BY u.full_match DESC,u.primary_match DESC,score DESC,"
-                "u.mentioned_at DESC NULLS LAST,u.unit_id OFFSET 0) "
-                "SELECT u.unit_id,u.score,u.entity_match,"
+                f"ORDER BY {order} OFFSET 0) "
+            )
+            if rank_user_originals:
+                fields = (
+                    "u.unit_id,u.score,u.entity_match,u.full_match,u.primary_match,"
+                    "u.mentioned_at,u.user_original,"
+                    "(u.full_match OR u.primary_match) AS strict_match"
+                )
+                eligible_user_originals = eligible_ordered.replace(
+                    "FROM ordered u", "FROM user_ordered u"
+                )
+                # The shared order makes the original top four redundant when the ordinary
+                # shortlist already contains four originals or exhausts all eligible hits.
+                rows = self._execute(
+                    ordered + f", ordinary AS MATERIALIZED (SELECT 0 AS branch,{fields} "
+                    f"FROM ({eligible_ordered}) u ORDER BY {order} LIMIT %(limit)s), "
+                    f"user_ordered AS (SELECT u.*,{score} AS score FROM hits u "
+                    "WHERE u.user_original AND (SELECT count(*) FROM ordinary)=%(limit)s "
+                    "AND (SELECT count(*) FROM ordinary WHERE user_original)<4 "
+                    f"ORDER BY {order} OFFSET 0) "
+                    "SELECT unit_id,score,entity_match,strict_match,branch FROM ("
+                    "SELECT * FROM ordinary UNION ALL "
+                    f"(SELECT 1 AS branch,{fields} FROM ({eligible_user_originals}) u "
+                    f"ORDER BY {order} LIMIT 4)) u ORDER BY branch,{order}",
+                    parameters,
+                )
+                ordinary, originals = [], []
+                for row in rows:
+                    if row.pop("branch") == 0:
+                        ordinary.append(row)
+                    else:
+                        originals.append(row)
+                known = {row["unit_id"] for row in ordinary}
+                novel = [row for row in originals if row["unit_id"] not in known][:2]
+                for index, row in enumerate(novel):
+                    ordinary.insert(2 * index + 1, row)
+                return ordinary[:limit]
+            return self._execute(
+                ordered + "SELECT u.unit_id,u.score,u.entity_match,"
                 "(u.full_match OR u.primary_match) AS strict_match FROM ("
                 + eligible_ordered
-                + ") u ORDER BY u.full_match DESC,u.primary_match DESC,u.score DESC,"
-                "u.mentioned_at DESC NULLS LAST,u.unit_id LIMIT %(limit)s",
+                + f") u ORDER BY {order} LIMIT %(limit)s",
                 parameters,
             )
         rows = self._execute(
@@ -886,13 +939,20 @@ class RecallRepository:
     def source_passage_locators(self, source_ids: Sequence[str]) -> list[dict]:
         if not source_ids:
             return []
+        # Bound the inputs before eligibility joins so a small owner in a large database
+        # does not get a plan that repeatedly scans unrelated source projections.
         return self._execute(
-            "WITH filtered AS NOT MATERIALIZED ("
+            "WITH source_units AS MATERIALIZED ("
+            "SELECT u.tenant_id,u.user_id,u.unit_id,u.passage_id,u.source_id,u.source_version,"
+            "u.generation_id,u.locator,u.ordinal FROM search_units u WHERE "
+            + owner_scope()
+            + "AND u.kind='passage' AND u.source_id=ANY(%(source_ids)s)), "
+            "eligible AS NOT MATERIALIZED ("
             + ELIGIBLE_PASSAGE_UNITS
             + ") SELECT u.unit_id,u.passage_id,u.source_id,u.source_version,"
             "u.generation_id,u.locator "
-            "FROM filtered u WHERE u.kind='passage' "
-            "AND u.source_id=ANY(%(source_ids)s) "
+            "FROM source_units u WHERE (SELECT true FROM eligible e WHERE "
+            "(e.tenant_id,e.user_id,e.unit_id)=(u.tenant_id,u.user_id,u.unit_id)) IS TRUE "
             "ORDER BY u.source_id,u.source_version,u.ordinal,u.unit_id",
             {"source_ids": list(source_ids)},
         )

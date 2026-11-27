@@ -276,6 +276,221 @@ def test_omitted_fact_does_not_make_a_rejected_neighbor_an_independent_original(
     assert {row["unit_id"] for row in result["items"]} == {"root", "support"}
 
 
+@pytest.mark.parametrize(
+    "mode,gated,source_seeds",
+    [
+        ("fast", False, 2),
+        ("normal", False, 2),
+        ("deep", False, 2),
+        ("normal", True, 2),
+        ("normal", False, 1),
+    ],
+)
+def test_normal_prefers_a_primary_user_original_to_optional_neighbor_text(
+    mode, gated, source_seeds
+):
+    support, neighbor = original("support", 4), original("neighbor", 2)
+    neighbor["text"] = ("More details about the earlier appointment. " * 16).strip()
+    root = fact("root", support)
+    direct = original("direct", 10)
+    direct["citations"][0]["source_id"] = "another-conversation"
+    direct["locator"] = direct["citations"][0]
+    direct["text"] = "I attended a second appointment the following week."
+    cap = context_token_count(render_context([root, support, neighbor]))
+    assert context_token_count(render_context([root, support, direct])) < cap
+
+    class RankedRepository(SourceRepository):
+        def lexical(self, query, count):
+            return [{"unit_id": "root", "strict_match": True}, {"unit_id": "direct"}]
+
+    class RankedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RankedRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    values["search"].update(
+        partial_match_gate="user_fact_exchange" if gated else "off", adjacent_user_context=True
+    )
+    values["search"][mode].update(context_max_tokens=cap, source_seed_results=source_seeds)
+    result = RankedService(
+        [root, support, neighbor, direct], config=type(CONFIG).model_validate(values)
+    ).search(object(), SearchRequest(query="appointments", recall_level=mode))
+
+    expected = "direct" if mode == "normal" and source_seeds > 1 else "neighbor"
+    assert [row["unit_id"] for row in result["items"]] == ["root", "support", expected]
+    assert result["context_tokens"] <= cap
+    omissions = result["diagnostics"]["context_budget"]["omission_reasons"]
+    assert omissions["neighbor" if expected == "direct" else "direct"] == "context_or_result_limit"
+
+
+def test_ranked_original_replacement_stops_at_request_deadline():
+    support = original("support", 4)
+    root = fact("root", support)
+    neighbor, direct = original("neighbor", 2), original("direct", 10)
+
+    items, omissions, _, _ = assemble_context(
+        [root, direct],
+        [],
+        context_max_tokens=1000,
+        include_chunks=True,
+        max_results=2,
+        evidence_groups=[[root, support]],
+        optional_context={"root": [neighbor]},
+        ranked_original_ids=frozenset({"direct"}),
+        deadline=0,
+    )
+
+    assert [item["unit_id"] for item in items] == ["root", "support", "neighbor"]
+    assert omissions == ["direct"]
+
+
+def test_ranked_original_replacement_respects_the_original_result_limit():
+    first, second = original("first", 4), original("second", 6)
+    earlier, later = fact("earlier", first), fact("later", second)
+    neighbor, direct = original("neighbor", 2), original("direct", 10)
+    neighbor["text"] = "The full earlier passage has several details."
+    excerpt = {
+        **neighbor,
+        "text": "The full earlier passage",
+        "excerpt": {"start": 0, "end": 24, "original_length": len(neighbor["text"])},
+    }
+
+    items, omissions, _, _ = assemble_context(
+        [earlier, later, direct],
+        [],
+        context_max_tokens=1000,
+        include_chunks=True,
+        max_results=3,
+        evidence_groups=[[earlier, first], [later, second]],
+        optional_context={"earlier": [excerpt], "later": [neighbor]},
+        ranked_original_ids=frozenset({"direct"}),
+    )
+
+    assert [item["unit_id"] for item in items] == [
+        "earlier",
+        "first",
+        "neighbor",
+        "later",
+        "second",
+    ]
+    assert next(item for item in items if item["unit_id"] == "neighbor")["text"] == neighbor["text"]
+    assert omissions == ["direct"]
+
+
+@pytest.mark.parametrize(
+    "mode,reached_dense,expected_rescue",
+    [
+        ("normal", True, True),
+        ("normal", False, False),
+        ("fast", True, False),
+    ],
+)
+def test_normal_packs_dense_related_user_fact_without_losing_ranked_evidence(
+    mode, reached_dense, expected_rescue
+):
+    support = original("support", 4)
+    before, after = original("before", 2), original("after", 6)
+    before["text"] = ("I noted a previous engineering detail. " * 15).strip()
+    after["text"] = ("I noted an additional engineering detail. " * 15).strip()
+    related_support = original("measurement", 10)
+    related_support["citations"][0]["source_id"] = "another-source"
+    related_support["text"] = ("I measured the query before changing the index. " * 15).strip()
+    kept_support = original("kept-support", 20)
+    kept_support["citations"][0]["source_id"] = "independent-source"
+    for passage in (support, before, after, related_support, kept_support):
+        passage["citations"][0]["message_id"] = passage["unit_id"]
+    seed, kept = fact("seed", support), fact("kept", kept_support)
+    related = fact("related", related_support)
+    cap = context_token_count(render_context([seed, support, before, after, kept, kept_support]))
+    assert (
+        context_token_count(
+            render_context([seed, support, kept, kept_support, related, related_support])
+        )
+        < cap
+    )
+
+    class RelatedRepository(SourceRepository):
+        def lexical(self, query, count):
+            return [{"unit_id": identity} for identity in ("seed", "kept", "related")]
+
+        def dense(self, vector, limit):
+            return [
+                {"unit_id": identity, "kind": "fact", "score": 0.8}
+                for identity in (("seed", "kept", "related") if reached_dense else ("seed", "kept"))
+            ]
+
+        def related_user_fact(self, unit_ids):
+            return {
+                "seed_id": "seed",
+                "unit_id": "related",
+                "source_id": "another-source",
+                "source_version": 1,
+            }
+
+    class RelatedService(SourceService):
+        @contextmanager
+        def _repository(self, authority, request, deadline):
+            yield RelatedRepository(request, self.rows, {})
+
+    values = CONFIG.model_dump(mode="json")
+    values["search"].update(adjacent_user_context=True, adjacent_user_context_max_chars=900)
+    values["search"][mode].update(context_max_tokens=cap, source_seed_results=1, max_results=6)
+    result = RelatedService(
+        [seed, kept, related, support, kept_support, related_support, before, after],
+        config=type(CONFIG).model_validate(values),
+    ).search(object(), SearchRequest(query="Recall the measurements", recall_level=mode))
+    ids = [item["unit_id"] for item in result["items"]]
+    assert all(identity in ids for identity in ("seed", "support", "kept", "kept-support"))
+    diagnostics = result["diagnostics"]["context_budget"]
+    if expected_rescue:
+        assert ids == ["seed", "support", "kept", "kept-support", "related", "measurement"]
+        assert ids[-2] not in diagnostics["omission_reasons"]
+        assert all(
+            diagnostics["omission_reasons"][x] == "context_or_result_limit"
+            for x in ("before", "after")
+        )
+    else:
+        assert "related" not in ids
+    assert result["context_tokens"] == context_token_count(result["context"]) <= cap
+
+
+@pytest.mark.parametrize("blocked_by", ["learned_pool", "same_source_passage", "deadline"])
+def test_related_group_exchange_preserves_the_existing_selection_when_blocked(blocked_by):
+    support = original("support", 4)
+    neighbor = original("neighbor", 2)
+    neighbor["text"] = ("A nearby update has optional context. " * 32).strip()
+    other_support = original("other-support", 10)
+    seed, kept = fact("seed", support), fact("kept", support)
+    target_support = support if blocked_by == "same_source_passage" else other_support
+    target = fact("target", target_support)
+    candidates = [seed, kept, target]
+    baseline, expected_omissions, _, _ = assemble_context(
+        candidates[:2],
+        [],
+        context_max_tokens=1000,
+        include_chunks=True,
+        max_results=2,
+        evidence_groups=[[seed, support], [kept, support]],
+        optional_context={"seed": [neighbor]},
+    )
+    assert [item["unit_id"] for item in baseline] == ["seed", "support", "neighbor", "kept"]
+    assert expected_omissions == []
+    selected, omissions, _, _ = assemble_context(
+        candidates,
+        [],
+        context_max_tokens=context_token_count(render_context(baseline)),
+        include_chunks=True,
+        max_results=2 if blocked_by == "learned_pool" else 8,
+        evidence_groups=[[seed, support], [kept, support], [target, target_support]],
+        optional_context={"seed": [neighbor]},
+        related_user_fact=("seed", "target"),
+        deadline=0 if blocked_by == "deadline" else float("inf"),
+    )
+    assert selected == baseline
+    assert omissions == ["target"]
+
+
 def test_source_window_does_not_treat_a_cited_passage_as_optional_when_ids_differ():
     support = original("support-unit", 4)
     root = fact("root", support)

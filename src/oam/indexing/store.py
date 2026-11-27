@@ -55,9 +55,30 @@ class StaleConsolidationPolicy(StaleConsolidationInputs):
     """Consolidation must restart from the current eligible support policy."""
 
 
+class SourceStageFailures(RuntimeError):
+    """Failures remaining after the source coordinator drained its stages."""
+
+    def __init__(self, errors: tuple[BaseException, ...]):
+        super().__init__("multiple indexing stages failed; usage coverage is partial")
+        self.errors = errors
+
+
 def stable_id(prefix: str, *parts: object) -> str:
     value = json.dumps(parts, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return prefix + "_" + hashlib.sha256(value.encode()).hexdigest()[:32]
+
+
+def extraction_group_id(passage_ids: list[str]) -> str:
+    return passage_ids[0] if len(passage_ids) == 1 else stable_id("extraction_group", passage_ids)
+
+
+@dataclass(frozen=True)
+class SavedExtraction:
+    stage: str
+    input_digest: bytes
+    members: tuple[str, ...]
+    fact_ids: frozenset[str]
+    output: dict
 
 
 def log_insight_indexed(
@@ -142,7 +163,7 @@ class IndexStore:
             )
 
     def resume_source(self):
-        """Read previously published interaction passages and their active facts."""
+        """Recover existing interaction publications and their source readiness."""
         with self.transaction() as connection:
             self.guard(connection)
             rows = connection.execute(
@@ -163,11 +184,30 @@ class IndexStore:
                     self.generation_id,
                 ),
             ).fetchall()
+            if (
+                rows
+                and connection.execute(
+                    "SELECT EXISTS (SELECT 1 FROM search_units u "
+                    "JOIN passages p USING(tenant_id,user_id,passage_id) "
+                    "JOIN evidence e ON (e.tenant_id,e.user_id,e.evidence_id)="
+                    "(p.tenant_id,p.user_id,p.evidence_id) "
+                    "WHERE u.tenant_id=%s AND u.user_id=%s AND u.source_id=%s "
+                    "AND u.source_version=%s AND u.generation_id=%s AND u.kind='passage' "
+                    "AND p.visible_to IS NULL AND e.status='active')",
+                    (
+                        *self.key,
+                        self.source["source_id"],
+                        self.source["source_version"],
+                        self.generation_id,
+                    ),
+                ).fetchone()[0]
+            ):
+                self.readiness(connection, source_searchable=True)
             diagnostic_rows = connection.execute(
-                "SELECT stage_key,output FROM index_stage_results "
+                "SELECT stage_key,input_digest,output FROM index_stage_results "
                 "WHERE tenant_id=%s AND user_id=%s AND source_id=%s AND source_version=%s "
                 "AND generation_id=%s AND starts_with(stage_key,'extract:') "
-                "ORDER BY stage_key",
+                "ORDER BY stage_key,created_at,input_digest",
                 (
                     *self.key,
                     self.source["source_id"],
@@ -175,17 +215,22 @@ class IndexStore:
                     self.generation_id,
                 ),
             ).fetchall()
-            removed_rows = connection.execute(
-                "SELECT DISTINCT passage_id FROM operations o "
-                "CROSS JOIN LATERAL jsonb_array_elements_text("
-                "COALESCE(o.stage_state->'removed_passage_ids','[]'::jsonb)) AS passage_id "
-                "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='remove_memory' "
-                "UNION SELECT sp.passage_id FROM operations o JOIN support sp ON "
-                "(sp.tenant_id,sp.user_id,sp.memory_id)="
-                "(o.tenant_id,o.user_id,o.removal_target_id) "
-                "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='remove_memory'",
-                (*self.key, *self.key),
-            ).fetchall()
+            saved_ids = {row[3] for row in rows if row[3] is not None}
+            links = set()
+            if saved_ids and any(
+                fact.get("caused_by") or fact.get("updates")
+                for _, _, output in diagnostic_rows
+                for fact in output.get("facts", ())
+            ):
+                links = set(
+                    connection.execute(
+                        "SELECT source_id,target_id,kind FROM unit_links "
+                        "WHERE tenant_id=%s AND user_id=%s AND source_id=ANY(%s) "
+                        "AND kind IN ('caused_by','updates')",
+                        (*self.key, sorted(saved_ids)),
+                    ).fetchall()
+                )
+            removed_passages = self.removed_fact_passages(connection)
             state_row = connection.execute(
                 "SELECT COALESCE(o.stage_state->'extraction_diagnostics', "
                 "parent.stage_state->'extraction_diagnostics', '[]'::jsonb) "
@@ -205,30 +250,57 @@ class IndexStore:
             passages.setdefault(message_index, {})[passage_index] = (content, passage_id)
             if memory_id:
                 facts.setdefault(passage_id, set()).add(memory_id)
-        saved_ids = {memory_id for values in facts.values() for memory_id in values}
         saved_passages = {passage_id for passage_id, _, _, _ in rows}
-        for (passage_id,) in removed_rows:
+        for passage_id in removed_passages:
             if passage_id in saved_passages:
                 facts.setdefault(passage_id, set())
         diagnostics = list(state_row[0]) if state_row else []
-        for stage, output in diagnostic_rows:
+        unfinished = []
+        for stage, digest, output in diagnostic_rows:
             group_id = stage.removeprefix("extract:").split(":recipe=", 1)[0]
-            output_ids = {
-                stable_id(
+            output_facts = output.get("facts", ())
+            identifiers = {
+                fact["output_index"]: stable_id(
                     "memory", fact.get("passage_id") or group_id, fact["output_index"], fact["text"]
                 )
-                for fact in output.get("facts", [])
+                for fact in output_facts
             }
-            members = output.get("_passage_ids", [])
-            completed = bool(members) and set(members) <= saved_passages and output_ids <= saved_ids
-            if completed:
+            output_ids = set(identifiers.values())
+            members = output.get("_passage_ids", [group_id] if group_id in saved_passages else [])
+            valid_members = (
+                members
+                and len(set(members)) == len(members)
+                and set(members) <= saved_passages
+                and group_id == extraction_group_id(members)
+                and all((fact.get("passage_id") or group_id) in members for fact in output_facts)
+            )
+            missing_links = any(
+                (identifiers[fact["output_index"]], identifiers[target], kind) not in links
+                for fact in output_facts
+                if identifiers[fact["output_index"]] in saved_ids
+                for kind in ("caused_by", "updates")
+                for target in fact.get(kind, ())
+                if identifiers.get(target) in saved_ids
+            )
+            if valid_members and output_ids <= saved_ids and not missing_links:
                 for passage_id in members:
                     facts.setdefault(passage_id, set())
-            if completed or output_ids & saved_ids:
-                for item in output.get("diagnostics", []):
-                    diagnostic = {"passage_id": group_id, **item}
-                    if diagnostic not in diagnostics:
-                        diagnostics.append(diagnostic)
+            elif (
+                valid_members
+                and (output_ids - saved_ids or missing_links)
+                and not removed_passages.intersection(members)
+            ):
+                unfinished.append(
+                    SavedExtraction(
+                        stage, bytes(digest), tuple(members), frozenset(output_ids), output
+                    )
+                )
+            elif not output_ids & saved_ids:
+                continue
+            for item in output.get("diagnostics", []):
+                diagnostic = {"passage_id": group_id, **item}
+                if diagnostic not in diagnostics:
+                    diagnostics.append(diagnostic)
         return (
             {
                 message: [(index, *entries[index]) for index in sorted(entries)]
@@ -236,7 +308,40 @@ class IndexStore:
             },
             facts,
             diagnostics,
+            unfinished,
         )
+
+    def removed_fact_passages(self, connection):
+        rows = connection.execute(
+            "SELECT DISTINCT passage_id FROM operations o "
+            "CROSS JOIN LATERAL jsonb_array_elements_text("
+            "COALESCE(o.stage_state->'removed_passage_ids','[]'::jsonb)) AS passage_id "
+            "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='remove_memory' "
+            "UNION SELECT sp.passage_id FROM operations o JOIN support sp ON "
+            "(sp.tenant_id,sp.user_id,sp.memory_id)="
+            "(o.tenant_id,o.user_id,o.removal_target_id) "
+            "WHERE o.tenant_id=%s AND o.user_id=%s AND o.kind='remove_memory'",
+            (*self.key, *self.key),
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    def guard_extraction_replay(self, connection, checkpoint: SavedExtraction) -> None:
+        # The caller holds the same user lock as memory removal and source publication.
+        exists = connection.execute(
+            "SELECT 1 FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
+            "AND source_id=%s AND source_version=%s AND generation_id=%s "
+            "AND stage_key=%s AND input_digest=%s",
+            (
+                *self.key,
+                self.source["source_id"],
+                self.source["source_version"],
+                self.generation_id,
+                checkpoint.stage,
+                checkpoint.input_digest,
+            ),
+        ).fetchone()
+        if not exists or self.removed_fact_passages(connection).intersection(checkpoint.members):
+            raise StaleIndexWork("saved extraction was withdrawn before publication")
 
     def resource_passages(self):
         """Read published Resource blocks before continuing a partial source."""
@@ -469,7 +574,9 @@ class IndexStore:
         finally:
             self._pipeline_owns_attempt = False
 
-    def checkpoint(self, stage: str, inputs: object, produce):
+    def checkpoint(
+        self, stage: str, inputs: object, produce, *, replay: SavedExtraction | None = None
+    ):
         digest = input_digest(inputs)
         stage_ref = stage + ":" + digest.hex()
         identity = (
@@ -483,6 +590,8 @@ class IndexStore:
         with self._model_stage_lock:
             with self.transaction() as connection:
                 self.guard(connection)
+                if replay is not None:
+                    self.guard_extraction_replay(connection, replay)
                 existing = connection.execute(
                     "SELECT output FROM index_stage_results WHERE tenant_id=%s AND user_id=%s "
                     "AND source_id=%s AND source_version=%s AND generation_id=%s "
@@ -520,9 +629,9 @@ class IndexStore:
             raise
         if hasattr(output, "model_dump"):
             output = output.model_dump(mode="json")
-        return self._save_model_checkpoint(identity, output, stage_ref)
+        return self._save_model_checkpoint(identity, output, stage_ref, replay=replay)
 
-    def _save_model_checkpoint(self, identity, output, stage_ref):
+    def _save_model_checkpoint(self, identity, output, stage_ref, *, replay=None):
         policy_error = None
         try:
             with self._model_stage_lock:
@@ -532,6 +641,8 @@ class IndexStore:
                     except StaleConsolidationPolicy as error:
                         self.guard(connection, allow_policy_change=True)
                         policy_error = error
+                    if replay is not None:
+                        self.guard_extraction_replay(connection, replay)
                     connection.execute(
                         "INSERT INTO index_stage_results(tenant_id,user_id,source_id,"
                         "source_version,"
@@ -961,7 +1072,7 @@ class IndexStore:
             )
             connection.execute(
                 "UPDATE operations SET status=%s,updated_at=clock_timestamp(), "
-                "stage_state=stage_state-'error'-'error_detail' "
+                "stage_state=stage_state-'error'-'error_detail'-'model_failure' "
                 "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s",
                 (
                     "running" if enqueue_semantic else "succeeded",
@@ -1035,6 +1146,7 @@ class IndexStore:
             ModelEmptyContentError,
             ModelOutputError,
             Usage,
+            retry_after_seconds,
             retryable_model_http_error,
         )
 
@@ -1054,6 +1166,7 @@ class IndexStore:
             else None
         )
         retryable_http = retryable_model_http_error(error)
+        pre_dispatch = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
         not_dispatched = (
             not self._unsettled_model_stages
             and (
@@ -1061,15 +1174,7 @@ class IndexStore:
                 or isinstance(error, GenerationBudgetRejection)
                 and not error.has_prior_generation_usage
             )
-            or isinstance(
-                error,
-                (
-                    httpx.ConnectError,
-                    httpx.ConnectTimeout,
-                    httpx.PoolTimeout,
-                    ExtractionInputTooLongError,
-                ),
-            )
+            or isinstance(error, (*pre_dispatch, ExtractionInputTooLongError))
         )
         if retryable_http and not not_dispatched:
             known_usage = Usage(coverage="partial")
@@ -1085,8 +1190,18 @@ class IndexStore:
         inputs_changed = (
             isinstance(error, StaleConsolidationInputs) and not self._unsettled_model_stages
         )
+
+        def retryable_model_error(value):
+            return (
+                retryable_model_http_error(value)
+                or isinstance(value, ModelEmptyContentError)
+                or isinstance(value, ExtractionError)
+                and value.retryable
+            )
+
         retryable = retryable or inputs_changed
         failures = getattr(self, "_model_stage_failures", {})
+        model_errors = error.errors if isinstance(error, SourceStageFailures) else (error,)
         unresolved_batch = bool(failures and self._unsettled_model_stages - failures.keys())
         if (
             failures
@@ -1101,9 +1216,10 @@ class IndexStore:
                 for value in errors
             )
             if known_failures:
+                if not isinstance(error, SourceStageFailures):
+                    model_errors = tuple(errors)
                 if all(
-                    isinstance(value, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
-                    and getattr(value, "usage", None) is None
+                    isinstance(value, pre_dispatch) and getattr(value, "usage", None) is None
                     for value in errors
                 ):
                     known_usage = None
@@ -1117,13 +1233,7 @@ class IndexStore:
                         for value in errors
                     ):
                         known_usage = known_usage.model_copy(update={"coverage": "partial"})
-                retryable = all(
-                    retryable_model_http_error(value)
-                    or isinstance(value, ModelEmptyContentError)
-                    or isinstance(value, ExtractionError)
-                    and value.retryable
-                    for value in errors
-                )
+                retryable = all(retryable_model_error(value) for value in model_errors)
             else:
                 unresolved_batch = True
                 known_usage = None
@@ -1156,6 +1266,41 @@ class IndexStore:
             retryable = False
             not_dispatched = False
             inputs_changed = False
+        if any(
+            isinstance(value, (httpx.HTTPError, ExtractionError, ModelOutputError))
+            for value in model_errors
+        ):
+            replayable = (
+                not unresolved_batch
+                and (not_dispatched or known_usage is not None)
+                and all(
+                    retryable_model_error(value)
+                    or type(value) is ModelOutputError
+                    and value.usage is not None
+                    for value in model_errors
+                )
+                and all(
+                    not isinstance(value, httpx.TransportError) or isinstance(value, pre_dispatch)
+                    for value in model_errors
+                )
+            )
+            status_errors = [
+                value for value in model_errors if isinstance(value, httpx.HTTPStatusError)
+            ]
+            diagnostic["model_failure"] = {
+                "http_status": error.response.status_code
+                if isinstance(error, httpx.HTTPStatusError)
+                else min((value.response.status_code for value in status_errors), default=None),
+                "retryable": replayable,
+                "retry_after_seconds": (
+                    max(
+                        (retry_after_seconds(value.response) for value in status_errors),
+                        default=0,
+                    )
+                    if replayable
+                    else None
+                ),
+            }
         with self.transaction() as connection:
             connection.execute(
                 "SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s FOR UPDATE", self.key
@@ -1201,11 +1346,12 @@ class IndexStore:
                     )
                 if retrying:
                     diagnostic["last_retry_error"] = dict(diagnostic)
+                    diagnostic.pop("model_failure", None)
                 if not semantic or self._inline_semantic or self._semantic_handoff:
                     self.summarize_usage(connection)
                 connection.execute(
                     "UPDATE operations SET status=%s,"
-                    "stage_state=stage_state||%s::jsonb "
+                    "stage_state=(stage_state-'model_failure')||%s::jsonb "
                     "WHERE tenant_id=%s AND user_id=%s AND operation_id=%s AND status='running'",
                     (
                         "running" if retrying else "partial_failed",

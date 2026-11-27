@@ -197,6 +197,47 @@ def add_user_passage(connection, authority, node_id, text, mentioned_at, *, dire
     )
 
 
+@pytest.mark.parametrize(
+    "mode,include_chunks,expected",
+    [
+        ("normal", True, ["a_fact", "z_user_passage", "b_fact"]),
+        ("normal", False, ["a_fact", "b_fact", "c_fact"]),
+        ("fast", True, ["a_fact", "b_fact", "c_fact"]),
+    ],
+)
+def test_normal_lexical_admits_an_eligible_user_original_outside_the_ordinary_limit(
+    recall_database, mode, include_chunks, expected
+):
+    from oam.retrieval.repository import RecallRepository
+
+    connection, authority = recall_database
+    for node in ("a_fact", "b_fact", "c_fact"):
+        add_fact(connection, authority, node, "orchard workshop")
+    invalid = [f"d_ineligible_{index}" for index in range(4)]
+    for node in [*invalid, "e_assistant", "z_user"]:
+        add_user_passage(connection, authority, node, "orchard", None)
+    connection.execute(
+        "UPDATE evidence SET learning_eligible=false WHERE tenant_id=%s AND user_id=%s "
+        "AND evidence_id=ANY(%s)",
+        (authority.tenant_id, authority.user_id, invalid),
+    )
+    connection.execute(
+        'UPDATE search_units SET locator=locator || \'{"role":"assistant"}\'::jsonb '
+        "WHERE tenant_id=%s AND user_id=%s AND unit_id='e_assistant_passage'",
+        (authority.tenant_id, authority.user_id),
+    )
+    config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
+    request = SearchRequest(
+        query="orchard workshop", recall_level=mode, include={"chunks": include_chunks}
+    )
+    connection.execute("SET LOCAL ROLE oam_api")
+    repository = RecallRepository(
+        connection, authority, config, deadline=time.monotonic() + 5, request=request
+    )
+
+    assert [row["unit_id"] for row in repository.lexical(request.query, 3)] == expected
+
+
 def test_source_user_originals_filter_role_revision_and_eligibility_before_limit(recall_database):
     from oam.retrieval.repository import RecallRepository
 
@@ -410,19 +451,39 @@ def test_supported_fact_ids_selects_next_eligible_user_fact(recall_database):
     ]
 
 
-def test_source_passage_locators_preserves_passage_and_unit_ids(recall_database):
+def test_source_passage_locators_returns_only_requested_active_passages(recall_database):
     from oam.retrieval.repository import RecallRepository
 
     connection, authority = recall_database
     add_user_passage(
         connection, authority, "source", "The user joined a meeting.", "2023-05-20T00:00:00Z"
     )
+    add_user_passage(
+        connection, authority, "superseded", "Previous version.", "2023-05-20T00:00:00Z"
+    )
+    add_user_passage(connection, authority, "other", "A different source.", None)
+    add_user_passage(connection, authority, "assistant", "An assistant reply.", None)
+    connection.execute(
+        'UPDATE search_units SET locator=locator || \'{"role":"assistant"}\'::jsonb '
+        "WHERE tenant_id=%s AND user_id=%s AND unit_id='assistant_passage'",
+        (authority.tenant_id, authority.user_id),
+    )
+    connection.execute(
+        "UPDATE source_versions SET status='superseded' "
+        "WHERE tenant_id=%s AND user_id=%s AND source_id='superseded'",
+        (authority.tenant_id, authority.user_id),
+    )
     config = load_config(Path(__file__).parents[2] / "configs/oam.yaml").config
     connection.execute("SET LOCAL ROLE oam_api")
     repository = RecallRepository(connection, authority, config, deadline=time.monotonic() + 5)
 
-    rows = repository.source_passage_locators(("source",))
-    assert [(row["passage_id"], row["unit_id"]) for row in rows] == [("source", "source_passage")]
+    rows = repository.source_passage_locators(
+        ("superseded", "source", "assistant", "missing", "source")
+    )
+    assert [(row["passage_id"], row["unit_id"], row["locator"]["role"]) for row in rows] == [
+        ("assistant", "assistant_passage", "assistant"),
+        ("source", "source_passage", "user"),
+    ]
 
 
 def test_candidate_eligibility_matches_full_source_and_support_policy(recall_database):

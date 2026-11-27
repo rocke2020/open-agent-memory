@@ -1,5 +1,7 @@
 import base64
 import json
+import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
@@ -10,7 +12,23 @@ import pytest
 from PIL import Image
 
 from oam.config import ModelsConfig, load_config
-from oam.models.runtime import ModelOutputError, RuntimeModels
+from oam.models.runtime import ModelOutputError, RuntimeModels, retry_after_seconds
+
+
+def test_retry_after_accepts_legacy_http_date_as_utc(monkeypatch):
+    previous = os.environ.get("TZ")
+    try:
+        monkeypatch.setenv("TZ", "Asia/Shanghai")
+        time.tzset()
+        monkeypatch.setattr(time, "time", lambda: 1795780800)
+        date = httpx.Response(503, headers={"Retry-After": "Fri Nov 27 12:02:00 2026"})
+        assert retry_after_seconds(date) == 120
+    finally:
+        if previous is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", previous)
+        time.tzset()
 
 
 @pytest.mark.parametrize("effort", ["none", "low", "high", "max"])

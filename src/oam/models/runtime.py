@@ -8,6 +8,8 @@ import math
 import time
 from collections.abc import Mapping
 from contextlib import suppress
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from threading import BoundedSemaphore, Event
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -35,6 +37,21 @@ def retryable_model_http_error(error: BaseException) -> bool:
         isinstance(error, httpx.HTTPStatusError)
         and (error.response.status_code == 429 or 500 <= error.response.status_code < 600)
     )
+
+
+def retry_after_seconds(response: httpx.Response) -> int | float:
+    value = response.headers.get("Retry-After", "").strip()
+    if response.status_code not in {429, 503} or not value:
+        return 0
+    try:
+        if value.isascii() and value.isdecimal():
+            return int(value)
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=UTC)
+        return max(0, date.timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 class ModelOutputError(ValueError):

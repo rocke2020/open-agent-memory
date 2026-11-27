@@ -821,12 +821,13 @@ class RecallService:
                 if isinstance(citation.get("source_id"), str)
             )
         )
-        primary_ids = {item["unit_id"] for item in seed_items}
-        direct_ids = set(arms.get("dense", ())) | set(arms.get("lexical", ()))
+        primary_direct_ids = frozenset(item["unit_id"] for item in seed_items).intersection(
+            (*arms.get("dense", ()), *arms.get("lexical", ()))
+        )
         primary_insights = [
             item
             for item in candidates
-            if item["unit_id"] in primary_ids & direct_ids and item["kind"] == "insight"
+            if item["unit_id"] in primary_direct_ids and item["kind"] == "insight"
         ]
         l2_diagnostics, l2_supports, l2_fact_items = [], {}, {}
         if primary_insights:
@@ -1508,6 +1509,18 @@ class RecallService:
             if resource_rerank_ids is not None
             else None
         )
+
+        related_fact_pair = None
+        related_seed_id = (related or {}).get("seed_id")
+        if (
+            mode == "normal"
+            and chunks
+            and fact_source_bodies == "required"
+            and related is not None
+            and related_seed_id in primary_direct_ids
+            and related["unit_id"] in arms.get("dense", ())
+        ):
+            related_fact_pair = related_seed_id, related["unit_id"]
         packing_started = time.monotonic()
         items, budget_omissions, admitted_roots, _ = assemble_context(
             packing_candidates,
@@ -1519,6 +1532,13 @@ class RecallService:
             optional_context=optional_context,
             resource_windows=resource_windows,
             fact_source_bodies=admission_source_bodies,
+            ranked_original_ids=(
+                primary_direct_ids
+                if mode == "normal" and fact_source_bodies == "required"
+                else frozenset()
+            ),
+            related_user_fact=related_fact_pair,
+            deadline=deadline,
         )
         timing["context_packing"] = (time.monotonic() - packing_started) * 1000
         selected_insights = [
@@ -1584,7 +1604,8 @@ class RecallService:
             assistant_deduplicated_fact_ids = sorted(required_ids - projected_ids)
             timing["context_packing"] += (time.monotonic() - projection_started) * 1000
         selected_ids = {item["unit_id"] for item in items}
-        omitted_by_gate = [node for node in gate_omissions if node not in selected_ids]
+        passed_to_packing = selected_ids.union(budget_omissions)
+        omitted_by_gate = [node for node in gate_omissions if node not in passed_to_packing]
         for diagnostic in l2_diagnostics:
             if diagnostic["status"] == "included" and diagnostic["unit_id"] not in selected_ids:
                 diagnostic.update(

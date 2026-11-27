@@ -17,6 +17,7 @@ from test_core_http import ROOT, SyntheticIndexModels, use_created_user_key
 from test_core_http import core_database as core_database
 
 from oam.config import load_config
+from oam.indexing.budget import GenerationBudgetRejection
 from oam.indexing.extraction import ExtractionError
 from oam.indexing.identity import index_generation
 from oam.indexing.store import IndexStore, input_digest
@@ -207,6 +208,128 @@ async def test_source_claim_finishes_complete_l1_pipeline(accepted_source):
                 (tenant, operation),
             ).fetchall()
         ) == {("index_source", "succeeded"), ("index_semantic_links", "succeeded")}
+
+
+@pytest.mark.parametrize("receipt_version", ["current", "legacy_singleton", "link_only"])
+async def test_retry_publishes_saved_fact_even_when_its_passage_already_has_a_fact(
+    accepted_source, monkeypatch, receipt_version
+):
+    from oam.indexing.store import stable_id
+    from oam.workers import index_source
+
+    client, dsn, tenant, config, operation = accepted_source
+    publish = index_source._publish_facts
+    published = []
+    added_text = "The same passage records a separate accepted fact."
+
+    def leave_checkpoint_after_partial_publication(store, owners, result, vectors, **kwargs):
+        ids = publish(store, owners, result, vectors, **kwargs)
+        published.extend(ids)
+        if len(published) == 2:
+            passage_id = next(iter(owners))
+            message, _, _, chunk = owners[passage_id]
+            additional = result.facts[0].model_copy(
+                update={"text": added_text, "output_index": 1, "updates": (0,)}
+            )
+            checkpoint = result.model_copy(update={"facts": (*result.facts, additional)})
+            payload = checkpoint.model_dump(mode="json")
+            if receipt_version != "legacy_singleton":
+                payload["_passage_ids"] = [passage_id]
+            store.checkpoint(
+                "extract:" + passage_id,
+                {
+                    "text": chunk.text,
+                    "context": chunk.previous_context,
+                    "role": message.role.value,
+                    "mentioned_at": message.event_time.isoformat(),
+                    "reference_facts": [
+                        {
+                            "id": ids[0],
+                            "text": result.facts[0].text,
+                            "role": message.role.value,
+                            "mentioned_at": message.event_time.isoformat(),
+                            "time_qualifiers": [],
+                        }
+                    ],
+                },
+                lambda: payload,
+            )
+            if receipt_version == "link_only":
+                earlier = checkpoint.model_copy(
+                    update={"facts": (*result.facts, additional.model_copy(update={"updates": ()}))}
+                )
+                publish(
+                    store,
+                    owners,
+                    earlier,
+                    (*vectors, vectors[0]),
+                    **{**kwargs, "texts": (*kwargs["texts"], added_text)},
+                )
+            published.append(stable_id("memory", passage_id, 1, added_text))
+            raise ModelOutputError(
+                "fixture interrupted publication after saving a second result",
+                usage=Usage(total_tokens=0, coverage="complete"),
+            )
+        return ids
+
+    with monkeypatch.context() as patch:
+        patch.setattr(index_source, "_publish_facts", leave_checkpoint_after_partial_publication)
+        with pytest.raises(ModelOutputError, match="fixture interrupted publication"):
+            run_source(dsn, config, SyntheticIndexModels())
+    first, second, missing = published
+
+    url = f"/v1/users/lin/operations/{operation}"
+    failed = (await client.get(url)).json()
+    assert failed["status"] == "partial"
+    recovered_id = missing
+    if receipt_version == "link_only":
+        with psycopg.connect(dsn) as db:
+            assert db.execute(
+                "SELECT 1 FROM search_units WHERE tenant_id=%s AND unit_id=%s",
+                (tenant, recovered_id),
+            ).fetchone() == (1,)
+            assert (
+                db.execute(
+                    "SELECT 1 FROM unit_links WHERE tenant_id=%s AND source_id=%s "
+                    "AND target_id=%s AND kind='updates'",
+                    (tenant, recovered_id, second),
+                ).fetchone()
+                is None
+            )
+    retry = await client.post(url + "/retry", headers={"Idempotency-Key": "replay-saved-fact"})
+    assert retry.status_code == 201, retry.text
+    replacement = retry.json()["operation_id"]
+    models = SyntheticIndexModels()
+    assert run_source(dsn, config, models)
+    ready = (await client.get(f"/v1/users/lin/operations/{replacement}")).json()
+    assert ready["status"] == "succeeded" and ready["readiness"]["links_ready"]
+    assert ready["readiness"]["source_searchable"]
+    assert models.generation_calls == []
+    if receipt_version == "link_only":
+        assert models.embedding_batches == []
+    with psycopg.connect(dsn) as db:
+        facts = db.execute(
+            "SELECT unit_id,content_text,embedding IS NOT NULL FROM search_units "
+            "WHERE tenant_id=%s AND kind='fact' ORDER BY unit_id",
+            (tenant,),
+        ).fetchall()
+        assert {row[0] for row in facts} == {first, second, missing}
+        assert (missing, added_text, True) in facts
+        assert db.execute(
+            "SELECT 1 FROM unit_links WHERE tenant_id=%s "
+            "AND source_id=%s AND target_id=%s AND kind='updates'",
+            (tenant, missing, second),
+        ).fetchone() == (1,)
+
+    repeat = await client.post(url + "/retry", headers={"Idempotency-Key": "recheck-saved-fact"})
+    assert repeat.status_code == 201, repeat.text
+    repeat_id = repeat.json()["operation_id"]
+    models = SyntheticIndexModels()
+    assert run_source(dsn, config, models)
+    ready = (await client.get(f"/v1/users/lin/operations/{repeat_id}")).json()
+    assert ready["status"] == "succeeded"
+    assert ready["readiness"]["source_searchable"]
+    assert models.generation_calls == models.embedding_batches == []
 
 
 @pytest.mark.parametrize("input_bound", [8192, 1])
@@ -1294,6 +1417,53 @@ async def test_provider_failure_retries_only_transient_statuses(accepted_source,
     operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
     assert operation["status"] == ("partial" if status == 401 else "processing")
     assert run_source(dsn, config, models) is (status != 401)
+
+
+@pytest.mark.parametrize("local_rejection", [False, True])
+async def test_concurrent_extraction_failures_preserve_retry_eligibility(
+    accepted_source, local_rejection
+):
+    client, dsn, tenant, config, operation_id = accepted_source
+    config = config.model_copy(
+        update={"provider": config.provider.model_copy(update={"llm_concurrency": 2})}
+    )
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "UPDATE work_units SET attempts_remaining=1 WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation_id),
+        )
+
+    class InvalidModels(SyntheticIndexModels):
+        def __init__(self):
+            super().__init__()
+            self.calls = Barrier(2)
+
+        def generate(self, role, **kwargs):
+            if role == "extraction":
+                self.calls.wait(timeout=5)
+                center = json.loads(kwargs["user"])["center"]["text"]
+                if local_rejection and center == "Lin prefers concise updates.":
+                    raise GenerationBudgetRejection("source generation budget rejected dispatch")
+                raise ExtractionError(
+                    "provider returned invalid extraction JSON",
+                    usage=Usage(total_tokens=12, coverage="complete"),
+                    retryable=True,
+                )
+            return super().generate(role, **kwargs)
+
+    with pytest.raises(RuntimeError, match="multiple indexing stages failed"):
+        run_source(dsn, config, InvalidModels())
+    operation = (await client.get(f"/v1/users/lin/operations/{operation_id}")).json()
+    assert operation["status"] == "partial"
+    assert operation["stage_state"]["model_failure"] == {
+        "http_status": None,
+        "retryable": not local_rejection,
+        "retry_after_seconds": None if local_rejection else 0,
+    }
+    with psycopg.connect(dsn) as connection:
+        assert connection.execute(
+            "SELECT disposition FROM attempts WHERE tenant_id=%s", (tenant,)
+        ).fetchall() == [("failed",)]
 
 
 async def test_model_timeout_can_settle_after_ordinary_claim_lease(accepted_source):
