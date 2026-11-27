@@ -12,27 +12,21 @@ Open Agent Memory（OAM）は、AI エージェント向けの完全にオープ
 
 ## パフォーマンスと精度
 
-**LongMemEval S（LME-500）で、OAM はコンテキスト上限 8,000 トークンで 476/500 問（95.2%）に正答し、保存済みコンテキストは平均 7,989.54 トークンでした。** Fast 検索では PostgreSQL の全文検索（FTS）で候補を抽出し、BM25 とカバー密度で順位付けしました。カバー密度は検索語が近接する候補を優先します。全問の判定が揃った 18k の Normal FTS 評価（**478/500、95.6%**）と比べ、平均コンテキストは **29.8% 減少**しました。[LME-500 の評価方法と結果](docs/benchmarks.md#1-longmemeval-s-at-8k-and-18k)
+![LongMemEval S、BEAM-10M、LegalBench-RAG mini の評価スコアと平均コンテキストトークン数](docs/assets/memory-performance.svg)
 
-| ベンチマーク | OAM | Hindsight の公開結果 | 保存済みコンテキストの平均 |
-| --- | --- | --- | --- |
-| **LongMemEval S** 正答率 | **95.2%（476/500）** | 94.6%（473/500） | **7,989.54** 対 43,124.55 トークン（**81.47% 削減**） |
-| **BEAM-10M** 平均ルーブリックスコア | **78.23%** | 64.08% | **24,676.88** 対 27,373.25 トークン（**9.85% 削減**） |
-| **BEAM-10M** 通過率（各問のスコア ≥ 0.5） | **86.0%（172/200）** | 73.5%（147/200） | |
+**LongMemEval S（LME-500）では、上限 8,000 トークンで 476/500 問（95.2%）に正答しました。** OAM の Fast 全文検索（FTS）と BM25 の評価で保存済みコンテキストは平均 **7,990** トークン、Hindsight の公開結果 **473/500（94.6%）** では **43,125** トークンでした。OAM の 18k Normal FTS 評価は **478/500（95.6%）** でした。8k の評価はアダプター経由で既存の L1 インデックスを再利用し、平均コンテキストは 18k の評価より **29.8% 少なく**なりました。[LME-500 の評価方法と結果](docs/benchmarks.md#1-longmemeval-s-at-8k-and-18k)
 
-**BEAM-10M は会話 1 件あたり 1,000 万トークン規模のメモリを評価します。** 10 件の履歴にまたがる 200 問を対象に、イベントの並べ替え、時間推論、矛盾の解消を評価します。OAM の平均スコアは **14.15 ポイント高く**、通過した問題は **25 問多く**なりました。全結果では、180 問の今回の検索に **24,000 トークン**のネイティブコンテキスト上限を用い、残りの 20 問は以前に保存済みのコンテキストを使用しました。[BEAM の評価方法と結果](docs/benchmarks.md#3-beam-10m)
+**BEAM-10M で、検索コンテキストの上限 12,000 トークンで平均スコア 85.24%、179/200 問が合格しました。** 11 月 27 日の評価は、1,000 万トークン規模の会話 10 件にわたる全 200 問を対象としています。OAM の Normal 検索を使用し、評価プログラムに原文を補う実験的な処理を加えました。[BEAM-10M の評価方法と結果](docs/benchmarks.md#3-beam-10m)
 
-OAM は低コストの **MiniMax M3.1 Flash** の adaptive モードで回答と判定を行い、両方の全データセットで Hindsight の公開最高スコアを上回りました。[AMB の結果マニフェスト](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+OAM は、Past.dev の公開比較表で最高の **85.03%** を上回り、Hindsight の公開スコア **64.08%** より **21.16 ポイント高く、合格数も 32 問多く**なりました。検索コンテキストの平均は OAM が **11,973** トークン、Hindsight が **27,373** トークンで、OAM は **56.26% 少ない**結果でした。各システムの評価条件は異なります。[Past.dev の比較表](https://past.dev/benchmarks/beam) · [Hindsight との比較](docs/benchmarks.md#3-beam-10m)
 
-**両方のベンチマークで Hindsight の公開結果と同じ質問、参照回答、採点ルールを使いました。** 回答・判定には、固定した Agent Memory Benchmark（AMB）リビジョンの同じプロンプトテンプレートを使いました。BEAM の判定呼び出し 3 件では、プロバイダー向けのリクエストに JSON の例を追加し、判定本文と採点ルールを維持しました。[Hindsight の固定版 LME-500 結果](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz) · [BEAM の採点方式](docs/benchmarks.md#3-beam-10m)
-
-比較はシステム全体の結果を対象とし、使用モデルとメモリ処理は異なります。LME-500 の平均値は、両システムで保存した各 500 件のコンテキストを `o200k_base` で数えたものです。8k のスコアは、既存の L1 インデックスを再利用した評価用アダプターで得られました。[LME-500 の比較詳細](docs/benchmarks.md#comparison-with-the-recorded-hindsight-result)
-
-MiniMax の公表価格はキャッシュされていない入力 100 万トークンあたり 0.15 米ドル、出力 100 万トークンあたり 0.60 米ドルです。[MiniMax 公式価格](https://platform.minimax.io/docs/pricing/overview#llm)
+**Past.dev との同条件での再評価**では、双方に同じ 12,000 トークンの上限とプロンプトを適用し、MiniMax M3.1 Flash の adaptive モードで回答と判定を行いました。OAM は **85.49%（180/200 問合格）**、Past.dev の保存済み検索結果は **80.54%（172/200 問合格）** で、OAM が **4.95 ポイント**上回りました。平均コンテキストはそれぞれ **11,973** トークンと **10,142** トークンでした。[再評価の詳細](docs/benchmarks.md#beam-10m-matched-replay)
 
 回答・判定モデルを再実行すると、スコアが変わることがあります。[同じ入力を使った MiniMax の実例](docs/benchmarks.md#answer-and-judge-variability)では、一方の回答は正解、もう一方は不正解でした。これは観測された変動の例であり、その発生頻度を示すものではありません。
 
-[結果・モデル料金・評価方法](docs/benchmarks.md) · [OAMB の評価結果一覧](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md) · [BEAM の質問ごとのエビデンス](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+**LegalBench-RAG mini の文書検索で、OAM の文字単位 Recall@5 は 88.45%、Hindsight の公開結果は 87.22% でした。** 全 **776 クエリ**と **714 文書**を対象に、上位 5 件で取得できた正解根拠の文字の割合を平均しました。Agent Memory Benchmark の形式で計測した平均コンテキストは、OAM が **3,702** トークン、Hindsight が **3,821** トークンでした。OAM は文書単位の候補選定を組み込んだ Normal 検索を使い、コンテキスト上限は **4,096 トークン**でした。[LegalBench-RAG mini の評価方法と結果](docs/benchmarks.md#legalbench-rag-mini)
+
+[評価結果と方法](docs/benchmarks.md) · [OAMB の評価結果一覧](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md)
 
 ## OAM を選ぶ理由
 

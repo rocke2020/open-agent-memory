@@ -14,27 +14,21 @@ Keep your conversations and documents in your own PostgreSQL database, choose yo
 
 ## Performance & Accuracy
 
-**On LongMemEval S (LME-500), OAM scored 476/500 (95.2%) with an 8,000-token context limit and 7,989.54 mean saved context tokens.** Fast recall used PostgreSQL full-text search (FTS) for matching and BM25 plus cover density for ranking. Cover density rewards nearby query terms. Mean context was **29.8% smaller** than in the completed 18k Normal FTS comparison, which scored **478/500 (95.6%)**. [LME-500 method and results](docs/benchmarks.md#1-longmemeval-s-at-8k-and-18k)
+![LongMemEval S, BEAM-10M, and LegalBench-RAG mini scores and mean context tokens](docs/assets/memory-performance.svg)
 
-| Benchmark | OAM | Published Hindsight | Mean saved context |
-| --- | --- | --- | --- |
-| **LongMemEval S**, accepted answers | **95.2% (476/500)** | 94.6% (473/500) | **7,989.54** vs 43,124.55 tokens (**81.47% fewer**) |
-| **BEAM-10M**, mean rubric credit | **78.23%** | 64.08% | **24,676.88** vs 27,373.25 tokens (**9.85% fewer**) |
-| **BEAM-10M**, pass rate (score ≥ 0.5) | **86.0% (172/200)** | 73.5% (147/200) | |
+**LongMemEval S (LME-500): 476/500 (95.2%) at an 8,000-token cap.** OAM's Fast full-text search (FTS) and BM25 run averaged **7,990** saved context tokens versus Hindsight's published **43,125** at **473/500 (94.6%)**. OAM's 18k Normal FTS run scored **478/500 (95.6%)**. The 8k run used a benchmark adapter over retained L1 indexes and **29.8% less context** than the 18k run on average. [LME-500 method and results](docs/benchmarks.md#1-longmemeval-s-at-8k-and-18k)
 
-**BEAM-10M tests memory at the 10-million-token scale per conversation.** It covers 200 questions across ten histories and tests event ordering, temporal reasoning and contradiction resolution. OAM gained **14.15 percentage points in mean rubric credit and 25 additional passes**. The full result uses 180 current recalls with a **24,000-token** native context cap and 20 previously saved contexts. [BEAM method and results](docs/benchmarks.md#3-beam-10m)
+**BEAM-10M: 85.24% mean rubric credit and 179/200 passes with a 12,000-token retrieval context cap.** The November 27 evaluation covers all 200 questions across ten histories at the 10-million-token scale. It used OAM Normal recall with an experimental source recovery step in the evaluation harness. [BEAM-10M method and results](docs/benchmarks.md#3-beam-10m)
 
-OAM exceeds the top recorded Hindsight scores on both full datasets using low-cost **MiniMax M3.1 Flash** adaptive for answering and judging. [AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+OAM exceeded Past.dev's published **85.03%**, the highest score in its public BEAM-10M comparison, and led Hindsight's published **64.08%** by **21.16 percentage points and 32 passes**. OAM averaged **11,973** retrieved tokens versus Hindsight's **27,373**, or **56.26% fewer**. These end-to-end runs used different evaluator setups. [Past.dev leaderboard](https://past.dev/benchmarks/beam) · [Hindsight comparison](docs/benchmarks.md#3-beam-10m)
 
-**Both benchmarks use the same questions, reference answers and scoring rules as the published Hindsight runs.** OAM uses the same answer and judge prompt templates from pinned Agent Memory Benchmark (AMB) sources. Three BEAM judge calls added a JSON example in the provider wrapper and kept the judge text and scoring rules. [Pinned Hindsight LME-500 result](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz) · [BEAM protocol](docs/benchmarks.md#3-beam-10m)
-
-The recorded comparisons measure end-to-end results with different models and memory pipelines. For LME-500, both context averages cover 500 saved texts counted with `o200k_base`. The 8k score comes from a benchmark adapter using retained L1 indexes. [LME-500 comparison details](docs/benchmarks.md#comparison-with-the-recorded-hindsight-result)
-
-MiniMax lists USD 0.15 per million uncached input tokens and USD 0.60 per million output tokens. [Official MiniMax pricing](https://platform.minimax.io/docs/pricing/overview#llm)
+**Matched Past.dev replay:** With the same 12,000-token cap, prompts, and MiniMax M3.1 Flash adaptive model for answering and judging, OAM scored **85.49% (180/200 passes)** versus **80.54% (172/200)** on Past.dev's saved retrieval. OAM led by **4.95 points** and used **11,973** mean context tokens versus **10,142**. [Matched replay details](docs/benchmarks.md#beam-10m-matched-replay)
 
 Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](docs/benchmarks.md#answer-and-judge-variability), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
 
-[Results, model pricing and methodology](docs/benchmarks.md) · [OAMB results index](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md) · [BEAM per-question evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+**LegalBench-RAG mini document retrieval reached 88.45% character Recall@5, versus Hindsight's published 87.22%.** The score averages the share of annotated evidence characters recovered in the top five hits across **776 queries** over **714 documents**. The Agent Memory Benchmark formatter counted **3,702** mean context tokens for OAM and **3,821** for Hindsight. OAM used document-guided Normal recall with a **4,096-token** native cap. [LegalBench-RAG mini method and results](docs/benchmarks.md#legalbench-rag-mini)
+
+[Benchmark results and methodology](docs/benchmarks.md) · [OAMB results index](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md)
 
 ## Why OAM?
 

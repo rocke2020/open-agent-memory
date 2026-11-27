@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="692" viewBox="0 0 820 692" role="img" aria-labelledby="title desc">
+  <title id="title">Open Agent Memory benchmark scores and retrieval context</title>
+  <desc id="desc">LongMemEval S pass rate and mean context tokens: OAM Fast, 95.2% and 7,990; published Hindsight, 94.6% and 43,125. BEAM-10M mean rubric credit and mean context tokens: OAM experimental Normal, 85.24% and 11,973; published Past.dev, 85.03% and 10,467; published Hindsight, 64.08% and 27,373. LegalBench-RAG mini character Recall@5 and mean AMB-formatted context tokens: OAM document-guided Normal, 88.45% and 3,702; published Hindsight, 87.22% and 3,821. The runs use different evaluation setups. Score bars span 0 to 100 percent; context bars span 0 to 50,000 tokens.</desc>
+  <style>
+    text { font-family: Arial, Helvetica, sans-serif; fill: #123443; }
+    .card { fill: #f5f8f6; stroke: #cadbd7; }
+    .divider { stroke: #cadbd7; }
+    .title { font-size: 27px; font-weight: 700; }
+    .meta { font-size: 16px; fill: #47636b; }
+    .metric { font-size: 19px; font-weight: 700; }
+    .system { font-size: 21px; font-weight: 700; }
+    .value { font-size: 23px; font-weight: 700; text-anchor: end; }
+    .track { fill: #dce7e4; }
+    .baseline { fill: #677f87; }
+    .oam { fill: #13786f; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #edf6f5; }
+      .card { fill: #142b34; stroke: #37525a; }
+      .divider { stroke: #37525a; }
+      .meta { fill: #b3cbd0; }
+      .track { fill: #2e4750; }
+      .baseline { fill: #8da5ad; }
+      .oam { fill: #67d8c5; }
+    }
+  </style>
+  <rect class="card" x=".5" y=".5" width="819" height="691" rx="16"/>
+
+  <text class="title" x="28" y="47">LongMemEval S</text>
+  <text class="meta" x="28" y="70">500 questions</text>
+  <text class="metric" x="280" y="48">Pass rate</text>
+  <text class="metric" x="554" y="48">Mean context tokens</text>
+
+  <g>
+    <text class="system oam" x="28" y="109">OAM</text>
+    <text class="meta" x="28" y="131">Fast · 8k cap</text>
+    <text class="value oam" x="500" y="111">95.2%</text>
+    <text class="value oam" x="792" y="111">7,990</text>
+    <rect class="track" x="280" y="121" width="220" height="10" rx="5"/>
+    <rect class="track" x="554" y="121" width="238" height="10" rx="5"/>
+    <rect class="oam" x="280" y="121" width="209.44" height="10" rx="5"/>
+    <rect class="oam" x="554" y="121" width="38.03" height="10" rx="5"/>
+  </g>
+  <g>
+    <text class="system" x="28" y="164">Hindsight</text>
+    <text class="meta" x="28" y="186">Published</text>
+    <text class="value" x="500" y="166">94.6%</text>
+    <text class="value" x="792" y="166">43,125</text>
+    <rect class="track" x="280" y="176" width="220" height="10" rx="5"/>
+    <rect class="track" x="554" y="176" width="238" height="10" rx="5"/>
+    <rect class="baseline" x="280" y="176" width="208.12" height="10" rx="5"/>
+    <rect class="baseline" x="554" y="176" width="205.27" height="10" rx="5"/>
+  </g>
+
+  <line class="divider" x1="28" y1="212" x2="792" y2="212"/>
+
+  <text class="title" x="28" y="251">BEAM-10M</text>
+  <text class="meta" x="28" y="274">200 questions</text>
+  <text class="metric" x="280" y="252">Mean rubric credit</text>
+  <text class="metric" x="554" y="252">Mean context tokens</text>
+
+  <g>
+    <text class="system oam" x="28" y="313">OAM</text>
+    <text class="meta" x="28" y="335">Experimental Normal · 12k cap</text>
+    <text class="value oam" x="500" y="315">85.24%</text>
+    <text class="value oam" x="792" y="315">11,973</text>
+    <rect class="track" x="280" y="325" width="220" height="10" rx="5"/>
+    <rect class="track" x="554" y="325" width="238" height="10" rx="5"/>
+    <rect class="oam" x="280" y="325" width="187.53" height="10" rx="5"/>
+    <rect class="oam" x="554" y="325" width="56.99" height="10" rx="5"/>
+  </g>
+  <g>
+    <text class="system" x="28" y="368">Past.dev</text>
+    <text class="meta" x="28" y="390">Published</text>
+    <text class="value" x="500" y="370">85.03%</text>
+    <text class="value" x="792" y="370">10,467</text>
+    <rect class="track" x="280" y="380" width="220" height="10" rx="5"/>
+    <rect class="track" x="554" y="380" width="238" height="10" rx="5"/>
+    <rect class="baseline" x="280" y="380" width="187.07" height="10" rx="5"/>
+    <rect class="baseline" x="554" y="380" width="49.83" height="10" rx="5"/>
+  </g>
+  <g>
+    <text class="system" x="28" y="423">Hindsight</text>
+    <text class="meta" x="28" y="445">Published</text>
+    <text class="value" x="500" y="425">64.08%</text>
+    <text class="value" x="792" y="425">27,373</text>
+    <rect class="track" x="280" y="435" width="220" height="10" rx="5"/>
+    <rect class="track" x="554" y="435" width="238" height="10" rx="5"/>
+    <rect class="baseline" x="280" y="435" width="140.98" height="10" rx="5"/>
+    <rect class="baseline" x="554" y="435" width="130.30" height="10" rx="5"/>
+  </g>
+
+  <line class="divider" x1="28" y1="471" x2="792" y2="471"/>
+
+  <text class="title" x="28" y="510">LegalBench-RAG</text>
+  <text class="meta" x="28" y="533">Mini · 776 queries</text>
+  <text class="metric" x="280" y="511">Character Recall@5</text>
+  <text class="metric" x="554" y="511">Mean context tokens</text>
+  <text class="meta" x="554" y="533">AMB formatting</text>
+
+  <g>
+    <text class="system oam" x="28" y="568">OAM</text>
+    <text class="meta" x="28" y="590">Guided Normal · 4,096-token cap</text>
+    <text class="value oam" x="500" y="570">88.45%</text>
+    <text class="value oam" x="792" y="570">3,702</text>
+    <rect class="track" x="280" y="580" width="220" height="10" rx="5"/>
+    <rect class="track" x="554" y="580" width="238" height="10" rx="5"/>
+    <rect class="oam" x="280" y="580" width="194.59" height="10" rx="5"/>
+    <rect class="oam" x="554" y="580" width="17.62" height="10" rx="5"/>
+  </g>
+  <g>
+    <text class="system" x="28" y="623">Hindsight</text>
+    <text class="meta" x="28" y="645">Published</text>
+    <text class="value" x="500" y="625">87.22%</text>
+    <text class="value" x="792" y="625">3,821</text>
+    <rect class="track" x="280" y="635" width="220" height="10" rx="5"/>
+    <rect class="track" x="554" y="635" width="238" height="10" rx="5"/>
+    <rect class="baseline" x="280" y="635" width="191.88" height="10" rx="5"/>
+    <rect class="baseline" x="554" y="635" width="18.19" height="10" rx="5"/>
+  </g>
+  <text class="meta" x="28" y="673">Published comparisons use different evaluation setups.</text>
+</svg>

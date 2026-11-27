@@ -12,27 +12,21 @@ Open Agent Memory（OAM）是完全开源的 AI Agent 记忆引擎。它跨会�
 
 ## 性能与准确率
 
-**在 LongMemEval S（LME-500）上，OAM 在 8,000 tokens 的上下文上限下获得 476/500（95.2%），已保存上下文平均为 7,989.54 tokens。** Fast 召回通过 PostgreSQL 全文搜索（FTS）匹配，再结合 BM25 和覆盖密度排序。覆盖密度为查询词彼此接近的匹配加分。与已完成的 18k Normal FTS 对照（**478/500，95.6%**）相比，平均上下文**减少 29.8%**。[LME-500 方法及结果](docs/zh/benchmarks.md#1-longmemeval-s-的-8k-与-18k-结果)
+![LongMemEval S、BEAM-10M 与 LegalBench-RAG mini 的评测得分及平均上下文 tokens](docs/assets/memory-performance.svg)
 
-| 基准测试 | OAM | Hindsight 公布结果 | 已保存上下文均值 |
-| --- | --- | --- | --- |
-| **LongMemEval S** 正确率 | **95.2%（476/500）** | 94.6%（473/500） | **7,989.54** 对比 43,124.55 tokens（**减少 81.47%**） |
-| **BEAM-10M** 平均评分 | **78.23%** | 64.08% | **24,676.88** 对比 27,373.25 tokens（**减少 9.85%**） |
-| **BEAM-10M** 通过率（单题得分 ≥ 0.5） | **86.0%（172/200）** | 73.5%（147/200） | |
+**LongMemEval S（LME-500）：在 8,000 tokens 上限下获得 476/500（95.2%）。** OAM 的 Fast 全文搜索（FTS）与 BM25 评测平均使用 **7,990** tokens 的已保存上下文，Hindsight 公布的 **473/500（94.6%）** 对应 **43,125** tokens。OAM 的 18k Normal FTS 评测得分为 **478/500（95.6%）**。8k 评测通过适配器复用已有 L1 索引，平均上下文比 18k 评测**少 29.8%**。[LME-500 方法及结果](docs/zh/benchmarks.md#1-longmemeval-s-的-8k-与-18k-结果)
 
-**BEAM-10M 在每段对话千万 token 规模上考查记忆能力。** 它覆盖十段历史中的 200 道题，考查事件排序、时间推理和矛盾消解。OAM 平均评分高 **14.15 个百分点**，多通过 **25 道题**。完整结果中，180 道题的当期召回使用 **24,000 tokens** 的原生上下文上限，另 20 道题使用此前保存的上下文。[BEAM 方法及结果](docs/zh/benchmarks.md#3-beam-10m)
+**BEAM-10M：召回上下文上限为 12,000 tokens，平均评分 85.24%，通过 179/200 题。** 11 月 27 日的评测覆盖十段千万 token 规模会话的全部 200 道题，使用 OAM Normal 召回，并在评测程序中加入实验性的原文恢复步骤。[BEAM-10M 方法及结果](docs/zh/benchmarks.md#3-beam-10m)
 
-OAM 使用低成本 **MiniMax M3.1 Flash** 的 adaptive 模式回答和评判，在两个完整数据集上都超过了 Hindsight 的最高已记录成绩。[AMB 成绩清单](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+OAM 超过了 Past.dev 在其公开 BEAM-10M 对照表中列出的最高分 **85.03%**，也比 Hindsight 公布的 **64.08%** 高 **21.16 个百分点**，多通过 **32 道题**。OAM 的召回上下文平均为 **11,973** tokens，Hindsight 为 **27,373**，减少 **56.26%**。这些端到端评测采用了不同的评估配置。[Past.dev 成绩表](https://past.dev/benchmarks/beam) · [Hindsight 对比](docs/zh/benchmarks.md#3-beam-10m)
 
-**两个基准测试均沿用 Hindsight 公布结果中的问题、参考答案和评分规则。** OAM 使用固定版本 Agent Memory Benchmark（AMB）的相同回答及评判提示词模板。BEAM 有 3 次评判调用在服务商的请求包装中加入 JSON 示例，评判正文和评分规则保持一致。[Hindsight 固定版本的 LME-500 结果](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz) · [BEAM 评分协议](docs/zh/benchmarks.md#3-beam-10m)
-
-两组对比均测量完整系统的表现，模型和记忆流程存在差异。LME-500 的双方均用 `o200k_base` 统计各自的 500 份已保存上下文。8k 成绩来自使用已有 L1 索引的评测适配器。[LME-500 对比详情](docs/zh/benchmarks.md#与-hindsight-已公布结果比较)
-
-MiniMax 官方标价为每百万未缓存输入 tokens 0.15 美元、每百万输出 tokens 0.60 美元。[MiniMax 官方定价](https://platform.minimax.io/docs/pricing/overview#llm)
+**与 Past.dev 的配对重放**采用同样的 12,000 tokens 上限、提示词和 MiniMax M3.1 Flash adaptive 回答与评判配置。OAM 为 **85.49%（通过 180/200 题）**，Past.dev 已保存的召回结果为 **80.54%（通过 172/200 题）**。OAM 高 **4.95 个百分点**，双方平均上下文分别为 **11,973** 和 **10,142** tokens。[配对重放详情](docs/zh/benchmarks.md#beam-10m-matched-replay)
 
 重新运行回答与评判模型时，评分可能变化。在一个[输入相同的 MiniMax 实例](docs/zh/benchmarks.md#回答和评判的波动)中，一次回答正确，另一次回答错误；这展示了已观察到的波动，而非其发生频率。
 
-[结果、模型定价与评测方法](docs/zh/benchmarks.md) · [OAMB 评测结果索引](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md) · [BEAM 逐题证据](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+**LegalBench-RAG mini 文档检索的字符级 Recall@5 为 88.45%，Hindsight 公布的结果为 87.22%。** 评测覆盖全部 **776 条查询**和 **714 份文档**，按前五条结果平均召回的标注证据字符比例计分。按 Agent Memory Benchmark 的格式统计，OAM 和 Hindsight 的平均上下文分别为 **3,702** 和 **3,821** tokens。OAM 使用文档引导的 Normal 召回，原生上下文上限为 **4,096 tokens**。[LegalBench-RAG mini 方法及结果](docs/zh/benchmarks.md#legalbench-rag-mini)
+
+[评测结果与方法](docs/zh/benchmarks.md) · [OAMB 评测结果索引](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md)
 
 ## 为什么选择 OAM？
 

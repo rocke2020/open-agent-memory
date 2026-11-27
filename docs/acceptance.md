@@ -94,7 +94,7 @@ Verify that the first ready source fixes its tenant/user/generation Insight wind
 
 Verify that automatic Profile triggers default off. Exercise authorized policy reads and updates, conflicting triggers, due cron and consolidation work, full-refresh precedence, pause and explicit recovery, and unchanged reuse. For custom generation, confirm cited output and `Cache-Control: no-store`. Check that the stored Profile remains unchanged and an unsupported or timed-out response leaves no custom result. In Inspector, verify the selected collection's timestamp and the manual Profile workflow.
 
-Verify recall override inheritance, validation and propagation through direct, batch and planned requests. Confirm the temporal budget operates independently of the result cap and personal evidence remains opt-in and subject to chunk eligibility, context and deadline limits. Verify recorded BEAM-10M scores against the pinned evidence. Those saved results measure the evaluated pipeline documented in [benchmarks](benchmarks.md#3-beam-10m).
+Verify recall override inheritance, validation and propagation through direct, batch and planned requests. Confirm the temporal budget operates independently of the result cap and personal evidence remains opt-in and subject to chunk eligibility, context and deadline limits. Verify recorded BEAM-10M scores against the pinned evidence. Those saved results measure the evaluated pipeline documented in [the November 19 benchmark](benchmarks.md#november-19-beam-10m).
 
 ## 12. v0.2.1 changed-surface checks
 

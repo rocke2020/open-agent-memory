@@ -6,9 +6,9 @@
 
 在 **LongMemEval S** 上，OAM 的 8k Fast 用全文搜索（FTS）与 BM25 获得 **95.2%（476/500）**，已保存上下文平均 **7,989.54 tokens**。完整的 18k Normal FTS 对照获得 **95.6%（478/500）**，平均 **11,375.12 tokens**。8k 的平均上下文少 **29.8%**。Hindsight 公布的结果为 **94.6%（473/500）**，平均 **43,124.55 tokens**。各组分数与上下文平均值涵盖全部 500 题。[Hindsight 固定版本结果](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
 
-在 **BEAM-10M** 上，OAM 的平均评分为 **78.23%**，通过率为 **86.0%**，Hindsight 对应为 **64.08%** 与 **73.5%**。OAM 保存的上下文少 **9.85% tokens**。这两项 OAM 结果均用 MiniMax M3.1 Flash 的 adaptive 推理回答和评判。[AMB 固定版本的成绩清单](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+在 **BEAM-10M** 上，OAM 11 月 27 日的实验性 Normal 评测平均得分 **85.24%（通过 179/200 题）**，在 **12,000 tokens 上限**下平均使用 **11,972.66** tokens 的上下文。Past.dev 和 Hindsight 分别用各自的评估配置公布了 **85.03%** 和 **64.08%**。在统一评估配置和上限的配对重放中，OAM 为 **85.49%**，Past.dev 的已保存召回结果为 **80.54%**。[BEAM-10M 结果](#3-beam-10m)
 
-两项评测沿用 Agent Memory Benchmark（AMB）公布的 Hindsight 评测中的问题、固定参考、评分规则及问答和评判模板。它们比较了各自采用不同模型与记忆流程的完整系统。[OAMB 结果索引](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md) · [BEAM-10M 证据](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+在 **LegalBench-RAG mini** 上，OAM 的前五条结果平均召回了 **88.45% 的标注证据字符**，Hindsight 公布的结果为 **87.22%**。在全部 **776 条查询**中，Agent Memory Benchmark 格式的平均上下文分别为 **3,702** 和 **3,821** tokens。[LegalBench-RAG mini 结果](#legalbench-rag-mini)
 
 ## 1. LongMemEval S 的 8k 与 18k 结果
 
@@ -109,7 +109,40 @@ AMB 固定适配器对 Hindsight 的 LongMemEval 高预算召回分别给记忆�
 
 ## 3. BEAM-10M
 
-BEAM-10M 从十段**千万 token 规模对话**中提取 200 个问题，测试十种能力。相较 Hindsight 的公布数据，OAM 平均评分高 **14.15 个百分点**，多通过 **25** 题。提升较大的类别是事件排序、时间推理和信息抽取。[BEAM 论文](https://arxiv.org/abs/2510.27246) · [分类和逐题结果](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+BEAM-10M 用十段**千万 token 规模会话**中的 **200 道题**测试十种记忆能力。平均评分对所有题的分数取均值，单题得分达到 0.50 即通过。OAM 在 2026 年 11 月 27 日的评测中比 Past.dev 的公开结果高 **0.21 个百分点**，通过题数相同。相较 Hindsight 的公开结果，OAM 高 **21.16 个百分点**、多通过 **32 道题**，平均上下文少 **56.26%**。[BEAM 论文](https://arxiv.org/abs/2510.27246) · [Past.dev 成绩表](https://past.dev/benchmarks/beam)
+
+### 全量评测与公开基线
+
+| 评测 | 平均评分 | 通过数 | 平均回答上下文（`o200k_base` tokens） |
+| --- | ---: | ---: | ---: |
+| OAM 实验性 Normal，12,000 tokens 上限 | **85.24%** | **179/200** | **11,972.66** |
+| Past.dev 公开结果，GPT-5.6 Luna | 85.03% | 179/200 | 10,467.45 |
+| Hindsight 公开结果，Gemini 3.1 Pro Preview 回答、Gemini 2.5 Flash Lite 评判 | 64.08% | 147/200 | 27,373.25 |
+
+OAM 使用 Normal 召回 L1 事实与原始段落，关闭 L2 洞察和画像。原文提取使用低推理强度的 DeepSeek Flash。20 道知识更新题都采用基准规定的时间截点，评测程序加入实验性的原文恢复步骤。渲染后的证据严格控制在 **11,220 至 12,000 tokens**。同一轮评测的常规 Normal 召回为 **84.49%（通过 178/200 题）**，加入实验性步骤后多通过一题。另有半分存在评判争议，去掉这半分后，实验结果为 **84.99%（通过 179/200 题）**。
+
+OAM 使用固定版本的 Past.dev 回答和评判提示词、评分细则与计分代码，由 MiniMax M3.1 Flash 的 adaptive 模式回答和评判。Past.dev 的公开评测使用 GPT-5.6 Luna，评判请求使用严格的 JSON Schema。Hindsight 使用 Agent Memory Benchmark（AMB）的存档协议。公开对照反映各自完整系统和评估配置的结果。[固定评估器](https://github.com/pastdotdev/benchmarks/blob/b3971de539aac109448f00ca124b023f2a89a7cb/beam/scoring.py) · [Past.dev 结果](https://github.com/pastdotdev/benchmarks/blob/b3971de539aac109448f00ca124b023f2a89a7cb/beam/results/10m/summary.json) · [Hindsight 结果](https://github.com/vectorize-io/agent-memory-benchmark/blob/5d5e8dbe56f140ad982ae61cbd73f43e100de706/outputs/beam/hindsight/single-query/10m.json.gz)
+
+上下文计数对应实际呈现给回答模型的召回证据。Past.dev 公开结果的均值通过将 200 道题的 `recall` 值分别序列化为紧凑 JSON 后重算，上下文范围为 **8,086 至 16,318 tokens**。[Past.dev 逐题存档](https://github.com/pastdotdev/benchmarks/blob/b3971de539aac109448f00ca124b023f2a89a7cb/beam/results/10m/results.jsonl)
+
+<a id="beam-10m-matched-replay"></a>
+
+### 与 Past.dev 的配对重放
+
+双方使用同样的 200 道题、提示词、计分规则、MiniMax M3.1 Flash adaptive 回答与评判配置，以及 **12,000 tokens 上限**。Past.dev 一侧使用已保存的召回结果，按原排名从头保留上限内能放下的最长连续完整记录。OAM 高 **4.95 个百分点**，多通过 **8 道题**，在相同上限下平均多使用 **1,831.12** tokens。
+
+| 重放使用的回答上下文 | 平均评分 | 通过数 | 平均回答上下文（`o200k_base` tokens） |
+| --- | ---: | ---: | ---: |
+| OAM 实验性 Normal | **85.49%** | **180/200** | 11,972.66 |
+| Past.dev 已保存的召回结果，应用上限 | 80.54% | 172/200 | 10,141.54 |
+
+配对重放中，评判模型给原先得零分的一道 OAM 回答判了半分，使其达到通过门槛。原评测成绩仍为 85.24%。固定版本的事件排序提示词包含参考顺序。仅统计其余 180 道配对题，OAM 为 **84.34%（160/180）**，应用上限后的 Past.dev 为 **78.63%（152/180）**。[固定版本的事件排序提示词](https://github.com/pastdotdev/benchmarks/blob/b3971de539aac109448f00ca124b023f2a89a7cb/beam/exabase_prompts.py#L37-L46)
+
+<a id="november-19-beam-10m"></a>
+
+### 11 月 19 日 OAM 与 Hindsight 对比
+
+在这轮较早的评测中，OAM 比 Hindsight 的公开结果高 **14.15 个百分点**，多通过 **25 道题**。提升较大的类别是事件排序、时间推理和信息抽取。[存档的分类及逐题结果](https://github.com/rocke2020/open-agent-memory-benchmark/tree/b24c8037adcb97666be63944841b7581d50141bf/eval_results/beam10m-20261119)
 
 | 指标 | OAM | Hindsight 公布结果 |
 | --- | ---: | ---: |
@@ -127,9 +160,28 @@ BEAM-10M 从十段**千万 token 规模对话**中提取 200 个问题，测试�
 
 [更早的 BEAM 已保存上下文重放](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m)使用 DeepSeek Flash 和独立评分设置。
 
-## 4. 检查和复算已保存结果
+<a id="legalbench-rag-mini"></a>
 
-最新 BEAM-10M CSV 提供题目 ID、分数和上下文计数。11 月 17 日 LME 和更早 BEAM 的 `report.html` 提供保存的上下文及逐题结果。[BEAM-10M 配对结果](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m-20261119/scores.csv) · [OAMB 结果索引](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md)
+## 4. LegalBench-RAG mini
+
+LegalBench-RAG mini 衡量法律文档检索能力。OAM 和 Hindsight 使用相同的 **714 份纯文本合同及政策文档**、中性文档标识和全部 **776 条查询**，并使用固定版本的 Agent Memory Benchmark（AMB）计分器。字符级 Recall@5 对前五条结果覆盖的标注证据字符比例按查询取平均。字符级 Precision@5 衡量已定位的返回字符中与标注证据重合的比例。该协议直接对检索结果计分，回答及评判模型调用均为零。[基准论文](https://arxiv.org/abs/2408.10343) · [固定计分器](https://github.com/vectorize-io/agent-memory-benchmark/blob/01bd83f3fa5245d6be3986cfab81fdd828f26acd/src/memory_bench/dataset/knowledge.py) · [Hindsight 公开存档](https://raw.githubusercontent.com/vectorize-io/agent-memory-benchmark/01bd83f3fa5245d6be3986cfab81fdd828f26acd/outputs/legalbench-rag/hindsight-no-filenames/retrieval/mini.json.gz)
+
+| 指标 | OAM 文档引导 Normal 召回 | Hindsight 公开结果（中性文件名） |
+| --- | ---: | ---: |
+| 字符级 Recall@5 | **88.45%** | 87.22% |
+| 字符级 Precision@5 | **4.05%** | 3.83% |
+| AMB 格式的平均上下文 tokens | **3,702** | 3,821 |
+| 召回 p50 | 3.388 秒 | 3.251 秒 |
+| 召回 p95 | **5.693 秒** | 7.984 秒 |
+| 零召回查询数 | **72** | 84 |
+
+OAM 于 2026 年 11 月 25 日（UTC）使用新索引，采用 BGE small English 向量模型，在每个段落前加入原文开头的 40 个词，并用 DeepSeek Flash 重排。文档引导的 Normal 路径最多考虑 144 个候选，返回不超过五条结果。OAM 原生上下文包含引用元数据，上限为 **4,096 tokens**，平均使用 **3,993 tokens**。表格使用双方的 AMB 格式计数。召回延迟来自各自的实测环境。
+
+仅对段落正文生成向量的对应评测得到 **86.41% Recall@5**。加入文档开头后，MAUD 和 ContractNLI 的召回提升，PrivacyQA 的召回下降。文档引导和文档开头向量均为评测覆盖设置，产品默认关闭这两项。离线检查用保存的原生响应复算了全部 776 条 OAM 评分。[产品默认配置](../../configs/oam.yaml)
+
+## 5. 检查和复算已保存结果
+
+11 月 19 日公开的 BEAM-10M CSV 提供题目 ID、分数和上下文计数。上文的 11 月 27 日 OAM 成绩为汇总结果。11 月 17 日 LME 和更早 BEAM 的 `report.html` 提供保存的上下文及逐题结果。[11 月 19 日 BEAM-10M 配对结果](https://github.com/rocke2020/open-agent-memory-benchmark/blob/b24c8037adcb97666be63944841b7581d50141bf/eval_results/beam10m-20261119/scores.csv) · [OAMB 结果索引](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md)
 
 在 OAMB 检出目录执行以下测试，验证归档 HTML 及相邻结果分片。
 

@@ -82,13 +82,13 @@ search:
 
 ## 4. Why the tested presets keep both expansions off
 
-The 8k Fast FTS+BM25 and 18k Normal FTS LME-500 runs disabled graph expansion. The recorded BEAM-10M run retained entity and alias expansion. All three disabled semantic-link and causal expansion. [Evaluation settings](../docs/benchmarks.md)
+The 8k Fast FTS+BM25 and 18k Normal FTS LME-500 runs disabled graph expansion. The November 19 BEAM-10M run retained entity and alias expansion. All three disabled semantic-link and causal expansion. [November 19 BEAM-10M settings](../docs/benchmarks.md#november-19-beam-10m)
 
 | Evaluated workload | Recall mode | `entity_semantic_graph` | `causal_graph` | Graph expansion used |
 |---|---|---|---|---|
 | LME-500, 8k FTS+BM25 | `fast` | `"off"` | `false` | None. |
 | LME-500, 18k FTS | `normal` | `"off"` | `false` | None. |
-| BEAM-10M | `normal` | `light` | `false` | Entity and alias only. |
+| BEAM-10M, November 19 | `normal` | `light` | `false` | Entity and alias only. |
 
 These configurations also disable causal indexing. They retain direct dense semantic search and lexical retrieval, temporal retrieval when applicable, original source evidence and explicit reasons preserved in fact text. Questions about causes can still retrieve those reasons directly; a stored causal edge is an additional retrieval route, not a prerequisite for answering "why."
 
@@ -127,7 +127,7 @@ Fast, Normal and Deep use the following numeric presets. For a request that omit
 
 The canonical direct-recall deadlines are 3 seconds for Fast and 5 seconds for Normal and Deep. Batch and planned recall split one selected context total across their child searches. Valid numeric preset overrides in operator YAML take precedence over the defaults. Recall-only preset changes preserve the indexed generation. [Operator configuration](../docs/operations.md#1-configuration)
 
-The historical BEAM-10M result used the former Normal 24k recipe with FTS ranking. Reproduction requires its pinned mode settings and product revision. The 16k/24k paired evidence does not establish native BM25 performance under the current defaults. Native BM25 BEAM verification remains pending.
+The November 19 BEAM-10M run used the former Normal 24k recipe with FTS ranking. The November 27 evaluation used a 12,000-token cap and an experimental source recovery step in the evaluation harness. Each score applies to its recorded configuration. [BEAM-10M evaluation settings](../docs/benchmarks.md#3-beam-10m)
 
 Normal and Deep enable entity expansion by default. Fast uses its direct retrieval path.
 

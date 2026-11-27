@@ -82,13 +82,13 @@ search:
 
 ## 4. 为什么已测试的配置关闭语义图扩展和因果扩展
 
-LME-500 的 8k Fast FTS+BM25 和 18k Normal FTS 评测均关闭图扩展。已记录的 BEAM-10M 评测保留实体及别名扩展。三组评测均关闭语义链接扩展和因果扩展。[评测配置](../docs/zh/benchmarks.md)
+LME-500 的 8k Fast FTS+BM25 和 18k Normal FTS 评测均关闭图扩展。11 月 19 日的 BEAM-10M 评测保留实体及别名扩展。三组评测均关闭语义链接扩展和因果扩展。[11 月 19 日 BEAM-10M 评测配置](../docs/zh/benchmarks.md#november-19-beam-10m)
 
 | 评测负载 | 召回模式 | `entity_semantic_graph` | `causal_graph` | 使用的图扩展 |
 |---|---|---|---|---|
 | LME-500，8k FTS+BM25 | `fast` | `"off"` | `false` | 无。 |
 | LME-500，18k FTS | `normal` | `"off"` | `false` | 无。 |
-| BEAM-10M | `normal` | `light` | `false` | 仅实体及别名扩展。 |
+| 11 月 19 日 BEAM-10M | `normal` | `light` | `false` | 仅实体及别名扩展。 |
 
 这些配置也都关闭因果索引。它们保留直接向量语义检索、词法检索、适用时的时间检索、原始来源证据，以及事实文本中保留的明确原因。关于原因的问题仍可直接检索这些原因；已存储的因果边是额外的检索路径，不是回答“为什么”的前提。
 
@@ -127,7 +127,7 @@ Fast、Normal 和 Deep 使用下表中的数值预设。请求省略 `recall_lev
 
 单次直接召回的默认截止时间为 Fast 3 秒、Normal 和 Deep 5 秒。批量和规划召回将所选模式的一份上下文预算分给各个子查询。运维 YAML 中通过校验的预设数值优先于默认值。仅修改召回预设不会改变索引代次。[运维配置](../docs/zh/operations.md#1-配置)
 
-历史 BEAM-10M 结果使用原 Normal 24k 配置和 FTS 排序。复现时需固定其模式配置和产品版本。16k/24k 配对结果不能证明当前默认配置下的原生 BM25 性能。原生 BM25 BEAM 验证仍待完成。
+11 月 19 日的 BEAM-10M 评测使用原 Normal 24k 配置和 FTS 排序。11 月 27 日的评测使用 12,000 tokens 上限，并在评测程序中加入实验性的原文恢复步骤。每项成绩对应各自的评测配置。[BEAM-10M 评测配置](../docs/zh/benchmarks.md#3-beam-10m)
 
 Normal 和 Deep 默认启用实体扩展。Fast 使用直接检索路径。
 

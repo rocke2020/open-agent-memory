@@ -6,9 +6,9 @@
 
 On **LongMemEval S**, OAM's 8k Fast run with full-text search (FTS) and BM25 scored **95.2% (476/500)** with **7,989.54 mean saved context tokens**. The completed 18k Normal FTS run scored **95.6% (478/500)** with **11,375.12 mean tokens**. The 8k run used **29.8% less context on average**. Hindsight's published result was **94.6% (473/500)** with **43,124.55 mean tokens**. Each score and context mean covers all 500 questions. [Hindsight's pinned AMB result](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
 
-On **BEAM-10M**, OAM earns **78.23% mean rubric credit** and **86.0% passes**, versus Hindsight's **64.08%** and **73.5%**, with **9.85% fewer saved context tokens**. The headline OAM results on both benchmarks use MiniMax M3.1 Flash with adaptive reasoning for answering and judging. [Pinned AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+On **BEAM-10M**, OAM's November 27 experimental Normal run scored **85.24% mean rubric credit (179/200 passes)** with **11,972.66 mean context tokens** under a **12,000-token cap**. Past.dev published **85.03%** and Hindsight published **64.08%** using their own evaluators. In a separate replay with the same evaluator and cap, OAM scored **85.49%** versus **80.54%** on Past.dev's saved retrieval. [BEAM-10M results](#3-beam-10m)
 
-Both benchmarks use the same questions, fixed references, scoring rules and answer and judge prompt templates as the published Hindsight evaluations in Agent Memory Benchmark (AMB). The results measure end-to-end systems with distinct models and memory pipelines. [OAMB results index](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md) · [BEAM-10M evidence](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+On **LegalBench-RAG mini**, OAM recovered **88.45% of annotated evidence characters** in the top five results, compared with Hindsight's published **87.22%**. Agent Memory Benchmark formatted context averaged **3,702** tokens for OAM and **3,821** for Hindsight across **776 queries**. [LegalBench-RAG mini results](#legalbench-rag-mini)
 
 ## 1. LongMemEval S at 8k and 18k
 
@@ -111,7 +111,40 @@ These are fixed-reference judge acceptance scores, not independently established
 
 ## 3. BEAM-10M
 
-BEAM-10M tests ten capabilities across **200 questions from ten conversations at the 10-million-token scale**. OAM gained **14.15 percentage points in mean rubric credit** and **25 passes** over Hindsight's published result. The largest gains were in event ordering, temporal reasoning and information extraction. [BEAM benchmark paper](https://arxiv.org/abs/2510.27246) · [Per-capability and per-question results](https://github.com/rocke2020/open-agent-memory-benchmark/tree/main/eval_results/beam10m-20261119)
+BEAM-10M tests ten memory capabilities across **200 questions from ten conversations at the 10-million-token scale**. Mean rubric credit averages the fractional scores across all questions. A score of at least 0.50 counts as a pass. The November 27, 2026 OAM result exceeded Past.dev's published score by **0.21 percentage points** with the same pass count. It exceeded Hindsight's published score by **21.16 points and 32 passes**, using **56.26% fewer mean context tokens**. [BEAM benchmark paper](https://arxiv.org/abs/2510.27246) · [Past.dev leaderboard](https://past.dev/benchmarks/beam)
+
+### Full split and published baselines
+
+| Run | Mean rubric credit | Passes | Mean answer-context tokens (`o200k_base`) |
+| --- | ---: | ---: | ---: |
+| OAM experimental Normal, 12,000-token cap | **85.24%** | **179/200** | **11,972.66** |
+| Past.dev published, GPT-5.6 Luna | 85.03% | 179/200 | 10,467.45 |
+| Hindsight published, Gemini 3.1 Pro Preview answer and Gemini 2.5 Flash Lite judge | 64.08% | 147/200 | 27,373.25 |
+
+OAM used Normal retrieval over L1 facts and original passages, with L2 Insights and Profile disabled. DeepSeek Flash indexed the source material with low reasoning effort. The evaluation used the benchmark cutoff for all 20 knowledge-update questions and an experimental source recovery step in the evaluation harness. Exact rendered evidence ranged from **11,220 to 12,000 tokens**. Ordinary Normal retrieval in the same campaign scored **84.49% (178/200)**. The experimental step added one pass. Removing a separate disputed half-credit judgment would put the experimental score at **84.99% (179/200)**.
+
+OAM used Past.dev's pinned answer and judge prompts, rubrics and score reducer, with adaptive MiniMax M3.1 Flash in both roles. Past.dev's published run used GPT-5.6 Luna and strict JSON-schema judge requests. Hindsight used the archived Agent Memory Benchmark (AMB) protocol. The published rows compare complete systems and evaluation setups. [Pinned evaluator](https://github.com/pastdotdev/benchmarks/blob/b3971de539aac109448f00ca124b023f2a89a7cb/beam/scoring.py) · [Past.dev result](https://github.com/pastdotdev/benchmarks/blob/b3971de539aac109448f00ca124b023f2a89a7cb/beam/results/10m/summary.json) · [Hindsight result](https://github.com/vectorize-io/agent-memory-benchmark/blob/5d5e8dbe56f140ad982ae61cbd73f43e100de706/outputs/beam/hindsight/single-query/10m.json.gz)
+
+Context counts cover retrieved evidence shown to the answer model. Past.dev's published mean was recounted from the compact JSON `recall` value for each of its 200 questions. Those contexts ranged from **8,086 to 16,318 tokens**. [Past.dev per-question archive](https://github.com/pastdotdev/benchmarks/blob/b3971de539aac109448f00ca124b023f2a89a7cb/beam/results/10m/results.jsonl)
+
+<a id="beam-10m-matched-replay"></a>
+
+### Matched Past.dev replay
+
+Both arms used the same 200 questions, prompts, scoring rules, adaptive MiniMax M3.1 Flash answer and judge settings, and a **12,000-token context cap**. The Past.dev arm replayed its saved retrieval, keeping the longest prefix of complete ranked records that fit the cap. OAM led by **4.95 percentage points and eight passes**, using **1,831.12 more mean context tokens** under the shared cap.
+
+| Replayed answer context | Mean rubric credit | Passes | Mean answer-context tokens (`o200k_base`) |
+| --- | ---: | ---: | ---: |
+| OAM experimental Normal | **85.49%** | **180/200** | 11,972.66 |
+| Past.dev saved retrieval, capped | 80.54% | 172/200 | 10,141.54 |
+
+The replay judge awarded half credit to an OAM answer that had scored zero in the original run, moving it over the pass threshold. The original score remains 85.24%. The pinned event-ordering prompt contains the reference order. Across the other 180 matched questions, OAM scored **84.34% (160/180)** and capped Past.dev scored **78.63% (152/180)**. [Pinned event-ordering prompt](https://github.com/pastdotdev/benchmarks/blob/b3971de539aac109448f00ca124b023f2a89a7cb/beam/exabase_prompts.py#L37-L46)
+
+<a id="november-19-beam-10m"></a>
+
+### November 19 OAM and Hindsight comparison
+
+In the earlier run, OAM gained **14.15 percentage points** and **25 passes** over Hindsight's published result. The largest gains were in event ordering, temporal reasoning and information extraction. [Archived per-capability and per-question results](https://github.com/rocke2020/open-agent-memory-benchmark/tree/b24c8037adcb97666be63944841b7581d50141bf/eval_results/beam10m-20261119)
 
 | Measurement | OAM | Published Hindsight |
 | --- | ---: | ---: |
@@ -129,9 +162,28 @@ The 180 current normal recalls used existing L1 indexes, included original passa
 
 The [earlier BEAM saved-context replay](https://github.com/rocke2020/open-agent-memory-benchmark/tree/308eef998091ec05aa2657b637fc37222e029672/eval_results/beam10m) used DeepSeek Flash and a separate scoring setup.
 
-## 4. Inspect and recompute the saved results
+<a id="legalbench-rag-mini"></a>
 
-The latest BEAM-10M CSV provides question IDs, scores and measured context counts. The November 17 LME and earlier BEAM `report.html` files show saved contexts and individual outcomes. [BEAM-10M paired outcomes](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/beam10m-20261119/scores.csv) · [OAMB results index](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md)
+## 4. LegalBench-RAG mini
+
+LegalBench-RAG mini measures retrieval from legal documents. OAM and Hindsight searched the same **714 plain-text contracts and policies** under neutral document IDs and scored all **776 queries** with the pinned Agent Memory Benchmark (AMB) scorer. Character Recall@5 is the share of marked evidence characters recovered in the first five hits, averaged across queries. Character Precision@5 is the share of located returned characters that overlap marked evidence. The protocol scored retrieval directly, with zero answer-generation or judge calls. [Benchmark paper](https://arxiv.org/abs/2408.10343) · [Pinned scorer](https://github.com/vectorize-io/agent-memory-benchmark/blob/01bd83f3fa5245d6be3986cfab81fdd828f26acd/src/memory_bench/dataset/knowledge.py) · [Published Hindsight archive](https://raw.githubusercontent.com/vectorize-io/agent-memory-benchmark/01bd83f3fa5245d6be3986cfab81fdd828f26acd/outputs/legalbench-rag/hindsight-no-filenames/retrieval/mini.json.gz)
+
+| Measurement | OAM, document-guided Normal | Hindsight, published neutral-filename run |
+| --- | ---: | ---: |
+| Character Recall@5 | **88.45%** | 87.22% |
+| Character Precision@5 | **4.05%** | 3.83% |
+| Mean AMB-formatted context tokens | **3,702** | 3,821 |
+| Retrieval p50 | 3.388 s | 3.251 s |
+| Retrieval p95 | **5.693 s** | 7.984 s |
+| Queries with zero recall | **72** | 84 |
+
+The November 25, 2026 UTC OAM run used a fresh index, BGE small English embeddings with the document's first 40 words prepended to each passage, and DeepSeek Flash reranking. The document-guided Normal path considered up to 144 candidates and returned at most five hits. OAM's native context includes citation metadata and averaged **3,993 tokens** under its **4,096-token cap**. The table uses the AMB-formatted count for both systems. Retrieval latencies come from the two recorded environments.
+
+The corresponding passage-body embedding run scored **86.41% Recall@5**. With source openings, MAUD and ContractNLI gained recall and PrivacyQA regressed. Document guidance and source-opening embeddings were benchmark overrides. Both are off in the default product configuration. An offline check reproduced all 776 OAM scores from the saved native replies. [Product defaults](../configs/oam.yaml)
+
+## 5. Inspect and recompute the saved results
+
+The public November 19 BEAM-10M CSV provides question IDs, scores and measured context counts. The November 27 OAM results above are reported in aggregate. The November 17 LME and earlier BEAM `report.html` files show saved contexts and individual outcomes. [November 19 BEAM-10M paired outcomes](https://github.com/rocke2020/open-agent-memory-benchmark/blob/b24c8037adcb97666be63944841b7581d50141bf/eval_results/beam10m-20261119/scores.csv) · [OAMB results index](https://github.com/rocke2020/open-agent-memory-benchmark/blob/main/eval_results/README.md)
 
 To validate the archived HTML reports and their adjacent result shards from an OAMB checkout, run the saved-evidence tests.
 
